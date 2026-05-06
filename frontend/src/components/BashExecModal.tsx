@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
+import { Modal, ModalHeader } from './ui/modal';
 import { Terminal as TerminalIcon } from 'lucide-react';
 import { loadXtermModules, type Terminal, type FitAddon, type XtermModules } from '@/lib/xtermLoader';
 import { buildXtermMinimalTheme } from '@/lib/terminalTheme';
@@ -214,31 +214,28 @@ export default function BashExecModal({ isOpen, onClose, containerId, containerN
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="max-w-4xl h-[600px] flex flex-col">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <TerminalIcon className="w-5 h-5" />
-            Bash: {containerName}
+    <Modal open={isOpen} onOpenChange={handleClose} className="max-w-4xl h-[600px] flex flex-col">
+      <ModalHeader
+        kicker={`BASH · ${containerName.toUpperCase()}`}
+        title={
+          <span className="flex items-center gap-2">
+            <TerminalIcon className="w-5 h-5" strokeWidth={1.5} />
+            Bash session
             {isConnected && (
               <span className="ml-2 text-xs bg-success/20 text-success px-2 py-0.5 rounded-full">
                 Connected
               </span>
             )}
-          </DialogTitle>
-          <DialogDescription className="sr-only">
-            Interactive bash terminal session for {containerName}
-          </DialogDescription>
-        </DialogHeader>
-        {/* Styling wrapper - padding and rounded corners go here */}
-        <div className="flex-1 rounded-lg bg-black p-1 min-h-0" style={{ overflow: 'hidden' }}>
-          {/* Clean xterm container - NO padding, NO overflow-hidden, explicit dimensions */}
-          <div
-            ref={terminalRef}
-            style={{ width: '100%', height: '100%' }}
-          />
-        </div>
-      </DialogContent>
-    </Dialog>
+          </span>
+        }
+        description={`Interactive bash terminal session for ${containerName}`}
+      />
+      <div className="flex-1 rounded-lg bg-black p-1 min-h-0 mx-6 mb-6" style={{ overflow: 'hidden' }}>
+        <div
+          ref={terminalRef}
+          style={{ width: '100%', height: '100%' }}
+        />
+      </div>
+    </Modal>
   );
 }

@@ -34,12 +34,15 @@ interface ModalProps {
   children: React.ReactNode;
   size?: ModalSize;
   className?: string;
+  /** Pass through to DialogContent — set to false when the modal renders its own close affordance. */
+  showClose?: boolean;
 }
 
-export function Modal({ open, onOpenChange, children, size = 'md', className }: ModalProps) {
+export function Modal({ open, onOpenChange, children, size = 'md', className, showClose }: ModalProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
+        showClose={showClose}
         className={cn(
           'p-0 gap-0 overflow-hidden grid-cols-1',
           SIZE_CLASS[size],
