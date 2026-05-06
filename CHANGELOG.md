@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.71.2](https://github.com/Studio-Saelix/sencho/compare/v0.71.1...v0.71.2) (2026-05-06)
+
+
+### Fixed
+
+* harden MonitorService evaluation loop ([#942](https://github.com/Studio-Saelix/sencho/issues/942)) ([13cb49c](https://github.com/Studio-Saelix/sencho/commit/13cb49ce3ab59eeb649362a5a88c180276284762))
+
 ## [0.71.1](https://github.com/Studio-Saelix/sencho/compare/v0.71.0...v0.71.1) (2026-05-06)
 
 
