@@ -6,8 +6,7 @@ import { springs } from '@/lib/motion';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from "@/components/ui/modal";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Combobox } from "@/components/ui/combobox";
@@ -515,7 +514,6 @@ export default function ResourcesView() {
                 throw new Error(data?.error || 'Failed to purge selected containers');
             }
             toast.success(`Purged ${selectedOrphans.length} unmanaged container(s)`);
-            setBulkPurgeConfirm(false);
             await fetchAllData();
         } catch (error) {
             const err = error as Record<string, unknown>;
@@ -523,6 +521,7 @@ export default function ResourcesView() {
         } finally {
             toast.dismiss(loadingId);
             setIsActioning(false);
+            setBulkPurgeConfirm(false);
         }
     };
 
@@ -1208,158 +1207,156 @@ export default function ResourcesView() {
             {/* ── Dialogs ── */}
 
             {/* Prune Confirm */}
-            <AlertDialog open={!!confirmPrune} onOpenChange={(open) => !open && setConfirmPrune(null)}>
-                <AlertDialogContent className="animate-in fade-in-0 zoom-in-95 duration-200">
-                    <AlertDialogHeader>
-                        {confirmPrune?.scope === 'all' ? (
-                            <>
-                                <AlertDialogTitle className="flex items-center gap-2 text-destructive">
-                                    <AlertTriangle className="w-4 h-4" />
-                                    Prune All Docker {confirmPrune?.target}
-                                </AlertDialogTitle>
-                                <AlertDialogDescription>
-                                    This will prune <span className="font-medium text-foreground">all</span> unused {confirmPrune?.target} from the Docker daemon -
-                                    including those from <span className="font-medium text-foreground">external projects not managed by Sencho</span>. This cannot be undone.
-                                </AlertDialogDescription>
-                            </>
-                        ) : (
-                            <>
-                                <AlertDialogTitle>Prune Sencho-Managed {confirmPrune?.target}</AlertDialogTitle>
-                                <AlertDialogDescription>
-                                    Only unused {confirmPrune?.target} belonging to your Sencho stacks will be removed.
-                                    External Docker resources are <span className="font-medium text-foreground">not affected</span>.
-                                </AlertDialogDescription>
-                            </>
-                        )}
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel disabled={isActioning}>Cancel</AlertDialogCancel>
-                        <AlertDialogAction
-                            disabled={isActioning}
-                            className={confirmPrune?.scope === 'all' ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90' : ''}
-                            onClick={handlePrune}
-                        >
-                            {isActioning ? 'Pruning...' : confirmPrune?.scope === 'all' ? 'Prune All' : 'Prune'}
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+            <ConfirmModal
+                open={!!confirmPrune}
+                onOpenChange={(open) => !open && setConfirmPrune(null)}
+                variant="destructive"
+                kicker="RESOURCES · PRUNE · IRREVERSIBLE"
+                title={
+                    confirmPrune?.scope === 'all'
+                        ? `Prune all Docker ${confirmPrune?.target}`
+                        : `Prune Sencho-managed ${confirmPrune?.target}`
+                }
+                hint={confirmPrune?.scope === 'all' ? 'AFFECTS external Docker resources' : 'KEEPS external resources'}
+                confirmLabel={isActioning ? 'Pruning...' : (confirmPrune?.scope === 'all' ? 'Prune all' : 'Prune')}
+                confirming={isActioning}
+                onConfirm={handlePrune}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    {confirmPrune?.scope === 'all' ? (
+                        <>
+                            Prunes <span className="font-medium text-stat-value">all</span> unused {confirmPrune?.target} from the Docker daemon, including those from{' '}
+                            <span className="font-medium text-stat-value">external projects not managed by Sencho</span>.
+                        </>
+                    ) : (
+                        <>
+                            Removes only unused {confirmPrune?.target} belonging to your Sencho stacks. External Docker resources are{' '}
+                            <span className="font-medium text-stat-value">not affected</span>.
+                        </>
+                    )}
+                </p>
+            </ConfirmModal>
 
             {/* Delete Confirm */}
-            <AlertDialog open={!!confirmDelete} onOpenChange={(open) => !open && setConfirmDelete(null)}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>Delete {confirmDelete?.type.slice(0, -1)}</AlertDialogTitle>
-                        <AlertDialogDescription>
-                            Permanently delete <span className="font-mono font-medium text-foreground">{confirmDelete?.name || confirmDelete?.id.substring(0, 12)}</span>? This cannot be undone.
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel disabled={isActioning}>Cancel</AlertDialogCancel>
-                        <AlertDialogAction disabled={isActioning} className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={handleDelete}>
-                            {isActioning ? 'Deleting...' : 'Delete'}
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+            <ConfirmModal
+                open={!!confirmDelete}
+                onOpenChange={(open) => !open && setConfirmDelete(null)}
+                variant="destructive"
+                kicker="RESOURCES · DELETE · IRREVERSIBLE"
+                title={`Delete ${confirmDelete?.type.slice(0, -1) ?? ''}`}
+                confirmLabel={isActioning ? 'Deleting...' : 'Delete'}
+                confirming={isActioning}
+                onConfirm={handleDelete}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Permanently deletes{' '}
+                    <span className="font-mono font-medium text-stat-value">
+                        {confirmDelete?.name || confirmDelete?.id.substring(0, 12)}
+                    </span>.
+                </p>
+            </ConfirmModal>
 
             {/* Unmanaged Container Purge Confirm */}
-            <AlertDialog open={bulkPurgeConfirm} onOpenChange={setBulkPurgeConfirm}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>Purge Selected Unmanaged Containers</AlertDialogTitle>
-                        <AlertDialogDescription>
-                            Permanently remove {selectedOrphans.length} container{selectedOrphans.length !== 1 ? 's' : ''} from external projects?
-                            This will force-stop and remove them. This cannot be undone.
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel disabled={isActioning}>Cancel</AlertDialogCancel>
-                        <AlertDialogAction disabled={isActioning} className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={handlePurgeOrphans}>
-                            {isActioning ? 'Purging...' : 'Purge'}
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+            <ConfirmModal
+                open={bulkPurgeConfirm}
+                onOpenChange={setBulkPurgeConfirm}
+                variant="destructive"
+                kicker="RESOURCES · PURGE · IRREVERSIBLE"
+                title="Purge selected unmanaged containers"
+                hint={`AFFECTS ${selectedOrphans.length} container${selectedOrphans.length !== 1 ? 's' : ''}`}
+                confirmLabel={isActioning ? 'Purging...' : 'Purge'}
+                confirming={isActioning}
+                onConfirm={handlePurgeOrphans}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Force-stops and removes {selectedOrphans.length} container{selectedOrphans.length !== 1 ? 's' : ''} from external projects not managed by Sencho.
+                </p>
+            </ConfirmModal>
 
-            {/* Create Network Dialog */}
-            <Dialog open={showCreateNetwork} onOpenChange={setShowCreateNetwork}>
-                <DialogContent>
-                    <DialogHeader>
-                        <DialogTitle>Create Network</DialogTitle>
-                        <DialogDescription className="sr-only">Create a new Docker network for inter-container communication.</DialogDescription>
-                    </DialogHeader>
-                    <div className="space-y-4 py-2">
+            {/* Create Network Modal */}
+            <Modal open={showCreateNetwork} onOpenChange={setShowCreateNetwork} size="md">
+                <ModalHeader
+                    kicker="NETWORKS · NEW"
+                    title="Create network"
+                    description="Create a new Docker network for inter-container communication."
+                />
+                <ModalBody>
+                    <div className="space-y-2">
+                        <Label htmlFor="net-name" className="text-xs font-medium">Name</Label>
+                        <Input
+                            id="net-name"
+                            placeholder="my-network"
+                            className="font-mono text-sm"
+                            value={createNetworkForm.name}
+                            onChange={e => setCreateNetworkForm(f => ({ ...f, name: e.target.value }))}
+                        />
+                    </div>
+                    <div className="space-y-2">
+                        <Label htmlFor="net-driver" className="text-xs font-medium">Driver</Label>
+                        <Combobox
+                            options={NETWORK_DRIVERS.map(d => ({ value: d, label: d }))}
+                            value={createNetworkForm.driver}
+                            onValueChange={v => setCreateNetworkForm(f => ({ ...f, driver: (v || 'bridge') as NetworkDriver }))}
+                            placeholder="Select driver..."
+                            searchPlaceholder="Search drivers..."
+                            emptyText="No matching driver."
+                        />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-2">
-                            <Label htmlFor="net-name" className="text-xs font-medium">Name</Label>
+                            <Label htmlFor="net-subnet" className="text-xs font-medium">Subnet <span className="text-muted-foreground">(optional)</span></Label>
                             <Input
-                                id="net-name"
-                                placeholder="my-network"
+                                id="net-subnet"
+                                placeholder="172.20.0.0/16"
                                 className="font-mono text-sm"
-                                value={createNetworkForm.name}
-                                onChange={e => setCreateNetworkForm(f => ({ ...f, name: e.target.value }))}
+                                value={createNetworkForm.subnet}
+                                onChange={e => setCreateNetworkForm(f => ({ ...f, subnet: e.target.value }))}
                             />
                         </div>
                         <div className="space-y-2">
-                            <Label htmlFor="net-driver" className="text-xs font-medium">Driver</Label>
-                            <Combobox
-                                options={NETWORK_DRIVERS.map(d => ({ value: d, label: d }))}
-                                value={createNetworkForm.driver}
-                                onValueChange={v => setCreateNetworkForm(f => ({ ...f, driver: (v || 'bridge') as NetworkDriver }))}
-                                placeholder="Select driver..."
-                                searchPlaceholder="Search drivers..."
-                                emptyText="No matching driver."
+                            <Label htmlFor="net-gateway" className="text-xs font-medium">Gateway <span className="text-muted-foreground">(optional)</span></Label>
+                            <Input
+                                id="net-gateway"
+                                placeholder="172.20.0.1"
+                                className="font-mono text-sm"
+                                value={createNetworkForm.gateway}
+                                onChange={e => setCreateNetworkForm(f => ({ ...f, gateway: e.target.value }))}
                             />
-                        </div>
-                        <div className="grid grid-cols-2 gap-3">
-                            <div className="space-y-2">
-                                <Label htmlFor="net-subnet" className="text-xs font-medium">Subnet <span className="text-muted-foreground">(optional)</span></Label>
-                                <Input
-                                    id="net-subnet"
-                                    placeholder="172.20.0.0/16"
-                                    className="font-mono text-sm"
-                                    value={createNetworkForm.subnet}
-                                    onChange={e => setCreateNetworkForm(f => ({ ...f, subnet: e.target.value }))}
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <Label htmlFor="net-gateway" className="text-xs font-medium">Gateway <span className="text-muted-foreground">(optional)</span></Label>
-                                <Input
-                                    id="net-gateway"
-                                    placeholder="172.20.0.1"
-                                    className="font-mono text-sm"
-                                    value={createNetworkForm.gateway}
-                                    onChange={e => setCreateNetworkForm(f => ({ ...f, gateway: e.target.value }))}
-                                />
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-6 pt-1">
-                            <div className="flex items-center gap-2">
-                                <TogglePill
-                                    id="net-internal"
-                                    checked={createNetworkForm.internal}
-                                    onChange={v => setCreateNetworkForm(f => ({ ...f, internal: v }))}
-                                />
-                                <Label htmlFor="net-internal" className="text-xs cursor-pointer">Internal <span className="text-muted-foreground">(no external access)</span></Label>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <TogglePill
-                                    id="net-attachable"
-                                    checked={createNetworkForm.attachable}
-                                    onChange={v => setCreateNetworkForm(f => ({ ...f, attachable: v }))}
-                                />
-                                <Label htmlFor="net-attachable" className="text-xs cursor-pointer">Attachable</Label>
-                            </div>
                         </div>
                     </div>
-                    <DialogFooter>
-                        <Button variant="outline" size="sm" onClick={() => setShowCreateNetwork(false)} disabled={isCreatingNetwork}>Cancel</Button>
-                        <Button size="sm" onClick={handleCreateNetwork} disabled={!createNetworkForm.name.trim() || isCreatingNetwork}>
-                            {isCreatingNetwork ? 'Creating...' : 'Create Network'}
+                    <div className="flex items-center gap-6 pt-1">
+                        <div className="flex items-center gap-2">
+                            <TogglePill
+                                id="net-internal"
+                                checked={createNetworkForm.internal}
+                                onChange={v => setCreateNetworkForm(f => ({ ...f, internal: v }))}
+                            />
+                            <Label htmlFor="net-internal" className="text-xs cursor-pointer">Internal <span className="text-muted-foreground">(no external access)</span></Label>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <TogglePill
+                                id="net-attachable"
+                                checked={createNetworkForm.attachable}
+                                onChange={v => setCreateNetworkForm(f => ({ ...f, attachable: v }))}
+                            />
+                            <Label htmlFor="net-attachable" className="text-xs cursor-pointer">Attachable</Label>
+                        </div>
+                    </div>
+                </ModalBody>
+                <ModalFooter
+                    hint={`DRIVER ${createNetworkForm.driver}`}
+                    secondary={
+                        <Button variant="outline" size="sm" onClick={() => setShowCreateNetwork(false)} disabled={isCreatingNetwork}>
+                            Cancel
                         </Button>
-                    </DialogFooter>
-                </DialogContent>
-            </Dialog>
+                    }
+                    primary={
+                        <Button size="sm" onClick={handleCreateNetwork} disabled={!createNetworkForm.name.trim() || isCreatingNetwork}>
+                            {isCreatingNetwork ? 'Creating...' : 'Create network'}
+                        </Button>
+                    }
+                />
+            </Modal>
 
             {/* Image Details Sheet */}
             <ImageDetailsSheet imageId={inspectImageId} onClose={() => setInspectImageId(null)} />
