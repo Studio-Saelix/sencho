@@ -5,7 +5,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Combobox } from '@/components/ui/combobox';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
+import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
@@ -60,6 +60,7 @@ export function ApiTokensSection() {
     const [creating, setCreating] = useState(false);
     const [showForm, setShowForm] = useState(false);
     const [newToken, setNewToken] = useState<{ id: number; token: string } | null>(null);
+    const [revokeTarget, setRevokeTarget] = useState<ApiTokenListItem | null>(null);
 
     const [formName, setFormName] = useState('');
     const [formScope, setFormScope] = useState('read-only');
@@ -244,27 +245,14 @@ export function ApiTokensSection() {
                                     {SCOPE_LABELS[token.scope] || token.scope}
                                 </Badge>
                             </div>
-                            <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                    <Button variant="ghost" size="sm" className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground shrink-0">
-                                        <Trash2 className="w-4 h-4" strokeWidth={1.5} />
-                                    </Button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                    <AlertDialogHeader>
-                                        <AlertDialogTitle>Revoke API token?</AlertDialogTitle>
-                                        <AlertDialogDescription>
-                                            Revoking <strong>{token.name}</strong> will immediately invalidate it. Any pipelines or scripts using this token will stop working.
-                                        </AlertDialogDescription>
-                                    </AlertDialogHeader>
-                                    <AlertDialogFooter>
-                                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                        <AlertDialogAction onClick={() => handleRevoke(token.id)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                                            Revoke
-                                        </AlertDialogAction>
-                                    </AlertDialogFooter>
-                                </AlertDialogContent>
-                            </AlertDialog>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground shrink-0"
+                                onClick={() => setRevokeTarget(token)}
+                            >
+                                <Trash2 className="w-4 h-4" strokeWidth={1.5} />
+                            </Button>
                         </div>
                         <div className="flex items-center gap-4 text-xs text-muted-foreground tabular-nums">
                             <span className="flex items-center gap-1">
@@ -282,6 +270,26 @@ export function ApiTokensSection() {
                         </div>
                     </div>
                 ))}
+
+                <ConfirmModal
+                    open={revokeTarget !== null}
+                    onOpenChange={(open) => { if (!open) setRevokeTarget(null); }}
+                    variant="destructive"
+                    kicker="API TOKEN · REVOKE · IRREVERSIBLE"
+                    title="Revoke API token"
+                    confirmLabel="Revoke"
+                    onConfirm={() => {
+                        if (revokeTarget) {
+                            const id = revokeTarget.id;
+                            setRevokeTarget(null);
+                            handleRevoke(id);
+                        }
+                    }}
+                >
+                    <p className="text-sm text-stat-subtitle">
+                        Invalidates <span className="font-medium text-stat-value">{revokeTarget?.name}</span> immediately. Any pipelines or scripts using this token will stop working.
+                    </p>
+                </ConfirmModal>
             </div>
           </CapabilityGate>
         </AdmiralGate>

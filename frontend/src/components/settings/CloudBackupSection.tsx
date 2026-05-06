@@ -5,21 +5,12 @@ import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Combobox } from '@/components/ui/combobox';
 import { TogglePill } from '@/components/ui/toggle-pill';
-import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { AdmiralGate } from '@/components/AdmiralGate';
-import { Cloud, CloudOff, RefreshCw, CheckCircle2, AlertCircle, Loader2, Trash2, Download } from 'lucide-react';
+import { Cloud, CloudOff, RefreshCw, CheckCircle2, Loader2, Trash2, Download } from 'lucide-react';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 
@@ -521,25 +512,19 @@ export function CloudBackupSection() {
                     </div>
                 )}
 
-                <AlertDialog open={!!deleteKey} onOpenChange={open => !open && setDeleteKey(null)}>
-                    <AlertDialogContent>
-                        <AlertDialogHeader>
-                            <AlertDialogTitle className="flex items-center gap-2">
-                                <AlertCircle className="w-4 h-4 text-destructive" strokeWidth={1.5} />
-                                Delete cloud snapshot?
-                            </AlertDialogTitle>
-                            <AlertDialogDescription>
-                                This permanently removes the archive from your bucket. The local SQLite copy is unaffected.
-                            </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction onClick={confirmDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                                Delete
-                            </AlertDialogAction>
-                        </AlertDialogFooter>
-                    </AlertDialogContent>
-                </AlertDialog>
+                <ConfirmModal
+                    open={!!deleteKey}
+                    onOpenChange={open => !open && setDeleteKey(null)}
+                    variant="destructive"
+                    kicker="CLOUD · DELETE · IRREVERSIBLE"
+                    title="Delete cloud snapshot"
+                    confirmLabel="Delete"
+                    onConfirm={confirmDelete}
+                >
+                    <p className="text-sm text-stat-subtitle">
+                        Permanently removes the archive from your bucket. The local SQLite copy is unaffected.
+                    </p>
+                </ConfirmModal>
             </div>
         </AdmiralGate>
     );
