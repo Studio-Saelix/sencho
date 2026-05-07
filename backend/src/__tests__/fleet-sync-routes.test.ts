@@ -274,6 +274,111 @@ describe('POST /api/fleet/role/reanchor', () => {
   });
 });
 
+describe('POST /api/fleet/sync/cve_suppressions row apply', () => {
+  // Existing tests in this file cover the protocol mechanics (auth, anchor,
+  // stale push, reanchor, demote) for cve_suppressions with empty rows arrays.
+  // These tests pin the suppression-specific pieces: actual rows replace prior
+  // replicated rows, the receive path writes an audit-log entry, and a malformed
+  // suppression row is rejected at the validator before any DB write.
+
+  async function freshAnchor(): Promise<void> {
+    const reanchor = await request(app)
+      .post('/api/fleet/role/reanchor')
+      .set('Authorization', adminAuthHeader)
+      .send({ override: true });
+    expect(reanchor.status).toBe(200);
+  }
+
+  it('replaces prior replicated rows on a fresh push and records an audit entry', async () => {
+    await freshAnchor();
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    // Flush prior tests' buffered audit writes BEFORE the wipe so they cannot
+    // land in the table after the DELETE.
+    db.flushAuditLogBuffer();
+    db.getDb().prepare('DELETE FROM audit_log').run();
+
+    const firstPush = await request(app)
+      .post('/api/fleet/sync/cve_suppressions')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({
+        rows: [
+          {
+            cve_id: 'CVE-2024-7001', pkg_name: null, image_pattern: null,
+            reason: 'first push', created_by: 'control-admin',
+            created_at: Date.now(), expires_at: null,
+          },
+          {
+            cve_id: 'CVE-2024-7002', pkg_name: 'openssl', image_pattern: null,
+            reason: 'first push 2', created_by: 'control-admin',
+            created_at: Date.now(), expires_at: null,
+          },
+        ],
+        targetIdentity: 'https://me.example',
+        controlIdentity: 'fingerprint-rowapply',
+        pushedAt: 1_900_000_000_000,
+      });
+    expect(firstPush.status).toBe(200);
+    expect(firstPush.body.applied).toBe(2);
+
+    let stored = db.getCveSuppressions().filter((s) => s.replicated_from_control === 1);
+    expect(stored.map((s) => s.cve_id).sort()).toEqual(['CVE-2024-7001', 'CVE-2024-7002']);
+
+    // Second push replaces, not appends.
+    const secondPush = await request(app)
+      .post('/api/fleet/sync/cve_suppressions')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({
+        rows: [
+          {
+            cve_id: 'CVE-2024-7003', pkg_name: null, image_pattern: null,
+            reason: 'second push', created_by: 'control-admin',
+            created_at: Date.now(), expires_at: null,
+          },
+        ],
+        targetIdentity: 'https://me.example',
+        controlIdentity: 'fingerprint-rowapply',
+        pushedAt: 1_900_000_000_001,
+      });
+    expect(secondPush.status).toBe(200);
+
+    stored = db.getCveSuppressions().filter((s) => s.replicated_from_control === 1);
+    expect(stored.map((s) => s.cve_id)).toEqual(['CVE-2024-7003']);
+
+    db.flushAuditLogBuffer();
+    const auditRows = db.getDb()
+      .prepare("SELECT username, path, summary FROM audit_log WHERE path = '/api/fleet/sync/cve_suppressions' ORDER BY id")
+      .all() as Array<{ username: string; path: string; summary: string }>;
+    expect(auditRows.length).toBeGreaterThanOrEqual(2);
+    expect(auditRows[0].username).toBe('system');
+    expect(auditRows[0].summary).toContain('cve_suppressions');
+    expect(auditRows[0].summary).toContain('fingerprint-rowapply');
+  });
+
+  it('rejects a malformed suppression row before touching the DB', async () => {
+    await freshAnchor();
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const before = db.getCveSuppressions().filter((s) => s.replicated_from_control === 1).length;
+
+    const res = await request(app)
+      .post('/api/fleet/sync/cve_suppressions')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({
+        rows: [
+          { cve_id: 'not-a-cve', reason: 'invalid', created_by: 'x', created_at: Date.now() },
+        ],
+        targetIdentity: 'https://me.example',
+        controlIdentity: 'fingerprint-malformed',
+        pushedAt: 1_950_000_000_000,
+      });
+    expect(res.status).toBe(400);
+
+    const after = db.getCveSuppressions().filter((s) => s.replicated_from_control === 1).length;
+    expect(after).toBe(before);
+  });
+});
+
 describe('POST /api/fleet/sync/:resource stack_pattern ReDoS guard', () => {
   it('rejects 4+ consecutive wildcards in a stack_pattern', async () => {
     const res = await request(app)

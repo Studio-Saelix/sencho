@@ -162,4 +162,28 @@ describe('applySuppressions', () => {
   it('returns an empty array for empty input', () => {
     expect(applySuppressions([], 'nginx:1.25', [], NOW)).toEqual([]);
   });
+
+  // Regression guard for the cve_id bucketing optimization. A naive O(N*M)
+  // implementation drifts into the tens of millions of comparisons at this
+  // scale; the bucketed implementation lands in low-tens of milliseconds on
+  // commodity hardware. The 1500ms ceiling is generous to keep the test
+  // stable across CI runners and slow Windows VMs while still catching a
+  // regression to the quadratic shape (which would blow well past 1.5s).
+  it('processes 10k suppressions x 2k findings in well under 1.5s', () => {
+    const suppressions: CveSuppression[] = Array.from({ length: 10_000 }, (_, i) =>
+      makeSuppression({ id: i, cve_id: `CVE-2024-${10_000 + i}`, pkg_name: i % 3 === 0 ? 'openssl' : null }),
+    );
+    const findings = Array.from({ length: 2_000 }, (_, i) => ({
+      vulnerability_id: `CVE-2024-${10_000 + (i * 5) % 10_000}`,
+      pkg_name: i % 2 === 0 ? 'openssl' : 'glibc',
+    }));
+    const start = Date.now();
+    const result = applySuppressions(findings, 'nginx:1.25', suppressions, NOW);
+    const elapsed = Date.now() - start;
+    expect(result).toHaveLength(2_000);
+    // At least one finding must actually match a suppression; otherwise a
+    // regression where bucketing silently drops every match could pass.
+    expect(result.some((r) => r.suppressed)).toBe(true);
+    expect(elapsed).toBeLessThan(1500);
+  });
 });

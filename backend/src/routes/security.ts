@@ -19,6 +19,50 @@ import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 
+// Strip control characters and cap length so an operator-supplied pkg or image
+// pattern cannot inject a fake audit row by smuggling a newline plus a forged
+// `cve_suppression.delete:` prefix. Validators on the route reject overlength
+// pkg/image strings but do not constrain the charset.
+function sanitiseScopeFragment(value: string, max: number): string {
+  // eslint-disable-next-line no-control-regex
+  const stripped = value.replace(/[\x00-\x1f\x7f]/g, '?');
+  return stripped.length > max ? stripped.slice(0, max) + '…' : stripped;
+}
+
+// Summarise a suppression for the audit log without leaking the reason text.
+// Reason is free-form and could carry incident-tracker IDs or vendor secrets;
+// scope (CVE id, pkg, image) is non-sensitive. The fields list emitted on
+// update operations does name `reason` when it changed, which lets an audit
+// reader see *when* a reason was rotated even though the contents stay private.
+function describeSuppressionScope(s: { cve_id: string; pkg_name: string | null; image_pattern: string | null }): string {
+  const pinned: string[] = [];
+  if (s.pkg_name) pinned.push(`pkg=${sanitiseScopeFragment(s.pkg_name, 200)}`);
+  if (s.image_pattern) pinned.push(`image=${sanitiseScopeFragment(s.image_pattern, 300)}`);
+  return pinned.length > 0 ? `${s.cve_id} (${pinned.join(', ')})` : s.cve_id;
+}
+
+function recordSuppressionAudit(
+  req: Request,
+  res: Response,
+  action: 'create' | 'update' | 'delete',
+  summary: string,
+): void {
+  try {
+    DatabaseService.getInstance().insertAuditLog({
+      timestamp: Date.now(),
+      username: req.user?.username ?? 'unknown',
+      method: req.method,
+      path: req.originalUrl,
+      status_code: res.statusCode,
+      node_id: null,
+      ip_address: req.ip || 'unknown',
+      summary: `cve_suppression.${action}: ${summary}`,
+    });
+  } catch (err) {
+    console.warn('[Security] Suppression audit log write failed:', getErrorMessage(err, 'unknown'));
+  }
+}
+
 function parseScannersInput(raw: unknown): readonly ('vuln' | 'secret')[] | undefined | null {
   if (raw === undefined || raw === null) return undefined;
   if (!Array.isArray(raw) || raw.length === 0) return null;
@@ -561,6 +605,7 @@ securityRouter.post('/suppressions', authMiddleware, (req: Request, res: Respons
     });
     FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
     res.status(201).json(suppression);
+    recordSuppressionAudit(req, res, 'create', describeSuppressionScope(suppression));
   } catch (error) {
     const message = (error as Error).message || '';
     if (message.includes('UNIQUE')) {
@@ -607,6 +652,13 @@ securityRouter.put('/suppressions/:id', authMiddleware, (req: Request, res: Resp
   }
   FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
   res.json(suppression);
+  const changed = Object.keys(updates);
+  recordSuppressionAudit(
+    req,
+    res,
+    'update',
+    `id=${id} ${describeSuppressionScope(suppression)} fields=[${changed.join(',')}]`,
+  );
 });
 
 securityRouter.delete('/suppressions/:id', authMiddleware, (req: Request, res: Response): void => {
@@ -616,9 +668,18 @@ securityRouter.delete('/suppressions/:id', authMiddleware, (req: Request, res: R
   if (!Number.isFinite(id)) {
     res.status(400).json({ error: 'Invalid suppression id' }); return;
   }
-  DatabaseService.getInstance().deleteCveSuppression(id);
+  const db = DatabaseService.getInstance();
+  // Snapshot before delete so the audit summary names the CVE rather than the bare id.
+  const existing = db.getCveSuppression(id);
+  db.deleteCveSuppression(id);
   FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
   res.json({ success: true });
+  recordSuppressionAudit(
+    req,
+    res,
+    'delete',
+    existing ? `id=${id} ${describeSuppressionScope(existing)}` : `id=${id} (not found)`,
+  );
 });
 
 securityRouter.get('/compare', authMiddleware, (req: Request, res: Response): void => {
