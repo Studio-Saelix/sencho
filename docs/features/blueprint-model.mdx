@@ -103,7 +103,11 @@ Click **Edit** on the detail sheet. Editing the compose bumps the revision; the 
 
 ### Withdraw a single deployment
 
-In the deployment table, click **Withdraw** on the node's row. For stateless blueprints, Sencho runs `docker compose down` and removes the directory. For stateful blueprints, you choose between **Snapshot, then evict** (records the compose definition to fleet snapshots, then evicts) and **Evict and destroy data** (typed-confirm, destroys named volumes).
+In the deployment table, click **Withdraw** on the node's row. For stateless blueprints, Sencho runs `docker compose down` and removes the directory. For stateful blueprints, you choose between **Snapshot, then evict** (records the compose definition to Fleet → Snapshots, then evicts) and **Evict and destroy data** (typed-confirm, destroys named volumes).
+
+<Note>
+**Snapshot, then evict** captures the compose definition only. Volume bytes are not shipped. The named volumes managed by this stack on the target node are removed by `docker compose down` just as with **Evict and destroy data**. To preserve data, capture volumes manually before withdrawing (see *Migrating stateful data between nodes* below).
+</Note>
 
 ### Delete the blueprint
 
@@ -111,11 +115,11 @@ Stateless blueprints withdraw all deployments and then delete. Stateful blueprin
 
 ## Migrating stateful data between nodes (manual)
 
-Sencho's compose-native lane does not include automatic volume shipping. When you move a stateful Blueprint's data from node A to node B, do it by hand:
+Sencho's compose-native lane does not include automatic volume shipping. **Snapshot, then evict** is a compose-only safety net: it preserves the YAML so you can redeploy elsewhere, but it does not move data. To relocate a stateful Blueprint's data from node A to node B, do it by hand before withdrawing:
 
-1. Stop the Blueprint deployment on node A from the deployment table.
-2. Use your existing host tooling (`docker run --rm -v <volume>:/data busybox tar -czf - /data > snapshot.tar.gz`, or app-aware tooling such as `pg_basebackup`/`mysqldump`/`mongodump`) to capture the volume.
-3. Transfer the artifact to node B and restore it into the named volume.
+1. Stop the Blueprint deployment on node A from the deployment table. *Tip:* use **Snapshot, then evict** so the compose YAML is parked in Fleet → Snapshots while you handle volumes.
+2. Use your host tooling (`docker run --rm -v <volume>:/data busybox tar -czf - /data > snapshot.tar.gz`, or app-aware tooling such as `pg_basebackup` / `mysqldump` / `mongodump`) to capture the volume on node A.
+3. Transfer the artifact to node B and restore it into the named volume there.
 4. Update the Blueprint's selector to include node B; click **Apply now**.
 
 A future Volume Migration feature will automate this with app-aware backup tooling.
@@ -137,6 +141,14 @@ Confirm the drift policy is `enforce` and the blueprint is enabled. Open the det
 ### Cannot disable a blueprint
 
 Blueprints with active or drifted deployments refuse to disable; you would orphan them silently. Withdraw the deployments first, then disable.
+
+### Where is my data after "Snapshot, then evict"?
+
+The named volumes managed by the stack on the target node are removed when the eviction runs `docker compose down`. The snapshot in Fleet → Snapshots holds the compose definition only; volume bytes are not included. To preserve data, capture the volume by hand before withdrawing (see *Migrating stateful data between nodes*). Bind mounts on the host filesystem are left in place by both eviction modes.
+
+### "Failed to capture compose snapshot before eviction"
+
+Sencho aborted the eviction because the pre-eviction compose snapshot could not be written. The deployment is still in place. Check the database is reachable (the snapshot lives in `fleet_snapshots`), then retry. If you accept data loss and want to evict regardless, use **Evict and destroy data** instead.
 
 ## What's not in scope
 
