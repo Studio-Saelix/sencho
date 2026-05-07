@@ -3612,6 +3612,12 @@ export class DatabaseService {
      * Replace all policies that were replicated from a control node with the
      * provided rows in a single transaction. Local-only policies (created on
      * this instance directly) are left untouched.
+     *
+     * Replicated policies always insert with fresh ids on the replica, so any
+     * `vulnerability_scans.policy_evaluation` row pointing at a replicated
+     * policy from the previous push refers to a now-deleted id. Clear those
+     * orphaned cache entries inside the same transaction so a replica's UI
+     * stops showing violations from a policy that no longer exists.
      */
     public replaceReplicatedScanPolicies(rows: ScanPolicy[]): void {
         const now = Date.now();
@@ -3635,6 +3641,7 @@ export class DatabaseService {
                     p.updated_at ?? now,
                 );
             }
+            this.clearOrphanPolicyEvaluations();
         });
         txn(rows);
     }
