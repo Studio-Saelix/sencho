@@ -176,7 +176,7 @@ export async function withdrawDeployment(
     blueprintId: number,
     nodeId: number,
     confirm: WithdrawConfirm,
-): Promise<{ status: BlueprintDeploymentStatus; error: string | null; snapshotPolicy: WithdrawConfirm }> {
+): Promise<{ status: BlueprintDeploymentStatus; error: string | null; snapshotPolicy: WithdrawConfirm; snapshotId: number | null }> {
     const res = await apiFetch(`/blueprints/${blueprintId}/withdraw/${nodeId}`, {
         method: 'POST',
         body: JSON.stringify({ confirm }),

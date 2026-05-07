@@ -146,7 +146,10 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         try {
             const result = await withdrawDeployment(blueprint.id, nodeId, confirm);
             if (result.error) toast.error(result.error);
-            else toast.success(confirm === 'evict_and_destroy' ? 'Evicted and data removed' : 'Deployment withdrawn');
+            else if (confirm === 'evict_and_destroy') toast.success('Evicted and data removed');
+            else if (confirm === 'snapshot_then_evict' && result.snapshotId !== null) {
+                toast.success(`Compose snapshot #${result.snapshotId} captured. Deployment withdrawn.`);
+            } else toast.success('Deployment withdrawn');
             await refresh();
             onChanged();
         } catch (err) {

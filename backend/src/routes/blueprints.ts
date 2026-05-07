@@ -328,10 +328,53 @@ blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Respons
             });
             return;
         }
-        // snapshot_then_evict: a v1 placeholder. The fleet-snapshot wiring is a separate feature;
-        // we record intent and proceed with a normal withdraw. v2 will perform the actual snapshot.
+        let snapshotId: number | null = null;
+        if (confirm === 'snapshot_then_evict') {
+            const compose = blueprint.compose_content;
+            if (!compose || compose.trim().length === 0) {
+                res.status(500).json({
+                    error: 'Blueprint has no compose content to snapshot',
+                    code: 'snapshot_failed',
+                });
+                return;
+            }
+            try {
+                const db = DatabaseService.getInstance();
+                const username = req.user?.username ?? 'admin';
+                snapshotId = db.createSnapshot(
+                    `Pre-eviction: blueprint=${blueprint.name} node=${node.name}`,
+                    username,
+                    1,
+                    1,
+                    '[]',
+                );
+                db.insertSnapshotFiles(snapshotId, [{
+                    nodeId: node.id,
+                    nodeName: node.name,
+                    stackName: blueprint.name,
+                    filename: 'docker-compose.yml',
+                    content: compose,
+                }]);
+            } catch (snapErr) {
+                console.error('[Blueprints] Pre-eviction snapshot failed:', snapErr);
+                if (snapshotId !== null) {
+                    try { DatabaseService.getInstance().deleteSnapshot(snapshotId); }
+                    catch (cleanupErr) { console.error('[Blueprints] Failed to clean up orphan snapshot row:', cleanupErr); }
+                }
+                res.status(500).json({
+                    error: 'Failed to capture compose snapshot before eviction',
+                    code: 'snapshot_failed',
+                });
+                return;
+            }
+        }
         const result = await BlueprintService.getInstance().withdrawFromNode(blueprint, node);
-        res.json({ status: result.status, error: result.error ?? null, snapshotPolicy: confirm });
+        res.json({
+            status: result.status,
+            error: result.error ?? null,
+            snapshotPolicy: confirm,
+            snapshotId,
+        });
     } catch (error) {
         console.error('[Blueprints] Withdraw error:', error);
         res.status(500).json({ error: getErrorMessage(error, 'Failed to withdraw blueprint') });
