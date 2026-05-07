@@ -34,12 +34,15 @@ interface ModalProps {
   children: React.ReactNode;
   size?: ModalSize;
   className?: string;
+  /** Pass through to DialogContent — set to false when the modal renders its own close affordance. */
+  showClose?: boolean;
 }
 
-export function Modal({ open, onOpenChange, children, size = 'md', className }: ModalProps) {
+export function Modal({ open, onOpenChange, children, size = 'md', className, showClose }: ModalProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
+        showClose={showClose}
         className={cn(
           'p-0 gap-0 overflow-hidden grid-cols-1',
           SIZE_CLASS[size],
@@ -141,7 +144,7 @@ function ConfirmDestructiveHeader(props: ModalHeaderBaseProps) {
 }
 
 export function ModalBody({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('px-6 py-5 space-y-4', className)} {...props} />;
+  return <div className={cn('px-6 py-5 space-y-4 max-h-[calc(85vh-12rem)] overflow-y-auto', className)} {...props} />;
 }
 
 interface ModalFooterProps {
