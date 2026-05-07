@@ -80,7 +80,7 @@ export function parseEnv(text: string): SecretKv {
             console.warn('[Secrets] Dropping invalid env key:', key);
             continue;
         }
-        let rawValue = line.slice(eq + 1);
+        const rawValue = line.slice(eq + 1);
         // Strip optional surrounding quotes.
         if (rawValue.length >= 2) {
             const first = rawValue[0];
