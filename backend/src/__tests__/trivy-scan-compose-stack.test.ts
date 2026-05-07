@@ -302,3 +302,44 @@ describe('TrivyService.scanComposeStack dedup', () => {
     expect(execFileCalls.length).toBe(2);
   });
 });
+
+describe('TrivyService.scanComposeStack failure modes', () => {
+  beforeEach(() => {
+    execFileCalls.length = 0;
+    createdScans.length = 0;
+    updateCalls.length = 0;
+    misconfigInserts.length = 0;
+    nextTrivyStdout = JSON.stringify({ Results: [] });
+    pendingExecGate = null;
+    nextExecShouldFail = false;
+    forceBinary(TrivyService.getInstance());
+  });
+
+  it('flips the scan row to failed when Trivy stdout is malformed JSON', async () => {
+    // parseTrivyOutput throws "Malformed Trivy output: ..." on bad JSON.
+    nextTrivyStdout = '{ this is not valid json';
+
+    await expect(
+      TrivyService.getInstance().scanComposeStack(1, 'broken-stack', 'manual'),
+    ).rejects.toThrow(/Malformed Trivy output/);
+
+    const failedUpdate = updateCalls.find((u) => u.patch.status === 'failed');
+    expect(failedUpdate).toBeDefined();
+    expect(failedUpdate?.patch.error).toMatch(/Malformed Trivy output/);
+    expect(updateCalls.some((u) => u.patch.status === 'completed')).toBe(false);
+  });
+
+  it('flips the scan row to failed when Trivy throws ETIMEDOUT', async () => {
+    // Simulate timeout the way util.promisify(execFile) surfaces it: a
+    // rejected Promise. We hijack the gate by failing instead of resolving.
+    nextExecShouldFail = true;
+
+    await expect(
+      TrivyService.getInstance().scanComposeStack(1, 'slow-stack', 'manual'),
+    ).rejects.toThrow();
+
+    const failedUpdate = updateCalls.find((u) => u.patch.status === 'failed');
+    expect(failedUpdate).toBeDefined();
+    expect(typeof failedUpdate?.patch.error).toBe('string');
+  });
+});
