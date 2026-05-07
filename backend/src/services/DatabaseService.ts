@@ -1693,6 +1693,19 @@ export class DatabaseService {
         this.db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)').run(key, value);
     }
 
+    /**
+     * Run `fn` inside a single SQLite transaction. better-sqlite3 promotes a
+     * nested call to a SAVEPOINT, so callers can compose this with methods
+     * that already wrap their own writes in `this.db.transaction(...)`.
+     *
+     * Used by FleetSync receive to keep the row replacement and the
+     * received_pushed_at watermark write atomic. If either step fails, both
+     * roll back.
+     */
+    public transaction<T>(fn: () => T): T {
+        return this.db.transaction(fn)();
+    }
+
     // --- Stack Alerts ---
 
     public getStackAlerts(stackName?: string): StackAlert[] {
@@ -3501,6 +3514,17 @@ export class DatabaseService {
             .all() as ScanPolicy[];
     }
 
+    /**
+     * Local-only scan policies (created on this instance, not replicated from a
+     * control). Used by the fleet sync sender so it never re-replicates rows
+     * that came from a control in the first place.
+     */
+    public getLocalScanPolicies(): ScanPolicy[] {
+        return this.db
+            .prepare('SELECT * FROM scan_policies WHERE replicated_from_control = 0 ORDER BY created_at DESC')
+            .all() as ScanPolicy[];
+    }
+
     public getScanPolicy(id: number): ScanPolicy | null {
         return (
             (this.db
@@ -3620,6 +3644,11 @@ export class DatabaseService {
         stackName: string | null,
         selfIdentity: string,
     ): ScanPolicy | null {
+        // Filter on node_id at SQL: rows are eligible when fleet-wide
+        // (node_id IS NULL) or when locally scoped to this node (node_id = ?).
+        // Replicated rows always insert node_id = NULL (see
+        // replaceReplicatedScanPolicies), so identity scoping for replicated
+        // rows is enforced in `matchesIdentity` below, not in SQL.
         const policies = this.db
             .prepare(
                 'SELECT * FROM scan_policies WHERE enabled = 1 AND (node_id IS NULL OR node_id = ?)',
@@ -3651,7 +3680,11 @@ export class DatabaseService {
             if (!aNode && bNode) return 1;
             if (a.stack_pattern && !b.stack_pattern) return -1;
             if (!a.stack_pattern && b.stack_pattern) return 1;
-            return 0;
+            // Deterministic tiebreaker: lowest id wins. Two rows in the same
+            // scope class (e.g. both fleet-wide stack-wildcard) must resolve
+            // to the same policy on every replica, regardless of SQLite row
+            // iteration order.
+            return a.id - b.id;
         });
         return scoped[0];
     }
@@ -3746,6 +3779,13 @@ export class DatabaseService {
     public getCveSuppressions(): CveSuppression[] {
         return this.db
             .prepare('SELECT * FROM cve_suppressions ORDER BY cve_id, pkg_name')
+            .all() as CveSuppression[];
+    }
+
+    /** Local-only CVE suppressions; mirrors `getLocalScanPolicies`. */
+    public getLocalCveSuppressions(): CveSuppression[] {
+        return this.db
+            .prepare('SELECT * FROM cve_suppressions WHERE replicated_from_control = 0 ORDER BY cve_id, pkg_name')
             .all() as CveSuppression[];
     }
 

@@ -4,7 +4,8 @@ import semver from 'semver';
 import si from 'systeminformation';
 import type Dockerode from 'dockerode';
 import { DatabaseService, type Node } from '../services/DatabaseService';
-import { FleetSyncService } from '../services/FleetSyncService';
+import { FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
+import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import DockerController from '../services/DockerController';
@@ -37,7 +38,6 @@ const UPDATE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const UPDATE_TIMEOUT_MSG = 'Node did not come back online within 5 minutes.';
 const EARLY_FAIL_MS = 180 * 1000; // 3 minutes before declaring a probable pull failure
 
-const MAX_SYNC_ROWS = 5000;
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 
 const isIntFlag = (v: unknown): v is 0 | 1 => v === 0 || v === 1;
@@ -298,6 +298,11 @@ fleetRouter.get('/role', authMiddleware, (req: Request, res: Response): void => 
 
 // Receive a full replacement of a replicated resource from the control.
 // Restricted to node_proxy Bearer tokens so only a sibling Sencho can push.
+//
+// No requirePaid here: the control instance has already enforced its tier
+// before issuing the push. The replica trusts a valid node_proxy bearer
+// signed against THIS instance's secret and applies the payload regardless
+// of the replica's own tier.
 fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response): void => {
   if (!requireNodeProxy(req, res)) return;
   const resource = req.params.resource;
@@ -308,6 +313,14 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
   const body = req.body ?? {};
   const rows = Array.isArray(body.rows) ? body.rows : null;
   const targetIdentity = typeof body.targetIdentity === 'string' ? body.targetIdentity : '';
+  // pushedAt is optional for back-compat with older controls that predate the
+  // versioning protocol. When present and strictly older than the most recent
+  // applied push for this resource, reject with 409 STALE_SYNC_PUSH so the
+  // control's retry logic can fall back to the next write. Negative or zero
+  // values are treated as absent: the sender always uses Date.now().
+  const pushedAt = typeof body.pushedAt === 'number' && Number.isFinite(body.pushedAt) && body.pushedAt > 0
+    ? body.pushedAt
+    : null;
   if (!rows) {
     res.status(400).json({ error: 'rows array is required' });
     return;
@@ -325,9 +338,21 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
     }
   }
   try {
-    FleetSyncService.getInstance().applyIncomingSync(resource, rows, targetIdentity);
+    FleetSyncService.getInstance().applyIncomingSync(
+      resource,
+      rows,
+      targetIdentity,
+      pushedAt ?? undefined,
+    );
     res.json({ success: true, applied: rows.length });
   } catch (error) {
+    if (error instanceof StaleSyncPushError) {
+      res.status(409).json({
+        error: error.message,
+        code: SYNC_ERROR_CODES.staleSyncPush,
+      });
+      return;
+    }
     console.error('[FleetSync] Failed to apply incoming sync:', error);
     res.status(500).json({ error: 'Failed to apply sync' });
   }

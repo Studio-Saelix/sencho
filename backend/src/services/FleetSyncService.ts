@@ -1,8 +1,17 @@
 import axios, { AxiosError } from 'axios';
 import { CveSuppression, DatabaseService, Node, ScanPolicy } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
+import { NotificationService } from './NotificationService';
+import { isDebugEnabled } from '../utils/debug';
+import {
+    FleetResource,
+    MAX_SYNC_ROWS,
+    SYNC_ERROR_CODES,
+    SYNC_STATE_KEYS,
+    TRUNCATION_ALERT_COOLDOWN_MS,
+} from './fleetSyncConstants';
 
-export type FleetResource = 'scan_policies' | 'cve_suppressions';
+export type { FleetResource };
 
 export const FLEET_RESOURCES: readonly FleetResource[] = ['scan_policies', 'cve_suppressions'];
 
@@ -15,17 +24,61 @@ export type FleetRole = 'control' | 'replica';
 export const LOCAL_IDENTITY_SENTINEL = 'local';
 
 /**
+ * Wire-format payload pushed to a remote's POST /api/fleet/sync/:resource.
+ * The receiver parses individual fields with explicit type checks, so this
+ * stays internal to the sender. Both sides tolerate absent `pushedAt` and
+ * `controlIdentity` for back-compat with controls that predate the
+ * versioning protocol.
+ */
+interface FleetSyncPayload {
+    rows: unknown[];
+    pushedAt: number;
+    targetIdentity: string;
+    controlIdentity: string;
+}
+
+/**
+ * Thrown by `applyIncomingSync` when the incoming `pushedAt` is strictly older
+ * than the receiver's last-applied watermark for the same resource. The route
+ * handler catches this specifically and returns 409 STALE_SYNC_PUSH; any other
+ * error becomes a 500.
+ */
+export class StaleSyncPushError extends Error {
+    constructor(public readonly previous: number, public readonly incoming: number) {
+        super(`Stale sync push: pushedAt=${incoming} is older than last applied=${previous}`);
+        this.name = 'StaleSyncPushError';
+    }
+}
+
+/**
  * FleetSyncService replicates security configuration from a control Sencho
  * instance to every managed remote node. Security rules live on the control's
  * SQLite database; each write triggers a push of the full table to every
  * remote that has an api_url and api_token configured.
  *
- * Push failures for a specific remote are logged and recorded on the
- * fleet_sync_status table so the UI and future retry logic can see stale
- * nodes.
+ * Per-node concurrency: pushes to the same remote are serialized via an
+ * in-memory mutex map. Sencho runs as a single Node.js process per instance,
+ * so process-local serialization is correct for the supported topology.
+ *
+ * Push failures are recorded on `fleet_sync_status` for the UI and the retry
+ * service. STALE_SYNC_PUSH 409 responses are not recorded — they are an
+ * expected protocol outcome, not a node health issue.
  */
 export class FleetSyncService {
     private static instance: FleetSyncService;
+
+    /** Tail of the most recent push promise for each node id. */
+    private inflightByNode = new Map<number, Promise<void>>();
+
+    /**
+     * Strictly-increasing timestamp guard for outgoing pushes. Process-global
+     * across resources: scan_policies and cve_suppressions share the counter
+     * because the receiver tracks watermarks per resource via separate
+     * `received_pushed_at:<resource>` keys.
+     */
+    private static lastPushedAt = 0;
+
+    private static warnedMissingIdentity = false;
 
     private constructor() {}
 
@@ -36,24 +89,21 @@ export class FleetSyncService {
         return FleetSyncService.instance;
     }
 
-    /**
-     * Resolve the fleet role for this instance.
-     * A node becomes a replica the first time it accepts a fleet sync push.
-     */
     public static getRole(): FleetRole {
-        return DatabaseService.getInstance().getSystemState('fleet_role') === 'replica' ? 'replica' : 'control';
+        return DatabaseService.getInstance().getSystemState(SYNC_STATE_KEYS.fleetRole) === 'replica'
+            ? 'replica'
+            : 'control';
     }
 
     /**
-     * The identity string used when matching scan policies on this instance.
-     * Control nodes use the LOCAL_IDENTITY_SENTINEL. Replicas use the
-     * identity they were told during the most recent sync push. If a replica
-     * is missing its cached identity (e.g. the sync row has been corrupted),
-     * return the empty string; callers treat this as fleet-wide only and log.
+     * Identity string used when matching scan policies on this instance. The
+     * empty string fallback on a replica with corrupted state means
+     * identity-scoped policies will not apply until the next sync push restores
+     * the cached identity.
      */
     public static getSelfIdentity(): string {
         if (FleetSyncService.getRole() === 'replica') {
-            const cached = DatabaseService.getInstance().getSystemState('fleet_self_identity');
+            const cached = DatabaseService.getInstance().getSystemState(SYNC_STATE_KEYS.fleetSelfIdentity);
             if (!cached) {
                 if (!FleetSyncService.warnedMissingIdentity) {
                     console.warn(
@@ -68,13 +118,9 @@ export class FleetSyncService {
         return LOCAL_IDENTITY_SENTINEL;
     }
 
-    private static warnedMissingIdentity = false;
-
     /**
      * Map a policy's node_id to a node_identity string.
-     * - NULL node_id → '' (fleet-wide)
-     * - Local node → LOCAL_IDENTITY_SENTINEL
-     * - Remote node → the node's api_url
+     * NULL → '' (fleet-wide); local → LOCAL_IDENTITY_SENTINEL; remote → api_url.
      */
     public static resolveIdentityForNodeId(nodeId: number | null | undefined): string {
         if (nodeId == null) return '';
@@ -85,56 +131,57 @@ export class FleetSyncService {
     }
 
     /**
-     * Push the current state of a resource to every remote node.
-     * Failures are recorded but do not bubble up to the caller.
+     * Returns the empty string. The receiver treats empty `controlIdentity`
+     * as legacy and accepts. A future change will derive a stable fingerprint
+     * from a system_state key for control-anchor enforcement.
      */
+    public static getControlIdentity(): string {
+        return '';
+    }
+
+    private nextPushedAt(): number {
+        const now = Date.now();
+        const next = now > FleetSyncService.lastPushedAt ? now : FleetSyncService.lastPushedAt + 1;
+        FleetSyncService.lastPushedAt = next;
+        return next;
+    }
+
+    /** Push the current state of a resource to every remote node. */
     public async pushResource(resource: FleetResource): Promise<void> {
         if (FleetSyncService.getRole() === 'replica') {
-            // Replicas never push; they only receive.
+            if (isDebugEnabled()) {
+                console.debug(`[FleetSync:debug] Skipping push for ${resource}: this instance is a replica`);
+            }
             return;
         }
         const db = DatabaseService.getInstance();
         const nodes = db.getNodes().filter((n): n is Node & { id: number } => {
             return n.type === 'remote' && Boolean(n.api_url) && Boolean(n.api_token) && n.id != null;
         });
-        if (nodes.length === 0) return;
+        if (nodes.length === 0) {
+            if (isDebugEnabled()) {
+                console.debug(`[FleetSync:debug] No eligible remote nodes for ${resource} push`);
+            }
+            return;
+        }
 
         const rows = this.loadResource(resource);
-        const pushedAt = Date.now();
+        const payload: Omit<FleetSyncPayload, 'targetIdentity'> = {
+            rows,
+            pushedAt: this.nextPushedAt(),
+            controlIdentity: FleetSyncService.getControlIdentity(),
+        };
 
-        await Promise.all(
-            nodes.map(async (node) => {
-                const baseUrl = (node.api_url ?? '').replace(/\/$/, '');
-                try {
-                    await axios.post(
-                        `${baseUrl}/api/fleet/sync/${resource}`,
-                        {
-                            rows,
-                            pushedAt,
-                            targetIdentity: node.api_url,
-                        },
-                        {
-                            headers: { Authorization: `Bearer ${node.api_token}` },
-                            timeout: 15_000,
-                        },
-                    );
-                    db.recordFleetSyncSuccess(node.id, resource);
-                } catch (err) {
-                    const message = this.formatError(err);
-                    console.warn(
-                        `[FleetSync] Failed to push ${resource} to "${node.name}" (${baseUrl}): ${message}`,
-                    );
-                    db.recordFleetSyncFailure(node.id, resource, message);
-                }
-            }),
-        );
+        if (isDebugEnabled()) {
+            console.debug(
+                `[FleetSync:debug] Pushing ${resource} to ${nodes.length} remote(s): rows=${rows.length} pushedAt=${payload.pushedAt}`,
+            );
+        }
+
+        await Promise.all(nodes.map((node) => this.enqueuePushToNode(node, resource, payload)));
     }
 
-    /**
-     * Fire and forget helper for write handlers. Errors are already logged
-     * inside pushResource; this swallows any residual rejection so request
-     * handlers can stay synchronous.
-     */
+    /** Fire-and-forget wrapper for write handlers. Errors are already logged inside. */
     public pushResourceAsync(resource: FleetResource): void {
         this.pushResource(resource).catch((err) => {
             console.error(`[FleetSync] Unexpected error pushing ${resource}:`, err);
@@ -142,59 +189,183 @@ export class FleetSyncService {
     }
 
     /**
-     * Apply a received sync payload on a replica.
-     * This promotes the instance to 'replica' mode if not already, caches
-     * the target identity it was told, and replaces replicated rows atomically.
+     * Apply a received sync payload on a replica. Runs role flip, identity
+     * cache, row replacement, watermark write, AND staleness comparison inside
+     * a single SQLite transaction so a partial-write window cannot leave the
+     * watermark behind the row state.
+     *
+     * Throws `StaleSyncPushError` (rolling back the transaction) when the
+     * incoming `pushedAt` is older than the persisted watermark; the route
+     * handler translates that into 409 STALE_SYNC_PUSH.
+     *
+     * `pushedAt` is optional for back-compat with legacy controls; when absent,
+     * the staleness check is skipped and no watermark is written.
      */
     public applyIncomingSync(
         resource: FleetResource,
         rows: ScanPolicy[] | Array<Omit<CveSuppression, 'id'>>,
         targetIdentity: string,
+        pushedAt?: number,
     ): void {
         const db = DatabaseService.getInstance();
-        db.setSystemState('fleet_role', 'replica');
-        if (targetIdentity) {
-            db.setSystemState('fleet_self_identity', targetIdentity);
-        }
-        if (resource === 'scan_policies') {
-            db.replaceReplicatedScanPolicies(rows as ScanPolicy[]);
-        } else if (resource === 'cve_suppressions') {
-            db.replaceReplicatedCveSuppressions(rows as Array<Omit<CveSuppression, 'id'>>);
+        db.transaction(() => {
+            if (pushedAt !== undefined && Number.isFinite(pushedAt)) {
+                const watermarkKey = SYNC_STATE_KEYS.receivedPushedAt(resource);
+                const previousRaw = db.getSystemState(watermarkKey);
+                const previous = previousRaw !== null ? Number(previousRaw) : null;
+                if (previous !== null && Number.isFinite(previous) && pushedAt < previous) {
+                    throw new StaleSyncPushError(previous, pushedAt);
+                }
+                db.setSystemState(watermarkKey, String(pushedAt));
+            }
+            db.setSystemState(SYNC_STATE_KEYS.fleetRole, 'replica');
+            if (targetIdentity) {
+                db.setSystemState(SYNC_STATE_KEYS.fleetSelfIdentity, targetIdentity);
+            }
+            if (resource === 'scan_policies') {
+                db.replaceReplicatedScanPolicies(rows as ScanPolicy[]);
+            } else if (resource === 'cve_suppressions') {
+                db.replaceReplicatedCveSuppressions(rows as Array<Omit<CveSuppression, 'id'>>);
+            }
+        });
+    }
+
+    /**
+     * Chain a push behind any in-flight push for the same node. Different
+     * nodes still run in parallel via the outer Promise.all.
+     */
+    private enqueuePushToNode(
+        node: Node & { id: number },
+        resource: FleetResource,
+        payload: Omit<FleetSyncPayload, 'targetIdentity'>,
+    ): Promise<void> {
+        const prev = this.inflightByNode.get(node.id) ?? Promise.resolve();
+        // .catch() before .then() so a thrown push does not poison the chain
+        // for that node id. executePushToNode swallows internally today, but
+        // the catch is defense-in-depth against future regressions.
+        const next = prev.catch(() => undefined).then(
+            () => this.executePushToNode(node, resource, payload),
+        );
+        const tracked = next.finally(() => {
+            if (this.inflightByNode.get(node.id) === tracked) {
+                this.inflightByNode.delete(node.id);
+            }
+        });
+        this.inflightByNode.set(node.id, tracked);
+        return next;
+    }
+
+    private async executePushToNode(
+        node: Node & { id: number },
+        resource: FleetResource,
+        partial: Omit<FleetSyncPayload, 'targetIdentity'>,
+    ): Promise<void> {
+        const db = DatabaseService.getInstance();
+        const apiUrl = node.api_url ?? '';
+        const baseUrl = apiUrl.replace(/\/$/, '');
+        const payload: FleetSyncPayload = { ...partial, targetIdentity: apiUrl };
+        try {
+            await axios.post(
+                `${baseUrl}/api/fleet/sync/${resource}`,
+                payload,
+                {
+                    headers: { Authorization: `Bearer ${node.api_token}` },
+                    timeout: 15_000,
+                },
+            );
+            db.recordFleetSyncSuccess(node.id, resource);
+            if (isDebugEnabled()) {
+                console.debug(
+                    `[FleetSync:debug] Pushed ${resource} to "${node.name}" (${baseUrl}) ok: rows=${payload.rows.length} pushedAt=${payload.pushedAt}`,
+                );
+            }
+        } catch (err) {
+            // STALE_SYNC_PUSH (409) is an expected protocol outcome: a newer
+            // push for the same resource has already landed. The node is
+            // healthy; suppress the failure record so it does not surface as
+            // an alert in the sync-status panel.
+            if (err instanceof AxiosError && err.response?.status === 409) {
+                const data = err.response.data as { code?: string } | undefined;
+                if (data?.code === SYNC_ERROR_CODES.staleSyncPush) {
+                    if (isDebugEnabled()) {
+                        console.debug(
+                            `[FleetSync:debug] Stale push to "${node.name}" (${baseUrl}) for ${resource}; receiver already has a newer state.`,
+                        );
+                    }
+                    return;
+                }
+            }
+            const message = this.formatError(err);
+            console.warn(
+                `[FleetSync] Failed to push ${resource} to "${node.name}" (${baseUrl}): ${message}`,
+            );
+            db.recordFleetSyncFailure(node.id, resource, message);
         }
     }
 
     private loadResource(resource: FleetResource): unknown[] {
         const db = DatabaseService.getInstance();
+        let rows: unknown[];
         if (resource === 'scan_policies') {
-            return db
-                .getScanPolicies()
-                .filter((p) => p.replicated_from_control === 0)
-                .map((p) => ({
-                    name: p.name,
-                    node_identity: p.node_identity,
-                    stack_pattern: p.stack_pattern,
-                    max_severity: p.max_severity,
-                    block_on_deploy: p.block_on_deploy,
-                    enabled: p.enabled,
-                    created_at: p.created_at,
-                    updated_at: p.updated_at,
-                }));
+            rows = db.getLocalScanPolicies().map((p) => ({
+                name: p.name,
+                node_identity: p.node_identity,
+                stack_pattern: p.stack_pattern,
+                max_severity: p.max_severity,
+                block_on_deploy: p.block_on_deploy,
+                enabled: p.enabled,
+                created_at: p.created_at,
+                updated_at: p.updated_at,
+            }));
+        } else if (resource === 'cve_suppressions') {
+            rows = db.getLocalCveSuppressions().map((s) => ({
+                cve_id: s.cve_id,
+                pkg_name: s.pkg_name,
+                image_pattern: s.image_pattern,
+                reason: s.reason,
+                created_by: s.created_by,
+                created_at: s.created_at,
+                expires_at: s.expires_at,
+            }));
+        } else {
+            return [];
         }
-        if (resource === 'cve_suppressions') {
-            return db
-                .getCveSuppressions()
-                .filter((s) => s.replicated_from_control === 0)
-                .map((s) => ({
-                    cve_id: s.cve_id,
-                    pkg_name: s.pkg_name,
-                    image_pattern: s.image_pattern,
-                    reason: s.reason,
-                    created_by: s.created_by,
-                    created_at: s.created_at,
-                    expires_at: s.expires_at,
-                }));
+
+        if (rows.length > MAX_SYNC_ROWS) {
+            const dropped = rows.length - MAX_SYNC_ROWS;
+            console.warn(
+                `[FleetSync] ${resource} has ${rows.length} local rows; truncating to ${MAX_SYNC_ROWS} for sync (dropped=${dropped})`,
+            );
+            this.maybeNotifyTruncation(resource, dropped);
+            rows = rows.slice(0, MAX_SYNC_ROWS);
         }
-        return [];
+        return rows;
+    }
+
+    /**
+     * Dispatch a truncation warning at most once per cooldown window. Without
+     * this throttle, a configuration that exceeds the row cap would generate
+     * one alert per write and flood the operator's notification stream.
+     */
+    private maybeNotifyTruncation(resource: FleetResource, dropped: number): void {
+        const db = DatabaseService.getInstance();
+        const stateKey = SYNC_STATE_KEYS.truncationAlertAt(resource);
+        const lastRaw = db.getSystemState(stateKey);
+        const last = lastRaw !== null ? Number(lastRaw) : 0;
+        const now = Date.now();
+        if (Number.isFinite(last) && now - last < TRUNCATION_ALERT_COOLDOWN_MS) {
+            return;
+        }
+        db.setSystemState(stateKey, String(now));
+        void NotificationService.getInstance()
+            .dispatchAlert(
+                'warning',
+                'system',
+                `Fleet sync truncated ${resource} to ${MAX_SYNC_ROWS} rows (${dropped} not replicated). Reduce the local set or contact support.`,
+            )
+            .catch((err) => {
+                console.warn('[FleetSync] Failed to dispatch truncation alert:', err);
+            });
     }
 
     private formatError(err: unknown): string {
