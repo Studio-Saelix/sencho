@@ -2,7 +2,7 @@ import { useExperimental } from '@/hooks/useExperimental';
 import {
     RefreshCw, Search, Camera,
     Network, SlidersHorizontal,
-    Send, KeyRound, ArrowLeftRight,
+    Send, KeyRound, ArrowLeftRight, Wrench,
 } from 'lucide-react';
 import { FleetMasthead } from './fleet/FleetMasthead';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
@@ -23,6 +23,7 @@ import { FleetConfiguration } from './fleet/FleetConfiguration';
 import { FleetSoonPlaceholder } from './fleet/FleetSoonPlaceholder';
 import { RoutingTab } from './fleet/RoutingTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
+import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
@@ -83,6 +84,11 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             <TabsHighlightItem value="configuration">
                                 <TabsTrigger value="configuration">
                                     <SlidersHorizontal className="w-4 h-4 mr-1.5" />Status
+                                </TabsTrigger>
+                            </TabsHighlightItem>
+                            <TabsHighlightItem value="actions">
+                                <TabsTrigger value="actions">
+                                    <Wrench className="w-4 h-4 mr-1.5" />Actions
                                 </TabsTrigger>
                             </TabsHighlightItem>
                             {isPaid && (
@@ -171,6 +177,9 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 )}
                 <TabsContent value="configuration">
                     <FleetConfiguration />
+                </TabsContent>
+                <TabsContent value="actions">
+                    <FleetActionsTab nodes={overview.allNodes} />
                 </TabsContent>
                 {isPaid && (
                     <TabsContent value="deployments">
