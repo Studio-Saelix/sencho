@@ -26,6 +26,43 @@ const SCAN_TIMEOUT_MS = 5 * 60 * 1000;
 const SBOM_TIMEOUT_MS = 3 * 60 * 1000;
 export const DIGEST_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
+const TRIVY_TEMP_DIR_PREFIX = 'sencho-trivy-';
+const TRIVY_TEMP_DIR_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Sweep leftover sencho-trivy-* temp dirs in the system tmp dir whose mtime
+ * is older than 1 hour. Runs once at service boot to clean up DOCKER_CONFIG
+ * dirs orphaned by a crashed scan process. Best-effort; swallows readdir or
+ * unlink failures so a quirky tmp dir cannot block startup.
+ */
+export async function sweepStaleTrivyTempDirs(): Promise<void> {
+    const tmp = os.tmpdir();
+    let entries: string[];
+    try {
+        entries = await fs.promises.readdir(tmp);
+    } catch {
+        return;
+    }
+    const cutoff = Date.now() - TRIVY_TEMP_DIR_MAX_AGE_MS;
+    let removed = 0;
+    for (const entry of entries) {
+        if (!entry.startsWith(TRIVY_TEMP_DIR_PREFIX)) continue;
+        const full = path.join(tmp, entry);
+        try {
+            const stat = await fs.promises.stat(full);
+            if (stat.mtimeMs < cutoff) {
+                await fs.promises.rm(full, { recursive: true, force: true });
+                removed++;
+            }
+        } catch {
+            /* race: dir already gone, or permissions; skip */
+        }
+    }
+    if (removed > 0) {
+        console.log(`[Trivy] Reaped ${removed} stale tmp dir(s) under ${tmp}`);
+    }
+}
+
 function diag(msg: string, ...args: unknown[]): void {
     if (isDebugEnabled()) console.log(`[Trivy:diag] ${sanitizeForLog(msg)}`, ...args);
 }
