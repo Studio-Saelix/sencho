@@ -1,11 +1,11 @@
 ---
 title: "Fleet Sync"
-description: "How security rules replicate from the control Sencho instance to remote nodes."
+description: "How security rules replicate from a control Sencho instance to remote nodes."
 ---
 
 When you manage several Sencho instances as a fleet, the control instance (the one where you added remote nodes in **Settings → Nodes**) acts as the source of truth for security configuration. Rules you create on the control replicate automatically to every remote so the entire fleet enforces the same policies.
 
-Today this covers **vulnerability scan policies**. Additional resources (CVE suppressions, scan filters) will reuse the same mechanism.
+Today this covers **vulnerability scan policies** and **CVE suppressions**. Both replicate over the same channel and follow the same rules.
 
 ## Control vs replica
 
@@ -16,7 +16,7 @@ Every Sencho instance has a **role** that determines whether it accepts writes f
 | **Control** | Default for any standalone instance and for the node you point your browser at when managing a fleet. Accepts create, edit, and delete for security rules. Pushes changes to every remote. |
 | **Replica** | An instance that has received at least one sync push from a control. Shows rules read-only with a banner indicating they are managed upstream. Returns `403 Forbidden` for direct write attempts. |
 
-Role detection is automatic: a Sencho instance becomes a replica the first time it accepts a sync push, and stays that way until the underlying database is reset.
+Role detection is automatic: a Sencho instance becomes a replica the first time it accepts a sync push. To switch a replica back to a standalone control, an admin uses **Demote to control** in **Settings → Security** (described below).
 
 <Frame>
   <img src="/images/fleet-sync/replica-banner.png" alt="Settings page on a replica showing the 'Managed by control node' banner above the policies list" />
@@ -24,13 +24,42 @@ Role detection is automatic: a Sencho instance becomes a replica the first time 
 
 ## How replication works
 
-1. You create, edit, or delete a scan policy on the control.
+1. You create, edit, or delete a security rule on the control.
 2. The control commits the change to its local database.
 3. The control iterates every remote node registered in **Settings → Nodes** that has an API URL and token configured.
-4. For each remote, the control posts the full current list of policies to `/api/fleet/sync/scan_policies`, tagged with the remote's own identity.
-5. The remote replaces its replicated rows in a single transaction and records the result.
+4. For each remote, the control posts the full current rule list to `/api/fleet/sync/<resource>`, tagged with the remote's own identity, a monotonic timestamp, and a fingerprint that identifies the control.
+5. The remote validates the payload, checks the control fingerprint and timestamp, and replaces its replicated rows in a single transaction.
 
-Local-only rules created directly on a remote coexist with the replicated set; sync only replaces rows flagged as coming from the control.
+Local-only rules created directly on a remote coexist with the replicated set. Sync only replaces rows flagged as coming from the control.
+
+## Control anchor
+
+A replica binds to the first control that pushes to it. The fingerprint is a hash derived from the control's persistent install ID, so a hostname change does not flag drift.
+
+After the first sync, pushes from any other control are rejected with `409 CONTROL_IDENTITY_MISMATCH`. This prevents an operator from accidentally pointing a second control at an existing replica and overwriting its mirrored state.
+
+To re-bind a replica to a different control (for example, after a control rebuild), an admin sends:
+
+```bash
+curl -X POST https://<replica-url>/api/fleet/role/reanchor \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{"override": true}'
+```
+
+The next push from any control becomes the new anchor.
+
+## Push ordering
+
+Each push carries a strictly-increasing timestamp. The receiver rejects strictly-older pushes with `409 STALE_SYNC_PUSH` so a slow push that arrives after a faster one cannot overwrite the newer state. The control's normal write path generates a fresh timestamp on every change.
+
+Controls that predate this protocol (older Sencho versions in mixed-version fleets) send no timestamp, and the receiver treats those pushes as legacy and accepts them.
+
+## Automatic retry
+
+If a remote is offline when a write happens, the control records the failure on the **Settings → Security** sync-status panel and retries every 5 minutes for the next 24 hours. Once the remote comes back online, the next retry catches it up to the latest state.
+
+If a previously-working remote stays unreachable for more than an hour, the control dispatches a **warning notification** so the operator knows the node has fallen behind. The notification fires once per hour-long failure window.
 
 ## Policy scope across a fleet
 
@@ -46,26 +75,48 @@ Only one policy is evaluated per deploy. The most specific match wins, in this o
 3. Fleet-wide, stack-scoped policies.
 4. Fleet-wide, stack-wildcard policies.
 
-## Handling remote failures
+When two rules tie on scope class, the lowest policy id wins so every replica resolves the same winner.
 
-Pushes happen in parallel with a 15-second timeout per remote. A failing remote (offline, expired token, network issue) does not stop the push from succeeding on other remotes. The control records the last success and failure timestamp per node; subsequent writes on the control retry the push, so a remote that comes back online picks up the latest state on the next policy change.
+On a replica, the **Settings → Security** panel shows local rules, fleet-wide replicated rules, and replicated rules that target this replica. Identity-scoped rules meant for a different replica do not appear.
+
+## Demote to control
+
+A replica admin can demote the instance back to a standalone control from **Settings → Security**. The button sits next to the "Managed by control node" banner. Demote:
+
+- Drops every replicated scan policy and CVE suppression mirrored from the control.
+- Clears the cached fleet identity and control fingerprint.
+- Re-enables local edits on this instance.
+
+The control loses this remote as a replica. Re-adding the remote in the control's **Settings → Nodes** restarts replication from scratch on the next write.
+
+## Pilot-agent nodes
+
+Pilot-agent nodes are not part of fleet sync today. The control logs a one-time warning per pilot node and skips it during pushes. Pilot-tunnel-based replication is on the post-1.0 roadmap.
 
 ## Troubleshooting
 
 ### Security rules are missing on this node
 
-You are looking at a replica. Navigate to the control Sencho instance (the one you use to manage the fleet) and view its **Settings → Security** page; rules you create there replicate here automatically.
+You are looking at a replica. Navigate to the control Sencho instance and view its **Settings → Security** page; rules you create there replicate here automatically.
 
-If rules are expected to be present but are not, the most recent sync push may have failed. Check **Settings → Security** on the control (it surfaces sync status per node) or make any small change to a policy to re-trigger a push.
+If rules are expected to be present but are not, check **Settings → Security** on the control: it surfaces sync status per node and shows the most recent error. The retry loop catches up automatically once the underlying issue (network, expired token) is resolved.
 
 ### A remote rejects the sync
 
 A remote rejects a push if its bearer token is invalid or the request does not reach it. Verify the node's API URL and token in **Settings → Nodes** on the control, then use **Test Connection** to confirm the remote is reachable.
 
+### A push returns 409 CONTROL_IDENTITY_MISMATCH
+
+The replica is anchored to a different control. Either point your browser at the original control, or call the reanchor endpoint on the replica with `{"override": true}` to re-bind.
+
+### A push returns 409 STALE_SYNC_PUSH
+
+A newer push has already landed on the replica for the same resource. The control's retry loop will skip the stale outcome on the next tick. No action needed.
+
 ### A rule I deleted on the control is still visible on a replica
 
-Sync happens on every write. If you deleted a rule but the replica still shows it, the push probably failed. Make any trivial edit to another rule to trigger a fresh push.
+Sync happens on every write. If you deleted a rule but the replica still shows it, the push probably failed. Check the sync-status panel on the control or wait for the next retry tick (within 5 minutes).
 
-### I need to demote a replica back to a standalone instance
+### I want this replica to be a standalone control
 
-Reset the `fleet_role` entry in the replica's local state (requires direct database access). For most operators, the cleaner approach is to remove the node from the control's **Settings → Nodes** list; the replica remains in replica mode with its last replicated snapshot, which is harmless if it will no longer receive traffic.
+Use **Demote to control** in **Settings → Security** on the replica. The button is admin-only and asks for explicit confirmation because demote wipes mirrored rules.
