@@ -131,3 +131,59 @@ describe('GET /api/fleet/sync-status', () => {
     vi.restoreAllMocks();
   });
 });
+
+describe('POST /api/fleet/sync/:resource pushedAt protocol', () => {
+  const validRow = {
+    name: 'from-control',
+    node_identity: '',
+    stack_pattern: null,
+    max_severity: 'CRITICAL' as const,
+    block_on_deploy: 0,
+    enabled: 1,
+  };
+
+  it('accepts payloads without pushedAt for back-compat with legacy controls', async () => {
+    const res = await request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({ rows: [validRow], targetIdentity: 'https://me.example' });
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+
+  it('accepts a fresh pushedAt and persists it for stale-rejection compare', async () => {
+    const res = await request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({ rows: [validRow], targetIdentity: 'https://me.example', pushedAt: 1_700_000_000_000 });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects a stale pushedAt with 409 STALE_SYNC_PUSH', async () => {
+    // Send fresh, then send strictly-older.
+    await request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({ rows: [validRow], targetIdentity: 'https://me.example', pushedAt: 1_800_000_000_000 });
+    const stale = await request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({ rows: [validRow], targetIdentity: 'https://me.example', pushedAt: 1_700_000_000_000 });
+    expect(stale.status).toBe(409);
+    expect(stale.body.code).toBe('STALE_SYNC_PUSH');
+  });
+
+  it('returns a friendly 413 SYNC_PAYLOAD_TOO_LARGE when the body exceeds the parser limit', async () => {
+    // ~6 MB of padding pushes past the 5mb route-level limit. Keeps a single
+    // valid row so any path that did parse would succeed; we want the parser
+    // to reject before the handler runs.
+    const padding = 'x'.repeat(6 * 1024 * 1024);
+    const res = await request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({ rows: [validRow], targetIdentity: 'https://me.example', pad: padding });
+    expect(res.status).toBe(413);
+    expect(res.body.code).toBe('SYNC_PAYLOAD_TOO_LARGE');
+    expect(res.body.error).toMatch(/Sync payload too large/);
+  });
+});
