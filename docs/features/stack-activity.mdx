@@ -3,10 +3,10 @@ title: Stack Activity
 description: Per-stack event log showing deploys, restarts, config changes, and alerts, each attributed to the user or system that triggered them.
 ---
 
-The **Activity** tab inside each stack's panel gives you a timestamped record of everything that happened to that stack: deploys, restarts, starts, stops, and image updates. Each entry shows who triggered the event so you always have operational context.
+The **Activity** tab in the right-hand **Anatomy** panel gives you a timestamped record of everything that happened to the selected stack: deploys, restarts, starts, stops, and image updates. Each entry shows who triggered the event so you always have operational context. The `files` and `edit` actions on the same strip belong to the panel as a whole and stay available regardless of which tab is active.
 
 <Frame>
-  <img src="/images/stack-activity/activity-tab-populated.png" alt="Stack Activity tab showing a restart event attributed to a user" />
+  <img src="/images/stack-activity/activity-tab-populated.png" alt="Stack Activity tab showing events grouped by Today, Yesterday, and Earlier with restart, auto-update, and image-update entries" />
 </Frame>
 
 ## What you'll see
@@ -15,34 +15,58 @@ Each entry in the activity list contains:
 
 | Field | Description |
 |-------|-------------|
-| **Icon** | Category of the event (deploy, restart, stop, start, update) |
-| **Message** | What happened (e.g. "bazarr restarted") |
-| **Attributed to** | `by <username>` for user-initiated actions, omitted for automated system events |
-| **Time** | Relative time since the event (e.g. "just now", "5m ago", "2h ago") |
+| **Icon** | Category of the event (deploy, restart, stop, start, image update applied) |
+| **Message** | What happened (for example, `dozzle restarted`) |
+| **Attributed to** | `by <username>` for user-initiated actions; omitted for events without an actor and for system-driven events such as auto-update or auto-heal |
+| **Time** | Relative time since the event: `just now`, `5m ago`, `2h ago`, `3d ago` |
 
-Events are grouped by day: **Today**, **Yesterday**, and **Earlier**.
+## Event categories
 
-## Who triggered an event
+The five operational categories below have a dedicated icon. Other notification categories that scope to a stack (for example, deploy failures, available image updates, auto-heal triggers, monitor alerts, or scan findings) also flow into the timeline and render with a generic activity icon.
 
-Sencho attributes every recorded event to the user who was authenticated when the action was taken. If the action was triggered by an automated process (auto-heal, image update polling, or any other system process) the event is recorded as a system action and the attribution label is omitted from the display.
+| Category | Icon | Example message |
+|----------|------|-----------------|
+| Deploy succeeded | rocket | `plex deployed` |
+| Stack restarted | refresh | `dozzle restarted` |
+| Stack stopped | stop | `radarr stopped` |
+| Stack started | play | `radarr started` |
+| Image update applied | up arrow | `Auto-update: stack "dozzle" updated with new images` |
 
-## Accessing the Activity tab
+## Day grouping
 
-1. Click any stack in the left sidebar to open its panel.
-2. Switch to the **Activity** tab in the panel header.
+Events are grouped by day under three headers: **Today**, **Yesterday**, and **Earlier**. Within each group, events are ordered most-recent first.
 
-The tab loads the most recent 50 events immediately and streams new events live as they happen without a page refresh.
+## Live updates
+
+New events stream in over the same WebSocket that powers the notification bell, so the list updates without a page refresh while the tab is open.
 
 ## Pagination
 
-If a stack has more than 50 recorded events, a **Load more** button appears at the bottom of the list. Each click fetches the next 50 older events.
+The tab loads the most recent 50 events on open. If a stack has more recorded events, a **Load more** button appears at the bottom of the list. Each click fetches the next 50 older events.
+
+## Empty state
+
+When a stack has no recorded operational events yet, the tab displays a heartbeat icon with the message `No activity recorded yet`.
+
+<Frame>
+  <img src="/images/stack-activity/activity-tab-empty.png" alt="Stack Activity tab in its empty state with a heartbeat icon and the message 'No activity recorded yet'" />
+</Frame>
+
+## Who triggered an event
+
+Sencho attributes every recorded event to the user who was authenticated when the action was taken. Events without an actor, and events triggered by automated processes such as auto-update polling or auto-heal, are recorded as system actions; the attribution label is omitted from their display.
+
+## Accessing the Activity tab
+
+1. Click any stack in the left sidebar to open it.
+2. Switch to the **Activity** tab in the Anatomy panel header.
 
 ## Troubleshooting
 
-**The Activity tab shows "No activity recorded yet"**
+### The Activity tab shows "No activity recorded yet"
 
-The activity log is populated by operations performed through Sencho — deploys, restarts, starts, stops, and image updates — since the Sencho instance started tracking them. If you have not performed any of these operations on this stack via Sencho since the feature was enabled, the tab will be empty. Trigger a restart or deploy and the entry appears within a few seconds.
+The activity log is populated by operations performed through Sencho on this stack: deploys, restarts, starts, stops, and image updates. Trigger one of those actions and the entry appears within a few seconds.
 
-**Events appear in the bell notification dropdown**
+### Operational events don't appear in the bell notification dropdown
 
-The notification dropdown shows system alerts and error-level events only. User-initiated operational events (start, stop, restart, deploy, update) appear exclusively in the per-stack Activity tab rather than the global notification tray, keeping the tray focused on conditions that need your attention.
+The notification dropdown surfaces system alerts and error-level events. User-initiated operational events (start, stop, restart, deploy, update) appear exclusively in the per-stack Activity tab, keeping the global tray focused on conditions that need your attention.
