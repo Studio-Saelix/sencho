@@ -22,6 +22,9 @@ export interface FleetNode {
     stats: FleetNodeStats | null;
     systemStats: FleetNodeSystemStats | null;
     stacks: string[] | null;
+    cordoned: boolean;
+    cordoned_at: number | null;
+    cordoned_reason: string | null;
 }
 
 export interface NodeUpdateStatus {

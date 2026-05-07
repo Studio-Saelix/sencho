@@ -22,6 +22,7 @@ import FleetSnapshots from './FleetSnapshots';
 import { FleetConfiguration } from './fleet/FleetConfiguration';
 import { FleetSoonPlaceholder } from './fleet/FleetSoonPlaceholder';
 import { RoutingTab } from './fleet/RoutingTab';
+import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
 
 interface FleetViewProps {
@@ -92,14 +93,16 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
+                            {isAdmiral && (
+                                <TabsHighlightItem value="federation">
+                                    <TabsTrigger value="federation">
+                                        <Network className="w-4 h-4 mr-1.5" />Federation
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
+                            )}
                             {experimental && (
                                 <>
                                     <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-                                    <TabsHighlightItem value="federation">
-                                        <TabsTrigger value="federation">
-                                            <Network className="w-4 h-4 mr-1.5" />Federation
-                                        </TabsTrigger>
-                                    </TabsHighlightItem>
                                     <TabsHighlightItem value="secrets">
                                         <TabsTrigger value="secrets">
                                             <KeyRound className="w-4 h-4 mr-1.5" />Secrets
@@ -156,6 +159,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         updatingNodeId={updateStatus.updatingNodeId}
                         onRetryUpdate={updateStatus.retryNodeUpdate}
                         onDismissUpdate={updateStatus.dismissNodeUpdate}
+                        onCordonChange={() => { void overview.fetchOverview(true); }}
                     />
                 </TabsContent>
 
@@ -177,27 +181,23 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         <DeploymentsTab />
                     </TabsContent>
                 )}
+                {isAdmiral && (
+                    <TabsContent value="federation">
+                        <AdmiralGate>
+                            <FederationTab />
+                        </AdmiralGate>
+                    </TabsContent>
+                )}
                 {experimental && (
-                    <>
-                        <TabsContent value="federation">
-                            <FleetSoonPlaceholder
-                                icon={<Network className="h-4 w-4" />}
-                                kicker="Federation"
-                                title="The fleet as one logical surface"
-                                description="Pin policies, drain a node for maintenance, weight-aware scheduling. This stack runs on whichever node has capacity."
-                                plannedActions={['Pin policy', 'Drain node', 'Cordon', 'Capacity plan']}
-                            />
-                        </TabsContent>
-                        <TabsContent value="secrets">
-                            <FleetSoonPlaceholder
-                                icon={<KeyRound className="h-4 w-4" />}
-                                kicker="Secrets"
-                                title="One source of truth for env, creds and certs"
-                                description="Push to selected nodes, rotate centrally, audit who-saw-what. Solves silent drift across copies."
-                                plannedActions={['Sync env', 'Rotate', 'Audit', 'Pin to nodes']}
-                            />
-                        </TabsContent>
-                    </>
+                    <TabsContent value="secrets">
+                        <FleetSoonPlaceholder
+                            icon={<KeyRound className="h-4 w-4" />}
+                            kicker="Secrets"
+                            title="One source of truth for env, creds and certs"
+                            description="Push to selected nodes, rotate centrally, audit who-saw-what. Solves silent drift across copies."
+                            plannedActions={['Sync env', 'Rotate', 'Audit', 'Pin to nodes']}
+                        />
+                    </TabsContent>
                 )}
             </Tabs>
 

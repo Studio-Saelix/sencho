@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
+import { requireAdmiral } from '../middleware/tierGates';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
@@ -252,6 +253,68 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('Failed to delete node:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to delete node' });
+  }
+});
+
+nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  const nodeIdParam = req.params.id as string;
+  if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
+  if (!requireAdmiral(req, res)) return;
+  const id = parseInt(nodeIdParam, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'Invalid node id' });
+    return;
+  }
+  const rawReason = (req.body && typeof req.body === 'object') ? (req.body as { reason?: unknown }).reason : undefined;
+  let reason: string | null = null;
+  if (rawReason !== undefined && rawReason !== null) {
+    if (typeof rawReason !== 'string') {
+      res.status(400).json({ error: 'reason must be a string' });
+      return;
+    }
+    const trimmed = rawReason.trim();
+    if (trimmed.length > 256) {
+      res.status(400).json({ error: 'reason must be 256 characters or fewer' });
+      return;
+    }
+    reason = trimmed.length > 0 ? trimmed : null;
+  }
+  try {
+    const existing = DatabaseService.getInstance().getNode(id);
+    if (!existing) {
+      res.status(404).json({ error: 'Node not found' });
+      return;
+    }
+    const updated = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+    res.set('cache-control', 'no-store').json(updated);
+  } catch (error: unknown) {
+    console.error('Failed to cordon node:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to cordon node' });
+  }
+});
+
+nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  const nodeIdParam = req.params.id as string;
+  if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
+  if (!requireAdmiral(req, res)) return;
+  const id = parseInt(nodeIdParam, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'Invalid node id' });
+    return;
+  }
+  try {
+    const existing = DatabaseService.getInstance().getNode(id);
+    if (!existing) {
+      res.status(404).json({ error: 'Node not found' });
+      return;
+    }
+    const updated = DatabaseService.getInstance().setNodeCordoned(id, false, null);
+    res.set('cache-control', 'no-store').json(updated);
+  } catch (error: unknown) {
+    console.error('Failed to uncordon node:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to uncordon node' });
   }
 });
 
