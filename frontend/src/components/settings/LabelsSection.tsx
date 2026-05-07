@@ -2,23 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Plus, Pencil, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
-import {
-    Dialog,
-    DialogContent,
-    DialogTitle,
-    DialogDescription,
-} from '@/components/ui/dialog';
-import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SENCHO_LABELS_CHANGED } from '@/lib/events';
@@ -132,12 +116,13 @@ export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
                 throw new Error(data?.error || 'Failed to delete label.');
             }
             toast.success('Label deleted.');
-            setDeleteTarget(null);
             fetchLabels();
             onLabelsChanged?.();
             window.dispatchEvent(new Event(SENCHO_LABELS_CHANGED));
         } catch (err: unknown) {
             toast.error((err as Error)?.message || 'Something went wrong.');
+        } finally {
+            setDeleteTarget(null);
         }
     };
 
@@ -193,65 +178,66 @@ export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
                 </div>
             </div>
 
-            {/* Create / Edit Dialog */}
-            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-                <DialogContent className="sm:max-w-[380px]">
-                    <DialogTitle>{editingLabel ? 'Edit Label' : 'Create Label'}</DialogTitle>
-                    <VisuallyHidden><DialogDescription>Manage label properties</DialogDescription></VisuallyHidden>
-                    <div className="space-y-4 mt-2">
-                        <Input
-                            placeholder="Label name"
-                            value={formName}
-                            onChange={e => setFormName(e.target.value)}
-                            className="font-mono"
-                            maxLength={30}
-                            autoFocus
-                            onKeyDown={e => { if (e.key === 'Enter') handleSave(); }}
-                        />
-                        <div>
-                            <div className="text-xs text-muted-foreground mb-2">Color</div>
-                            <div className="flex flex-wrap gap-2">
-                                {LABEL_COLORS.map(c => (
-                                    <button
-                                        key={c}
-                                        type="button"
-                                        className={`w-7 h-7 rounded-full border-2 transition-colors ${c === formColor ? 'border-foreground scale-110' : 'border-transparent hover:border-muted-foreground/30'}`}
-                                        style={{ backgroundColor: `var(--label-${c})` }}
-                                        onClick={() => setFormColor(c)}
-                                    />
-                                ))}
-                            </div>
-                        </div>
-                        <div className="flex justify-end gap-2">
-                            <Button variant="ghost" onClick={() => setDialogOpen(false)}>Cancel</Button>
-                            <Button onClick={handleSave} disabled={saving || !formName.trim()}>
-                                {saving ? 'Saving...' : editingLabel ? 'Save' : 'Create'}
-                            </Button>
+            {/* Create / Edit Modal */}
+            <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="sm">
+                <ModalHeader
+                    kicker={editingLabel ? 'LABELS · EDIT' : 'LABELS · NEW'}
+                    title={editingLabel ? 'Edit label' : 'Create label'}
+                    description="Manage label properties"
+                />
+                <ModalBody>
+                    <Input
+                        placeholder="Label name"
+                        value={formName}
+                        onChange={e => setFormName(e.target.value)}
+                        className="font-mono"
+                        maxLength={30}
+                        autoFocus
+                        onKeyDown={e => { if (e.key === 'Enter') handleSave(); }}
+                    />
+                    <div>
+                        <div className="text-xs text-muted-foreground mb-2">Color</div>
+                        <div className="flex flex-wrap gap-2">
+                            {LABEL_COLORS.map(c => (
+                                <button
+                                    key={c}
+                                    type="button"
+                                    className={`w-7 h-7 rounded-full border-2 transition-colors ${c === formColor ? 'border-foreground scale-110' : 'border-transparent hover:border-muted-foreground/30'}`}
+                                    style={{ backgroundColor: `var(--label-${c})` }}
+                                    onClick={() => setFormColor(c)}
+                                />
+                            ))}
                         </div>
                     </div>
-                </DialogContent>
-            </Dialog>
+                </ModalBody>
+                <ModalFooter
+                    secondary={
+                        <Button variant="outline" size="sm" onClick={() => setDialogOpen(false)} disabled={saving}>
+                            Cancel
+                        </Button>
+                    }
+                    primary={
+                        <Button size="sm" onClick={handleSave} disabled={saving || !formName.trim()}>
+                            {saving ? 'Saving...' : editingLabel ? 'Save' : 'Create'}
+                        </Button>
+                    }
+                />
+            </Modal>
 
             {/* Delete Confirmation */}
-            <AlertDialog open={!!deleteTarget} onOpenChange={open => !open && setDeleteTarget(null)}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>Delete label &ldquo;{deleteTarget?.name}&rdquo;?</AlertDialogTitle>
-                        <AlertDialogDescription>
-                            This will remove the label from all stacks. This action cannot be undone.
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction
-                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                            onClick={handleDelete}
-                        >
-                            Delete
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+            <ConfirmModal
+                open={!!deleteTarget}
+                onOpenChange={open => !open && setDeleteTarget(null)}
+                variant="destructive"
+                kicker="LABELS · DELETE · IRREVERSIBLE"
+                title={`Delete label "${deleteTarget?.name ?? ''}"`}
+                confirmLabel="Delete"
+                onConfirm={handleDelete}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Removes the label from every stack across the fleet.
+                </p>
+            </ConfirmModal>
           </CapabilityGate>
         </PaidGate>
     );
