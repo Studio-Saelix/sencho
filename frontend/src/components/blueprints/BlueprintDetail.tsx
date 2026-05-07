@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { ChevronLeft, MoreHorizontal, Pencil, Play, Trash2 } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -321,20 +321,16 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                     />
                 )}
                 {blueprint && (
-                    <Dialog open={deleteOpen} onOpenChange={(o) => { if (!o) { setDeleteOpen(false); setDeleteConfirmText(''); } }}>
-                        <DialogContent className="sm:max-w-md">
-                            <DialogHeader>
-                                <div className="flex items-center gap-2 text-brand font-mono text-[10px] uppercase tracking-[0.2em]">
-                                    <span className="inline-block w-1 h-3 bg-destructive" />
-                                    Delete blueprint
-                                </div>
-                                <DialogTitle className="font-serif italic text-xl tracking-[-0.01em]">
-                                    Permanently delete {blueprint.name}?
-                                </DialogTitle>
-                                <DialogDescription>
-                                    Stateless deployments will be withdrawn first. Stateful deployments must be withdrawn explicitly through the deployment table before delete; the API will refuse otherwise.
-                                </DialogDescription>
-                            </DialogHeader>
+                    <Modal open={deleteOpen} onOpenChange={(o) => { if (!o) { setDeleteOpen(false); setDeleteConfirmText(''); } }} size="md">
+                        <ModalDestructiveHeader
+                            kicker="BLUEPRINT · DELETE · IRREVERSIBLE"
+                            title={`Delete ${blueprint.name}`}
+                            description="Stateless deployments will be withdrawn first. Stateful deployments must be withdrawn explicitly through the deployment table before delete; the API will refuse otherwise."
+                        />
+                        <ModalBody>
+                            <p className="text-sm text-stat-subtitle">
+                                Stateless deployments will be withdrawn first. Stateful deployments must be withdrawn explicitly through the deployment table before delete.
+                            </p>
                             <div className="space-y-2">
                                 <p className="text-xs text-stat-subtitle leading-relaxed">
                                     Type <span className="font-mono text-stat-value">{blueprint.name}</span> to confirm.
@@ -347,21 +343,25 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                     disabled={submitting}
                                 />
                             </div>
-                            <DialogFooter>
-                                <Button variant="outline" onClick={() => { setDeleteOpen(false); setDeleteConfirmText(''); }} disabled={submitting}>
+                        </ModalBody>
+                        <ModalFooter
+                            secondary={
+                                <Button variant="outline" size="sm" onClick={() => { setDeleteOpen(false); setDeleteConfirmText(''); }} disabled={submitting}>
                                     Cancel
                                 </Button>
+                            }
+                            primary={
                                 <Button
-                                    variant="outline"
-                                    className="text-destructive border-destructive/40 hover:bg-destructive/10"
+                                    variant="destructive"
+                                    size="sm"
                                     disabled={!deleteTypedOk || submitting}
                                     onClick={performDelete}
                                 >
                                     Delete blueprint
                                 </Button>
-                            </DialogFooter>
-                        </DialogContent>
-                    </Dialog>
+                            }
+                        />
+                    </Modal>
                 )}
             </SheetContent>
         </Sheet>
