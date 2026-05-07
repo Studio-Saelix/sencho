@@ -7,11 +7,8 @@ import {
   Minimize2,
   Terminal as TerminalIcon,
 } from 'lucide-react';
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { Modal } from '@/components/ui/modal';
+import { DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { StructuredLogRow } from '@/components/log-rendering/StructuredLogRow';
 import TerminalComponent from '@/components/Terminal';
@@ -156,11 +153,15 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
   const verbLabel = VERB_LABELS[action];
 
   return (
-    <Dialog open={isDialogOpen} onOpenChange={handleOpenChange}>
-      <DialogContent
-        showClose={false}
+    <Modal
+      open={isDialogOpen}
+      onOpenChange={handleOpenChange}
+      showClose={false}
+      className="max-w-[640px] max-h-[70vh] flex flex-col"
+    >
+      <div
         data-testid="deploy-feedback-modal"
-        className="max-w-[640px] p-0 gap-0 max-h-[70vh] flex flex-col"
+        className="flex flex-col flex-1 min-h-0"
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
       >
@@ -273,8 +274,8 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
             </Button>
           </div>
         </div>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </Modal>
   );
 }
 
