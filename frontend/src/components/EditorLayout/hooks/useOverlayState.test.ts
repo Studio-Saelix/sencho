@@ -14,9 +14,7 @@ describe('useOverlayState', () => {
     expect(result.current.selectedContainer).toBeNull();
     expect(result.current.logViewerOpen).toBe(false);
     expect(result.current.logContainer).toBeNull();
-    expect(result.current.alertSheetOpen).toBe(false);
-    expect(result.current.alertSheetStack).toBe('');
-    expect(result.current.autoHealStackName).toBeNull();
+    expect(result.current.stackMonitor).toBeNull();
     expect(result.current.policyBlock).toBeNull();
     expect(result.current.policyBypassing).toBe(false);
     expect(result.current.stackMisconfigScanId).toBeNull();
@@ -69,32 +67,29 @@ describe('useOverlayState', () => {
     expect(result.current.logContainer).toBeNull();
   });
 
-  it('openAlertSheet sets sheet state', () => {
+  it('openAlertSheet opens stack monitor on the alerts tab', () => {
     const { result } = renderHook(() => useOverlayState());
     act(() => result.current.openAlertSheet('web-stack'));
-    expect(result.current.alertSheetOpen).toBe(true);
-    expect(result.current.alertSheetStack).toBe('web-stack');
+    expect(result.current.stackMonitor).toEqual({ stackName: 'web-stack', tab: 'alerts' });
   });
 
-  it('openAlertSheet with autoHeal sets autoHealStackName', () => {
+  it('openAutoHeal opens stack monitor on the auto-heal tab', () => {
     const { result } = renderHook(() => useOverlayState());
-    act(() => result.current.openAlertSheet('web-stack', 'web-stack'));
-    expect(result.current.alertSheetOpen).toBe(true);
-    expect(result.current.alertSheetStack).toBe('web-stack');
-    expect(result.current.autoHealStackName).toBe('web-stack');
+    act(() => result.current.openAutoHeal('web-stack'));
+    expect(result.current.stackMonitor).toEqual({ stackName: 'web-stack', tab: 'auto-heal' });
   });
 
-  it('openAlertSheet without autoHeal leaves autoHealStackName null', () => {
+  it('openAutoHeal after openAlertSheet switches to the auto-heal tab', () => {
     const { result } = renderHook(() => useOverlayState());
     act(() => result.current.openAlertSheet('web-stack'));
-    expect(result.current.alertSheetOpen).toBe(true);
-    expect(result.current.autoHealStackName).toBeNull();
+    act(() => result.current.openAutoHeal('web-stack'));
+    expect(result.current.stackMonitor).toEqual({ stackName: 'web-stack', tab: 'auto-heal' });
   });
 
-  it('closeAlertSheet sets alertSheetOpen to false', () => {
+  it('closeStackMonitor clears the stack monitor state', () => {
     const { result } = renderHook(() => useOverlayState());
     act(() => result.current.openAlertSheet('web-stack'));
-    act(() => result.current.closeAlertSheet());
-    expect(result.current.alertSheetOpen).toBe(false);
+    act(() => result.current.closeStackMonitor());
+    expect(result.current.stackMonitor).toBeNull();
   });
 });

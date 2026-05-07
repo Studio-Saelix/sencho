@@ -5,8 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -844,31 +843,27 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       </ConfirmModal>
 
       {/* Run History Sheet */}
-      <Sheet open={!!runsTask} onOpenChange={(open) => { if (!open) setRunsTask(null); }}>
-        <SheetContent className="sm:max-w-xl">
-          <SheetHeader>
-            <div className="flex items-center justify-between">
-              <SheetTitle>Execution History - {runsTask?.name}</SheetTitle>
-              {runsTask && runs.length > 0 && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => window.open(`/api/scheduled-tasks/${runsTask.id}/runs/export`, '_blank')}
-                  title="Export as CSV"
-                >
-                  <Download className="w-4 h-4" strokeWidth={1.5} />
-                </Button>
-              )}
-            </div>
-          </SheetHeader>
-          <ScrollArea className="mt-4 flex-1" style={{ maxHeight: 'calc(100vh - 10rem)' }}>
-            <div>
-            {runsLoading ? (
-              <div className="text-center text-muted-foreground py-8">Loading...</div>
-            ) : runs.length === 0 ? (
-              <div className="text-center text-muted-foreground py-8">No executions yet.</div>
-            ) : (
-              <>
+      <SystemSheet
+        open={!!runsTask}
+        onOpenChange={(open) => { if (!open) setRunsTask(null); }}
+        crumb={['Schedules', runsTask?.name ?? '—', 'Runs']}
+        name={runsTask?.name ?? 'Run history'}
+        meta={`${runsTotal} run${runsTotal === 1 ? '' : 's'}`}
+        secondaryActions={runsTask && runs.length > 0 ? [{
+          label: 'Download CSV',
+          icon: Download,
+          onClick: () => window.open(`/api/scheduled-tasks/${runsTask.id}/runs/export`, '_blank'),
+        }] : undefined}
+        footerContext={runsTask?.next_run_at ? `Next run ${formatTimestamp(runsTask.next_run_at)}` : undefined}
+        size="lg"
+      >
+        <SheetSection title="Executions" hideHeader>
+          {runsLoading ? (
+            <div className="text-center text-muted-foreground py-8">Loading...</div>
+          ) : runs.length === 0 ? (
+            <div className="text-center text-muted-foreground py-8">No executions yet.</div>
+          ) : (
+            <>
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -927,12 +922,10 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   </div>
                 </div>
               )}
-              </>
-            )}
-            </div>
-          </ScrollArea>
-        </SheetContent>
-      </Sheet>
+            </>
+          )}
+        </SheetSection>
+      </SystemSheet>
     </div>
   );
 }

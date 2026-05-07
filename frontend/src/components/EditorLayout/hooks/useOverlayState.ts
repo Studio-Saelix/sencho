@@ -66,15 +66,14 @@ export function useOverlayState() {
     return () => window.removeEventListener(SENCHO_OPEN_LOGS_EVENT, handler);
   }, [openLogViewer]); // openLogViewer is stable (useCallback with empty deps)
 
-  const [alertSheetOpen, setAlertSheetOpen] = useState(false);
-  const [alertSheetStack, setAlertSheetStack] = useState('');
-  const [autoHealStackName, setAutoHealStackName] = useState<string | null>(null);
-  const openAlertSheet = useCallback((stackName: string, autoHeal?: string | null) => {
-    setAlertSheetStack(stackName);
-    setAutoHealStackName(autoHeal ?? null);
-    setAlertSheetOpen(true);
+  const [stackMonitor, setStackMonitor] = useState<{ stackName: string; tab: 'alerts' | 'auto-heal' } | null>(null);
+  const openAlertSheet = useCallback((stackName: string) => {
+    setStackMonitor({ stackName, tab: 'alerts' });
   }, []);
-  const closeAlertSheet = useCallback(() => setAlertSheetOpen(false), []);
+  const openAutoHeal = useCallback((stackName: string) => {
+    setStackMonitor({ stackName, tab: 'auto-heal' });
+  }, []);
+  const closeStackMonitor = useCallback(() => setStackMonitor(null), []);
 
   const [policyBlock, setPolicyBlock] = useState<PolicyBlock | null>(null);
   const [policyBypassing, setPolicyBypassing] = useState(false);
@@ -91,8 +90,7 @@ export function useOverlayState() {
     pendingUnsavedNode, setPendingUnsavedNode,
     bashModalOpen, selectedContainer, openBashModal, closeBashModal,
     logViewerOpen, logContainer, openLogViewer, closeLogViewer,
-    alertSheetOpen, alertSheetStack, autoHealStackName, openAlertSheet, closeAlertSheet,
-    setAutoHealStackName,
+    stackMonitor, openAlertSheet, openAutoHeal, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing, setPolicyBypassing,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
