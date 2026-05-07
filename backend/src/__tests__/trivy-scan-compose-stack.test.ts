@@ -15,6 +15,11 @@ interface ExecFileCall {
 
 const execFileCalls: ExecFileCall[] = [];
 let nextTrivyStdout = JSON.stringify({ Results: [] });
+// Tests can install a Promise to gate the next execFile resolution. The
+// dedup tests use this to keep the first scan in flight while issuing a
+// second concurrent call, so the in-progress flag is observable.
+let pendingExecGate: Promise<void> | null = null;
+let nextExecShouldFail = false;
 
 vi.mock('child_process', () => {
   // TrivyService wraps this with `promisify(execFile)` at module load. The
@@ -24,9 +29,14 @@ vi.mock('child_process', () => {
   const execFile = () => undefined;
   (execFile as unknown as Record<symbol, unknown>)[
     Symbol.for('nodejs.util.promisify.custom')
-  ] = (file: string, args: string[]) => {
+  ] = async (file: string, args: string[]) => {
     execFileCalls.push({ file, args });
-    return Promise.resolve({ stdout: nextTrivyStdout, stderr: '' });
+    if (pendingExecGate) await pendingExecGate;
+    if (nextExecShouldFail) {
+      nextExecShouldFail = false;
+      throw new Error('simulated trivy failure');
+    }
+    return { stdout: nextTrivyStdout, stderr: '' };
   };
   return { execFile };
 });
@@ -221,5 +231,74 @@ describe('TrivyService.scanComposeStack arg vector', () => {
     expect(misconfigInserts.length).toBe(1);
     expect(misconfigInserts[0].scanId).toBe(42);
     expect(misconfigInserts[0].count).toBe(3);
+  });
+});
+
+describe('TrivyService.scanComposeStack dedup', () => {
+  beforeEach(() => {
+    execFileCalls.length = 0;
+    createdScans.length = 0;
+    updateCalls.length = 0;
+    misconfigInserts.length = 0;
+    nextTrivyStdout = JSON.stringify({ Results: [] });
+    pendingExecGate = null;
+    nextExecShouldFail = false;
+    forceBinary(TrivyService.getInstance());
+  });
+
+  it('reports isScanningStack=false before any scan starts', () => {
+    expect(TrivyService.getInstance().isScanningStack(1, 'unscanned')).toBe(false);
+  });
+
+  it('rejects a concurrent scan of the same stack while the first is in flight', async () => {
+    let release: (() => void) | null = null;
+    pendingExecGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const first = TrivyService.getInstance().scanComposeStack(1, 'gated-stack', 'manual');
+    // Yield twice so the inner async setup (path resolve + dedup add) runs.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(TrivyService.getInstance().isScanningStack(1, 'gated-stack')).toBe(true);
+
+    await expect(
+      TrivyService.getInstance().scanComposeStack(1, 'gated-stack', 'manual'),
+    ).rejects.toThrow(/Already scanning this stack/);
+
+    release!();
+    await first;
+    expect(TrivyService.getInstance().isScanningStack(1, 'gated-stack')).toBe(false);
+    // Only one trivy invocation should have happened — the second was
+    // rejected before it ever reached execFile.
+    expect(execFileCalls.length).toBe(1);
+  });
+
+  it('allows different stacks on the same node to scan in parallel', async () => {
+    const r1 = TrivyService.getInstance().scanComposeStack(1, 'stack-a', 'manual');
+    const r2 = TrivyService.getInstance().scanComposeStack(1, 'stack-b', 'manual');
+    await Promise.all([r1, r2]);
+    expect(execFileCalls.length).toBe(2);
+    expect(TrivyService.getInstance().isScanningStack(1, 'stack-a')).toBe(false);
+    expect(TrivyService.getInstance().isScanningStack(1, 'stack-b')).toBe(false);
+  });
+
+  it('allows the same stack to scan again on a different node', async () => {
+    const r1 = TrivyService.getInstance().scanComposeStack(1, 'shared-name', 'manual');
+    const r2 = TrivyService.getInstance().scanComposeStack(2, 'shared-name', 'manual');
+    await Promise.all([r1, r2]);
+    expect(execFileCalls.length).toBe(2);
+  });
+
+  it('releases the dedup key after a failed scan so retry works', async () => {
+    nextExecShouldFail = true;
+    await expect(
+      TrivyService.getInstance().scanComposeStack(1, 'fail-stack', 'manual'),
+    ).rejects.toThrow(/simulated trivy failure/);
+    expect(TrivyService.getInstance().isScanningStack(1, 'fail-stack')).toBe(false);
+
+    // Subsequent scan after release should succeed.
+    await TrivyService.getInstance().scanComposeStack(1, 'fail-stack', 'manual');
+    expect(execFileCalls.length).toBe(2);
   });
 });

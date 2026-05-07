@@ -245,6 +245,9 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
   if (!stackName || !/^[a-zA-Z0-9_-]+$/.test(stackName)) {
     res.status(400).json({ error: 'Invalid stack name' }); return;
   }
+  if (svc.isScanningStack(req.nodeId, stackName)) {
+    res.status(409).json({ error: 'Already scanning this stack' }); return;
+  }
   try {
     const scan = await svc.scanComposeStack(req.nodeId, stackName, 'manual');
     res.status(201).json(scan);
@@ -252,6 +255,9 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
     const message = (error as Error).message || '';
     if (message === 'Invalid stack path' || message.startsWith('No compose file found')) {
       res.status(404).json({ error: message }); return;
+    }
+    if (message === 'Already scanning this stack') {
+      res.status(409).json({ error: message }); return;
     }
     console.error('[Security] Stack config scan failed:', error);
     res.status(500).json({ error: message || 'Failed to scan stack' });

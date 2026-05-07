@@ -459,8 +459,16 @@ class TrivyService {
         return `${nodeId}:${imageRef}`;
     }
 
+    private stackScanKey(nodeId: number, stackName: string): string {
+        return `stack:${nodeId}:${stackName}`;
+    }
+
     isScanning(nodeId: number, imageRef: string): boolean {
         return this.scanningImages.has(this.scanKey(nodeId, imageRef));
+    }
+
+    isScanningStack(nodeId: number, stackName: string): boolean {
+        return this.scanningImages.has(this.stackScanKey(nodeId, stackName));
     }
 
     async scanImage(
@@ -835,129 +843,137 @@ class TrivyService {
         if (!(await fsvc.hasComposeFile(resolved))) {
             throw new Error(`No compose file found for stack: ${stackName}`);
         }
-
-        const db = DatabaseService.getInstance();
-        const scanId = db.createVulnerabilityScan({
-            node_id: nodeId,
-            image_ref: `stack:${stackName}`,
-            image_digest: null,
-            scanned_at: Date.now(),
-            total_vulnerabilities: 0,
-            critical_count: 0,
-            high_count: 0,
-            medium_count: 0,
-            low_count: 0,
-            unknown_count: 0,
-            fixable_count: 0,
-            secret_count: 0,
-            misconfig_count: 0,
-            scanners_used: 'config',
-            highest_severity: null,
-            os_info: null,
-            trivy_version: this.version,
-            scan_duration_ms: null,
-            triggered_by: triggeredBy,
-            status: 'in_progress',
-            error: null,
-            stack_context: stackName,
-        });
-        const startedAt = Date.now();
+        const dedupKey = this.stackScanKey(nodeId, stackName);
+        if (this.scanningImages.has(dedupKey)) {
+            throw new Error('Already scanning this stack');
+        }
+        this.scanningImages.add(dedupKey);
         try {
-            const { env, cleanup } = await this.buildEnv();
-            try {
-                const args = ['config', '--format', 'json', '--quiet', resolved];
-                const { stdout } = await execFileAsync(binary, args, {
-                    env,
-                    timeout: SCAN_TIMEOUT_MS,
-                    maxBuffer: 64 * 1024 * 1024,
-                });
-                const { misconfigs } = parseTrivyOutput(stdout);
-                let critical = 0,
-                    high = 0,
-                    medium = 0,
-                    low = 0,
-                    unknown = 0;
-                for (const m of misconfigs) {
-                    switch (m.severity) {
-                        case 'CRITICAL':
-                            critical++;
-                            break;
-                        case 'HIGH':
-                            high++;
-                            break;
-                        case 'MEDIUM':
-                            medium++;
-                            break;
-                        case 'LOW':
-                            low++;
-                            break;
-                        default:
-                            unknown++;
-                    }
-                }
-                const highestSeverity: VulnSeverity | null =
-                    critical > 0 ? 'CRITICAL'
-                        : high > 0 ? 'HIGH'
-                        : medium > 0 ? 'MEDIUM'
-                        : low > 0 ? 'LOW'
-                        : unknown > 0 ? 'UNKNOWN'
-                        : null;
-                db.updateVulnerabilityScan(scanId, {
-                    scanned_at: Date.now(),
-                    critical_count: critical,
-                    high_count: high,
-                    medium_count: medium,
-                    low_count: low,
-                    unknown_count: unknown,
-                    misconfig_count: misconfigs.length,
-                    highest_severity: highestSeverity,
-                    trivy_version: this.version,
-                    scan_duration_ms: Date.now() - startedAt,
-                    status: 'completed',
-                });
-                db.insertMisconfigFindings(
-                    scanId,
-                    misconfigs.map((m) => ({
-                        rule_id: m.ruleId,
-                        check_id: m.checkId,
-                        severity: m.severity,
-                        title: m.title,
-                        message: m.message,
-                        resolution: m.resolution,
-                        target: m.target,
-                        primary_url: m.primaryUrl,
-                    })),
-                );
-                const stored = db.getVulnerabilityScan(scanId);
-                if (!stored) throw new Error('Scan vanished after write');
-                try {
-                    const evaluation = db.evaluateScanAgainstPolicies(
-                        nodeId,
-                        stored,
-                        FleetSyncService.getSelfIdentity(),
-                    );
-                    if (evaluation) {
-                        db.setScanPolicyEvaluation(scanId, evaluation);
-                        stored.policy_evaluation = JSON.stringify(evaluation);
-                    }
-                } catch (err) {
-                    console.warn(
-                        `[Trivy] policy evaluation failed for stack scanId=${scanId}:`,
-                        getErrorMessage(err, 'unknown error'),
-                    );
-                }
-                return stored;
-            } finally {
-                cleanup();
-            }
-        } catch (error) {
-            const msg = getErrorMessage(error, 'Stack scan failed');
-            db.updateVulnerabilityScan(scanId, {
-                status: 'failed',
-                error: msg,
-                scan_duration_ms: Date.now() - startedAt,
+            const db = DatabaseService.getInstance();
+            const scanId = db.createVulnerabilityScan({
+                node_id: nodeId,
+                image_ref: `stack:${stackName}`,
+                image_digest: null,
+                scanned_at: Date.now(),
+                total_vulnerabilities: 0,
+                critical_count: 0,
+                high_count: 0,
+                medium_count: 0,
+                low_count: 0,
+                unknown_count: 0,
+                fixable_count: 0,
+                secret_count: 0,
+                misconfig_count: 0,
+                scanners_used: 'config',
+                highest_severity: null,
+                os_info: null,
+                trivy_version: this.version,
+                scan_duration_ms: null,
+                triggered_by: triggeredBy,
+                status: 'in_progress',
+                error: null,
+                stack_context: stackName,
             });
-            throw error;
+            const startedAt = Date.now();
+            try {
+                const { env, cleanup } = await this.buildEnv();
+                try {
+                    const args = ['config', '--format', 'json', '--quiet', resolved];
+                    const { stdout } = await execFileAsync(binary, args, {
+                        env,
+                        timeout: SCAN_TIMEOUT_MS,
+                        maxBuffer: 64 * 1024 * 1024,
+                    });
+                    const { misconfigs } = parseTrivyOutput(stdout);
+                    let critical = 0,
+                        high = 0,
+                        medium = 0,
+                        low = 0,
+                        unknown = 0;
+                    for (const m of misconfigs) {
+                        switch (m.severity) {
+                            case 'CRITICAL':
+                                critical++;
+                                break;
+                            case 'HIGH':
+                                high++;
+                                break;
+                            case 'MEDIUM':
+                                medium++;
+                                break;
+                            case 'LOW':
+                                low++;
+                                break;
+                            default:
+                                unknown++;
+                        }
+                    }
+                    const highestSeverity: VulnSeverity | null =
+                        critical > 0 ? 'CRITICAL'
+                            : high > 0 ? 'HIGH'
+                            : medium > 0 ? 'MEDIUM'
+                            : low > 0 ? 'LOW'
+                            : unknown > 0 ? 'UNKNOWN'
+                            : null;
+                    db.updateVulnerabilityScan(scanId, {
+                        scanned_at: Date.now(),
+                        critical_count: critical,
+                        high_count: high,
+                        medium_count: medium,
+                        low_count: low,
+                        unknown_count: unknown,
+                        misconfig_count: misconfigs.length,
+                        highest_severity: highestSeverity,
+                        trivy_version: this.version,
+                        scan_duration_ms: Date.now() - startedAt,
+                        status: 'completed',
+                    });
+                    db.insertMisconfigFindings(
+                        scanId,
+                        misconfigs.map((m) => ({
+                            rule_id: m.ruleId,
+                            check_id: m.checkId,
+                            severity: m.severity,
+                            title: m.title,
+                            message: m.message,
+                            resolution: m.resolution,
+                            target: m.target,
+                            primary_url: m.primaryUrl,
+                        })),
+                    );
+                    const stored = db.getVulnerabilityScan(scanId);
+                    if (!stored) throw new Error('Scan vanished after write');
+                    try {
+                        const evaluation = db.evaluateScanAgainstPolicies(
+                            nodeId,
+                            stored,
+                            FleetSyncService.getSelfIdentity(),
+                        );
+                        if (evaluation) {
+                            db.setScanPolicyEvaluation(scanId, evaluation);
+                            stored.policy_evaluation = JSON.stringify(evaluation);
+                        }
+                    } catch (err) {
+                        console.warn(
+                            `[Trivy] policy evaluation failed for stack scanId=${scanId}:`,
+                            getErrorMessage(err, 'unknown error'),
+                        );
+                    }
+                    return stored;
+                } finally {
+                    cleanup();
+                }
+            } catch (error) {
+                const msg = getErrorMessage(error, 'Stack scan failed');
+                db.updateVulnerabilityScan(scanId, {
+                    status: 'failed',
+                    error: msg,
+                    scan_duration_ms: Date.now() - startedAt,
+                });
+                throw error;
+            }
+        } finally {
+            this.scanningImages.delete(dedupKey);
         }
     }
 
