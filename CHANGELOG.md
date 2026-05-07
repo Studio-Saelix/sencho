@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.73.0](https://github.com/Studio-Saelix/sencho/compare/v0.72.0...v0.73.0) (2026-05-07)
+
+
+### Added
+
+* **fleet-sync:** anchor replicas to a control fingerprint ([#968](https://github.com/Studio-Saelix/sencho/issues/968)) ([f3757b4](https://github.com/Studio-Saelix/sencho/commit/f3757b43c6b30a72d5ed4cf26a69873920b1aa45))
+* **fleet-sync:** hide other replicas' identity-scoped policies on a replica ([#973](https://github.com/Studio-Saelix/sencho/issues/973)) ([a284732](https://github.com/Studio-Saelix/sencho/commit/a284732a95675234c316e60a819ee0a02cbd9bc9))
+* **fleet-sync:** replica self-demote endpoint and role UX ([#969](https://github.com/Studio-Saelix/sencho/issues/969)) ([7dde257](https://github.com/Studio-Saelix/sencho/commit/7dde257e1fab84bbfcafbcd78ec2ba4597781398))
+* **fleet-sync:** retry failed pushes and backfill on add-node ([#970](https://github.com/Studio-Saelix/sencho/issues/970)) ([33b15d6](https://github.com/Studio-Saelix/sencho/commit/33b15d6cbacdc95656da696f50c29323d704a319))
+* **security:** audit-hardening pass for fleet-replicated CVE suppressions ([#976](https://github.com/Studio-Saelix/sencho/issues/976)) ([060bc30](https://github.com/Studio-Saelix/sencho/commit/060bc300ac36a00eb38a2492717b89546d4c7b76))
+* **security:** audit-hardening pass for secret and misconfiguration scanning ([#977](https://github.com/Studio-Saelix/sencho/issues/977)) ([887d8fb](https://github.com/Studio-Saelix/sencho/commit/887d8fb8f0b91451d1c8a61bef5056a5f3b25ad7))
+
+
+### Fixed
+
+* **fleet-sync:** clear stale policy_evaluation on replica sync swap ([#971](https://github.com/Studio-Saelix/sencho/issues/971)) ([f8c75aa](https://github.com/Studio-Saelix/sencho/commit/f8c75aa6cdba6d4d189281ce1b5466dec949ed16))
+* **fleet-sync:** hygiene pass on receiver behavior and cleanup ([#972](https://github.com/Studio-Saelix/sencho/issues/972)) ([4007709](https://github.com/Studio-Saelix/sencho/commit/4007709590a2b2d54bdc1102e7f20a72655a7ff4))
+* **fleet-sync:** version the wire protocol and serialize per-node pushes ([#967](https://github.com/Studio-Saelix/sencho/issues/967)) ([27660f6](https://github.com/Studio-Saelix/sencho/commit/27660f622bce5c99ed279bdab63017ff746808db))
+
 ## [0.72.0](https://github.com/Studio-Saelix/sencho/compare/v0.71.2...v0.72.0) (2026-05-07)
 
 
