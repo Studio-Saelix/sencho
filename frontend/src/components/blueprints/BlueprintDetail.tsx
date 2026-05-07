@@ -1,13 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
-import { ChevronLeft, MoreHorizontal, Pencil, Play, Trash2 } from 'lucide-react';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Pencil, Play, Power, Trash2 } from 'lucide-react';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import {
-    DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
-} from '@/components/ui/dropdown-menu';
 import { toast } from '@/components/ui/toast-store';
 import {
     type BlueprintSummary,
@@ -199,70 +196,63 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         setStateReviewTarget({ nodeId, nodeName: node.name });
     }
 
-    return (
-        <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent side="right" className="w-full sm:max-w-2xl flex flex-col gap-0 overflow-y-auto p-0">
-                <SheetHeader className="sticky top-0 z-10 bg-popover/95 backdrop-blur-md border-b border-border px-6 py-4">
-                    <div className="flex items-center justify-between gap-3">
-                        <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="gap-1.5 -ml-2">
-                            <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
-                            Back
-                        </Button>
-                        {blueprint && (
-                            <div className="flex items-center gap-1.5">
-                                <Button size="sm" onClick={handleApply} disabled={submitting || !blueprint.enabled} className="gap-1.5">
-                                    <Play className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                    Apply now
-                                </Button>
-                                {canEdit && !editMode && (
-                                    <Button size="sm" variant="outline" onClick={() => setEditMode(true)} className="gap-1.5">
-                                        <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                        Edit
-                                    </Button>
-                                )}
-                                {canEdit && (
-                                    <DropdownMenu>
-                                        <DropdownMenuTrigger asChild>
-                                            <Button size="icon" variant="ghost" className="h-8 w-8" disabled={submitting}>
-                                                <MoreHorizontal className="h-4 w-4" strokeWidth={1.5} />
-                                            </Button>
-                                        </DropdownMenuTrigger>
-                                        <DropdownMenuContent align="end">
-                                            <DropdownMenuItem onClick={handleToggleEnabled} disabled={submitting}>
-                                                {blueprint.enabled ? 'Disable reconciler' : 'Enable reconciler'}
-                                            </DropdownMenuItem>
-                                            <DropdownMenuSeparator />
-                                            <DropdownMenuItem onClick={() => setDeleteOpen(true)} className="text-destructive">
-                                                <Trash2 className="h-3.5 w-3.5 mr-2" strokeWidth={1.5} />
-                                                Delete blueprint
-                                            </DropdownMenuItem>
-                                        </DropdownMenuContent>
-                                    </DropdownMenu>
-                                )}
-                            </div>
-                        )}
-                    </div>
-                    <div className="space-y-1.5">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">
-                            Blueprint
-                        </span>
-                        <SheetTitle className="font-serif italic text-2xl tracking-[-0.01em] text-stat-value">
-                            {blueprint?.name ?? <Skeleton className="h-7 w-40" />}
-                        </SheetTitle>
-                        {blueprint?.description && (
-                            <p className="text-xs text-stat-subtitle">{blueprint.description}</p>
-                        )}
-                    </div>
-                </SheetHeader>
+    const meta = blueprint
+        ? `${describeSelector(blueprint.selector)} · ${blueprint.drift_mode} · rev ${blueprint.revision}`
+        : (loading ? 'Loading…' : '');
 
-                <div className="px-6 py-5 space-y-5">
-                    {loading || !blueprint || !summary ? (
-                        <div className="space-y-3">
-                            <Skeleton className="h-12 w-full" />
-                            <Skeleton className="h-32 w-full" />
-                            <Skeleton className="h-40 w-full" />
-                        </div>
-                    ) : editMode ? (
+    const footerContext = blueprint
+        ? `Updated ${formatTimeAgo(blueprint.updated_at)}${blueprint.enabled ? '' : ' · reconciler disabled'}`
+        : undefined;
+
+    const secondaryActions = blueprint && canEdit
+        ? [
+            ...(!editMode ? [{
+                label: 'Edit',
+                icon: Pencil,
+                onClick: () => setEditMode(true),
+                disabled: submitting,
+            }] : []),
+            {
+                label: blueprint.enabled ? 'Disable' : 'Enable',
+                icon: Power,
+                onClick: handleToggleEnabled,
+                disabled: submitting,
+            },
+        ]
+        : undefined;
+
+    return (
+        <>
+            <SystemSheet
+                open={open}
+                onOpenChange={onOpenChange}
+                crumb={['Blueprints', blueprint?.name ?? '…']}
+                name={blueprint?.name ?? <Skeleton className="h-7 w-40 inline-block" />}
+                meta={meta}
+                primaryAction={blueprint ? {
+                    label: 'Apply now',
+                    icon: Play,
+                    onClick: handleApply,
+                    disabled: submitting || !blueprint.enabled || editMode,
+                } : undefined}
+                secondaryActions={secondaryActions}
+                destructiveAction={blueprint && canEdit ? {
+                    label: 'Delete',
+                    icon: Trash2,
+                    onClick: () => setDeleteOpen(true),
+                    disabled: submitting || editMode,
+                } : undefined}
+                footerContext={footerContext}
+                size="lg"
+            >
+                {loading || !blueprint || !summary ? (
+                    <div className="space-y-3">
+                        <Skeleton className="h-12 w-full" />
+                        <Skeleton className="h-32 w-full" />
+                        <Skeleton className="h-40 w-full" />
+                    </div>
+                ) : editMode ? (
+                    <SheetSection title="Edit blueprint" hideHeader>
                         <BlueprintEditor
                             mode="edit"
                             initial={blueprint}
@@ -271,15 +261,16 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                             onSubmit={handleSaveEdit}
                             submitting={submitting}
                         />
-                    ) : (
-                        <>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                                <Stat label="Selector" value={describeSelector(blueprint.selector)} />
-                                <Stat label="Drift" value={blueprint.drift_mode} />
-                                <Stat label="Revision" value={String(blueprint.revision)} />
-                                <Stat label="Last updated" value={formatTimeAgo(blueprint.updated_at)} />
-                            </div>
+                    </SheetSection>
+                ) : (
+                    <>
+                        {blueprint.description && (
+                            <SheetSection title="Description" hideHeader>
+                                <p className="text-xs text-stat-subtitle">{blueprint.description}</p>
+                            </SheetSection>
+                        )}
 
+                        <SheetSection title="Deployments">
                             <BlueprintDeploymentTable
                                 deployments={summary.deployments}
                                 classification={blueprint.classification}
@@ -289,20 +280,23 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                 onAcceptStateReview={openAcceptStateReview}
                                 onRetry={handleRetryRow}
                             />
+                        </SheetSection>
 
-                            <details className="rounded-lg border border-card-border bg-card">
-                                <summary className="cursor-pointer px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon hover:text-stat-value">
-                                    Compose
+                        <SheetSection title="Compose">
+                            <details>
+                                <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle hover:text-stat-value">
+                                    Show compose source
                                 </summary>
-                                <pre className="px-3 pb-3 font-mono text-[11px] text-stat-value overflow-x-auto whitespace-pre-wrap">
+                                <pre className="mt-2 font-mono text-[11px] text-stat-value overflow-x-auto whitespace-pre-wrap">
                                     {blueprint.compose_content}
                                 </pre>
                             </details>
-                        </>
-                    )}
-                </div>
+                        </SheetSection>
+                    </>
+                )}
+            </SystemSheet>
 
-                {evictTarget && blueprint && (
+            {evictTarget && blueprint && (
                     <EvictionDialog
                         open={!!evictTarget}
                         onOpenChange={(o) => { if (!o) setEvictTarget(null); }}
@@ -366,16 +360,6 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                         />
                     </Modal>
                 )}
-            </SheetContent>
-        </Sheet>
-    );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-    return (
-        <div className="space-y-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">{label}</span>
-            <p className="font-mono text-sm tabular-nums tracking-tight text-stat-value truncate">{value}</p>
-        </div>
+        </>
     );
 }
