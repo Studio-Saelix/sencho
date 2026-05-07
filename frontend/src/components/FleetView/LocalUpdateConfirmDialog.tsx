@@ -1,8 +1,5 @@
 import { Download } from 'lucide-react';
-import {
-    AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-    AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+import { ConfirmModal } from '@/components/ui/modal';
 
 interface LocalUpdateConfirmDialogProps {
     open: boolean;
@@ -12,23 +9,22 @@ interface LocalUpdateConfirmDialogProps {
 
 export function LocalUpdateConfirmDialog({ open, onOpenChange, onConfirm }: LocalUpdateConfirmDialogProps) {
     return (
-        <AlertDialog open={open} onOpenChange={onOpenChange}>
-            <AlertDialogContent>
-                <AlertDialogHeader>
-                    <AlertDialogTitle>Update local node?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                        This will pull the latest Sencho image and restart the server. The dashboard will be
-                        briefly disconnected and will automatically reconnect when the update completes.
-                    </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                    <AlertDialogAction onClick={onConfirm}>
-                        <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
-                        Update &amp; Restart
-                    </AlertDialogAction>
-                </AlertDialogFooter>
-            </AlertDialogContent>
-        </AlertDialog>
+        <ConfirmModal
+            open={open}
+            onOpenChange={onOpenChange}
+            kicker="LOCAL · UPDATE"
+            title="Update local node"
+            confirmLabel={
+                <>
+                    <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+                    Update &amp; restart
+                </>
+            }
+            onConfirm={onConfirm}
+        >
+            <p className="text-sm text-stat-subtitle">
+                Pulls the latest Sencho image and restarts the server. The dashboard briefly disconnects and reconnects automatically when the update completes.
+            </p>
+        </ConfirmModal>
     );
 }

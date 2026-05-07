@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Modal, ModalHeader } from "@/components/ui/modal";
 import { Loader2, Terminal } from "lucide-react";
 
 interface LogViewerProps {
@@ -56,30 +56,37 @@ export function LogViewer({ containerId, containerName, isOpen, onClose }: LogVi
     }, [isOpen, containerId]);
 
     return (
-        <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-            <DialogContent className="max-w-4xl h-[80vh] flex flex-col bg-background border-border">
-                <DialogHeader className="flex flex-row items-center gap-2 pb-2 border-b">
-                    <Terminal className="w-5 h-5" />
-                    <DialogTitle className="flex-1 text-left font-mono text-sm">
-                        {containerName} {isConnected ? <span className="text-success text-xs ml-2">(connected)</span> : <Loader2 className="inline w-3 h-3 ml-2 animate-spin" />}
-                    </DialogTitle>
-                </DialogHeader>
+        <Modal open={isOpen} onOpenChange={(open) => !open && onClose()} className="max-w-4xl h-[80vh] flex flex-col">
+            <ModalHeader
+                kicker={`LOGS · ${containerName.toUpperCase()}`}
+                title={
+                    <span className="flex items-center gap-2">
+                        <Terminal className="w-5 h-5" strokeWidth={1.5} />
+                        Container logs
+                        {isConnected ? (
+                            <span className="text-success text-xs ml-2">(connected)</span>
+                        ) : (
+                            <Loader2 className="inline w-4 h-4 ml-2 animate-spin" />
+                        )}
+                    </span>
+                }
+                description={`Live log stream for ${containerName}`}
+            />
 
-                <div
-                    ref={scrollRef}
-                    className="flex-1 w-full bg-[var(--terminal-bg)] text-success p-4 rounded-md overflow-y-auto font-mono text-xs mt-2"
-                >
-                    {logs.length === 0 && !isConnected ? (
-                        <div className="text-muted-foreground">Connecting to container stream...</div>
-                    ) : (
-                        logs.map((log, i) => (
-                            <div key={i} className="break-all whitespace-pre-wrap leading-tight mb-1">
-                                {log}
-                            </div>
-                        ))
-                    )}
-                </div>
-            </DialogContent>
-        </Dialog>
+            <div
+                ref={scrollRef}
+                className="flex-1 w-full bg-[var(--terminal-bg)] text-success p-4 overflow-y-auto font-mono text-xs mx-6 mb-6 rounded-md"
+            >
+                {logs.length === 0 && !isConnected ? (
+                    <div className="text-muted-foreground">Connecting to container stream...</div>
+                ) : (
+                    logs.map((log, i) => (
+                        <div key={i} className="break-all whitespace-pre-wrap leading-tight mb-1">
+                            {log}
+                        </div>
+                    ))
+                )}
+            </div>
+        </Modal>
     );
 }

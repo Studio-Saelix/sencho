@@ -13,11 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
-import {
-    AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-    AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
-    AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
+import { ConfirmModal } from '@/components/ui/modal';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -84,6 +80,7 @@ export default function FleetSnapshots() {
     const [previewFiles, setPreviewFiles] = useState<Set<string>>(new Set());
     const [restoringStack, setRestoringStack] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<number | null>(null);
+    const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
     const [page, setPage] = useState(0);
     const [cloudSnapshotIds, setCloudSnapshotIds] = useState<Set<number>>(new Set());
     const [uploadingId, setUploadingId] = useState<number | null>(null);
@@ -631,39 +628,19 @@ export default function FleetSnapshots() {
                                                     </Button>
                                                 )}
                                                 {isAdmin && (
-                                                    <AlertDialog>
-                                                        <AlertDialogTrigger asChild>
-                                                            <Button
-                                                                variant="ghost"
-                                                                size="sm"
-                                                                className="h-7 px-2 text-xs text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
-                                                                disabled={deletingId === snapshot.id}
-                                                            >
-                                                                {deletingId === snapshot.id ? (
-                                                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                                                ) : (
-                                                                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                                )}
-                                                            </Button>
-                                                        </AlertDialogTrigger>
-                                                        <AlertDialogContent>
-                                                            <AlertDialogHeader>
-                                                                <AlertDialogTitle>Delete snapshot?</AlertDialogTitle>
-                                                                <AlertDialogDescription>
-                                                                    This will permanently delete this fleet snapshot. This action cannot be undone.
-                                                                </AlertDialogDescription>
-                                                            </AlertDialogHeader>
-                                                            <AlertDialogFooter>
-                                                                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                                                <AlertDialogAction
-                                                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                                                    onClick={() => handleDelete(snapshot.id)}
-                                                                >
-                                                                    Delete
-                                                                </AlertDialogAction>
-                                                            </AlertDialogFooter>
-                                                        </AlertDialogContent>
-                                                    </AlertDialog>
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        className="h-7 px-2 text-xs text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                                                        disabled={deletingId === snapshot.id}
+                                                        onClick={() => setConfirmDeleteId(snapshot.id)}
+                                                    >
+                                                        {deletingId === snapshot.id ? (
+                                                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                        ) : (
+                                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                        )}
+                                                    </Button>
                                                 )}
                                             </div>
                                         </TableCell>
@@ -674,6 +651,26 @@ export default function FleetSnapshots() {
                     </Table>
                 </div>
             )}
+
+            <ConfirmModal
+                open={confirmDeleteId !== null}
+                onOpenChange={(open) => { if (!open) setConfirmDeleteId(null); }}
+                variant="destructive"
+                kicker="SNAPSHOTS · DELETE · IRREVERSIBLE"
+                title="Delete snapshot"
+                confirmLabel="Delete"
+                onConfirm={async () => {
+                    if (confirmDeleteId !== null) {
+                        const id = confirmDeleteId;
+                        setConfirmDeleteId(null);
+                        await handleDelete(id);
+                    }
+                }}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Permanently removes this fleet snapshot.
+                </p>
+            </ConfirmModal>
         </div>
     );
 }
@@ -691,32 +688,40 @@ function RestoreButton({ nodeId, nodeName, stackName, restoring, onRestore }: {
     const [open, setOpen] = useState(false);
 
     return (
-        <AlertDialog open={open} onOpenChange={setOpen}>
-            <AlertDialogTrigger asChild>
-                <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 px-2.5 text-xs gap-1.5 ml-3 mt-1"
-                    disabled={restoring}
-                >
-                    {restoring ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                    ) : (
-                        <RotateCcw className="w-3 h-3" strokeWidth={1.5} />
-                    )}
-                    Restore
-                </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-                <AlertDialogHeader>
-                    <AlertDialogTitle>
-                        Restore {stackName} on {nodeName}?
-                    </AlertDialogTitle>
-                    <AlertDialogDescription>
-                        This will overwrite the current compose files with the snapshot version.
-                    </AlertDialogDescription>
-                </AlertDialogHeader>
-                <div className="flex items-center space-x-2 py-2">
+        <>
+            <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2.5 text-xs gap-1.5 ml-3 mt-1"
+                disabled={restoring}
+                onClick={() => setOpen(true)}
+            >
+                {restoring ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                    <RotateCcw className="w-3 h-3" strokeWidth={1.5} />
+                )}
+                Restore
+            </Button>
+            <ConfirmModal
+                open={open}
+                onOpenChange={setOpen}
+                kicker="SNAPSHOTS · RESTORE"
+                title={`Restore ${stackName} on ${nodeName}`}
+                confirmLabel={restoring ? 'Restoring...' : 'Restore'}
+                confirming={restoring}
+                onConfirm={async () => {
+                    try {
+                        await onRestore(nodeId, stackName, redeploy);
+                    } finally {
+                        setOpen(false);
+                    }
+                }}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Overwrites the current compose files with the snapshot version.
+                </p>
+                <div className="flex items-center space-x-2 pt-1">
                     <Checkbox
                         id={`redeploy-${nodeId}-${stackName}`}
                         checked={redeploy}
@@ -729,23 +734,7 @@ function RestoreButton({ nodeId, nodeName, stackName, restoring, onRestore }: {
                         Redeploy stack after restore
                     </Label>
                 </div>
-                <AlertDialogFooter>
-                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                    <Button
-                        disabled={restoring}
-                        onClick={async () => {
-                            try {
-                                await onRestore(nodeId, stackName, redeploy);
-                            } finally {
-                                setOpen(false);
-                            }
-                        }}
-                    >
-                        {restoring && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
-                        Restore
-                    </Button>
-                </AlertDialogFooter>
-            </AlertDialogContent>
-        </AlertDialog>
+            </ConfirmModal>
+        </>
     );
 }

@@ -36,7 +36,9 @@ async function openGitSourcePanel(page: Page) {
   const gitBtn = page.getByRole('button', { name: /Git Source/i });
   await expect(gitBtn).toBeVisible({ timeout: 10_000 });
   await gitBtn.click();
-  await expect(page.getByRole('dialog').getByText('Git Source', { exact: false })).toBeVisible({ timeout: 5_000 });
+  // Match the title heading specifically; the modal also has a mono kicker
+  // ("<STACK> · GIT SOURCE") that would satisfy a plain getByText match.
+  await expect(page.getByRole('dialog').getByRole('heading', { name: /git source/i })).toBeVisible({ timeout: 5_000 });
 }
 
 test.describe('Git Sources', () => {
