@@ -297,3 +297,160 @@ describe('DELETE /api/security/suppressions/:id', () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('GET /api/security/suppressions on a replica', () => {
+  it('still serves the list when the local instance is a replica', async () => {
+    vi.spyOn(FleetSyncService, 'getRole').mockReturnValue('replica');
+    const db = DatabaseService.getInstance();
+    db.createCveSuppression({
+      cve_id: 'CVE-2024-5500',
+      pkg_name: null,
+      image_pattern: null,
+      reason: 'mirrored from control',
+      created_by: 'control-admin',
+      created_at: Date.now(),
+      expires_at: null,
+      replicated_from_control: 1,
+    });
+    const res = await request(app).get('/api/security/suppressions').set('Authorization', adminAuthHeader);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].replicated_from_control).toBe(1);
+  });
+});
+
+describe('Control-side audit log entries (L2)', () => {
+  // The receive path on a replica writes an audit-log row when applying a sync.
+  // Control-side writes need the same so the operator's actions show up in the
+  // audit panel; otherwise the trail looks like it begins on the replica.
+  // The assertions below also pin a privacy contract: the suppression's free-form
+  // `reason` field never lands in the audit log, even though it is part of the
+  // stored row. Reasons can carry incident-tracker IDs or vendor context the
+  // operator did not intend to broadcast fleet-wide.
+
+  function findSuppressionAuditEntries(): Array<{ summary: string; method: string }> {
+    const db = DatabaseService.getInstance();
+    db.flushAuditLogBuffer();
+    return (db.getDb()
+      .prepare("SELECT summary, method FROM audit_log WHERE summary LIKE 'cve_suppression.%' ORDER BY id")
+      .all() as Array<{ summary: string; method: string }>);
+  }
+
+  beforeEach(() => {
+    // Flush prior tests' buffered audit writes BEFORE the wipe; otherwise the
+    // setTimeout flush could materialize them after the DELETE and pollute
+    // this block's assertions.
+    const db = DatabaseService.getInstance();
+    db.flushAuditLogBuffer();
+    db.getDb().prepare('DELETE FROM audit_log').run();
+  });
+
+  it('records a create entry without leaking the reason text', async () => {
+    const secret = 'INC-12345 vendor-only do-not-broadcast';
+    const res = await request(app)
+      .post('/api/security/suppressions')
+      .set('Authorization', adminAuthHeader)
+      .send({
+        cve_id: 'CVE-2024-6001',
+        pkg_name: 'openssl',
+        image_pattern: 'nginx*',
+        reason: secret,
+      });
+    expect(res.status).toBe(201);
+    const entries = findSuppressionAuditEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].method).toBe('POST');
+    expect(entries[0].summary).toContain('cve_suppression.create');
+    expect(entries[0].summary).toContain('CVE-2024-6001');
+    expect(entries[0].summary).toContain('pkg=openssl');
+    expect(entries[0].summary).toContain('image=nginx*');
+    expect(entries[0].summary).not.toContain(secret);
+    expect(entries[0].summary).not.toContain('INC-12345');
+  });
+
+  it('records an update entry with the changed field names but not the new reason', async () => {
+    const db = DatabaseService.getInstance();
+    const created = db.createCveSuppression({
+      cve_id: 'CVE-2024-6002',
+      pkg_name: null,
+      image_pattern: null,
+      reason: 'original',
+      created_by: TEST_USERNAME,
+      created_at: Date.now(),
+      expires_at: null,
+      replicated_from_control: 0,
+    });
+    const sensitive = 'CONFIDENTIAL: internal ticket OPS-9911';
+    const res = await request(app)
+      .put(`/api/security/suppressions/${created.id}`)
+      .set('Authorization', adminAuthHeader)
+      .send({ reason: sensitive });
+    expect(res.status).toBe(200);
+    const entries = findSuppressionAuditEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].method).toBe('PUT');
+    expect(entries[0].summary).toContain('cve_suppression.update');
+    expect(entries[0].summary).toContain(`id=${created.id}`);
+    expect(entries[0].summary).toContain('fields=[reason]');
+    expect(entries[0].summary).not.toContain('CONFIDENTIAL');
+    expect(entries[0].summary).not.toContain('OPS-9911');
+  });
+
+  it('records a delete entry that names the CVE rather than the bare id', async () => {
+    const db = DatabaseService.getInstance();
+    const created = db.createCveSuppression({
+      cve_id: 'CVE-2024-6003',
+      pkg_name: 'glibc',
+      image_pattern: null,
+      reason: 'TICKET-7777 do not log',
+      created_by: TEST_USERNAME,
+      created_at: Date.now(),
+      expires_at: null,
+      replicated_from_control: 0,
+    });
+    const res = await request(app)
+      .delete(`/api/security/suppressions/${created.id}`)
+      .set('Authorization', adminAuthHeader);
+    expect(res.status).toBe(200);
+    const entries = findSuppressionAuditEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].method).toBe('DELETE');
+    expect(entries[0].summary).toContain('cve_suppression.delete');
+    expect(entries[0].summary).toContain('CVE-2024-6003');
+    expect(entries[0].summary).toContain('pkg=glibc');
+    expect(entries[0].summary).not.toContain('TICKET-7777');
+  });
+
+  it('strips newlines and control chars from pkg/image so the audit row cannot be forged', async () => {
+    // The route validators check length but not charset; a pattern with an
+    // embedded newline could otherwise smuggle a fake `cve_suppression.delete:`
+    // entry into the audit panel.
+    const res = await request(app)
+      .post('/api/security/suppressions')
+      .set('Authorization', adminAuthHeader)
+      .send({
+        cve_id: 'CVE-2024-6004',
+        pkg_name: 'evil\npkg',
+        image_pattern: 'img\r\ncve_suppression.delete: id=999 (forged)',
+        reason: 'log-injection guard',
+      });
+    expect(res.status).toBe(201);
+    const entries = findSuppressionAuditEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].summary).not.toContain('\n');
+    expect(entries[0].summary).not.toContain('\r');
+    // The forged prefix the attacker tried to inject must not appear as a new
+    // logical entry — the sanitiser turns control chars into `?` so the
+    // string still appears, but on a single line, framed inside the real entry.
+    expect(entries[0].summary).toContain('cve_suppression.create');
+  });
+
+  it('does not record an audit entry on validation failure', async () => {
+    const res = await request(app)
+      .post('/api/security/suppressions')
+      .set('Authorization', adminAuthHeader)
+      .send({ cve_id: 'not-a-cve', reason: 'whatever' });
+    expect(res.status).toBe(400);
+    expect(findSuppressionAuditEntries()).toHaveLength(0);
+  });
+});
