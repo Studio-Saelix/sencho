@@ -17,7 +17,7 @@ Sencho is configured entirely through environment variables and Docker volume mo
 
 ### How Sencho organizes your compose directory
 
-When you point `COMPOSE_DIR` at a directory, Sencho expects each stack to live in its own subdirectory. If you create a stack through the UI, Sencho automatically creates a subfolder and places a blank `compose.yaml` inside it. Sencho does not move or "capture" existing files - it simply treats every subdirectory as a separate stack.
+When you point `COMPOSE_DIR` at a directory, Sencho expects each stack to live in its own subdirectory. If you create a stack through the UI, Sencho automatically creates a subfolder and places a blank `compose.yaml` inside it. Sencho does not move or "capture" existing files; it simply treats every subdirectory as a separate stack.
 
 ## Optional environment variables
 
@@ -106,7 +106,7 @@ volumes:
 ```
 
 <Warning>
-  Without a persistent data mount, Sencho will lose all configuration - including registered nodes, alerts, and settings - every time the container restarts.
+  Without a persistent data mount, Sencho will lose all configuration (including registered nodes, alerts, and settings) every time the container restarts.
 </Warning>
 
 ### Compose directory - the 1:1 path rule
@@ -115,7 +115,7 @@ volumes:
   This is the most common source of deployment problems. Read carefully.
 </Warning>
 
-When Sencho runs `docker compose up`, it does so on your **host machine**. Docker resolves relative volume paths in your Compose files relative to the **host** path of the stack directory - not the path inside the Sencho container.
+When Sencho runs `docker compose up`, it does so on your **host machine**. Docker resolves relative volume paths in your Compose files relative to the **host** path of the stack directory, not the path inside the Sencho container.
 
 **The rule:** Mount your Compose directory at the **exact same path** inside the container as it exists on your host.
 
