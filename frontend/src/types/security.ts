@@ -77,6 +77,21 @@ export interface MisconfigFinding {
   resolution: string | null;
   target: string;
   primary_url: string | null;
+  acknowledged?: boolean;
+  acknowledgement_id?: number;
+  acknowledgement_reason?: string;
+}
+
+export interface MisconfigAcknowledgement {
+  id: number;
+  rule_id: string;
+  stack_pattern: string | null;
+  reason: string;
+  created_by: string;
+  created_at: number;
+  expires_at: number | null;
+  replicated_from_control: number;
+  active: boolean;
 }
 
 export interface VulnerabilityDetail {

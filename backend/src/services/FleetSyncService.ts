@@ -1,6 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import { createHash } from 'crypto';
-import { CveSuppression, DatabaseService, Node, ScanPolicy } from './DatabaseService';
+import { CveSuppression, DatabaseService, MisconfigAcknowledgement, Node, ScanPolicy } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { isDebugEnabled } from '../utils/debug';
@@ -14,7 +14,11 @@ import {
 
 export type { FleetResource };
 
-export const FLEET_RESOURCES: readonly FleetResource[] = ['scan_policies', 'cve_suppressions'];
+export const FLEET_RESOURCES: readonly FleetResource[] = [
+    'scan_policies',
+    'cve_suppressions',
+    'misconfig_acknowledgements',
+];
 
 export function isFleetResource(value: unknown): value is FleetResource {
     return typeof value === 'string' && (FLEET_RESOURCES as readonly string[]).includes(value);
@@ -282,7 +286,9 @@ export class FleetSyncService {
      */
     public applyIncomingSync(
         resource: FleetResource,
-        rows: ScanPolicy[] | Array<Omit<CveSuppression, 'id'>>,
+        rows: ScanPolicy[]
+            | Array<Omit<CveSuppression, 'id'>>
+            | Array<Omit<MisconfigAcknowledgement, 'id'>>,
         targetIdentity: string,
         pushedAt?: number,
         controlIdentity?: string,
@@ -336,6 +342,12 @@ export class FleetSyncService {
                 db.replaceReplicatedScanPolicies(rows as ScanPolicy[]);
             } else if (resource === 'cve_suppressions') {
                 db.replaceReplicatedCveSuppressions(rows as Array<Omit<CveSuppression, 'id'>>);
+            } else if (resource === 'misconfig_acknowledgements') {
+                // Rows are shape-validated upstream by
+                // validateMisconfigAcknowledgementRow before this method runs,
+                // so a single declared-type assignment is honest.
+                const ackRows = rows as Array<Omit<MisconfigAcknowledgement, 'id'>>;
+                db.replaceReplicatedMisconfigAcknowledgements(ackRows);
             }
             // F4: persist an audit-log entry for the operator on the replica
             // side. Without this, mirrored security-rule changes happen
@@ -372,6 +384,7 @@ export class FleetSyncService {
             db.setSystemState(SYNC_STATE_KEYS.fleetControlIdentity, '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('scan_policies'), '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('cve_suppressions'), '');
+            db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('misconfig_acknowledgements'), '');
             db.clearReplicatedRows();
         });
         FleetSyncService.cachedControlIdentity = null;
@@ -404,6 +417,7 @@ export class FleetSyncService {
             db.setSystemState(SYNC_STATE_KEYS.fleetControlIdentity, '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('scan_policies'), '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('cve_suppressions'), '');
+            db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('misconfig_acknowledgements'), '');
             db.clearReplicatedRows();
         });
         FleetSyncService.cachedControlIdentity = null;
@@ -506,6 +520,15 @@ export class FleetSyncService {
                 created_by: s.created_by,
                 created_at: s.created_at,
                 expires_at: s.expires_at,
+            }));
+        } else if (resource === 'misconfig_acknowledgements') {
+            rows = db.getLocalMisconfigAcknowledgements().map((a) => ({
+                rule_id: a.rule_id,
+                stack_pattern: a.stack_pattern,
+                reason: a.reason,
+                created_by: a.created_by,
+                created_at: a.created_at,
+                expires_at: a.expires_at,
             }));
         } else {
             return [];
