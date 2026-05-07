@@ -5,10 +5,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Combobox } from '@/components/ui/combobox';
-import {
-    AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-    AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
+import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useAuth, type UserRole } from '@/context/AuthContext';
@@ -52,6 +49,10 @@ export function UsersSection() {
     const [formPassword, setFormPassword] = useState('');
     const [formConfirmPassword, setFormConfirmPassword] = useState('');
     const [formRole, setFormRole] = useState<UserRole>('viewer');
+
+    // Per-row destructive confirms
+    const [resetMfaTarget, setResetMfaTarget] = useState<UserItem | null>(null);
+    const [deleteTarget, setDeleteTarget] = useState<UserItem | null>(null);
 
     const fetchUsers = async () => {
         try {
@@ -455,45 +456,23 @@ export function UsersSection() {
                                                         <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
                                                     </Button>
                                                     {u.mfaEnabled && (
-                                                        <AlertDialog>
-                                                            <AlertDialogTrigger asChild>
-                                                                <Button variant="ghost" size="sm" title="Reset 2FA">
-                                                                    <ShieldOff className="w-3.5 h-3.5 text-warning" strokeWidth={1.5} />
-                                                                </Button>
-                                                            </AlertDialogTrigger>
-                                                            <AlertDialogContent>
-                                                                <AlertDialogHeader>
-                                                                    <AlertDialogTitle>Reset two-factor authentication for "{u.username}"?</AlertDialogTitle>
-                                                                    <AlertDialogDescription>
-                                                                        This removes the user's authenticator enrolment and backup codes. They will sign in with just their password on their next login and can re-enrol from their account settings. Use this when a user has lost access to their authenticator.
-                                                                    </AlertDialogDescription>
-                                                                </AlertDialogHeader>
-                                                                <AlertDialogFooter>
-                                                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                                                    <AlertDialogAction onClick={() => handleResetMfa(u.id, u.username)}>Reset 2FA</AlertDialogAction>
-                                                                </AlertDialogFooter>
-                                                            </AlertDialogContent>
-                                                        </AlertDialog>
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            title="Reset 2FA"
+                                                            onClick={() => setResetMfaTarget(u)}
+                                                        >
+                                                            <ShieldOff className="w-3.5 h-3.5 text-warning" strokeWidth={1.5} />
+                                                        </Button>
                                                     )}
-                                                    <AlertDialog>
-                                                        <AlertDialogTrigger asChild>
-                                                            <Button variant="ghost" size="sm" disabled={isSelf}>
-                                                                <Trash2 className="w-3.5 h-3.5 text-destructive" strokeWidth={1.5} />
-                                                            </Button>
-                                                        </AlertDialogTrigger>
-                                                        <AlertDialogContent>
-                                                            <AlertDialogHeader>
-                                                                <AlertDialogTitle>Delete user "{u.username}"?</AlertDialogTitle>
-                                                                <AlertDialogDescription>
-                                                                    This action cannot be undone. The user will lose access immediately.
-                                                                </AlertDialogDescription>
-                                                            </AlertDialogHeader>
-                                                            <AlertDialogFooter>
-                                                                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                                                <AlertDialogAction onClick={() => handleDelete(u.id)}>Delete</AlertDialogAction>
-                                                            </AlertDialogFooter>
-                                                        </AlertDialogContent>
-                                                    </AlertDialog>
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        disabled={isSelf}
+                                                        onClick={() => setDeleteTarget(u)}
+                                                    >
+                                                        <Trash2 className="w-3.5 h-3.5 text-destructive" strokeWidth={1.5} />
+                                                    </Button>
                                                 </div>
                                             </td>
                                         </tr>
@@ -503,6 +482,45 @@ export function UsersSection() {
                         </table>
                     </div>
                 )}
+
+                <ConfirmModal
+                    open={resetMfaTarget !== null}
+                    onOpenChange={(open) => { if (!open) setResetMfaTarget(null); }}
+                    kicker="USERS · RESET 2FA"
+                    title={`Reset 2FA for ${resetMfaTarget?.username ?? ''}`}
+                    confirmLabel="Reset 2FA"
+                    onConfirm={() => {
+                        if (resetMfaTarget) {
+                            const user = resetMfaTarget;
+                            setResetMfaTarget(null);
+                            handleResetMfa(user.id, user.username);
+                        }
+                    }}
+                >
+                    <p className="text-sm text-stat-subtitle">
+                        Removes the user's authenticator enrolment and backup codes. They will sign in with just their password on their next login and can re-enrol from their account settings. Use this when a user has lost access to their authenticator.
+                    </p>
+                </ConfirmModal>
+
+                <ConfirmModal
+                    open={deleteTarget !== null}
+                    onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+                    variant="destructive"
+                    kicker="USERS · DELETE · IRREVERSIBLE"
+                    title={`Delete user "${deleteTarget?.username ?? ''}"`}
+                    confirmLabel="Delete"
+                    onConfirm={() => {
+                        if (deleteTarget) {
+                            const id = deleteTarget.id;
+                            setDeleteTarget(null);
+                            handleDelete(id);
+                        }
+                    }}
+                >
+                    <p className="text-sm text-stat-subtitle">
+                        Removes the user immediately. They lose access right away.
+                    </p>
+                </ConfirmModal>
             </div>
           </CapabilityGate>
         </PaidGate>
