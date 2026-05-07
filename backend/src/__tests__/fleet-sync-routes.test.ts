@@ -274,6 +274,47 @@ describe('POST /api/fleet/role/reanchor', () => {
   });
 });
 
+describe('POST /api/fleet/sync/:resource stack_pattern ReDoS guard', () => {
+  it('rejects 4+ consecutive wildcards in a stack_pattern', async () => {
+    const res = await request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({
+        rows: [{
+          name: 'redos', node_identity: '', stack_pattern: 'foo****bar',
+          max_severity: 'CRITICAL', block_on_deploy: 0, enabled: 1,
+        }],
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/4\+ consecutive wildcards/);
+  });
+
+  it('rejects more than 8 wildcards anywhere in a stack_pattern', async () => {
+    const res = await request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({
+        rows: [{
+          name: 'too-many-stars', node_identity: '',
+          stack_pattern: '*a*b*c*d*e*f*g*h*i*',
+          max_severity: 'CRITICAL', block_on_deploy: 0, enabled: 1,
+        }],
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/too many wildcards/);
+  });
+
+  it('regex compiled from a max-allowed pattern matches in under 50ms on a worst-case input', () => {
+    const pattern = 'a*b*c*d*e*f*g*h'; // 7 stars, allowed.
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    const re = new RegExp('^' + escaped + '$');
+    const target = 'a' + 'a'.repeat(2000);
+    const start = Date.now();
+    re.test(target);
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+});
+
 describe('POST /api/fleet/role/demote', () => {
   it('returns 401 without auth', async () => {
     const res = await request(app).post('/api/fleet/role/demote').send({ confirm: true });

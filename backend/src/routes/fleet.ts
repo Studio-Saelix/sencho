@@ -48,11 +48,32 @@ function validateScanPolicyRow(row: unknown): string | null {
   if (typeof r.name !== 'string' || r.name.length === 0 || r.name.length > 200) return 'name must be a non-empty string';
   if (typeof r.max_severity !== 'string' || !POLICY_SEVERITIES.has(r.max_severity)) return 'max_severity must be CRITICAL, HIGH, MEDIUM, or LOW';
   if (r.stack_pattern !== null && typeof r.stack_pattern !== 'string') return 'stack_pattern must be a string or null';
-  if (typeof r.stack_pattern === 'string' && r.stack_pattern.length > 200) return 'stack_pattern is too long';
+  if (typeof r.stack_pattern === 'string') {
+    const patternError = validateStackPatternForRedos(r.stack_pattern);
+    if (patternError) return patternError;
+  }
   if (typeof r.node_identity !== 'string') return 'node_identity must be a string';
   if (r.node_identity.length > 500) return 'node_identity is too long';
   if (!isIntFlag(r.block_on_deploy)) return 'block_on_deploy must be 0 or 1';
   if (!isIntFlag(r.enabled)) return 'enabled must be 0 or 1';
+  return null;
+}
+
+/**
+ * Reject `stack_pattern` inputs that would compile to a backtracking-prone
+ * regex. The matcher in `getMatchingPolicy` substitutes `*` with `.*`, so a
+ * pattern like `***...` becomes a chain of adjacent `.*` runs that exhibit
+ * catastrophic backtracking on long inputs.
+ *
+ * Caps mirror the limit in routes/security.ts so a control creating a policy
+ * sees the same error as a replica receiving one. Length is gated at 200 by
+ * the surrounding row validator.
+ */
+export function validateStackPatternForRedos(pattern: string): string | null {
+  if (pattern.length > 200) return 'stack_pattern is too long';
+  const stars = (pattern.match(/\*/g) ?? []).length;
+  if (stars > 8) return 'stack_pattern has too many wildcards (max 8)';
+  if (/\*{4,}/.test(pattern)) return 'stack_pattern must not contain 4+ consecutive wildcards';
   return null;
 }
 

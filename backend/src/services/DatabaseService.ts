@@ -2097,6 +2097,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
+            this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
         })();
     }
