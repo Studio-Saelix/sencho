@@ -4,8 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { TogglePill } from '@/components/ui/toggle-pill';
@@ -315,7 +314,6 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       const res = await apiFetch(`/scheduled-tasks/${deleteTarget.id}`, { method: 'DELETE', localOnly: true });
       if (res.ok) {
         toast.success('Task deleted');
-        setDeleteTarget(null);
         fetchTasks();
       } else {
         const data = await res.json().catch(() => ({}));
@@ -323,6 +321,8 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       }
     } catch {
       toast.error('Something went wrong.');
+    } finally {
+      setDeleteTarget(null);
     }
   };
 
@@ -661,14 +661,14 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
         </CardContent>
       </Card>
 
-      {/* Create/Edit Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-[480px]">
-          <DialogHeader>
-            <DialogTitle>{editingTask ? 'Edit Scheduled Task' : 'New Scheduled Task'}</DialogTitle>
-            <DialogDescription className="sr-only">Configure a scheduled operation task.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
+      {/* Create/Edit Modal */}
+      <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="lg">
+        <ModalHeader
+          kicker={editingTask ? 'SCHEDULER · EDIT TASK' : 'SCHEDULER · NEW TASK'}
+          title={editingTask ? 'Edit scheduled task' : 'New scheduled task'}
+          description="Configure a scheduled operation task."
+        />
+        <ModalBody>
             <div className="space-y-2">
               <Label>Name</Label>
               <Input placeholder="e.g. Nightly stack restart" value={formName} onChange={e => setFormName(e.target.value)} />
@@ -815,33 +815,33 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 <p className="text-xs text-muted-foreground">Task removes itself after its first successful execution. Failures keep the task so you can retry or debug.</p>
               </div>
             </label>
-          </div>
-          <DialogFooter>
+        </ModalBody>
+        <ModalFooter
+          secondary={
             <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
+          }
+          primary={
             <Button onClick={handleSave} disabled={isSaveDisabled}>
               {saving ? 'Saving...' : editingTask ? 'Update' : 'Create'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          }
+        />
+      </Modal>
 
       {/* Delete Confirmation */}
-      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Scheduled Task</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete &ldquo;{deleteTarget?.name}&rdquo;? This will also remove all execution history. This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmModal
+        open={!!deleteTarget}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+        variant="destructive"
+        kicker="SCHEDULER · DELETE · IRREVERSIBLE"
+        title="Delete scheduled task"
+        confirmLabel="Delete"
+        onConfirm={handleDelete}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Permanently deletes <span className="font-mono font-medium text-stat-value">{deleteTarget?.name}</span> and all of its execution history.
+        </p>
+      </ConfirmModal>
 
       {/* Run History Sheet */}
       <Sheet open={!!runsTask} onOpenChange={(open) => { if (!open) setRunsTask(null); }}>
