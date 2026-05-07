@@ -15,11 +15,17 @@ import { sweepStaleTrivyTempDirs } from '../services/TrivyService';
 const PREFIX = 'sencho-trivy-';
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
-function makeTempDir(suffix: string): string {
-    const dir = path.join(os.tmpdir(), `${PREFIX}${suffix}`);
-    fs.mkdirSync(dir, { recursive: true });
+// `mkdtempSync` appends a process-random suffix to the prefix and creates the
+// directory atomically. Required to avoid the predictable-tmp-path symlink
+// attack flagged by CodeQL's `js/insecure-temporary-file` rule.
+function makeTempDir(label: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${PREFIX}${label}-`));
     fs.writeFileSync(path.join(dir, 'config.json'), '{}');
     return dir;
+}
+
+function makeNonPrefixedTempDir(): string {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'not-trivy-'));
 }
 
 function backdate(dir: string, ageMs: number): void {
@@ -41,7 +47,7 @@ describe('sweepStaleTrivyTempDirs', () => {
     });
 
     it('removes a sencho-trivy-* dir whose mtime is older than 1 hour', async () => {
-        const stale = makeTempDir(`stale-${Date.now()}`);
+        const stale = makeTempDir('stale');
         created.push(stale);
         backdate(stale, ONE_HOUR_MS + 5_000);
 
@@ -51,7 +57,7 @@ describe('sweepStaleTrivyTempDirs', () => {
     });
 
     it('leaves fresh sencho-trivy-* dirs untouched', async () => {
-        const fresh = makeTempDir(`fresh-${Date.now()}`);
+        const fresh = makeTempDir('fresh');
         created.push(fresh);
         // Default mtime is now, well within the 1-hour cutoff.
 
@@ -61,8 +67,7 @@ describe('sweepStaleTrivyTempDirs', () => {
     });
 
     it('ignores dirs that do not match the prefix', async () => {
-        const other = path.join(os.tmpdir(), `not-trivy-${Date.now()}`);
-        fs.mkdirSync(other, { recursive: true });
+        const other = makeNonPrefixedTempDir();
         backdate(other, 2 * ONE_HOUR_MS);
         created.push(other);
 

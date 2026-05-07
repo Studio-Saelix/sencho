@@ -113,21 +113,6 @@ function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 
   return { ...rest, policy_evaluation: parsePolicyEvaluation(policy_evaluation) };
 }
 
-function fetchAllPages<T>(
-  q: (opts: { limit?: number; offset?: number }) => { items: T[]; total: number },
-): T[] {
-  const pageSize = 1000;
-  const collected: T[] = [];
-  let offset = 0;
-  while (true) {
-    const page = q({ limit: pageSize, offset });
-    collected.push(...page.items);
-    if (collected.length >= page.total || page.items.length === 0) break;
-    offset += page.items.length;
-  }
-  return collected;
-}
-
 export const securityRouter = Router();
 
 securityRouter.get('/trivy-status', authMiddleware, (_req: Request, res: Response) => {
