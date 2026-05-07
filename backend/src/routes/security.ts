@@ -477,16 +477,42 @@ securityRouter.get(
       res.status(409).json({ error: 'Scan not complete' }); return;
     }
     try {
-      const details = fetchAllPages((opts) => db.getVulnerabilityDetails(scanId, opts));
-      const secrets = fetchAllPages((opts) => db.getSecretFindings(scanId, opts));
-      const misconfigs = fetchAllPages((opts) => db.getMisconfigFindings(scanId, opts));
-      const suppressed = applySuppressions(details, scan.image_ref, db.getCveSuppressions());
+      // Hard cap to bound memory and serialization on pathological scans.
+      // 5000 findings per type comfortably covers realistic scans; if any
+      // type trips the cap we surface `truncated` in the SARIF metadata so
+      // tooling can flag the export as partial.
+      const SARIF_ROW_LIMIT = 5000;
+      const detailsPage = db.getVulnerabilityDetails(scanId, { limit: SARIF_ROW_LIMIT });
+      const secretsPage = db.getSecretFindings(scanId, { limit: SARIF_ROW_LIMIT });
+      const misconfigsPage = db.getMisconfigFindings(scanId, { limit: SARIF_ROW_LIMIT });
+      const truncated =
+        detailsPage.total > SARIF_ROW_LIMIT
+        || secretsPage.total > SARIF_ROW_LIMIT
+        || misconfigsPage.total > SARIF_ROW_LIMIT;
+      if (truncated) {
+        console.warn(
+          `[Security] SARIF export truncated for scanId=${scanId}: `
+          + `vulns=${detailsPage.total}, secrets=${secretsPage.total}, misconfigs=${misconfigsPage.total}, cap=${SARIF_ROW_LIMIT}`,
+        );
+      }
+      const suppressed = applySuppressions(detailsPage.items, scan.image_ref, db.getCveSuppressions());
       const acknowledged = applyMisconfigAcknowledgements(
-        misconfigs,
+        misconfigsPage.items,
         scan.stack_context,
         db.getMisconfigAcknowledgements(),
       );
-      const sarif = generateSarif(scan, suppressed, secrets, acknowledged);
+      const sarif = generateSarif(scan, suppressed, secretsPage.items, acknowledged);
+      if (truncated) {
+        sarif.runs[0].properties = {
+          truncated: true,
+          row_limit: SARIF_ROW_LIMIT,
+          totals: {
+            vulnerabilities: detailsPage.total,
+            secrets: secretsPage.total,
+            misconfigs: misconfigsPage.total,
+          },
+        };
+      }
       const safeName = scan.image_ref.replace(/[^a-zA-Z0-9._-]/g, '_') || `scan-${scanId}`;
       res.setHeader('Content-Type', 'application/sarif+json');
       res.setHeader('Content-Disposition', `attachment; filename="${safeName}.sarif.json"`);

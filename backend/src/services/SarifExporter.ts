@@ -64,6 +64,10 @@ export interface SarifDocument {
             };
         };
         results: SarifResult[];
+        // SARIF 2.1.0 allows arbitrary properties on a run for tool-specific
+        // metadata. Sencho writes a truncation marker here when a scan
+        // exceeds the export row cap.
+        properties?: Record<string, unknown>;
     }>;
 }
 
