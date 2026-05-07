@@ -9,7 +9,7 @@ Sencho is configured entirely through environment variables and Docker volume mo
 
 | Variable | Description |
 |----------|-------------|
-| `COMPOSE_DIR` | Absolute path to the directory that contains your Compose stacks. Every subdirectory inside becomes a stack in Sencho. |
+| `COMPOSE_DIR` | Absolute path to the directory that contains your Compose stacks. Every subdirectory inside becomes a stack in Sencho. Falls back to `/app/compose` if unset, but per the [1:1 path rule](#compose-directory-the-11-path-rule) you should always set this explicitly to match the host path you mount. |
 
 <Note>
   **JWT_SECRET is generated automatically.** Sencho creates a secure random signing key during initial setup and stores it in its database. You do not need to provide one.
@@ -23,11 +23,23 @@ When you point `COMPOSE_DIR` at a directory, Sencho expects each stack to live i
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `1852` | Port the Sencho HTTP server listens on. |
 | `DATA_DIR` | `/app/data` | Directory where Sencho stores its SQLite database, node registry, and cached metrics. |
 | `FRONTEND_URL` | *(empty)* | Frontend origin for CORS. Only needed if the UI is served from a different domain than the API. Leave empty for same-origin setups. |
 | `NODE_ENV` | `production` | Set automatically in the Docker image. Only change this for local development. |
-| `SENCHO_USER` | *(unset)* | Optional. When set to a username present inside the container (`sencho` is pre-created for this purpose), the entrypoint drops privileges to that user at startup instead of running as `root`. See [Running as a non-root user](#running-as-a-non-root-user) below. |
+| `SENCHO_USER` | *(unset)* | When set to a username present inside the container (`sencho` is pre-created for this purpose), the entrypoint drops privileges to that user at startup instead of running as `root`. See [Running as a non-root user](#running-as-a-non-root-user) below. |
+| `API_RATE_LIMIT` | `200` | Global API requests per minute per user session. Applies in production only; development uses a fixed higher cap. Authenticated requests are keyed by user ID, unauthenticated by IP. Internal node-to-node traffic bypasses this limit. |
+| `API_POLLING_RATE_LIMIT` | `300` | Rate limit for dashboard polling endpoints, in requests per minute. Applies in production only; development uses a fixed higher cap. Raise it for environments with many concurrent browser sessions behind shared NAT. |
+
+## Listen port
+
+Sencho always listens on `1852` inside the container. The port is fixed and is not read from an environment variable. To expose Sencho on a different host port, remap with Docker's `-p` flag (or the `ports:` key in your compose file):
+
+```yaml
+ports:
+  - "8080:1852"   # host 8080 to container 1852
+```
+
+Behind a reverse proxy you can keep the standard mapping and let the proxy own the public port.
 
 ## Container user
 
@@ -71,7 +83,7 @@ If you use SSO (Admiral), configure your identity providers via environment vari
 | `SSO_OIDC_OKTA_ENABLED` | Enable Okta SSO |
 | `SSO_CALLBACK_URL` | External base URL for OAuth callbacks (required behind reverse proxy) |
 
-For the full SSO configuration reference and setup guides, see [SSO Authentication →](/features/sso).
+For end-to-end provider setup walkthroughs, see the [SSO Quickstart →](/getting-started/sso-quickstart). For the full feature reference, see [SSO Authentication →](/features/sso).
 
 ## Required volume mounts
 
@@ -270,4 +282,21 @@ Caddy automatically obtains and renews SSL certificates via Let's Encrypt. WebSo
 
 ## First boot
 
-After starting Sencho, open it in your browser. If no admin account exists yet, you'll be taken to a setup screen to create one. This only appears once - subsequent visits go directly to the login page.
+After starting Sencho, open `http://localhost:1852` in a browser. On a fresh install you land on the **Cold start** card to create the first admin account; every subsequent visit goes to the regular sign-in screen. The [Quickstart](/getting-started/quickstart#first-boot) shows it in detail.
+
+## Where to next
+
+<CardGroup cols={2}>
+  <Card title="Stack management" icon="layer-group" href="/features/stack-management">
+    Deploy, edit, restart, update, and roll back stacks from the cockpit.
+  </Card>
+  <Card title="Multi-node" icon="sitemap" href="/features/multi-node">
+    Add a remote Sencho instance and manage it from the same console.
+  </Card>
+  <Card title="Self-hosting" icon="server" href="/operations/self-hosting">
+    Resource recommendations, networking, and Docker socket security.
+  </Card>
+  <Card title="SSO Quickstart" icon="key" href="/getting-started/sso-quickstart">
+    End-to-end provider setup for OIDC, LDAP, and Active Directory.
+  </Card>
+</CardGroup>
