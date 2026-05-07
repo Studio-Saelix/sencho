@@ -141,7 +141,7 @@ function ConfirmDestructiveHeader(props: ModalHeaderBaseProps) {
 }
 
 export function ModalBody({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('px-6 py-5 space-y-4', className)} {...props} />;
+  return <div className={cn('px-6 py-5 space-y-4 max-h-[calc(85vh-12rem)] overflow-y-auto', className)} {...props} />;
 }
 
 interface ModalFooterProps {
