@@ -74,23 +74,12 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     <Camera className="w-4 h-4 mr-1.5" />Snapshots
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {isAdmiral && (
-                                <TabsHighlightItem value="routing">
-                                    <TabsTrigger value="routing">
-                                        <ArrowLeftRight className="w-4 h-4 mr-1.5" />Traffic · Routing
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
                             <TabsHighlightItem value="configuration">
                                 <TabsTrigger value="configuration">
                                     <SlidersHorizontal className="w-4 h-4 mr-1.5" />Status
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            <TabsHighlightItem value="actions">
-                                <TabsTrigger value="actions">
-                                    <Wrench className="w-4 h-4 mr-1.5" />Actions
-                                </TabsTrigger>
-                            </TabsHighlightItem>
+                            <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
                             {isPaid && (
                                 <TabsHighlightItem value="deployments">
                                     <TabsTrigger value="deployments">
@@ -98,9 +87,20 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
+                            {isAdmiral && (
+                                <TabsHighlightItem value="routing">
+                                    <TabsTrigger value="routing">
+                                        <ArrowLeftRight className="w-4 h-4 mr-1.5" />Traffic
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
+                            )}
+                            <TabsHighlightItem value="actions">
+                                <TabsTrigger value="actions">
+                                    <Wrench className="w-4 h-4 mr-1.5" />Fleet Actions
+                                </TabsTrigger>
+                            </TabsHighlightItem>
                             {experimental && (
                                 <>
-                                    <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
                                     <TabsHighlightItem value="federation">
                                         <TabsTrigger value="federation">
                                             <Network className="w-4 h-4 mr-1.5" />Federation
@@ -168,6 +168,14 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 <TabsContent value="snapshots">
                     <FleetSnapshots />
                 </TabsContent>
+                <TabsContent value="configuration">
+                    <FleetConfiguration />
+                </TabsContent>
+                {isPaid && (
+                    <TabsContent value="deployments">
+                        <DeploymentsTab />
+                    </TabsContent>
+                )}
                 {isAdmiral && (
                     <TabsContent value="routing">
                         <AdmiralGate>
@@ -175,17 +183,9 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         </AdmiralGate>
                     </TabsContent>
                 )}
-                <TabsContent value="configuration">
-                    <FleetConfiguration />
-                </TabsContent>
                 <TabsContent value="actions">
                     <FleetActionsTab nodes={overview.allNodes} />
                 </TabsContent>
-                {isPaid && (
-                    <TabsContent value="deployments">
-                        <DeploymentsTab />
-                    </TabsContent>
-                )}
                 {experimental && (
                     <>
                         <TabsContent value="federation">

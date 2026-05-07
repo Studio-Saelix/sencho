@@ -7,7 +7,7 @@ description: Run fleet-wide bulk operations from one place — stop stacks acros
   Fleet Actions require a Sencho **Skipper** or **Admiral** license.
 </Note>
 
-The **Actions** tab inside Fleet centralizes bulk operations that span more than a single stack and would otherwise need many manual clicks. It lives next to **Status** and **Deployments** in the Fleet view.
+The **Fleet Actions** tab inside Fleet centralizes bulk operations that span more than a single stack and would otherwise need many manual clicks. It lives next to **Deployments** and **Traffic** in the Fleet view, after the separator that follows Status.
 
 Fleet Actions covers the operations that aren't already exposed elsewhere in Sencho:
 
@@ -26,7 +26,7 @@ Other bulk actions you may be looking for live in their natural homes:
 
 This card sends a stop to every stack on every node that has a label matching the name you type. Labels are matched **by name** across the fleet, so a label called `production` on one node and a separate label also called `production` on another node both match.
 
-1. Open **Fleet > Actions**.
+1. Open **Fleet > Fleet Actions**.
 2. In the **Stop fleet by label** card, type a label name. The input suggests names that already exist on any node.
 3. Click **Stop matching stacks**.
 4. Confirm the destructive action. Sencho dispatches stops per node.
@@ -60,5 +60,5 @@ Labels are stored per node. The fleet stop matches by **name** only. If the labe
 **Bulk label assign reports "Invalid stack name" for one row.**
 Stack names must be alphanumeric with dashes and underscores. The endpoint validates each entry independently, so a single bad name does not block the rest of the batch.
 
-**The Actions tab is missing from Fleet.**
+**The Fleet Actions tab is missing from Fleet.**
 Confirm the active license is **Skipper** or **Admiral** under **Settings > License**. The tab itself is always visible, but the action cards only render at paid tiers.
