@@ -1021,6 +1021,7 @@ class TrivyService {
         if (this.source === 'none') {
             throw new Error('Trivy is not available on this host');
         }
+        const batchStartedAt = Date.now();
         const images = await DockerController.getInstance(nodeId).getImages();
         const imageRefs = new Set<string>();
         for (const img of images as Array<{ RepoTags?: string[] }>) {
@@ -1093,6 +1094,11 @@ class TrivyService {
             }
             await new Promise((r) => setTimeout(r, 300));
         }
+        diag(
+            `scanAllNodeImages: nodeId=${nodeId} unique=${imageRefs.size} `
+            + `scanned=${scanned} skipped=${skipped} failed=${failed} `
+            + `violations=${violations.length} elapsedMs=${Date.now() - batchStartedAt}`,
+        );
         return { scanned, skipped, failed, severity, violations };
     }
 
