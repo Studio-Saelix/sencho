@@ -45,6 +45,16 @@ export const SYNC_PATH_PREFIX = '/api/fleet/sync/';
 /** How long to suppress repeat truncation alerts after one fires. */
 export const TRUNCATION_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
+/** How far back the retry service looks for failed sync targets. */
+export const RETRY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Failure-window threshold for the retry-service stale-target notification.
+ * A previously-working node whose `last_failure_at - last_success_at` exceeds
+ * this triggers one warning per cooldown.
+ */
+export const STALE_THRESHOLD_MS = 60 * 60 * 1000;
+
 /**
  * Resource enum kept here so the state-key helpers below can type-check
  * their arguments without a cycle through FleetSyncService. The ordering

@@ -225,6 +225,30 @@ export class FleetSyncService {
     }
 
     /**
+     * Push a resource to a single remote node. Used by the retry service to
+     * re-send to a node that previously failed without disturbing other nodes
+     * in the fleet. Goes through the same per-node mutex as `pushResource`,
+     * so a normal fanout and a retry never overlap on one node.
+     *
+     * No-op when this instance is a replica or when the node is not a
+     * proxy-mode remote with credentials configured.
+     */
+    public async pushResourceToNode(
+        node: Node & { id: number },
+        resource: FleetResource,
+    ): Promise<void> {
+        if (FleetSyncService.getRole() === 'replica') return;
+        if (node.type !== 'remote' || !node.api_url || !node.api_token) return;
+        const rows = this.loadResource(resource);
+        const payload: Omit<FleetSyncPayload, 'targetIdentity'> = {
+            rows,
+            pushedAt: this.nextPushedAt(),
+            controlIdentity: FleetSyncService.getControlIdentity(),
+        };
+        await this.enqueuePushToNode(node, resource, payload);
+    }
+
+    /**
      * Apply a received sync payload on a replica. Runs control-anchor check,
      * staleness comparison, role flip, identity cache, row replacement, and
      * watermark write inside a single SQLite transaction so a partial-write
