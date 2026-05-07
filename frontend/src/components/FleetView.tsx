@@ -20,7 +20,7 @@ import { useLicense } from '@/context/LicenseContext';
 import { AdmiralGate } from './AdmiralGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetConfiguration } from './fleet/FleetConfiguration';
-import { FleetSoonPlaceholder, SoonBadge } from './fleet/FleetSoonPlaceholder';
+import { FleetSoonPlaceholder } from './fleet/FleetSoonPlaceholder';
 import { RoutingTab } from './fleet/RoutingTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
 
@@ -73,7 +73,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     <Camera className="w-4 h-4 mr-1.5" />Snapshots
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {isAdmiral && experimental && (
+                            {isAdmiral && (
                                 <TabsHighlightItem value="routing">
                                     <TabsTrigger value="routing">
                                         <ArrowLeftRight className="w-4 h-4 mr-1.5" />Traffic · Routing
@@ -85,25 +85,24 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     <SlidersHorizontal className="w-4 h-4 mr-1.5" />Status
                                 </TabsTrigger>
                             </TabsHighlightItem>
+                            {isPaid && (
+                                <TabsHighlightItem value="deployments">
+                                    <TabsTrigger value="deployments">
+                                        <Send className="w-4 h-4 mr-1.5" />Deployments
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
+                            )}
                             {experimental && (
                                 <>
                                     <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-                                    <TabsHighlightItem value="deployments">
-                                        <TabsTrigger value="deployments">
-                                            <Send className="w-4 h-4 mr-1.5" />Deployments
-                                            {!isPaid && <SoonBadge />}
-                                        </TabsTrigger>
-                                    </TabsHighlightItem>
                                     <TabsHighlightItem value="federation">
                                         <TabsTrigger value="federation">
                                             <Network className="w-4 h-4 mr-1.5" />Federation
-                                            <SoonBadge />
                                         </TabsTrigger>
                                     </TabsHighlightItem>
                                     <TabsHighlightItem value="secrets">
                                         <TabsTrigger value="secrets">
                                             <KeyRound className="w-4 h-4 mr-1.5" />Secrets
-                                            <SoonBadge />
                                         </TabsTrigger>
                                     </TabsHighlightItem>
                                 </>
@@ -163,7 +162,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 <TabsContent value="snapshots">
                     <FleetSnapshots />
                 </TabsContent>
-                {isAdmiral && experimental && (
+                {isAdmiral && (
                     <TabsContent value="routing">
                         <AdmiralGate>
                             <RoutingTab />
@@ -173,25 +172,17 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 <TabsContent value="configuration">
                     <FleetConfiguration />
                 </TabsContent>
+                {isPaid && (
+                    <TabsContent value="deployments">
+                        <DeploymentsTab />
+                    </TabsContent>
+                )}
                 {experimental && (
                     <>
-                        <TabsContent value="deployments">
-                            {isPaid ? (
-                                <DeploymentsTab />
-                            ) : (
-                                <FleetSoonPlaceholder
-                                    icon={<Send className="h-4 w-4" />}
-                                    kicker="Deployments · Blueprints"
-                                    title="Declare once. Distribute everywhere."
-                                    description="Pick nodes by label, drop in a docker-compose, and Sencho keeps the matching nodes in sync. Drift detection always on; auto-fix optional."
-                                    plannedActions={['Author', 'Target', 'Reconcile', 'Snapshot+evict']}
-                                />
-                            )}
-                        </TabsContent>
                         <TabsContent value="federation">
                             <FleetSoonPlaceholder
                                 icon={<Network className="h-4 w-4" />}
-                                kicker="Federation · Coming soon"
+                                kicker="Federation"
                                 title="The fleet as one logical surface"
                                 description="Pin policies, drain a node for maintenance, weight-aware scheduling. This stack runs on whichever node has capacity."
                                 plannedActions={['Pin policy', 'Drain node', 'Cordon', 'Capacity plan']}
@@ -200,7 +191,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         <TabsContent value="secrets">
                             <FleetSoonPlaceholder
                                 icon={<KeyRound className="h-4 w-4" />}
-                                kicker="Secrets · Coming soon"
+                                kicker="Secrets"
                                 title="One source of truth for env, creds and certs"
                                 description="Push to selected nodes, rotate centrally, audit who-saw-what. Solves silent drift across copies."
                                 plannedActions={['Sync env', 'Rotate', 'Audit', 'Pin to nodes']}
