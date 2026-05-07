@@ -1,16 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { GitBranch, Loader2, Trash2, RefreshCw, Save, AlertCircle } from 'lucide-react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+import { Modal, ModalHeader, ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -290,18 +280,17 @@ export function GitSourcePanel({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-xl w-[95vw] p-0 gap-0">
-          <DialogHeader className="px-6 pt-6 pb-4 border-b border-glass-border">
-            <DialogTitle className="flex items-center gap-2">
-              <GitBranch className="w-4 h-4" strokeWidth={1.5} />
-              Git Source
-              <span className="font-mono tabular-nums text-xs text-stat-subtitle">{stackName}</span>
-            </DialogTitle>
-            <DialogDescription className="sr-only">
-              Link this stack to a Git repository so compose updates can be pulled on demand or via webhook.
-            </DialogDescription>
-          </DialogHeader>
+      <Modal open={open} onOpenChange={onOpenChange} size="xl">
+        <ModalHeader
+          kicker={`${stackName.toUpperCase()} · GIT SOURCE`}
+          title={
+            <span className="flex items-center gap-2">
+              <GitBranch className="w-5 h-5" strokeWidth={1.5} />
+              Git source
+            </span>
+          }
+          description="Link this stack to a Git repository so compose updates can be pulled on demand or via webhook."
+        />
 
           <ScrollArea className="max-h-[70vh]">
             <div className="px-6 py-5 space-y-5">
@@ -416,8 +405,7 @@ export function GitSourcePanel({
               )}
             </div>
           </div>
-        </DialogContent>
-      </Dialog>
+      </Modal>
 
       <GitSourceDiffDialog
         open={diffOpen}
@@ -432,22 +420,20 @@ export function GitSourcePanel({
         onDismiss={dismissPending}
       />
 
-      <AlertDialog open={removeConfirmOpen} onOpenChange={setRemoveConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove Git source?</AlertDialogTitle>
-            <AlertDialogDescription>
-              The stack files on disk will be left in place. You can reconfigure the source later at any time.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={remove} disabled={deleting}>
-              Remove
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmModal
+        open={removeConfirmOpen}
+        onOpenChange={setRemoveConfirmOpen}
+        variant="destructive"
+        kicker={`${stackName.toUpperCase()} · GIT · DISCONNECT`}
+        title="Remove Git source"
+        confirmLabel={deleting ? 'Removing...' : 'Remove'}
+        confirming={deleting}
+        onConfirm={remove}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Disconnects the stack from its Git source. The stack files on disk are left in place and you can reconfigure the source later at any time.
+        </p>
+      </ConfirmModal>
     </>
   );
 }
