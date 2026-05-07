@@ -94,67 +94,97 @@
             "group": "Features",
             "pages": [
               "features/overview",
-              "features/dashboard",
-              "features/global-search",
-              "features/sidebar",
-              "features/stack-management",
-              "features/stack-activity",
-              "features/editor",
-              "features/stack-file-explorer",
-              "features/deploy-progress",
-              "features/resources",
-              "features/app-store",
-              "features/global-observability",
-              "features/host-console",
-              "features/multi-node",
-              "features/pilot-agent",
-              "features/sencho-mesh",
-              "features/fleet-view",
-              "features/fleet-sync",
-              "features/blueprint-model",
-              "features/remote-updates",
-              "features/stack-labels",
-              "features/alerts-notifications",
-              "features/notification-routing",
-              "features/webhooks",
-              "features/git-sources",
-              "features/rbac",
-              "features/atomic-deployments",
-              "features/fleet-backups",
-              "features/audit-log",
-              "features/api-tokens",
-              "features/private-registries",
-              "features/vulnerability-scanning",
-              "features/deploy-enforcement",
-              "features/cve-suppressions",
-              "features/auto-update-policies",
-              "features/auto-heal-policies",
-              "features/scheduled-operations",
-              "features/sso",
-              "features/two-factor-authentication",
-              "features/licensing"
+              {
+                "group": "Stacks & Deployments",
+                "pages": [
+                  "features/stack-management",
+                  "features/stack-activity",
+                  "features/editor",
+                  "features/stack-file-explorer",
+                  "features/deploy-progress",
+                  "features/resources",
+                  "features/app-store",
+                  "features/atomic-deployments",
+                  "features/deploy-enforcement",
+                  "features/blueprint-model",
+                  "features/git-sources",
+                  "features/stack-labels"
+                ]
+              },
+              {
+                "group": "Observability",
+                "pages": [
+                  "features/dashboard",
+                  "features/global-search",
+                  "features/global-observability",
+                  "features/alerts-notifications",
+                  "features/notification-routing",
+                  "features/audit-log"
+                ]
+              },
+              {
+                "group": "Fleet & Multi-Node",
+                "pages": [
+                  "features/multi-node",
+                  "features/pilot-agent",
+                  "features/sencho-mesh",
+                  "features/fleet-view",
+                  "features/fleet-sync",
+                  "features/fleet-backups",
+                  "features/remote-updates",
+                  "features/scheduled-operations"
+                ]
+              },
+              {
+                "group": "Security & Identity",
+                "pages": [
+                  "features/two-factor-authentication",
+                  "features/rbac",
+                  "features/sso",
+                  "features/api-tokens",
+                  "features/vulnerability-scanning",
+                  "features/cve-suppressions",
+                  "features/private-registries"
+                ]
+              },
+              {
+                "group": "Automation",
+                "pages": [
+                  "features/auto-update-policies",
+                  "features/auto-heal-policies",
+                  "features/webhooks"
+                ]
+              },
+              {
+                "group": "Platform",
+                "pages": [
+                  "features/sidebar",
+                  "features/host-console"
+                ]
+              }
             ]
           },
           {
             "group": "Reference",
             "pages": [
-              "security",
-              "features/node-compatibility",
               "reference/settings",
-              "reference/contact",
-              "reference/security-advisories"
+              "features/licensing",
+              "features/node-compatibility",
+              "security",
+              "reference/security-advisories",
+              "reference/contact"
             ]
           },
           {
             "group": "Operations",
             "pages": [
-              "operations/troubleshooting",
-              "operations/backup",
-              "operations/upgrade",
               "operations/self-hosting",
+              "operations/upgrade",
+              "operations/backup",
+              "operations/troubleshooting",
+              "operations/verifying-images",
               "operations/trivy-setup",
-              "operations/two-factor-admin",
-              "operations/verifying-images"
+              "operations/two-factor-admin"
             ]
           }
         ]
