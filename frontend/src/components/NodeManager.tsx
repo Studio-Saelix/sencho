@@ -4,8 +4,7 @@ import type { Node, NodeMode } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
 import { toast } from '@/components/ui/toast-store';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from './ui/dialog';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from './ui/alert-dialog';
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from './ui/modal';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -232,11 +231,12 @@ export function NodeManager() {
         throw new Error(err.error || 'Failed to delete node');
       }
       toast.success(`Node "${deletingNode.name}" deleted`);
-      setDeleteOpen(false);
-      setDeletingNode(null);
       await refreshNodes();
     } catch (error) {
       toast.error((error as Error).message || 'Failed to delete node');
+    } finally {
+      setDeleteOpen(false);
+      setDeletingNode(null);
     }
   };
 
@@ -422,28 +422,40 @@ export function NodeManager() {
     <div className="space-y-6">
       {/* Actions */}
       <div className="flex justify-end">
-        <Dialog
+        <SettingsPrimaryButton
+          size="sm"
+          className="gap-1 shrink-0"
+          onClick={() => {
+            setFormData(defaultFormData);
+            setCreateOpen(true);
+          }}
+        >
+          <Plus className="w-4 h-4" />
+          Add node
+        </SettingsPrimaryButton>
+        <Modal
           open={createOpen}
           onOpenChange={(open) => {
             setCreateOpen(open);
-            // Reset form to defaults every time the dialog opens
             if (open) setFormData(defaultFormData);
           }}
+          size="lg"
         >
-          <DialogTrigger asChild>
-            <SettingsPrimaryButton size="sm" className="gap-1 shrink-0">
-              <Plus className="w-4 h-4" />
-              Add node
-            </SettingsPrimaryButton>
-          </DialogTrigger>
-          <DialogContent className="max-w-lg">
-            <DialogHeader className="pr-8">
-              <DialogTitle>Add {formData.type === 'local' ? 'Local' : 'Remote'} Node</DialogTitle>
-            </DialogHeader>
+          <ModalHeader
+            kicker={formData.type === 'local' ? 'NODES · ADD LOCAL' : 'NODES · ADD REMOTE'}
+            title={formData.type === 'local' ? 'Add local node' : 'Add remote node'}
+            description="Register a Sencho node so you can manage it from this console."
+          />
+          <ModalBody>
             {renderFormFields()}
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
+          </ModalBody>
+          <ModalFooter
+            secondary={
+              <Button variant="outline" size="sm" onClick={() => setCreateOpen(false)}>Cancel</Button>
+            }
+            primary={
               <SettingsPrimaryButton
+                size="sm"
                 onClick={handleCreate}
                 disabled={
                   !formData.name ||
@@ -452,9 +464,9 @@ export function NodeManager() {
               >
                 Add node
               </SettingsPrimaryButton>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+            }
+          />
+        </Modal>
       </div>
 
       <Separator />
@@ -723,12 +735,10 @@ export function NodeManager() {
         </div>
       )}
 
-      {/* Edit Dialog */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader className="pr-8">
-            <DialogTitle>Edit Node</DialogTitle>
-          </DialogHeader>
+      {/* Edit Modal */}
+      <Modal open={editOpen} onOpenChange={setEditOpen} size="lg">
+        <ModalHeader kicker="NODES · EDIT" title="Edit node" description="Update the connection details for this node." />
+        <ModalBody>
           {renderFormFields()}
           {formData.type === 'remote' && formData.mode === 'pilot_agent' && editingNodeId !== null && (
             <div className="rounded-md border border-card-border bg-card/50 p-3 space-y-2">
@@ -749,23 +759,28 @@ export function NodeManager() {
               </Button>
             </div>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setEditOpen(false); setEditingNodeId(null); }}>Cancel</Button>
+        </ModalBody>
+        <ModalFooter
+          secondary={
+            <Button variant="outline" size="sm" onClick={() => { setEditOpen(false); setEditingNodeId(null); }}>Cancel</Button>
+          }
+          primary={
             <Button
+              size="sm"
               onClick={handleEdit}
               disabled={
                 !formData.name ||
                 (formData.type === 'remote' && formData.mode === 'proxy' && !formData.api_url)
               }
             >
-              Save Changes
+              Save changes
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          }
+        />
+      </Modal>
 
-      {/* Pilot enrollment dialog (create + regenerate flows both open this) */}
-      <Dialog
+      {/* Pilot enrollment Modal (create + regenerate flows both open this) */}
+      <Modal
         open={activeEnrollment !== null}
         onOpenChange={(open) => {
           if (!open) {
@@ -775,13 +790,16 @@ export function NodeManager() {
             setFormData(defaultFormData);
           }
         }}
+        size="xl"
       >
-        <DialogContent className="max-w-2xl">
-          <DialogHeader className="pr-8">
-            <DialogTitle>Enroll the pilot agent</DialogTitle>
-          </DialogHeader>
+        <ModalHeader
+          kicker="NODES · PILOT ENROLLMENT"
+          title="Enroll the pilot agent"
+          description="Run the docker command on the remote host to connect the pilot agent."
+        />
+        <ModalBody>
           {activeEnrollment && (
-            <div className="space-y-3 py-2">
+            <>
               <p className="text-sm text-muted-foreground">
                 Run this command on <strong>{activeEnrollment.nodeName}</strong> to start the pilot agent. The token below is valid for 15 minutes and can only be used once.
               </p>
@@ -797,10 +815,13 @@ export function NodeManager() {
                   {enrollmentCopied ? 'Copied' : 'Copy command'}
                 </Button>
               </div>
-            </div>
+            </>
           )}
-          <DialogFooter>
+        </ModalBody>
+        <ModalFooter
+          primary={
             <Button
+              size="sm"
               onClick={() => {
                 setActiveEnrollment(null);
                 setEnrollmentCopied(false);
@@ -811,25 +832,24 @@ export function NodeManager() {
             >
               Done
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          }
+        />
+      </Modal>
 
       {/* Delete Confirmation */}
-      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Node</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to remove <strong>{deletingNode?.name}</strong>? This will only remove the node from Sencho - it will not affect the remote instance or any running containers.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete}>Delete</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmModal
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        variant="destructive"
+        kicker="NODES · DELETE · IRREVERSIBLE"
+        title="Delete node"
+        confirmLabel="Delete"
+        onConfirm={handleDelete}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Removes <span className="font-medium text-stat-value">{deletingNode?.name}</span> from this console. The remote instance and its containers are not affected.
+        </p>
+      </ConfirmModal>
     </div>
   );
 }
