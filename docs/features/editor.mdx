@@ -1,121 +1,204 @@
 ---
 title: Editor
-description: Edit compose files and environment variables, and manage containers directly from the dashboard.
+description: The per-stack cockpit. Run, restart, update, and update compose files; stream logs; exec into a container.
 ---
 
-Selecting a stack opens the editor view, a two-column layout. The left column shows the command center (stack controls, containers, and an embedded terminal). The right column holds the Monaco code editor.
+Selecting a stack in the sidebar opens the editor cockpit, a two-column workspace for everything you do to a single stack. The left column is the **Command Center** with the stack's identity, action bar, container list, and log stream. The right column starts on the **Anatomy panel**, a read-only summary of the compose file; clicking **edit** swaps it for the Monaco editor with `compose.yaml`, `.env`, and **Files** tabs.
 
 <Frame>
-  <img src="/images/editor/editor-overview.png" alt="Editor view showing command center on the left and Monaco editor on the right" />
+  <img src="/images/editor/editor-overview.png" alt="Editor cockpit showing the Command Center and live logs on the left and the Anatomy panel on the right" />
 </Frame>
 
-## Files tab
+## Command Center
 
-The **Files** tab gives you a browseable directory tree for everything inside the stack's folder. Community users can view text files in read-only mode. Skipper and above can upload, download, edit and save, create folders, and delete files. Protected files (`compose.yaml`, `.env`, and their variants) redirect to their dedicated editor tabs when clicked.
+The top card on the left holds the stack's identity and primary controls.
 
-For full details on permissions, viewing limits, upload caps, and troubleshooting, see the [Stack File Explorer](/features/stack-file-explorer) guide.
+<Frame>
+  <img src="/images/editor/command-center.png" alt="Command Center card with breadcrumb, stack title, running status pill, image and digest, action bar, and the plex container row with live stats" />
+</Frame>
 
-## Compose file editor
+| Element | What it shows |
+|---------|--------------|
+| **Breadcrumb** | `<node> › stacks › <stack>` rendered in caps. Confirms which node the stack lives on. |
+| **Stack title** | The stack name in display italic. |
+| **Status pill** | Aggregate state: `running · healthy`, `running · starting`, `running · unhealthy`, plain `running` (no healthcheck defined), or `exited` (any non-running state, including stopped, created, and paused). The dot pulses while the stack is running. |
+| **Image and digest** | First container's image and the leading 12 characters of its image digest, with a copy button for the full SHA. |
 
-The right panel shows your `compose.yaml` with full syntax highlighting. By default the editor is **read-only** to prevent accidental changes.
+### Stack action bar
 
-Click **Edit** to enter edit mode. Your changes are unsaved until you explicitly save them.
+The action bar runs every state transition for the whole stack. It is hidden for roles without the `stack:deploy` permission.
+
+| Button | Behavior |
+|--------|----------|
+| **Start** / **Restart** | A single button that becomes **Restart** when at least one container is running and **Start** otherwise. |
+| **Stop** | Stops every container in the stack. Hidden when nothing is running. |
+| **Update** | Pulls fresh images and reapplies the compose file. |
+| **More actions** (`⋮`) | Opens a dropdown with secondary actions. |
+
+The kebab dropdown carries:
+
+- **Rollback `<timestamp>`** restores the previous deployment using the stored snapshot. Visible only when a backup exists. Skipper or Admiral.
+- **Scan config** runs Trivy against the compose configuration and surfaces misconfigurations inline. Visible only when Trivy is reachable. Admin role required. Skipper or Admiral.
+- **Delete** stops the stack and removes its compose directory. Always available to the deploy role.
+
+## Containers list
+
+Below the action bar, the **CONTAINERS** section lists every container the stack defines. Each row carries a status badge, identity, port mapping, action buttons, and live stats.
+
+<Frame>
+  <img src="/images/editor/containers-list.png" alt="Container row showing the green check status badge, container name, uptime, port mapping with an inline open link, action buttons, and CPU MEM and NET I/O stats with sparklines" />
+</Frame>
+
+| Element | Detail |
+|---------|--------|
+| **Status badge** | `✓` (green, healthy or running), `✗` (red, exited or unhealthy), `…` (yellow, starting). |
+| **Name** | The Docker container name; falls back to the first 12 characters of the container ID. |
+| **Uptime / state** | `up 2h 15m` for running containers, the raw state for everything else. |
+| **Healthcheck label** | `healthcheck passing`, `healthcheck failing`, or `healthcheck starting`, only when a healthcheck is defined. |
+| **Port mapping** | The first detected web-UI port, formatted `host → container/proto`, with an inline **open** link that launches `http://<node-host>:<host-port>` in a new tab. |
+| **Action buttons** | **View logs**, **Open bash shell** (admin only), **Service actions**. |
+| **Live stats** | CPU, memory, and net I/O with rolling sparklines. Only rendered while the container is running. Stats refresh on the same 1500 ms cadence as the dashboard. |
+
+### Service actions
+
+When the container has a compose service name attached, an extra `⋮` button appears at the right of the row. It opens **Restart service**, **Stop service**, or **Start service** depending on the current state. Service actions affect a single service; for full-stack operations use the action bar above.
+
+## Anatomy panel
+
+The right column shows the **Anatomy panel** by default: a read-only summary of the compose file with a tab for the stack's activity timeline.
+
+The header strip carries two tabs (**Anatomy** and **Activity**) plus shortcuts to open the **files** tab and enter **edit** mode. The shortcuts belong to the strip itself and remain available regardless of which tab is active.
+
+The Anatomy tab lists:
+
+- **services** as chips
+- **ports** in `host → container/proto` rows, grouped by service when the stack defines more than one
+- **volumes** in `host → container` rows
+- **restart** policy
+- **env_file** paths and a count of variables defined in each
+- **network** and its driver
+- **source** with `git · <host>/<repo>#<branch>` when the stack is linked to a Git repository, or `local` when it is not. Clicking the row opens the Git source dialog. A pulsing brand-color dot means an upstream change is queued.
+
+When an image update is available, an inline banner appears at the top of the panel. Its tone follows the version-bump severity: `safe to apply` (patch), `review recommended` (minor), `breaking changes possible` (major), or `review required` when the bump cannot be classified. The banner has an inline **apply** button that runs the same operation as the action bar's **Update**; it is hidden for roles that lack the `stack:edit` permission and when the bump is flagged as blocked.
+
+The **Activity** tab streams every operational event scoped to this stack. See [Stack Activity](/features/stack-activity) for the full event catalog and attribution rules.
+
+## Editor mode
+
+Clicking **edit** in the Anatomy strip swaps the right column for the Monaco editor card.
+
+<Frame>
+  <img src="/images/editor/editor-edit-mode.png" alt="Editor in edit mode with the compose.yaml tab selected, the Git Source button, the Save and Deploy split button, and the close button visible" />
+</Frame>
+
+The editor card has three tabs:
+
+| Tab | Purpose |
+|-----|---------|
+| `compose.yaml` | YAML editor with syntax highlighting. Always available. |
+| `.env` | Plaintext editor for the discovered env file. Disabled when the stack has no env file. |
+| **Files** | Browseable directory tree for the stack folder. See the dedicated [Stack File Explorer](/features/stack-file-explorer) page for permissions, upload caps, and protected-file behavior. |
+
+Above the editor area, the toolbar carries:
+
+- **Git Source** opens the Git source dialog. A pulsing brand-color dot appears next to it when an upstream change is waiting to be applied.
+- **Edit** (when read-only) flips the editor into write mode. Replaced by the save split-button while editing.
+- **Close editor** (`X`) returns the right column to the Anatomy panel.
+
+When you switch to the `.env` tab and the stack defines more than one env file, a dropdown appears next to the tab strip so you can pick which file to edit. Sencho discovers env files from the `env_file:` entries in `compose.yaml`; if none are declared, it falls back to a `.env` in the stack directory.
+
+The `.env` editor renders a teal banner above the textarea reminding you that variables defined there are available for substitution in `compose.yaml` (`${VAR}`), and that passing them into containers requires an `env_file:` entry on the service.
 
 ### Save options
 
-The primary action button is **Save & Deploy**, which writes the file to disk and immediately runs `docker compose up -d`. A dropdown arrow next to it reveals additional options:
+In edit mode the toolbar shows a split button. The primary action is **Save & Deploy**; the dropdown chevron reveals two more.
 
-| Action | What it does |
-|--------|--------------|
-| **Save & Deploy** | Writes the file, then runs `docker compose up -d` to apply changes immediately. |
-| **Save Only** | Writes the file to disk without restarting any containers. |
-| **Discard Changes** | Reverts the editor to the last saved version. Unsaved changes are lost. |
+| Action | Effect |
+|--------|--------|
+| **Save & Deploy** | Writes the file to disk, then runs `docker compose up -d` to apply changes. |
+| **Save Only** | Writes the file to disk without restarting any containers. Changes take effect on the next deploy. |
+| **Discard Changes** | Reverts the editor to the last saved version. Unsaved edits are lost. |
 
-## Environment file editor
-
-Click the **.env** tab to switch to the environment file editor. If your `compose.yaml` references multiple env files (via `env_file:`), a dropdown lets you select which file to edit.
-
-The `.env` editor has the same save/discard controls as the compose editor. Changes take effect the next time the stack is deployed.
-
-<Note>
-  Sencho reads the `env_file:` paths from your `compose.yaml` to discover available env files. If no `env_file:` is declared, a default `.env` in the stack directory is used.
-</Note>
+The same controls apply to the `compose.yaml` and `.env` editors.
 
 ## Diff preview before save
 
-When the **Diff preview before save** toggle is enabled in **Settings → Appearance**, clicking **Save & Deploy** or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane shows the current on-disk content; the right pane shows your unsaved edits, with additions highlighted in green.
+When **Diff preview before save** is enabled in **Settings → Appearance**, clicking **Save & Deploy** or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
 
 <Frame>
-  <img src="/images/compose-diff-preview/diff-modal.png" alt="Diff preview modal showing side-by-side YAML diff with a new comment line highlighted in green on the right" />
+  <img src="/images/compose-diff-preview/diff-modal.png" alt="Diff preview modal showing side-by-side YAML diff with the unsaved version on the right and an ON DISK to UNSAVED legend in the footer" />
 </Frame>
 
 Review the diff, then:
 
-- Click **Save & deploy** (or **Save**) to confirm and write the changes to disk.
+- Click the primary button (**Save & deploy** when triggered from **Save & Deploy**, or **Save** when triggered from **Save Only**) to confirm and write the changes.
 - Click **Cancel** to return to the editor without saving.
 
-If there are no unsaved changes the modal is skipped and the save proceeds directly.
+If there are no unsaved changes the modal is skipped and the save proceeds directly. The toggle is off by default and stored per browser, so each device remembers its own setting.
 
-The toggle is off by default and saved per browser. Each device remembers its own setting independently. Enable it in **Settings → Appearance → Diff preview before save**.
+## Logs
 
-## Container panel
+Below the Command Center the left column reserves the rest of its height for the **Logs** stream. Two modes are available, toggled by the buttons at the top right of the section.
 
-The left column lists all containers that belong to the selected stack under the **CONTAINERS** heading. Each container shows:
+| Mode | What it shows |
+|------|--------------|
+| **Structured** | Parses each line for an ISO 8601 timestamp and severity (info, warn, err) and renders rows with filter chips (`all`, `info`, `warn`, `err`) and a counter on the active level. Strips ANSI control codes and auto-follows new lines while you stay at the bottom; scrolling up reveals a **resume follow** button. The buffer is capped at 10,000 lines and the **Download logs** button writes the current buffer to a `.txt` file. |
+| **Raw terminal** | A full xterm.js terminal that streams the combined container output verbatim with ANSI color preserved. Press `Ctrl+F` to open the inline find bar. The scrollback is 10,000 lines and a download button is available in the toolbar. |
 
-- **Status badge** - `running`, `exited`, `starting`, or `unhealthy` (hover for detailed status text)
-- **Live stats** - CPU %, RAM usage, and network I/O displayed inline, updated every few seconds
-
-### Container actions
-
-Each container row has action buttons on the right side:
-
-| Button | What it does |
-|--------|--------------|
-| **Open App** | Opens the container's web UI in a new tab (uses the detected web port). Only shown when a port is mapped. |
-| **View Live Logs** | Opens a live log stream modal for that container. Only available when the container is running. |
-| **Open Bash Terminal** | Opens an interactive bash session inside the container. Admin only, only available when running. |
-
-<Frame>
-  <img src="/images/editor/container-actions.png" alt="Container row showing status badge, live stats, and action buttons" />
-</Frame>
-
-## Embedded terminal
-
-Below the container list, an embedded terminal streams the combined output from the stack's containers. This provides a persistent view of container logs without opening a separate modal.
-
-The terminal supports search (find text within the log output) and export (download the current log buffer).
-
-### Container terminal (exec)
-
-The terminal modal from the container action buttons gives you an interactive bash shell inside a running container, equivalent to `docker exec -it <id> bash`. It uses a full terminal emulator with colour support, tab completion, and automatic resizing when you resize the browser window.
-
-#### Access requirements
-
-- **Admin role required.** Only admin users see the terminal button in the container actions. Non-admin users cannot open a shell session.
-- **Container must be running.** The button is disabled for stopped containers, and the backend will reject exec attempts against non-running containers.
-- **API token restrictions.** API tokens with `read-only` or `deploy-only` scope cannot open exec sessions. Only `full-admin` API tokens are permitted.
-
-<Frame>
-  <img src="/images/editor/container-exec-modal.png" alt="Container exec modal showing a connected bash session with a root shell prompt" />
-</Frame>
-
-#### Shell selection
-
-Sencho tries `/bin/bash` first. If bash is not available inside the container, it automatically falls back to `/bin/sh`. This happens transparently; no user action is needed.
-
-<Warning>
-  The container terminal requires the container to have `bash` or `sh` installed. Minimal base images (e.g. `scratch`, `distroless`) that ship no shell will not work with container exec.
-</Warning>
-
-#### Troubleshooting
-
-| Symptom | Cause | Resolution |
-|---------|-------|------------|
-| "Container is not running" error | The container stopped between clicking the button and the exec starting | Start the container and try again |
-| "Failed to start shell" error | The container image has no shell binary (`/bin/bash` or `/bin/sh`) | Use an image that includes a shell, or install one in your Dockerfile |
-| Terminal connects but immediately shows "Session ended" | The shell process inside the container exited immediately | Check the container logs for errors; the container's entrypoint may be overriding the shell |
-| Terminal is unresponsive | WebSocket connection dropped silently | Close the modal and reopen it to establish a new session |
+Both modes connect to the same WebSocket and switch instantly without losing the stream.
 
 ## Log viewer
 
-The log viewer (opened from the container action buttons) streams output from a single container in real-time using Server-Sent Events. Logs auto-scroll to the bottom as new lines arrive. Close the modal to stop the stream.
+The **View logs** button on a container row opens a dedicated modal that streams output from a single container in real time using Server-Sent Events. Logs auto-scroll to the bottom as new lines arrive. Close the modal to stop the stream.
+
+## Container exec (bash session)
+
+The **Open bash shell** icon button opens an interactive shell inside a single running container, equivalent to `docker exec -it <id> bash`. The modal uses xterm.js with color, tab completion, and resize handling.
+
+<Frame>
+  <img src="/images/editor/container-exec-modal.png" alt="Bash session modal connected to the plex container running cat slash etc slash os release with a Connected status pill" />
+</Frame>
+
+### Access requirements
+
+- **Admin role required.** The button is rendered only for admin users.
+- **Container must be running.** The button is disabled for stopped containers, and the backend rejects exec attempts against non-running containers.
+- **API token scope.** API tokens with the `read-only` or `deploy-only` scope cannot open exec sessions. Only `full-admin` tokens are accepted.
+
+### Shell selection
+
+Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash is missing. No user action is needed.
+
+<Warning>
+  Minimal base images that ship no shell at all (for example `scratch` or fully `distroless`) will not work with container exec.
+</Warning>
+
+## Troubleshooting
+
+<Accordion title="The compose editor is read-only and I can't type">
+You have not entered edit mode yet. Click **edit** in the Anatomy panel header (or the **Edit** button at the top of the editor card) to enable typing. If the **Edit** button is missing entirely, your role lacks the `stack:edit` permission; ask an admin to grant it.
+</Accordion>
+
+<Accordion title="Save & Deploy is disabled">
+A deploy is already running for this stack. Watch the action bar for the spinning state to clear, then save again.
+</Accordion>
+
+<Accordion title="The .env tab is greyed out">
+The stack has no env file to edit. Add an `env_file:` entry to a service in `compose.yaml` and save, or create a `.env` file in the stack directory through the **Files** tab.
+</Accordion>
+
+<Accordion title='"Container is not running" error when opening a bash session'>
+The container stopped between clicking the button and the exec starting. Start the container from the action bar (or the row's **Start service** option) and try again.
+</Accordion>
+
+<Accordion title='"Failed to start shell" error when opening a bash session'>
+The container image has no shell binary at `/bin/bash` or `/bin/sh`. Use an image that includes a shell, or install one in your Dockerfile.
+</Accordion>
+
+<Accordion title='Bash session connects but immediately shows "Session ended"'>
+The shell process inside the container exited as soon as it started. Check the container logs (the **View logs** button on the same row) for errors; the container's entrypoint may be overriding the shell, or the container itself may be in a crash loop.
+</Accordion>
+
+<Accordion title="Bash session is unresponsive">
+The WebSocket dropped silently. Close the modal and reopen it to start a fresh session; the bash modal does not reconnect automatically.
+</Accordion>
