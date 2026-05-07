@@ -83,7 +83,7 @@ function HeaderShell({
   return (
     <div className="relative border-b border-card-border/60 px-6 pt-6 pb-4 pr-12">
       <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px]', v.rail)} />
-      <div className={cn(KICKER_CLASS, v.kicker)}>
+      <div className={cn(KICKER_CLASS, 'whitespace-nowrap', v.kicker)}>
         {kicker}
       </div>
       <TitleComponent className="mt-1 font-display text-[1.75rem] italic leading-tight text-stat-value">
