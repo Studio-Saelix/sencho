@@ -131,6 +131,14 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Blueprints (Federation pin)
   'PUT /blueprints/*/pin': 'Updated blueprint pin',
+
+  // Fleet secrets
+  'POST /secrets': 'Created secret',
+  'PUT /secrets': 'Updated secret',
+  'DELETE /secrets': 'Deleted secret',
+  'POST /secrets/*/import-from-stack': 'Imported env into secret',
+  'POST /secrets/*/push/preview': 'Previewed secret push',
+  'POST /secrets/*/push': 'Pushed secret',
 };
 
 // Pre-sorted at module load: most specific patterns (by segment count) first.

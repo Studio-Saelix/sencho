@@ -306,6 +306,46 @@ export interface AuditLogEntry {
     summary: string;
 }
 
+export interface SecretRow {
+    id: number;
+    name: string;
+    description: string;
+    current_version: number;
+    created_at: number;
+    created_by: string;
+    updated_at: number;
+}
+
+export interface SecretVersionRow {
+    id: number;
+    secret_id: number;
+    version: number;
+    encrypted_payload: string;
+    key_count: number;
+    created_at: number;
+    created_by: string;
+    note: string;
+}
+
+export type SecretPushStatus = 'ok' | 'failed' | 'skipped';
+
+export interface SecretPushRow {
+    id: number;
+    secret_id: number;
+    version: number;
+    push_id: string;
+    node_id: number;
+    stack_name: string;
+    env_file_basename: string;
+    status: SecretPushStatus;
+    error: string;
+    added_count: number;
+    changed_count: number;
+    unchanged_count: number;
+    pushed_by: string;
+    pushed_at: number;
+}
+
 export type ApiTokenScope = 'read-only' | 'deploy-only' | 'full-admin';
 
 /** Map an API token's scope to the synthesized user role used during request authorization. */
@@ -1030,6 +1070,52 @@ export class DatabaseService {
 
       CREATE INDEX IF NOT EXISTS idx_auto_heal_history_policy_ts
         ON auto_heal_history(policy_id, timestamp DESC);
+
+      CREATE TABLE IF NOT EXISTS secrets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        current_version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        created_by TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_secrets_name ON secrets(name);
+
+      CREATE TABLE IF NOT EXISTS secret_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        secret_id INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        encrypted_payload TEXT NOT NULL,
+        key_count INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        created_by TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        UNIQUE(secret_id, version),
+        FOREIGN KEY(secret_id) REFERENCES secrets(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_secret_versions_secret ON secret_versions(secret_id);
+
+      CREATE TABLE IF NOT EXISTS secret_pushes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        secret_id INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        push_id TEXT NOT NULL,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        env_file_basename TEXT NOT NULL DEFAULT '.env',
+        status TEXT NOT NULL,
+        error TEXT NOT NULL DEFAULT '',
+        added_count INTEGER NOT NULL DEFAULT 0,
+        changed_count INTEGER NOT NULL DEFAULT 0,
+        unchanged_count INTEGER NOT NULL DEFAULT 0,
+        pushed_by TEXT NOT NULL,
+        pushed_at INTEGER NOT NULL,
+        FOREIGN KEY(secret_id) REFERENCES secrets(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_secret_pushes_push ON secret_pushes(push_id);
+      CREATE INDEX IF NOT EXISTS idx_secret_pushes_secret_version ON secret_pushes(secret_id, version);
+      CREATE INDEX IF NOT EXISTS idx_secret_pushes_node ON secret_pushes(node_id, stack_name);
     `);
 
         // Apply migrations safely (ignore if columns already exist)
@@ -4076,5 +4162,116 @@ export class DatabaseService {
 
     public deleteDeployment(blueprintId: number, nodeId: number): void {
         this.db.prepare('DELETE FROM blueprint_deployments WHERE blueprint_id = ? AND node_id = ?').run(blueprintId, nodeId);
+    }
+
+    // --- Secrets ---
+
+    public listSecrets(): SecretRow[] {
+        return this.db.prepare(
+            'SELECT id, name, description, current_version, created_at, created_by, updated_at FROM secrets ORDER BY name ASC'
+        ).all() as SecretRow[];
+    }
+
+    public getSecret(id: number): SecretRow | undefined {
+        return this.db.prepare(
+            'SELECT id, name, description, current_version, created_at, created_by, updated_at FROM secrets WHERE id = ?'
+        ).get(id) as SecretRow | undefined;
+    }
+
+    public listSecretVersions(secretId: number): SecretVersionRow[] {
+        return this.db.prepare(
+            'SELECT id, secret_id, version, encrypted_payload, key_count, created_at, created_by, note FROM secret_versions WHERE secret_id = ? ORDER BY version DESC'
+        ).all(secretId) as SecretVersionRow[];
+    }
+
+    public getCurrentSecretVersion(secretId: number): SecretVersionRow | undefined {
+        return this.db.prepare(
+            `SELECT v.id, v.secret_id, v.version, v.encrypted_payload, v.key_count, v.created_at, v.created_by, v.note
+             FROM secret_versions v
+             INNER JOIN secrets s ON s.id = v.secret_id AND s.current_version = v.version
+             WHERE v.secret_id = ?`
+        ).get(secretId) as SecretVersionRow | undefined;
+    }
+
+    public createSecretWithVersion(input: {
+        name: string;
+        description: string;
+        encryptedPayload: string;
+        keyCount: number;
+        createdBy: string;
+        note: string;
+    }): { id: number; version: number } {
+        const now = Date.now();
+        const txn = this.db.transaction(() => {
+            const insertSecret = this.db.prepare(
+                'INSERT INTO secrets (name, description, current_version, created_at, created_by, updated_at) VALUES (?, ?, 1, ?, ?, ?)'
+            );
+            const result = insertSecret.run(input.name, input.description, now, input.createdBy, now);
+            const secretId = Number(result.lastInsertRowid);
+            this.db.prepare(
+                'INSERT INTO secret_versions (secret_id, version, encrypted_payload, key_count, created_at, created_by, note) VALUES (?, 1, ?, ?, ?, ?, ?)'
+            ).run(secretId, input.encryptedPayload, input.keyCount, now, input.createdBy, input.note);
+            return { id: secretId, version: 1 };
+        });
+        return txn();
+    }
+
+    public updateSecretWithVersion(input: {
+        secretId: number;
+        description: string | null;
+        encryptedPayload: string;
+        keyCount: number;
+        createdBy: string;
+        note: string;
+    }): { version: number } {
+        const now = Date.now();
+        const txn = this.db.transaction(() => {
+            const current = this.db.prepare('SELECT current_version FROM secrets WHERE id = ?').get(input.secretId) as { current_version: number } | undefined;
+            if (!current) throw new Error('Secret not found');
+            const nextVersion = current.current_version + 1;
+            this.db.prepare(
+                'INSERT INTO secret_versions (secret_id, version, encrypted_payload, key_count, created_at, created_by, note) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            ).run(input.secretId, nextVersion, input.encryptedPayload, input.keyCount, now, input.createdBy, input.note);
+            if (input.description === null) {
+                this.db.prepare('UPDATE secrets SET current_version = ?, updated_at = ? WHERE id = ?').run(nextVersion, now, input.secretId);
+            } else {
+                this.db.prepare('UPDATE secrets SET current_version = ?, description = ?, updated_at = ? WHERE id = ?').run(nextVersion, input.description, now, input.secretId);
+            }
+            return { version: nextVersion };
+        });
+        return txn();
+    }
+
+    public deleteSecret(id: number): boolean {
+        const result = this.db.prepare('DELETE FROM secrets WHERE id = ?').run(id);
+        return result.changes > 0;
+    }
+
+    public insertSecretPushes(rows: Array<Omit<SecretPushRow, 'id'>>): void {
+        if (rows.length === 0) return;
+        const stmt = this.db.prepare(
+            `INSERT INTO secret_pushes (secret_id, version, push_id, node_id, stack_name, env_file_basename, status, error, added_count, changed_count, unchanged_count, pushed_by, pushed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        const txn = this.db.transaction((entries: Array<Omit<SecretPushRow, 'id'>>) => {
+            for (const r of entries) {
+                stmt.run(
+                    r.secret_id, r.version, r.push_id, r.node_id, r.stack_name, r.env_file_basename,
+                    r.status, r.error, r.added_count, r.changed_count, r.unchanged_count, r.pushed_by, r.pushed_at,
+                );
+            }
+        });
+        txn(rows);
+    }
+
+    public listSecretPushes(secretId: number, limit = 50): SecretPushRow[] {
+        return this.db.prepare(
+            `SELECT id, secret_id, version, push_id, node_id, stack_name, env_file_basename, status, error,
+                    added_count, changed_count, unchanged_count, pushed_by, pushed_at
+             FROM secret_pushes
+             WHERE secret_id = ?
+             ORDER BY pushed_at DESC
+             LIMIT ?`
+        ).all(secretId, limit) as SecretPushRow[];
     }
 }

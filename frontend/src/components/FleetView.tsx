@@ -1,4 +1,3 @@
-import { useExperimental } from '@/hooks/useExperimental';
 import {
     RefreshCw, Search, Camera,
     Network, SlidersHorizontal,
@@ -20,11 +19,11 @@ import { useLicense } from '@/context/LicenseContext';
 import { AdmiralGate } from './AdmiralGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetConfiguration } from './fleet/FleetConfiguration';
-import { FleetSoonPlaceholder } from './fleet/FleetSoonPlaceholder';
 import { RoutingTab } from './fleet/RoutingTab';
 import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
 import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
+import { SecretsTab } from './fleet/secrets/SecretsTab';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
@@ -33,7 +32,6 @@ interface FleetViewProps {
 export function FleetView({ onNavigateToNode }: FleetViewProps) {
     const { isPaid, license } = useLicense();
     const isAdmiral = isPaid && license?.variant === 'admiral';
-    const experimental = useExperimental();
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -107,15 +105,12 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     <Wrench className="w-4 h-4 mr-1.5" />Fleet Actions
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {experimental && (
-                                <>
-                                    <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-                                    <TabsHighlightItem value="secrets">
-                                        <TabsTrigger value="secrets">
-                                            <KeyRound className="w-4 h-4 mr-1.5" />Secrets
-                                        </TabsTrigger>
-                                    </TabsHighlightItem>
-                                </>
+                            {isPaid && (
+                                <TabsHighlightItem value="secrets">
+                                    <TabsTrigger value="secrets">
+                                        <KeyRound className="w-4 h-4 mr-1.5" />Secrets
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
                             )}
                         </TabsHighlight>
                     </TabsList>
@@ -198,15 +193,9 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 <TabsContent value="actions">
                     <FleetActionsTab nodes={overview.allNodes} />
                 </TabsContent>
-                {experimental && (
+                {isPaid && (
                     <TabsContent value="secrets">
-                        <FleetSoonPlaceholder
-                            icon={<KeyRound className="h-4 w-4" />}
-                            kicker="Secrets"
-                            title="One source of truth for env, creds and certs"
-                            description="Push to selected nodes, rotate centrally, audit who-saw-what. Solves silent drift across copies."
-                            plannedActions={['Sync env', 'Rotate', 'Audit', 'Pin to nodes']}
-                        />
+                        <SecretsTab />
                     </TabsContent>
                 )}
             </Tabs>

@@ -132,6 +132,7 @@
                   "features/fleet-federation",
                   "features/fleet-actions",
                   "features/fleet-sync",
+                  "features/fleet-secrets",
                   "features/fleet-backups",
                   "features/remote-updates",
                   "features/scheduled-operations"

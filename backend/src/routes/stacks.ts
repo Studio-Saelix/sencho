@@ -37,7 +37,7 @@ function notifyActionSuccess(category: NotificationCategory, message: string, st
     .catch(err => console.error('[Stacks] Failed to dispatch activity for %s:', sanitizeForLog(stackName), err));
 }
 
-async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
+export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
   const fsService = FileSystemService.getInstance(nodeId);
   const stackDir = path.join(fsService.getBaseDir(), stackName);
   const defaultEnvPath = path.join(stackDir, '.env');
