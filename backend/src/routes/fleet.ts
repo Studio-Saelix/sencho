@@ -94,6 +94,9 @@ interface FleetNodeOverview {
   latency_ms?: number;
   last_successful_contact?: number | null;
   pilot_last_seen?: number | null;
+  cordoned: boolean;
+  cordoned_at: number | null;
+  cordoned_reason: string | null;
 }
 
 /** Resolve the version to compare nodes against (latest from GitHub, or gateway fallback). */
@@ -162,6 +165,9 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       },
       stacks,
       last_successful_contact: node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   } catch (error) {
     console.error(`[Fleet] Local node ${node.name} error:`, error);
@@ -169,6 +175,9 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       id: node.id, name: node.name, type: node.type, status: 'offline',
       stats: null, systemStats: null, stacks: null,
       last_successful_contact: node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   }
 }
@@ -187,6 +196,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       stacks: null,
       last_successful_contact: node.pilot_last_seen ? Math.floor(node.pilot_last_seen / 1000) : null,
       pilot_last_seen: node.pilot_last_seen ? Math.floor(node.pilot_last_seen / 1000) : null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   }
 
@@ -195,6 +207,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       id: node.id, name: node.name, type: node.type, status: 'offline',
       stats: null, systemStats: null, stacks: null,
       last_successful_contact: node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   }
 
@@ -254,6 +269,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       last_successful_contact: isOnline
         ? Math.floor(completedAt / 1000)
         : node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   } catch (error) {
     console.error(`[Fleet] Remote node ${node.name} error:`, error);
@@ -261,6 +279,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       id: node.id, name: node.name, type: node.type, mode: node.mode, status: 'offline',
       stats: null, systemStats: null, stacks: null,
       last_successful_contact: node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   }
 }
@@ -345,6 +366,9 @@ fleetRouter.get('/overview', authMiddleware, async (_req: Request, res: Response
         stats: null,
         systemStats: null,
         stacks: null,
+        cordoned: nodes[i].cordoned,
+        cordoned_at: nodes[i].cordoned_at,
+        cordoned_reason: nodes[i].cordoned_reason,
       };
     });
 

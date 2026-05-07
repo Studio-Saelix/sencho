@@ -176,6 +176,158 @@ describe('BlueprintReconciler.computeDecision', () => {
         expect(decision.withdraw).toEqual([]);
     });
 
+    it('skips new placements onto cordoned nodes (cordon filter)', () => {
+        const nodeId = seedNode();
+        DatabaseService.getInstance().setNodeCordoned(nodeId, true, 'maintenance');
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(bp, allNodes);
+        expect(decision.deploy).toEqual([]);
+        expect(decision.stateReview).toEqual([]);
+    });
+
+    it('skips state-review for stateful blueprints landing on cordoned nodes', () => {
+        const nodeId = seedNode();
+        DatabaseService.getInstance().setNodeCordoned(nodeId, true, null);
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [nodeId] });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(bp, allNodes);
+        expect(decision.stateReview).toEqual([]);
+        expect(decision.deploy).toEqual([]);
+    });
+
+    it('still redeploys for revision drift on a cordoned node (existing deployment, not a new placement)', () => {
+        const nodeId = seedNode();
+        DatabaseService.getInstance().setNodeCordoned(nodeId, true, null);
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'active',
+            applied_revision: bp.revision - 1,
+        });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(bp, allNodes);
+        expect(decision.deploy.map((n: { id: number }) => n.id)).toContain(nodeId);
+    });
+
+    it('still drift-checks active deployments on a cordoned node', () => {
+        const nodeId = seedNode();
+        DatabaseService.getInstance().setNodeCordoned(nodeId, true, null);
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'active',
+            applied_revision: bp.revision,
+        });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(bp, allNodes);
+        expect(decision.check.map((n: { id: number }) => n.id)).toContain(nodeId);
+    });
+
+    it('honors pin override: desired set is exactly the pinned node, regardless of selector', () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeA] });
+        DatabaseService.getInstance().setBlueprintPinnedNode(bp.id, nodeB);
+        const refreshed = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(refreshed, allNodes);
+        expect(decision.deploy.map((n: { id: number }) => n.id)).toContain(nodeB);
+        expect(decision.deploy.map((n: { id: number }) => n.id)).not.toContain(nodeA);
+    });
+
+    it('pin overrides cordon: pinned blueprint deploys onto a cordoned node', () => {
+        const nodeId = seedNode();
+        DatabaseService.getInstance().setNodeCordoned(nodeId, true, null);
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [] });
+        DatabaseService.getInstance().setBlueprintPinnedNode(bp.id, nodeId);
+        const refreshed = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(refreshed, allNodes);
+        expect(decision.deploy.map((n: { id: number }) => n.id)).toContain(nodeId);
+    });
+
+    it('pin to a non-existent node yields an empty desired set', () => {
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [] });
+        DatabaseService.getInstance().setBlueprintPinnedNode(bp.id, 999_999);
+        const refreshed = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(refreshed, allNodes);
+        expect(decision.deploy).toEqual([]);
+        expect(decision.stateReview).toEqual([]);
+    });
+
+    it('pin shrinks the desired set: stateless deployments on non-pinned nodes are queued for withdraw', () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeA, nodeB] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id, node_id: nodeA, status: 'active', applied_revision: bp.revision,
+        });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id, node_id: nodeB, status: 'active', applied_revision: bp.revision,
+        });
+        DatabaseService.getInstance().setBlueprintPinnedNode(bp.id, nodeA);
+        const refreshed = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(refreshed, allNodes);
+        expect(decision.check.map((n: { id: number }) => n.id)).toContain(nodeA);
+        expect(decision.withdraw.map((n: { id: number }) => n.id)).toContain(nodeB);
+        expect(decision.evictBlocked).toEqual([]);
+    });
+
+    it('pin shrinks the desired set: stateful deployments on non-pinned nodes are queued for evict_blocked', () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [nodeA, nodeB] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id, node_id: nodeA, status: 'active', applied_revision: bp.revision,
+        });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id, node_id: nodeB, status: 'active', applied_revision: bp.revision,
+        });
+        DatabaseService.getInstance().setBlueprintPinnedNode(bp.id, nodeA);
+        const refreshed = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(refreshed, allNodes);
+        expect(decision.evictBlocked.map((n: { id: number }) => n.id)).toContain(nodeB);
+        expect(decision.withdraw).toEqual([]);
+    });
+
+    it('deleting the pinned node clears the pin from the blueprint', () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [] });
+        DatabaseService.getInstance().setBlueprintPinnedNode(bp.id, nodeId);
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)!.pinned_node_id).toBe(nodeId);
+        DatabaseService.getInstance().deleteNode(nodeId);
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)!.pinned_node_id).toBeNull();
+    });
+
+    it('clearing the pin restores selector behavior on the next tick', () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeA] });
+        DatabaseService.getInstance().setBlueprintPinnedNode(bp.id, nodeB);
+        DatabaseService.getInstance().setBlueprintPinnedNode(bp.id, null);
+        const refreshed = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(refreshed, allNodes);
+        expect(decision.deploy.map((n: { id: number }) => n.id)).toContain(nodeA);
+        expect(decision.deploy.map((n: { id: number }) => n.id)).not.toContain(nodeB);
+    });
+
     it('matches via labels selector and respects label changes', () => {
         const nodeA = seedNode();
         const nodeB = seedNode();

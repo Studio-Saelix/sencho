@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Pencil, Play, Power, Trash2 } from 'lucide-react';
+import { Pencil, Pin, Play, Power, Trash2 } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
@@ -264,6 +264,18 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                     </SheetSection>
                 ) : (
                     <>
+                        {blueprint.pinned_node_id !== null && (
+                            <SheetSection title="Pin" hideHeader>
+                                <div className="flex items-start gap-2 rounded-md border border-card-border bg-glass-highlight px-3 py-2">
+                                    <Pin className="w-3.5 h-3.5 mt-0.5 text-foreground shrink-0" />
+                                    <div className="text-xs text-stat-value">
+                                        <span className="font-medium">Pinned to {nodes.find(n => n.id === blueprint.pinned_node_id)?.name ?? `node ${blueprint.pinned_node_id}`}.</span>{' '}
+                                        <span className="text-stat-subtitle">Selector is overridden. Manage in the Federation tab.</span>
+                                    </div>
+                                </div>
+                            </SheetSection>
+                        )}
+
                         {blueprint.description && (
                             <SheetSection title="Description" hideHeader>
                                 <p className="text-xs text-stat-subtitle">{blueprint.description}</p>
@@ -279,6 +291,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                 onWithdraw={openWithdraw}
                                 onAcceptStateReview={openAcceptStateReview}
                                 onRetry={handleRetryRow}
+                                pinnedNodeId={blueprint.pinned_node_id}
                             />
                         </SheetSection>
 
