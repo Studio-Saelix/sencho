@@ -3872,6 +3872,38 @@ export class DatabaseService {
         txn(rows);
     }
 
+    /**
+     * Null out `vulnerability_scans.policy_evaluation` rows whose `$.policyId`
+     * no longer exists in `scan_policies`. Used after replicated rows are
+     * wiped (sync replace, demote) so cached scan banners do not reference
+     * deleted policies.
+     */
+    public clearOrphanPolicyEvaluations(): void {
+        this.db
+            .prepare(
+                `UPDATE vulnerability_scans
+                    SET policy_evaluation = NULL
+                  WHERE policy_evaluation IS NOT NULL
+                    AND CAST(json_extract(policy_evaluation, '$.policyId') AS INTEGER)
+                        NOT IN (SELECT id FROM scan_policies)`,
+            )
+            .run();
+    }
+
+    /**
+     * Atomically delete every replicated_from_control row from both
+     * scan_policies and cve_suppressions, then null out any orphaned
+     * policy_evaluation cache. Used by the demote endpoint and any future
+     * "drop replicated state" operation.
+     */
+    public clearReplicatedRows(): void {
+        this.transaction(() => {
+            this.db.prepare('DELETE FROM scan_policies WHERE replicated_from_control = 1').run();
+            this.db.prepare('DELETE FROM cve_suppressions WHERE replicated_from_control = 1').run();
+            this.clearOrphanPolicyEvaluations();
+        });
+    }
+
     // --- Stack Labels ---
 
     public getLabels(nodeId: number): Label[] {
