@@ -18,6 +18,7 @@ import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { SuppressionsPanel } from './SuppressionsPanel';
+import { MisconfigAckPanel } from './MisconfigAckPanel';
 
 const SEVERITY_OPTIONS: Array<{ value: VulnSeverity; label: string }> = [
   { value: 'CRITICAL', label: 'Critical' },
@@ -502,6 +503,8 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
         ))}
 
       {!isRemote && <SuppressionsPanel isReplica={isReplica} />}
+
+      {!isRemote && <MisconfigAckPanel isReplica={isReplica} />}
 
       {isPaid && (
         <>

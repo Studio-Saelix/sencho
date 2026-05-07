@@ -16,6 +16,7 @@ import type {
     VulnSeverity,
 } from './DatabaseService';
 import type { SuppressionDecision } from '../utils/suppression-filter';
+import type { MisconfigAcknowledgementDecision } from '../utils/misconfig-ack-filter';
 
 export interface SarifSuppression {
     kind: 'external';
@@ -67,6 +68,7 @@ export interface SarifDocument {
 }
 
 type SuppressedVulnerability = VulnerabilityDetail & Partial<SuppressionDecision>;
+type AcknowledgedMisconfig = MisconfigFinding & Partial<MisconfigAcknowledgementDecision>;
 
 const SEVERITY_TO_LEVEL: Record<VulnSeverity, 'error' | 'warning' | 'note' | 'none'> = {
     CRITICAL: 'error',
@@ -94,6 +96,19 @@ function toSuppressions(decision: Partial<SuppressionDecision>): SarifSuppressio
             kind: 'external',
             status: 'accepted',
             justification: decision.suppression_reason?.trim() || 'Suppressed in Sencho',
+        },
+    ];
+}
+
+function toAckSuppressions(
+    decision: Partial<MisconfigAcknowledgementDecision>,
+): SarifSuppression[] | undefined {
+    if (!decision.acknowledged) return undefined;
+    return [
+        {
+            kind: 'external',
+            status: 'accepted',
+            justification: decision.acknowledgement_reason?.trim() || 'Acknowledged in Sencho',
         },
     ];
 }
@@ -191,7 +206,7 @@ function secretResult(finding: SecretFinding): SarifResult {
     };
 }
 
-function misconfigResult(finding: MisconfigFinding): SarifResult {
+function misconfigResult(finding: AcknowledgedMisconfig): SarifResult {
     const parts = [finding.title || finding.rule_id];
     if (finding.message) parts.push(finding.message);
     if (finding.resolution) parts.push(`Fix: ${finding.resolution}`);
@@ -202,6 +217,7 @@ function misconfigResult(finding: MisconfigFinding): SarifResult {
         locations: [
             { physicalLocation: { artifactLocation: { uri: finding.target } } },
         ],
+        suppressions: toAckSuppressions(finding),
         properties: { 'security-severity': SEVERITY_TO_SCORE[finding.severity] },
     };
 }
@@ -210,7 +226,7 @@ export function generateSarif(
     scan: VulnerabilityScan,
     vulnerabilities: SuppressedVulnerability[],
     secrets: SecretFinding[],
-    misconfigs: MisconfigFinding[],
+    misconfigs: AcknowledgedMisconfig[],
 ): SarifDocument {
     const rules = new Map<string, SarifRule>();
     for (const v of vulnerabilities) if (!rules.has(v.vulnerability_id)) rules.set(v.vulnerability_id, vulnRule(v));

@@ -93,6 +93,24 @@ function validateCveSuppressionRow(row: unknown): string | null {
   return null;
 }
 
+function validateMisconfigAcknowledgementRow(row: unknown): string | null {
+  if (!row || typeof row !== 'object') return 'row must be an object';
+  const r = row as Record<string, unknown>;
+  if (typeof r.rule_id !== 'string' || r.rule_id.length === 0 || r.rule_id.length > 200) return 'rule_id must be a non-empty string up to 200 chars';
+  if (r.stack_pattern !== null && typeof r.stack_pattern !== 'string') return 'stack_pattern must be a string or null';
+  if (typeof r.stack_pattern === 'string') {
+    if (r.stack_pattern.length > 300) return 'stack_pattern is too long';
+    const patternError = validateStackPatternForRedos(r.stack_pattern);
+    if (patternError) return patternError;
+  }
+  if (typeof r.reason !== 'string') return 'reason must be a string';
+  if (r.reason.length > 2000) return 'reason is too long';
+  if (typeof r.created_by !== 'string' || r.created_by.length > 200) return 'created_by must be a string';
+  if (typeof r.created_at !== 'number') return 'created_at must be a number';
+  if (r.expires_at !== null && typeof r.expires_at !== 'number') return 'expires_at must be a number or null';
+  return null;
+}
+
 interface FleetNodeOverview {
   id: number;
   name: string;
@@ -327,7 +345,11 @@ fleetRouter.get('/role', authMiddleware, (req: Request, res: Response): void => 
 fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response): void => {
   if (!requireNodeProxy(req, res)) return;
   const resource = req.params.resource;
-  if (resource !== 'scan_policies' && resource !== 'cve_suppressions') {
+  if (
+    resource !== 'scan_policies'
+    && resource !== 'cve_suppressions'
+    && resource !== 'misconfig_acknowledgements'
+  ) {
     res.status(400).json({ error: `Unsupported sync resource: ${resource}` });
     return;
   }
@@ -353,7 +375,12 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
     res.status(413).json({ error: `Too many rows (max ${MAX_SYNC_ROWS})` });
     return;
   }
-  const validator = resource === 'scan_policies' ? validateScanPolicyRow : validateCveSuppressionRow;
+  const validator =
+    resource === 'scan_policies'
+      ? validateScanPolicyRow
+      : resource === 'cve_suppressions'
+        ? validateCveSuppressionRow
+        : validateMisconfigAcknowledgementRow;
   for (let i = 0; i < rows.length; i++) {
     const err = validator(rows[i]);
     if (err) {
