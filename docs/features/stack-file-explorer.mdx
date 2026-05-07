@@ -1,9 +1,13 @@
 ---
 title: Stack File Explorer
-description: Browse, edit, upload, and manage files inside a stack's directory from the dashboard.
+description: Browse, view, edit, upload, rename, and chmod every file inside a stack's directory from the dashboard.
 ---
 
-The file explorer gives you direct access to everything inside a stack's directory: configuration files, certificates, scripts, static assets, and any other files your containers depend on. It lives on the **Files** tab inside the stack editor.
+The file explorer gives you direct access to everything inside a stack's directory: configuration files, certificates, scripts, static assets, and any other files your containers depend on. It lives on the **Files** tab inside the stack editor, alongside the dedicated `compose.yaml` and `.env` editors.
+
+<Frame>
+  <img src="/images/stack-file-explorer/overview.png" alt="Files tab open with a populated tree on the left, a YAML file open in the editor on the right, and the Anatomy panel in the background" />
+</Frame>
 
 <Note>
   The explorer is scoped to the stack's own directory. You cannot browse other stacks or navigate above the stack root.
@@ -11,94 +15,189 @@ The file explorer gives you direct access to everything inside a stack's directo
 
 ## Opening the file explorer
 
-Select any stack in the sidebar, then click the **Files** tab in the editor. The left panel shows the directory tree; clicking a file opens it in the viewer on the right.
+1. Click any stack in the left sidebar.
+2. Click **edit** in the right-hand Anatomy panel header to open the editor.
+3. Switch to the **Files** tab.
+
+The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files tab in one click.
 
 ## Tiers at a glance
 
 <CardGroup cols={2}>
   <Card title="Community" icon="eye">
-    Browse the directory tree and view text files in read-only mode.
+    Browse the directory tree, view text files in read-only mode, and inspect file permissions.
   </Card>
   <Card title="Skipper" icon="pencil">
-    Full read/write access: upload, download, edit and save, create folders, and delete files or directories. Admiral tier includes the same access.
+    Full read and write: upload, download, edit and save, create files and folders, rename, change permissions, and delete. Admiral inherits the same access.
   </Card>
 </CardGroup>
 
+## Layout
+
+The Files tab splits into two panes. The left pane holds the upload affordance, the new-folder button, and the directory tree. The right pane is the action bar plus the file viewer.
+
+<Frame>
+  <img src="/images/stack-file-explorer/layout-panes.png" alt="Files tab two-pane layout showing the upload widget and tree on the left and the file viewer on the right" />
+</Frame>
+
 ## Browsing the directory tree
 
-The tree lists all files and folders in the stack directory. Folders are sorted before files, and items within each group are sorted alphabetically.
+Folders sort before files, and entries within each group sort alphabetically.
 
-Click a folder to expand or collapse it. Click a file to open it in the viewer panel on the right.
+Click a folder to expand or collapse it. Click a file to open it in the viewer on the right. Symlinks render with a chain icon and behave like files when clicked.
 
-### Protected files
+**Display cap.** Each directory render is capped at 500 entries. A folder with more than 500 children shows the first 500 alphabetically and appends `Showing 500 of N - refine in shell` at the bottom of the list. For directories with more entries, work from a host shell.
 
-`compose.yaml`, `docker-compose.yaml`, `docker-compose.yml`, `.env`, and any `.env.*` variants are shown in the tree, but clicking them does not open the generic file viewer. Instead, Sencho navigates to the dedicated **Compose** or **Env** tab editor for that file. This ensures you always use the purpose-built editor with save-and-deploy controls for your main stack files.
+## Protected files
+
+The amber dot in the tree marks the five canonical stack files: `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, and `.env`.
+
+<Frame>
+  <img src="/images/stack-file-explorer/protected-tree-marker.png" alt="File tree with amber dot markers next to compose.yaml and .env" />
+</Frame>
+
+Two behaviours follow from the marker:
+
+- **Dedicated tab redirect.** Clicking `compose.yaml`, `compose.yml`, or `.env` jumps you to the matching **compose.yaml** or **.env** tab so the save-and-deploy controls stay in front of you. `docker-compose.yaml` and `docker-compose.yml` are still flagged as protected, but they open in the regular file viewer because they are not the canonical Sencho file.
+- **Type-to-confirm delete.** All five protected names require typing the filename to confirm a delete. See the Deleting section below.
 
 ## Viewing files
 
-When you click a text file, its contents appear in the editor panel on the right.
-
-**Viewing limits:**
+When you click a text file, its contents appear in the editor on the right. The Monaco editor auto-detects the language from the extension.
 
 | File type | Behaviour |
 |-----------|-----------|
-| Text file up to 2 MB | Displayed inline with syntax highlighting. |
-| Text file over 2 MB | "File is too large to preview" message with a **Download** button (Skipper+). |
-| Binary file | "Binary file detected" message with a **Download** button (Skipper+). |
+| Text file up to 2 MB | Rendered inline with syntax highlighting. |
+| Text file over 2 MB | Panel with the filename and size, plus a **Download** button on Skipper+. |
+| Binary file | Same panel layout, label is `Binary file`. |
 
-On Community, the Download button is hidden for files that exceed the preview limit. To access large or binary files from the Community tier, use the host terminal or `docker cp` from your server.
+On Community, the panel for over-2-MB and binary files omits the Download button. To pull oversized or binary files from Community, use a host shell or `docker cp`.
 
 ## Editing and saving (Skipper+)
 
-Text files open in read-only mode by default. Click **Edit** in the toolbar to enable editing. The editor accepts plain text input.
+When you have stack edit permission and a paid tier, the editor opens in write mode. The toolbar shows the filename and a **Save** button that activates as soon as there are unsaved changes.
 
-When you're done, click **Save** to write the file to disk. Unsaved changes are discarded when you navigate away or close the tab.
+When you do not, the toolbar shows a `Read-only` chip and the editor refuses input.
+
+<Frame>
+  <img src="/images/stack-file-explorer/viewer-edit-mode.png" alt="Viewer toolbar showing the filename label and the Save button next to a YAML buffer" />
+</Frame>
+
+Click **Save** to write the file to disk. Navigating away from the file before saving discards the unsaved edits.
 
 <Warning>
-  Editing a file does not restart any containers. If your stack reads the file at runtime (e.g. a config file mounted as a volume), restart the relevant service after saving for the change to take effect.
+  Editing a file does not restart any containers. If your stack reads the file at runtime (for example, a config file mounted as a volume), restart the relevant service after saving so the container picks up the new content.
 </Warning>
+
+## Creating files and folders (Skipper+)
+
+The toolbar **New folder** button at the top of the tree creates a folder in the currently selected directory (the parent of the file you have open, or the stack root if nothing is open). The button is hidden on Community.
+
+Right-click any folder for **New File** and **New Folder** entries that scope to the right-clicked folder.
+
+<Frame>
+  <img src="/images/stack-file-explorer/new-file-dialog.png" alt="New file modal scoped to the nginx folder, with the file name field populated and a Create button" />
+</Frame>
+
+Filenames cannot be empty, cannot contain `/` or `\`, and cannot be `.` or `..`. The Create button stays disabled until the input passes validation.
 
 ## Uploading files (Skipper+)
 
-Click **Upload** in the file explorer toolbar, then select one or more files from your local machine. Files are uploaded into the currently selected directory.
+The dashed **Upload file** affordance at the top of the tree opens a file picker. Uploads are one file at a time.
 
-**Limits:**
+| Limit | Value |
+|-------|-------|
+| Maximum file size | 25 MB. Uploads above the limit return a 413 error with `TOO_LARGE`. |
+| Target directory | The currently selected directory, or the stack root if no file is open. |
+| Same-name files | Overwritten without prompt. |
 
-- Maximum 25 MB per file.
-- Files larger than 25 MB are rejected with an error. Split large archives or use `scp` / `rsync` for bulk transfers.
+On Community the upload affordance is hidden entirely.
 
-If a file with the same name already exists in the target directory, it is overwritten.
+<Tip>
+  For bulk transfers or files above 25 MB, use `scp` or `rsync` from your workstation directly to the stack directory on the host.
+</Tip>
 
 ## Downloading files (Skipper+)
 
-Click the **Download** button in the file toolbar (for the currently open file) or right-click a file in the tree and choose **Download**. Files are streamed directly to your browser. The download limit is 100 MB per file.
+When a file is selected on Skipper+, the right pane action bar shows **Download**. Files stream straight to your browser. Files that exceed the inline preview limit also expose a Download button inside the oversized-file panel itself.
 
-<Tip>
-  For files larger than 100 MB, use `docker cp`, `scp`, or mount an export volume and copy from there.
-</Tip>
+## Renaming (Skipper+)
 
-## Creating folders (Skipper+)
+Right-click any file or folder and choose **Rename**. The dialog accepts a new name following the same rules as creation.
 
-Click the **New Folder** button in the tree toolbar, or right-click an existing folder and choose **New Folder**. Enter a name and confirm. The new folder is created immediately and appears in the tree.
+The rename is in-place; cross-directory moves are not supported. To move an entry between directories, copy it via the host shell or upload to the new location and delete the original.
 
-Folder names follow the same rules as filenames on your host OS. Avoid leading dots unless you intend a hidden directory.
+## Permissions (chmod)
 
-## Deleting files and folders (Skipper+)
+Right-click any file and choose **Permissions** to inspect or edit its Unix mode bits. The dialog shows a 3 by 3 grid of `r` / `w` / `x` toggles for Owner, Group, and Other, plus the current octal value.
 
-Right-click a file or folder in the tree and choose **Delete**. A confirmation prompt appears before anything is removed.
+<Frame>
+  <img src="/images/stack-file-explorer/permissions-dialog.png" alt="Permissions modal for a file showing the rwx grid for Owner, Group, and Other plus the octal value 644" />
+</Frame>
 
-**Deleting a folder** removes the folder and all of its contents recursively. The confirmation dialog lists the path so you can verify before proceeding.
+On Community the dialog opens read-only: the toggles render the current state and the footer shows only **Close**. On Skipper+ the toggles are interactive and the footer adds **Save**.
+
+<Note>
+  Permissions are applied with `chmod`. Symlinks may not honour the change depending on the host kernel.
+</Note>
+
+## Deleting (Skipper+)
+
+There are three delete entry points. All three open the same confirmation modal.
+
+- **Toolbar delete.** With a file open in the viewer, click **Delete** in the right-pane action bar.
+- **Context-menu delete.** Right-click any file or folder in the tree and choose **Delete**.
+- **Non-empty folder delete.** The first attempt is non-recursive. If the folder has contents, the modal switches to `This folder is not empty. Delete everything inside?` with a destructive **Delete all** button.
+
+When the entry is one of the five protected names, the modal asks you to type the filename before the destructive button activates.
+
+<Frame>
+  <img src="/images/stack-file-explorer/delete-protected-confirm.png" alt="Delete confirmation modal for compose.yaml requiring the user to type the filename before the destructive button activates" />
+</Frame>
 
 <Warning>
-  Deletions are permanent. Sencho does not keep a trash bin or undo history for file operations.
+  Deletes are permanent. Sencho does not keep a trash bin or undo history for file operations.
 </Warning>
+
+## Context menu reference
+
+<Frame>
+  <img src="/images/stack-file-explorer/context-menu-folder.png" alt="Right-click menu on a folder showing New File, New Folder, Rename, and Delete entries" />
+</Frame>
+
+<Frame>
+  <img src="/images/stack-file-explorer/context-menu-file.png" alt="Right-click menu on a file showing Rename, Permissions, and Delete entries" />
+</Frame>
+
+| Right-click target | Skipper+ entries | Community admin entries |
+|---|---|---|
+| Folder | New File, New Folder, Rename, Delete | Rename, Delete |
+| File | Rename, Permissions, Delete | Rename, Permissions, Delete |
+
+On Community, the New File and New Folder entries on a folder are hidden. Rename and Delete are gated by the `stack:edit` permission, so admins still see them, but the underlying API rejects the call with a 403 toast on a non-paid tier. Use Skipper+ for any write action; the Permissions dialog opens for everyone but only Skipper+ can save changes.
 
 ## Troubleshooting
 
-| Symptom | Cause | Resolution |
-|---------|-------|------------|
-| File shows as "Binary file detected" but it is a text file | The binary detection heuristic found null bytes or a high proportion of non-printable characters, which can happen with certain encodings or line endings | Download the file, edit it locally or via an SSH session, then re-upload. Alternatively, open a host terminal and edit with `nano` or `vim`. |
-| Upload fails with a 413 error | The file exceeds the 25 MB per-file limit | Compress or split the file before uploading, or transfer it via `scp` / `rsync` directly to the stack directory on the host. |
-| Cannot delete a folder | The UI requires confirmation before a recursive delete | Confirm the deletion prompt. If the error persists, check whether a running container has an open file handle inside that directory, which can block the delete on some OS configurations. Stop the relevant service and retry. |
-| File saved but container still reads old content | The container caches the file at startup or the mount is read-only inside the container | Restart the service after saving so the container picks up the new file. |
-| Download button not visible | You are on the Community tier, and the file exceeds the preview limit or is binary | Upgrade to Skipper to enable downloads, or access the file via the host terminal or `docker cp`. |
+<AccordionGroup>
+  <Accordion title="File shows as 'Binary file detected' but it is a text file">
+    The binary detection heuristic flagged null bytes or a high proportion of non-printable characters in the file's first kilobytes. This can happen with certain encodings, non-UTF-8 byte sequences, or unusual line-ending mixes. Download the file, edit it locally or via a host terminal, then re-upload.
+  </Accordion>
+  <Accordion title="Upload fails with a 413 error">
+    The file exceeds the 25 MB per-file upload limit. Compress or split the file before uploading, or transfer it via `scp` or `rsync` directly to the stack directory on the host.
+  </Accordion>
+  <Accordion title="Cannot delete a folder">
+    The first delete attempt is non-recursive. If the folder is not empty, the dialog switches to `This folder is not empty. Delete everything inside?`. Click **Delete all** to remove the folder and its contents. If the error persists, check whether a running container has an open file handle inside that directory; stop the relevant service and retry.
+  </Accordion>
+  <Accordion title="File saved but the container still reads the old content">
+    The container caches the file at startup, or the mount is configured read-only inside the container. Restart the service after saving so the container picks up the new file.
+  </Accordion>
+  <Accordion title="Download button is missing">
+    You are on the Community tier. Downloads are a Skipper+ feature. To pull large or binary files from Community, use a host terminal or `docker cp`.
+  </Accordion>
+  <Accordion title="The tree shows 'Showing 500 of N - refine in shell'">
+    Each directory render is capped at 500 entries to keep the tree responsive. The first 500 entries alphabetically are shown. To work with the entries past the cap, drop into a host shell with `cd` into the stack directory.
+  </Accordion>
+  <Accordion title="Rename or Delete returned a 403">
+    Rename and Delete in the file context menu are write operations that require Skipper+. The menu items appear for any user with the `stack:edit` permission so a Community admin can see them, but the API rejects the call. Upgrade to Skipper+ to enable these actions, or perform the rename or delete from a host shell.
+  </Accordion>
+</AccordionGroup>
