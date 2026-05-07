@@ -47,6 +47,7 @@ import { containersRouter, portsRouter } from './routes/containers';
 import { nodesRouter } from './routes/nodes';
 import { stacksRouter } from './routes/stacks';
 import { stackActivityRouter } from './routes/stackActivity';
+import { secretsRouter } from './routes/secrets';
 
 // Suppress [DEP0060] DeprecationWarning emitted by http-proxy@1.18.1 which calls
 // util._extend internally. The warning fires at runtime when createProxyServer() is
@@ -95,6 +96,7 @@ app.use('/api/convert', convertRouter);
 app.use('/api/alerts', alertsRouter);
 app.use('/api/labels', labelsRouter);
 app.use('/api/stacks', stackLabelsRouter);
+app.use('/api/secrets', secretsRouter);
 app.use('/api/api-tokens', apiTokensRouter);
 app.use('/api/audit-log', auditLogRouter);
 app.use('/api/fleet', fleetRouter);

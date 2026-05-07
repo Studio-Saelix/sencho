@@ -130,6 +130,7 @@
                   "features/sencho-mesh",
                   "features/fleet-view",
                   "features/fleet-sync",
+                  "features/fleet-secrets",
                   "features/fleet-backups",
                   "features/remote-updates",
                   "features/scheduled-operations"
