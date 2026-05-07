@@ -3,13 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import {
   Table,
   TableBody,
@@ -153,198 +147,177 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
   };
 
   const compareDisabled = selected.length !== 2;
+  const meta = `${total} scan${total === 1 ? '' : 's'} · ${groups.length} image${groups.length === 1 ? '' : 's'}`;
+  const footerContext = `Node ${activeNode?.name ?? '—'}`;
 
   return (
-    <Sheet open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
-      <SheetContent className="sm:max-w-4xl flex flex-col p-0 gap-0">
-        <SheetHeader className="px-6 pt-6 pb-4 pr-14 border-b border-border space-y-2">
-          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-            Security · Node {activeNode?.name ?? '-'}
+    <SystemSheet
+      open={open}
+      onOpenChange={(next) => { if (!next) onClose(); }}
+      crumb={['Security', 'Scan history']}
+      name="Scan history"
+      meta={meta}
+      primaryAction={isPaid ? {
+        label: `Compare (${selected.length}/2)`,
+        icon: GitCompare,
+        onClick: compareSelected,
+        disabled: compareDisabled,
+      } : undefined}
+      secondaryActions={[{
+        label: 'Refresh',
+        icon: RefreshCw,
+        onClick: () => load(safePage, search),
+        disabled: loading,
+      }]}
+      footerContext={footerContext}
+      size="xl"
+    >
+      <SheetSection title="Scans" hideHeader>
+        <div className="flex items-center gap-3 mb-3 flex-wrap">
+          <div className="relative flex-1 min-w-[200px] max-w-sm">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
+            <Input
+              placeholder="Search by image..."
+              value={searchDraft}
+              onChange={(e) => setSearchDraft(e.target.value)}
+              className="pl-8"
+            />
           </div>
-          <div className="flex items-center justify-between gap-3">
-            <SheetTitle className="font-display italic text-2xl">Scan history</SheetTitle>
-            <div className="flex items-center gap-2">
-              {isPaid && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="border-border"
-                  onClick={compareSelected}
-                  disabled={compareDisabled}
-                  title={compareDisabled
-                    ? 'Select exactly two completed scans to compare'
-                    : 'Compare the two selected scans'}
-                >
-                  <GitCompare className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                  Compare ({selected.length}/2)
-                </Button>
-              )}
+          {needsPagination && (
+            <div className="flex items-center gap-1 ml-auto" aria-live="polite">
               <Button
-                variant="outline"
-                size="sm"
-                className="border-border"
-                onClick={() => load(safePage, search)}
-                disabled={loading}
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={() => setPage(Math.max(0, safePage - 1))}
+                disabled={safePage === 0}
+                aria-label="Previous page"
               >
-                <RefreshCw
-                  className={cn('w-4 h-4 mr-2', loading && 'animate-spin')}
-                  strokeWidth={1.5}
-                />
-                Refresh
+                <ChevronLeft className="w-4 h-4" strokeWidth={1.5} />
+              </Button>
+              <span
+                className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center"
+                aria-label={`Page ${safePage + 1} of ${totalPages}`}
+              >
+                {safePage + 1} / {totalPages}
+              </span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={() => setPage(Math.min(totalPages - 1, safePage + 1))}
+                disabled={safePage >= totalPages - 1}
+                aria-label="Next page"
+              >
+                <ChevronRight className="w-4 h-4" strokeWidth={1.5} />
               </Button>
             </div>
-          </div>
-          <SheetDescription className="text-sm text-muted-foreground">
-            Completed vulnerability scans on this node, grouped by image. Select two to compare.
-          </SheetDescription>
-        </SheetHeader>
-        <div className="flex-1 flex flex-col px-6 py-4 overflow-hidden">
-          <div className="flex items-center gap-3 mb-4 flex-wrap">
-            <div className="relative flex-1 min-w-[200px] max-w-sm">
-              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
-              <Input
-                placeholder="Search by image..."
-                value={searchDraft}
-                onChange={(e) => setSearchDraft(e.target.value)}
-                className="pl-8"
-              />
-            </div>
-            {needsPagination && (
-              <div className="flex items-center gap-1 ml-auto" aria-live="polite">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6"
-                  onClick={() => setPage(Math.max(0, safePage - 1))}
-                  disabled={safePage === 0}
-                  aria-label="Previous page"
-                >
-                  <ChevronLeft className="w-4 h-4" strokeWidth={1.5} />
-                </Button>
-                <span
-                  className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center"
-                  aria-label={`Page ${safePage + 1} of ${totalPages}`}
-                >
-                  {safePage + 1} / {totalPages}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6"
-                  onClick={() => setPage(Math.min(totalPages - 1, safePage + 1))}
-                  disabled={safePage >= totalPages - 1}
-                  aria-label="Next page"
-                >
-                  <ChevronRight className="w-4 h-4" strokeWidth={1.5} />
-                </Button>
-              </div>
-            )}
-          </div>
-
-          {groups.length === 0 && !loading ? (
-            <div className="flex flex-col items-center justify-center text-center py-16 gap-2">
-              <ShieldCheck className="w-8 h-8 text-muted-foreground" strokeWidth={1.5} />
-              <div className="text-sm text-muted-foreground">
-                {search
-                  ? 'No completed scans match your search.'
-                  : 'No scans have completed on this node yet.'}
-              </div>
-            </div>
-          ) : (
-            <ScrollArea className="flex-1 min-h-0">
-              <div className="space-y-5 pr-2">
-                {groups.map((group) => (
-                  <div key={group.image_ref}>
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <span className="font-mono text-sm truncate" title={group.image_ref}>
-                        {group.image_ref}
-                      </span>
-                      <span className="text-xs text-stat-subtitle">
-                        {group.scans.length} scan{group.scans.length === 1 ? '' : 's'}
-                      </span>
-                    </div>
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-[40px]" />
-                          <TableHead className="w-[180px]">Scanned</TableHead>
-                          <TableHead className="w-[120px]">Trigger</TableHead>
-                          <TableHead className="w-[120px]">Highest</TableHead>
-                          <TableHead className="w-[90px] text-right">Total</TableHead>
-                          <TableHead className="w-[90px] text-right">Fixable</TableHead>
-                          <TableHead />
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {group.scans.map((scan) => {
-                          const isSelected = selected.includes(scan.id);
-                          return (
-                            <TableRow
-                              key={scan.id}
-                              className={cn(isSelected && 'bg-accent/30')}
-                            >
-                              <TableCell>
-                                <Checkbox
-                                  checked={isSelected}
-                                  onCheckedChange={() => toggleSelect(scan.id)}
-                                  aria-label={`Select scan ${scan.id}`}
-                                />
-                              </TableCell>
-                              <TableCell className="font-mono text-xs">
-                                {new Date(scan.scanned_at).toLocaleString()}
-                              </TableCell>
-                              <TableCell className="font-mono text-xs capitalize">
-                                {scan.triggered_by}
-                              </TableCell>
-                              <TableCell>
-                                {scan.highest_severity ? (
-                                  <SeverityChip severity={scan.highest_severity} />
-                                ) : (
-                                  <span className="text-xs text-success font-mono">none</span>
-                                )}
-                              </TableCell>
-                              <TableCell className="text-right font-mono text-xs tabular-nums">
-                                {scan.total_vulnerabilities}
-                              </TableCell>
-                              <TableCell className="text-right font-mono text-xs tabular-nums text-success">
-                                {scan.fixable_count}
-                              </TableCell>
-                              <TableCell className="text-right">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 text-xs"
-                                  onClick={() => setInspectScanId(scan.id)}
-                                >
-                                  Open
-                                </Button>
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                  </div>
-                ))}
-              </div>
-            </ScrollArea>
           )}
         </div>
 
-        <ScanComparisonSheet
-          baselineScanId={compareIds?.[0] ?? null}
-          currentScanId={compareIds?.[1] ?? null}
-          onClose={() => setCompareIds(null)}
-        />
+        {groups.length === 0 && !loading ? (
+          <div className="flex flex-col items-center justify-center text-center py-16 gap-2">
+            <ShieldCheck className="w-8 h-8 text-muted-foreground" strokeWidth={1.5} />
+            <div className="text-sm text-muted-foreground">
+              {search
+                ? 'No completed scans match your search.'
+                : 'No scans have completed on this node yet.'}
+            </div>
+          </div>
+        ) : (
+          <ScrollArea block className="max-h-[60vh]">
+            <div className="space-y-5">
+              {groups.map((group) => (
+                <div key={group.image_ref}>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="font-mono text-sm truncate" title={group.image_ref}>
+                      {group.image_ref}
+                    </span>
+                    <span className="text-xs text-stat-subtitle">
+                      {group.scans.length} scan{group.scans.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-[40px]" />
+                        <TableHead className="w-[180px]">Scanned</TableHead>
+                        <TableHead className="w-[120px]">Trigger</TableHead>
+                        <TableHead className="w-[120px]">Highest</TableHead>
+                        <TableHead className="w-[90px] text-right">Total</TableHead>
+                        <TableHead className="w-[90px] text-right">Fixable</TableHead>
+                        <TableHead />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {group.scans.map((scan) => {
+                        const isSelected = selected.includes(scan.id);
+                        return (
+                          <TableRow
+                            key={scan.id}
+                            className={cn(isSelected && 'bg-accent/30')}
+                          >
+                            <TableCell>
+                              <Checkbox
+                                checked={isSelected}
+                                onCheckedChange={() => toggleSelect(scan.id)}
+                                aria-label={`Select scan ${scan.id}`}
+                              />
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">
+                              {new Date(scan.scanned_at).toLocaleString()}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs capitalize">
+                              {scan.triggered_by}
+                            </TableCell>
+                            <TableCell>
+                              {scan.highest_severity ? (
+                                <SeverityChip severity={scan.highest_severity} />
+                              ) : (
+                                <span className="text-xs text-success font-mono">none</span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs tabular-nums">
+                              {scan.total_vulnerabilities}
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs tabular-nums text-success">
+                              {scan.fixable_count}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={() => setInspectScanId(scan.id)}
+                              >
+                                Open
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        )}
+      </SheetSection>
 
-        <VulnerabilityScanSheet
-          scanId={inspectScanId}
-          onClose={() => setInspectScanId(null)}
-          canGenerateSbom={isPaid}
-          canCompare={false}
-          canManageSuppressions={isPaid && isAdmin}
-        />
-      </SheetContent>
-    </Sheet>
+      <ScanComparisonSheet
+        baselineScanId={compareIds?.[0] ?? null}
+        currentScanId={compareIds?.[1] ?? null}
+        onClose={() => setCompareIds(null)}
+      />
+
+      <VulnerabilityScanSheet
+        scanId={inspectScanId}
+        onClose={() => setInspectScanId(null)}
+        canGenerateSbom={isPaid}
+        canCompare={false}
+        canManageSuppressions={isPaid && isAdmin}
+      />
+    </SystemSheet>
   );
 }

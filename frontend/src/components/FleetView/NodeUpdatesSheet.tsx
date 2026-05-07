@@ -3,8 +3,7 @@ import {
     Search, Loader2, Check, CircleCheck, CircleAlert, AlertTriangle,
     Download, RefreshCw, Monitor, Globe,
 } from 'lucide-react';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -64,174 +63,160 @@ export function NodeUpdatesSheet({
     const localEntry = updateStatuses.find(s => s.type === 'local') ?? updateStatuses[0];
     const gatewayLabel = formatVersion(localEntry?.latestVersion);
 
+    const meta = updateStatuses.length === 0
+        ? 'No nodes'
+        : `${updateStatuses.length} nodes · ${available} update${available === 1 ? '' : 's'} available`;
+
+    const footerContext = updateStatuses.length === 0
+        ? undefined
+        : (gatewayLabel ? `Latest version ${gatewayLabel}` : `${available} update${available === 1 ? '' : 's'} available`);
+
+    const secondaryActions = canBulkUpdate && updatableRemoteCount > 0
+        ? [{
+            label: `Update all (${updatableRemoteCount})`,
+            icon: Download,
+            onClick: () => { void triggerUpdateAll(); },
+        }]
+        : undefined;
+
     return (
-        <Sheet open={open} onOpenChange={handleOpenChange}>
-            <SheetContent side="right" className="w-[700px] sm:max-w-[700px] flex flex-col p-0">
-                <SheetHeader className="px-6 pt-6 pb-4 shrink-0 border-b">
-                    <SheetTitle>Node Updates</SheetTitle>
-                    <SheetDescription className="sr-only">Check and apply updates across your fleet nodes.</SheetDescription>
-                </SheetHeader>
-
-                {checkingUpdates ? (
-                    <div className="flex flex-1 items-center justify-center text-muted-foreground text-sm gap-2">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Checking for updates...
-                    </div>
-                ) : updateStatuses.length === 0 ? (
-                    <div className="flex flex-1 items-center justify-center text-muted-foreground text-sm">
-                        No nodes found.
-                    </div>
-                ) : (
-                    <div className="flex flex-col flex-1 min-h-0">
-                        {/* Summary stats */}
-                        <div className="px-6 pt-4 pb-3 shrink-0">
-                            <div className="grid grid-cols-4 gap-2">
-                                <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2 text-center">
-                                    <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{upToDate}</div>
-                                    <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
-                                        <CircleCheck className="w-3 h-3 text-success" strokeWidth={1.5} /> Up to date
-                                    </div>
+        <SystemSheet
+            open={open}
+            onOpenChange={handleOpenChange}
+            crumb={['Fleet', 'Updates']}
+            name="Node updates"
+            meta={meta}
+            primaryAction={{
+                label: 'Recheck',
+                icon: recheckingUpdates ? Loader2 : RefreshCw,
+                onClick: () => { void handleRecheck(); },
+                disabled: recheckingUpdates || checkingUpdates,
+            }}
+            secondaryActions={secondaryActions}
+            footerContext={footerContext}
+            size="lg"
+        >
+            {checkingUpdates ? (
+                <div className="flex items-center justify-center py-12 text-muted-foreground text-sm gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Checking for updates...
+                </div>
+            ) : updateStatuses.length === 0 ? (
+                <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
+                    No nodes found.
+                </div>
+            ) : (
+                <>
+                    <SheetSection title="Summary">
+                        <div className="grid grid-cols-4 gap-x-4 divide-x divide-card-border/40 text-center">
+                            <div className="px-2">
+                                <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{upToDate}</div>
+                                <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
+                                    <CircleCheck className="w-3 h-3 text-success" strokeWidth={1.5} /> Up to date
                                 </div>
-                                <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2 text-center">
-                                    <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{available}</div>
-                                    <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
-                                        <CircleAlert className="w-3 h-3 text-warning" strokeWidth={1.5} /> Available
-                                    </div>
+                            </div>
+                            <div className="px-2">
+                                <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{available}</div>
+                                <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
+                                    <CircleAlert className="w-3 h-3 text-warning" strokeWidth={1.5} /> Available
                                 </div>
-                                <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2 text-center">
-                                    <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{updating}</div>
-                                    <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
-                                        <Loader2 className="w-3 h-3 text-brand" strokeWidth={1.5} /> Updating
-                                    </div>
+                            </div>
+                            <div className="px-2">
+                                <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{updating}</div>
+                                <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
+                                    <Loader2 className="w-3 h-3 text-brand" strokeWidth={1.5} /> Updating
                                 </div>
-                                <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2 text-center">
-                                    <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{failed}</div>
-                                    <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
-                                        <AlertTriangle className="w-3 h-3 text-destructive/70" strokeWidth={1.5} /> Failed
-                                    </div>
+                            </div>
+                            <div className="px-2">
+                                <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{failed}</div>
+                                <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
+                                    <AlertTriangle className="w-3 h-3 text-destructive/70" strokeWidth={1.5} /> Failed
                                 </div>
                             </div>
                         </div>
+                    </SheetSection>
 
-                        {/* Search + gateway version */}
-                        <div className="flex items-center gap-2 px-6 pb-3 shrink-0">
-                            <div className="relative flex-1">
-                                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-                                <Input
-                                    placeholder="Filter nodes..."
-                                    value={search}
-                                    onChange={e => setSearch(e.target.value)}
-                                    className="h-8 pl-8 text-xs"
-                                />
-                            </div>
-                            {gatewayLabel && (
-                                <div className="text-[11px] text-muted-foreground shrink-0">
-                                    Latest: <span className="font-mono tabular-nums text-foreground">{gatewayLabel}</span>
+                    <SheetSection title={`Nodes · ${updateStatuses.length}`}>
+                        <div className="relative mb-3">
+                            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+                            <Input
+                                placeholder="Filter nodes..."
+                                value={search}
+                                onChange={e => setSearch(e.target.value)}
+                                className="h-8 pl-8 text-xs"
+                            />
+                        </div>
+
+                        <div className="grid grid-cols-[1fr_80px_100px_100px_120px] gap-2 px-3 pb-1 text-[10px] leading-3 font-mono text-stat-subtitle uppercase tracking-[0.18em]">
+                            <span>Node</span>
+                            <span>Type</span>
+                            <span>Current</span>
+                            <span>Latest</span>
+                            <span className="text-right">Status</span>
+                        </div>
+
+                        <div className="divide-y divide-card-border/40">
+                            {filtered.map(s => (
+                                <div key={s.nodeId} className="grid grid-cols-[1fr_80px_100px_100px_120px] gap-2 items-center px-3 py-2">
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                        <div className={`flex items-center justify-center w-6 h-6 rounded-md shrink-0 ${s.updateAvailable && !s.updateStatus ? 'bg-warning/10' : 'bg-muted'}`}>
+                                            {s.type === 'local'
+                                                ? <Monitor className={`w-3 h-3 ${s.updateAvailable && !s.updateStatus ? 'text-warning' : 'text-muted-foreground'}`} strokeWidth={1.5} />
+                                                : <Globe className={`w-3 h-3 ${s.updateAvailable && !s.updateStatus ? 'text-warning' : 'text-muted-foreground'}`} strokeWidth={1.5} />
+                                            }
+                                        </div>
+                                        <span className="text-sm font-medium truncate">{s.name}</span>
+                                    </div>
+                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 w-fit">
+                                        {s.type}
+                                    </Badge>
+                                    <span className="text-xs font-mono tabular-nums text-muted-foreground">
+                                        {formatVersion(s.version) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
+                                    </span>
+                                    <span className="text-xs font-mono tabular-nums">
+                                        {formatVersion(s.latestVersion) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
+                                    </span>
+                                    <div className="flex justify-end">
+                                        {s.updateStatus && (
+                                            <UpdateStatusBadge
+                                                status={s.updateStatus}
+                                                error={s.error}
+                                                onRetry={() => retryNodeUpdate(s.nodeId)}
+                                                onDismiss={() => dismissNodeUpdate(s.nodeId)}
+                                            />
+                                        )}
+                                        {!s.updateStatus && !s.updateAvailable && (
+                                            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-success-muted text-success border-success/30">
+                                                <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
+                                            </Badge>
+                                        )}
+                                        {s.updateAvailable && !s.updateStatus && (
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="h-6 text-[11px] px-2.5"
+                                                onClick={() => triggerNodeUpdate(s.nodeId)}
+                                                disabled={updatingNodeId === s.nodeId}
+                                            >
+                                                {updatingNodeId === s.nodeId ? (
+                                                    <><Loader2 className="w-3 h-3 mr-1 animate-spin" />Updating</>
+                                                ) : (
+                                                    <><Download className="w-3 h-3 mr-1" strokeWidth={1.5} />Update</>
+                                                )}
+                                            </Button>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                            {filtered.length === 0 && (
+                                <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
+                                    No nodes match &ldquo;{search}&rdquo;
                                 </div>
                             )}
                         </div>
-
-                        {/* Table column header */}
-                        <div className="px-6 pb-2 shrink-0">
-                            <div className="grid grid-cols-[1fr_80px_100px_100px_120px] gap-2 px-3 text-[10px] leading-3 font-mono text-stat-subtitle uppercase tracking-[0.18em]">
-                                <span>Node</span>
-                                <span>Type</span>
-                                <span>Current</span>
-                                <span>Latest</span>
-                                <span className="text-right">Status</span>
-                            </div>
-                        </div>
-
-                        {/* Node list — fills remaining height, no cap */}
-                        <ScrollArea className="flex-1 min-h-0 px-6">
-                            <div className="space-y-1 pb-2">
-                                {filtered.map(s => (
-                                    <div key={s.nodeId} className="grid grid-cols-[1fr_80px_100px_100px_120px] gap-2 items-center rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2">
-                                        <div className="flex items-center gap-2.5 min-w-0">
-                                            <div className={`flex items-center justify-center w-6 h-6 rounded-md shrink-0 ${s.updateAvailable && !s.updateStatus ? 'bg-warning/10' : 'bg-muted'}`}>
-                                                {s.type === 'local'
-                                                    ? <Monitor className={`w-3 h-3 ${s.updateAvailable && !s.updateStatus ? 'text-warning' : 'text-muted-foreground'}`} strokeWidth={1.5} />
-                                                    : <Globe className={`w-3 h-3 ${s.updateAvailable && !s.updateStatus ? 'text-warning' : 'text-muted-foreground'}`} strokeWidth={1.5} />
-                                                }
-                                            </div>
-                                            <span className="text-sm font-medium truncate">{s.name}</span>
-                                        </div>
-                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 w-fit">
-                                            {s.type}
-                                        </Badge>
-                                        <span className="text-xs font-mono tabular-nums text-muted-foreground">
-                                            {formatVersion(s.version) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
-                                        </span>
-                                        <span className="text-xs font-mono tabular-nums">
-                                            {formatVersion(s.latestVersion) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
-                                        </span>
-                                        <div className="flex justify-end">
-                                            {s.updateStatus && (
-                                                <UpdateStatusBadge
-                                                    status={s.updateStatus}
-                                                    error={s.error}
-                                                    onRetry={() => retryNodeUpdate(s.nodeId)}
-                                                    onDismiss={() => dismissNodeUpdate(s.nodeId)}
-                                                />
-                                            )}
-                                            {!s.updateStatus && !s.updateAvailable && (
-                                                <Badge className="text-[10px] px-1.5 py-0 h-5 bg-success-muted text-success border-success/30">
-                                                    <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
-                                                </Badge>
-                                            )}
-                                            {s.updateAvailable && !s.updateStatus && (
-                                                <Button
-                                                    variant="outline"
-                                                    size="sm"
-                                                    className="h-6 text-[11px] px-2.5"
-                                                    onClick={() => triggerNodeUpdate(s.nodeId)}
-                                                    disabled={updatingNodeId === s.nodeId}
-                                                >
-                                                    {updatingNodeId === s.nodeId ? (
-                                                        <><Loader2 className="w-3 h-3 mr-1 animate-spin" />Updating</>
-                                                    ) : (
-                                                        <><Download className="w-3 h-3 mr-1" strokeWidth={1.5} />Update</>
-                                                    )}
-                                                </Button>
-                                            )}
-                                        </div>
-                                    </div>
-                                ))}
-                                {filtered.length === 0 && (
-                                    <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-                                        No nodes match &ldquo;{search}&rdquo;
-                                    </div>
-                                )}
-                            </div>
-                        </ScrollArea>
-
-                        {/* Footer */}
-                        <div className="flex items-center justify-between px-6 py-4 border-t border-border/50 shrink-0">
-                            <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-7 text-xs text-muted-foreground"
-                                disabled={recheckingUpdates}
-                                onClick={handleRecheck}
-                            >
-                                <RefreshCw className={`w-3 h-3 mr-1.5 ${recheckingUpdates ? 'animate-spin' : ''}`} strokeWidth={1.5} />
-                                Recheck
-                            </Button>
-                            {canBulkUpdate && updatableRemoteCount > 0 && (
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={triggerUpdateAll}
-                                    className="h-7 gap-1.5"
-                                >
-                                    <Download className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                    Update All ({updatableRemoteCount})
-                                </Button>
-                            )}
-                        </div>
-                    </div>
-                )}
-            </SheetContent>
-        </Sheet>
+                    </SheetSection>
+                </>
+            )}
+        </SystemSheet>
     );
 }
