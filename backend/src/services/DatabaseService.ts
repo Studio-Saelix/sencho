@@ -3526,6 +3526,33 @@ export class DatabaseService {
             .all() as ScanPolicy[];
     }
 
+    /**
+     * Variant of `getScanPolicies` for the security-settings UI.
+     *
+     * On a control instance: returns the full set, identical to
+     * `getScanPolicies`.
+     *
+     * On a replica: returns only the policies that apply to THIS replica.
+     * Replicated rows scoped to a different replica's identity (the
+     * `node_identity` of a sibling node in the fleet) are filtered out so
+     * an operator on Replica A cannot enumerate the names of identity-scoped
+     * policies meant for Replica B. Internal evaluators
+     * (`getMatchingPolicy`, `evaluateScanAgainstPolicies`) keep using the
+     * unfiltered list because they already enforce identity matching at
+     * evaluation time.
+     */
+    public getScanPoliciesForUi(role: 'control' | 'replica', selfIdentity: string): ScanPolicy[] {
+        const all = this.getScanPolicies();
+        if (role === 'control') return all;
+        return all.filter((p) => {
+            if (p.replicated_from_control === 0) return true;
+            // Fleet-wide replicated rows have an empty node_identity and
+            // apply on every replica.
+            if (!p.node_identity) return true;
+            return p.node_identity === selfIdentity;
+        });
+    }
+
     public getScanPolicy(id: number): ScanPolicy | null {
         return (
             (this.db
