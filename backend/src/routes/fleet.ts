@@ -25,6 +25,9 @@ import { POLICY_SEVERITIES } from '../utils/severity';
 import { sanitizeForLog } from '../utils/safeLog';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
+import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { containerActionForStack } from './stacks';
+import { activeBulkActions } from './labels';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
@@ -866,6 +869,110 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
     }
   }
   res.status(204).send();
+});
+
+// ─── Fleet Actions: gateway-orchestrated endpoints (multi-node) ───
+//
+// Per-node fleet-action endpoints (run on the target node via the proxy) live
+// in `routes/fleetActions.ts`. The endpoint below is gateway-orchestrated and
+// lives here so it sits behind the `/api/fleet/` proxy-exempt prefix.
+
+// Fleet-wide stop by label name. Matches each node's labels by name and runs
+// container stops on each matching stack.
+// Tier: requirePaid + requireAdmin.
+fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePaid(req, res)) return;
+  if (!requireAdmin(req, res)) return;
+  const body = req.body as { labelName?: unknown } | undefined;
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Request body is required' });
+    return;
+  }
+  const { labelName } = body;
+  if (typeof labelName !== 'string' || labelName.trim().length === 0) {
+    res.status(400).json({ error: 'labelName is required' });
+    return;
+  }
+  const trimmed = labelName.trim();
+  try {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+    const results = await Promise.all(nodes.map(async (node) => {
+      const label = db.getLabels(node.id).find(l => l.name === trimmed);
+      if (!label) {
+        return { nodeId: node.id, nodeName: node.name, matched: false, stackResults: [] };
+      }
+      const stackNames = db.getStacksForLabel(label.id, node.id);
+      if (stackNames.length === 0) {
+        return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: [] };
+      }
+
+      if (node.type === 'local') {
+        // Share the per-node bulk lock with `POST /api/labels/:id/action` so
+        // a fleet-stop and a per-label action cannot double-stop the same
+        // containers concurrently on the same local node.
+        const lockKey = `bulk:${node.id}`;
+        if (activeBulkActions.has(lockKey)) {
+          return {
+            nodeId: node.id, nodeName: node.name, matched: true,
+            stackResults: stackNames.map(stackName => ({ stackName, success: false, error: 'A bulk action is already running on this node' })),
+          };
+        }
+        activeBulkActions.add(lockKey);
+        try {
+          const fsStacks = await FileSystemService.getInstance(node.id).getStacks();
+          const fsStackSet = new Set(fsStacks);
+          const validStacks = stackNames.filter(name => fsStackSet.has(name));
+          const stackResults: { stackName: string; success: boolean; error?: string }[] = [];
+          for (const stackName of validStacks) {
+            const outcome = await containerActionForStack(node.id, stackName, 'stop');
+            if (outcome.kind === 'ok') stackResults.push({ stackName, success: true });
+            else if (outcome.kind === 'no-containers') stackResults.push({ stackName, success: false, error: 'No containers found for this stack' });
+            else stackResults.push({ stackName, success: false, error: outcome.message });
+          }
+          if (stackResults.some(r => r.success)) invalidateNodeCaches(node.id);
+          return { nodeId: node.id, nodeName: node.name, matched: true, stackResults };
+        } finally {
+          activeBulkActions.delete(lockKey);
+        }
+      }
+
+      if (!node.api_url || !node.api_token) {
+        return {
+          nodeId: node.id, nodeName: node.name, matched: true,
+          stackResults: stackNames.map(stackName => ({ stackName, success: false, error: 'Remote node not configured' })),
+        };
+      }
+      try {
+        const response = await fetch(`${node.api_url.replace(/\/$/, '')}/api/labels/${label.id}/action`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'stop' }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!response.ok) {
+          const err = (await response.json().catch(() => ({}))) as { error?: string };
+          const message = err.error || `Remote returned ${response.status}`;
+          return {
+            nodeId: node.id, nodeName: node.name, matched: true,
+            stackResults: stackNames.map(stackName => ({ stackName, success: false, error: message })),
+          };
+        }
+        const remote = (await response.json()) as { results?: { stackName: string; success: boolean; error?: string }[] };
+        return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: remote.results ?? [] };
+      } catch (err) {
+        const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
+        return {
+          nodeId: node.id, nodeName: node.name, matched: true,
+          stackResults: stackNames.map(stackName => ({ stackName, success: false, error: errorMsg })),
+        };
+      }
+    }));
+    res.json({ results });
+  } catch (error) {
+    console.error('[Fleet] fleet-stop error:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to run fleet stop') });
+  }
 });
 
 // ─── Fleet Snapshots (manual: Community; scheduled: Skipper+) ───

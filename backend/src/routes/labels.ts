@@ -15,7 +15,11 @@ import { getErrorMessage, isSqliteUniqueViolation } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 import { sanitizeForLog } from '../utils/safeLog';
 
-const activeBulkActions = new Set<string>();
+// Module-scope lock shared by `POST /api/labels/:id/action` and the fleet-wide
+// bulk endpoints in `routes/fleet.ts`. Keyed by `${nodeId}` so concurrent bulk
+// actions targeting the same node serialize and a fleet-stop cannot race a
+// per-label action on the same containers.
+export const activeBulkActions = new Set<string>();
 
 export const labelsRouter = Router();
 
