@@ -31,6 +31,7 @@ interface OverviewTabProps {
     updatingNodeId: number | null;
     onRetryUpdate?: (nodeId: number) => void;
     onDismissUpdate?: (nodeId: number) => void;
+    onCordonChange?: () => void;
 }
 
 export function OverviewTab({
@@ -56,6 +57,7 @@ export function OverviewTab({
     updatingNodeId,
     onRetryUpdate,
     onDismissUpdate,
+    onCordonChange,
 }: OverviewTabProps) {
     return (
         <>
@@ -118,6 +120,7 @@ export function OverviewTab({
                                     updatingNodeId={updatingNodeId}
                                     onRetryUpdate={onRetryUpdate}
                                     onDismissUpdate={onDismissUpdate}
+                                    onCordonChange={onCordonChange}
                                 />
                             ))}
                         </div>

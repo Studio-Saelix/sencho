@@ -46,6 +46,8 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /nodes': 'Added node',
   'PUT /nodes': 'Updated node',
   'DELETE /nodes': 'Deleted node',
+  'POST /nodes/*/cordon': 'Cordoned node',
+  'POST /nodes/*/uncordon': 'Uncordoned node',
 
   // User management
   'POST /users': 'Created user',
@@ -126,6 +128,9 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Auto-update
   'POST /auto-update/execute': 'Executed auto-update',
+
+  // Blueprints (Federation pin)
+  'PUT /blueprints/*/pin': 'Updated blueprint pin',
 
   // Fleet secrets
   'POST /secrets': 'Created secret',

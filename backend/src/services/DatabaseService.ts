@@ -72,6 +72,9 @@ export interface Node {
     pilot_last_seen?: number | null;
     pilot_agent_version?: string | null;
     last_successful_contact?: number | null;
+    cordoned: boolean;
+    cordoned_at: number | null;
+    cordoned_reason: string | null;
 }
 
 export interface StackRestartSummary {
@@ -275,6 +278,7 @@ export interface Blueprint {
     created_at: number;
     updated_at: number;
     created_by: string | null;
+    pinned_node_id: number | null;
 }
 
 export interface BlueprintDeployment {
@@ -627,6 +631,8 @@ export class DatabaseService {
         this.migrateNodeLabels();
         this.migrateBlueprints();
         this.migrateAddNodeLastContact();
+        this.migrateAddNodeCordonFields();
+        this.migrateAddBlueprintPinnedNode();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1497,6 +1503,16 @@ export class DatabaseService {
         this.tryAddColumn('nodes', 'last_successful_contact', 'INTEGER');
     }
 
+    private migrateAddNodeCordonFields(): void {
+        this.tryAddColumn('nodes', 'cordoned', 'INTEGER NOT NULL DEFAULT 0');
+        this.tryAddColumn('nodes', 'cordoned_at', 'INTEGER');
+        this.tryAddColumn('nodes', 'cordoned_reason', 'TEXT');
+    }
+
+    private migrateAddBlueprintPinnedNode(): void {
+        this.tryAddColumn('blueprints', 'pinned_node_id', 'INTEGER');
+    }
+
     // --- Sencho Mesh ---
 
     public listMeshStacks(nodeId?: number): Array<{ id: number; node_id: number; stack_name: string; created_at: number; created_by: string | null }> {
@@ -1974,11 +1990,14 @@ export class DatabaseService {
             pilot_last_seen: row.pilot_last_seen ?? null,
             pilot_agent_version: row.pilot_agent_version ?? null,
             last_successful_contact: row.last_successful_contact ?? null,
+            cordoned: row.cordoned === 1,
+            cordoned_at: row.cordoned_at ?? null,
+            cordoned_reason: row.cordoned_reason ?? null,
         };
     }
 
     private static readonly NODE_COLUMNS =
-        'id, name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode, pilot_last_seen, pilot_agent_version, last_successful_contact';
+        'id, name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode, pilot_last_seen, pilot_agent_version, last_successful_contact, cordoned, cordoned_at, cordoned_reason';
 
     public getNodes(): Node[] {
         const stmt = this.db.prepare(`SELECT ${DatabaseService.NODE_COLUMNS} FROM nodes ORDER BY is_default DESC, name ASC`);
@@ -1999,7 +2018,7 @@ export class DatabaseService {
         return this.decryptNodeRow(row);
     }
 
-    public addNode(node: Omit<Node, 'id' | 'status' | 'created_at' | 'mode'> & { mode?: NodeMode }): number {
+    public addNode(node: Omit<Node, 'id' | 'status' | 'created_at' | 'mode' | 'cordoned' | 'cordoned_at' | 'cordoned_reason'> & { mode?: NodeMode }): number {
         if (node.is_default) {
             this.db.prepare('UPDATE nodes SET is_default = 0').run();
         }
@@ -2063,6 +2082,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_label_assignments WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
+            this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
         })();
@@ -2070,6 +2090,25 @@ export class DatabaseService {
 
     public updateNodeStatus(id: number, status: 'online' | 'offline' | 'unknown'): void {
         this.db.prepare('UPDATE nodes SET status = ? WHERE id = ?').run(status, id);
+    }
+
+    public setNodeCordoned(id: number, cordoned: boolean, reason: string | null): Node | undefined {
+        if (cordoned) {
+            this.db.prepare(
+                'UPDATE nodes SET cordoned = 1, cordoned_at = ?, cordoned_reason = ? WHERE id = ?'
+            ).run(Date.now(), reason, id);
+        } else {
+            this.db.prepare(
+                'UPDATE nodes SET cordoned = 0, cordoned_at = NULL, cordoned_reason = NULL WHERE id = ?'
+            ).run(id);
+        }
+        return this.getNode(id);
+    }
+
+    public setBlueprintPinnedNode(blueprintId: number, nodeId: number | null): Blueprint | undefined {
+        this.db.prepare('UPDATE blueprints SET pinned_node_id = ?, updated_at = ? WHERE id = ?')
+            .run(nodeId, Date.now(), blueprintId);
+        return this.getBlueprint(blueprintId);
     }
 
     public updateNodeLastContact(nodeId: number): void {
@@ -3948,6 +3987,7 @@ export class DatabaseService {
             created_at: row.created_at as number,
             updated_at: row.updated_at as number,
             created_by: (row.created_by as string | null) ?? null,
+            pinned_node_id: (row.pinned_node_id as number | null) ?? null,
         };
     }
 

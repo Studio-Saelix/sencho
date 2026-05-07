@@ -1,8 +1,7 @@
-import { useExperimental } from '@/hooks/useExperimental';
 import {
     RefreshCw, Search, Camera,
     Network, SlidersHorizontal,
-    Send, KeyRound, ArrowLeftRight,
+    Send, KeyRound, ArrowLeftRight, Wrench,
 } from 'lucide-react';
 import { FleetMasthead } from './fleet/FleetMasthead';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
@@ -20,9 +19,10 @@ import { useLicense } from '@/context/LicenseContext';
 import { AdmiralGate } from './AdmiralGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetConfiguration } from './fleet/FleetConfiguration';
-import { FleetSoonPlaceholder } from './fleet/FleetSoonPlaceholder';
 import { RoutingTab } from './fleet/RoutingTab';
+import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
+import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 import { SecretsTab } from './fleet/secrets/SecretsTab';
 
 interface FleetViewProps {
@@ -32,7 +32,6 @@ interface FleetViewProps {
 export function FleetView({ onNavigateToNode }: FleetViewProps) {
     const { isPaid, license } = useLicense();
     const isAdmiral = isPaid && license?.variant === 'admiral';
-    const experimental = useExperimental();
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -74,18 +73,12 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     <Camera className="w-4 h-4 mr-1.5" />Snapshots
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {isAdmiral && (
-                                <TabsHighlightItem value="routing">
-                                    <TabsTrigger value="routing">
-                                        <ArrowLeftRight className="w-4 h-4 mr-1.5" />Traffic · Routing
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
                             <TabsHighlightItem value="configuration">
                                 <TabsTrigger value="configuration">
                                     <SlidersHorizontal className="w-4 h-4 mr-1.5" />Status
                                 </TabsTrigger>
                             </TabsHighlightItem>
+                            <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
                             {isPaid && (
                                 <TabsHighlightItem value="deployments">
                                     <TabsTrigger value="deployments">
@@ -93,22 +86,31 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
+                            {isAdmiral && (
+                                <TabsHighlightItem value="routing">
+                                    <TabsTrigger value="routing">
+                                        <ArrowLeftRight className="w-4 h-4 mr-1.5" />Traffic
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
+                            )}
+                            {isAdmiral && (
+                                <TabsHighlightItem value="federation">
+                                    <TabsTrigger value="federation">
+                                        <Network className="w-4 h-4 mr-1.5" />Federation
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
+                            )}
+                            <TabsHighlightItem value="actions">
+                                <TabsTrigger value="actions">
+                                    <Wrench className="w-4 h-4 mr-1.5" />Fleet Actions
+                                </TabsTrigger>
+                            </TabsHighlightItem>
                             {isPaid && (
                                 <TabsHighlightItem value="secrets">
                                     <TabsTrigger value="secrets">
                                         <KeyRound className="w-4 h-4 mr-1.5" />Secrets
                                     </TabsTrigger>
                                 </TabsHighlightItem>
-                            )}
-                            {experimental && (
-                                <>
-                                    <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-                                    <TabsHighlightItem value="federation">
-                                        <TabsTrigger value="federation">
-                                            <Network className="w-4 h-4 mr-1.5" />Federation
-                                        </TabsTrigger>
-                                    </TabsHighlightItem>
-                                </>
                             )}
                         </TabsHighlight>
                     </TabsList>
@@ -159,19 +161,13 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         updatingNodeId={updateStatus.updatingNodeId}
                         onRetryUpdate={updateStatus.retryNodeUpdate}
                         onDismissUpdate={updateStatus.dismissNodeUpdate}
+                        onCordonChange={() => { void overview.fetchOverview(true); }}
                     />
                 </TabsContent>
 
                 <TabsContent value="snapshots">
                     <FleetSnapshots />
                 </TabsContent>
-                {isAdmiral && (
-                    <TabsContent value="routing">
-                        <AdmiralGate>
-                            <RoutingTab />
-                        </AdmiralGate>
-                    </TabsContent>
-                )}
                 <TabsContent value="configuration">
                     <FleetConfiguration />
                 </TabsContent>
@@ -180,20 +176,26 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         <DeploymentsTab />
                     </TabsContent>
                 )}
+                {isAdmiral && (
+                    <TabsContent value="routing">
+                        <AdmiralGate>
+                            <RoutingTab />
+                        </AdmiralGate>
+                    </TabsContent>
+                )}
+                {isAdmiral && (
+                    <TabsContent value="federation">
+                        <AdmiralGate>
+                            <FederationTab />
+                        </AdmiralGate>
+                    </TabsContent>
+                )}
+                <TabsContent value="actions">
+                    <FleetActionsTab nodes={overview.allNodes} />
+                </TabsContent>
                 {isPaid && (
                     <TabsContent value="secrets">
                         <SecretsTab />
-                    </TabsContent>
-                )}
-                {experimental && (
-                    <TabsContent value="federation">
-                        <FleetSoonPlaceholder
-                            icon={<Network className="h-4 w-4" />}
-                            kicker="Federation"
-                            title="The fleet as one logical surface"
-                            description="Pin policies, drain a node for maintenance, weight-aware scheduling. This stack runs on whichever node has capacity."
-                            plannedActions={['Pin policy', 'Drain node', 'Cordon', 'Capacity plan']}
-                        />
                     </TabsContent>
                 )}
             </Tabs>

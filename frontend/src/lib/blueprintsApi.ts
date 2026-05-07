@@ -33,6 +33,7 @@ export interface Blueprint {
     created_at: number;
     updated_at: number;
     created_by: string | null;
+    pinned_node_id: number | null;
 }
 
 export interface BlueprintListItem extends Blueprint {
@@ -170,6 +171,15 @@ export async function deleteBlueprint(id: number): Promise<void> {
 export async function applyBlueprint(id: number): Promise<{ message: string }> {
     const res = await apiFetch(`/blueprints/${id}/apply`, { method: 'POST', localOnly: true });
     return expectJson(res, 'Failed to apply blueprint');
+}
+
+export async function pinBlueprint(id: number, nodeId: number | null): Promise<Blueprint> {
+    const res = await apiFetch(`/blueprints/${id}/pin`, {
+        method: 'PUT',
+        body: JSON.stringify({ nodeId }),
+        localOnly: true,
+    });
+    return expectJson<Blueprint>(res, 'Failed to update blueprint pin');
 }
 
 export async function withdrawDeployment(

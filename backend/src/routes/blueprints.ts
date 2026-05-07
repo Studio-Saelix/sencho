@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
+import { requirePaid, requireAdmiral, requireAdmin, requireBody } from '../middleware/tierGates';
 import {
     DatabaseService,
     type BlueprintSelector,
@@ -438,6 +438,46 @@ blueprintsRouter.get('/:id/preview', (req: Request, res: Response): void => {
     } catch (error) {
         console.error('[Blueprints] Preview error:', error);
         res.status(500).json({ error: 'Failed to preview blueprint' });
+    }
+});
+
+blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!requireBody(req, res)) return;
+    const id = parseIntParam(req, res, 'id');
+    if (id === null) return;
+    const rawNodeId = (req.body as { nodeId?: unknown }).nodeId;
+    let nodeId: number | null;
+    if (rawNodeId === null) {
+        nodeId = null;
+    } else if (typeof rawNodeId === 'number' && Number.isInteger(rawNodeId) && rawNodeId > 0) {
+        nodeId = rawNodeId;
+    } else {
+        res.status(400).json({ error: 'nodeId must be a positive integer or null' });
+        return;
+    }
+    try {
+        const blueprint = DatabaseService.getInstance().getBlueprint(id);
+        if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (nodeId !== null) {
+            const node = DatabaseService.getInstance().getNode(nodeId);
+            if (!node) { res.status(404).json({ error: 'Node not found' }); return; }
+        }
+        const updated = DatabaseService.getInstance().setBlueprintPinnedNode(id, nodeId);
+        if (!updated) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        // Trigger immediate reconciliation so the pin takes effect without
+        // waiting for the next 60s tick. Errors here are logged but do not
+        // fail the request: the pin is already persisted.
+        if (updated.enabled) {
+            BlueprintReconciler.getInstance().reconcileOne(id).catch(err => {
+                console.warn('[Blueprints] post-pin reconcileOne failed:', err);
+            });
+        }
+        res.json(updated);
+    } catch (error) {
+        console.error('[Blueprints] Pin error:', error);
+        res.status(500).json({ error: 'Failed to update blueprint pin' });
     }
 });
 

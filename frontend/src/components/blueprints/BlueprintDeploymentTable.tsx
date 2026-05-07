@@ -1,4 +1,4 @@
-import { Lock, AlertTriangle, ShieldQuestion } from 'lucide-react';
+import { Lock, AlertTriangle, Pin, ShieldQuestion } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
@@ -17,6 +17,7 @@ interface BlueprintDeploymentTableProps {
     onWithdraw: (nodeId: number) => void;
     onAcceptStateReview: (nodeId: number) => void;
     onRetry: (nodeId: number) => void;
+    pinnedNodeId?: number | null;
 }
 
 const STATUS_LABEL: Record<BlueprintDeploymentStatus, string> = {
@@ -50,7 +51,7 @@ function statusDotClass(status: BlueprintDeploymentStatus): string {
 }
 
 export function BlueprintDeploymentTable({
-    deployments, classification, canEdit, busyNodeId, onWithdraw, onAcceptStateReview, onRetry,
+    deployments, classification, canEdit, busyNodeId, onWithdraw, onAcceptStateReview, onRetry, pinnedNodeId = null,
 }: BlueprintDeploymentTableProps) {
     const { nodes } = useNodes();
     const nodesById = new Map(nodes.map(n => [n.id, n]));
@@ -88,6 +89,15 @@ export function BlueprintDeploymentTable({
                                         {dep.status === 'active' && isStateful && (
                                             <span title="Data pinned on this node" className="text-warning">
                                                 <Lock className="h-3 w-3" strokeWidth={1.5} />
+                                            </span>
+                                        )}
+                                        {pinnedNodeId === dep.node_id && (
+                                            <span
+                                                title="Blueprint is pinned to this node (Federation)"
+                                                className="inline-flex items-center gap-0.5 text-[9px] font-mono uppercase tracking-[0.18em] text-foreground/80"
+                                            >
+                                                <Pin className="h-3 w-3" strokeWidth={1.5} />
+                                                Pinned
                                             </span>
                                         )}
                                     </div>

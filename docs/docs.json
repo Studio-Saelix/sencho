@@ -129,6 +129,8 @@
                   "features/pilot-agent",
                   "features/sencho-mesh",
                   "features/fleet-view",
+                  "features/fleet-federation",
+                  "features/fleet-actions",
                   "features/fleet-sync",
                   "features/fleet-secrets",
                   "features/fleet-backups",

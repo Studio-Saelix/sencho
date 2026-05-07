@@ -1,0 +1,64 @@
+---
+title: Fleet Actions
+description: Run fleet-wide bulk operations from one place — stop stacks across nodes by label, or apply labels to many stacks at once.
+---
+
+<Note>
+  Fleet Actions require a Sencho **Skipper** or **Admiral** license.
+</Note>
+
+The **Fleet Actions** tab inside Fleet centralizes bulk operations that span more than a single stack and would otherwise need many manual clicks. It lives next to **Deployments** and **Traffic** in the Fleet view, after the separator that follows Status.
+
+Fleet Actions covers the operations that aren't already exposed elsewhere in Sencho:
+
+- **Stop fleet by label** dispatches a stop to every stack labeled with a given name across every node in the fleet.
+- **Bulk label assign** applies the same label set to many stacks on one node in a single round trip.
+
+Other bulk actions you may be looking for live in their natural homes:
+
+| Goal | Where to do it |
+|------|----------------|
+| Restart, stop, or update a subset of stacks | **Bulk mode** in the stack sidebar (press `B` to enable, then check the stacks you want) |
+| Schedule a recurring restart, update, or snapshot | **Schedules** in the primary navigation |
+| Trigger a Sencho self-update on remote nodes | **Check Updates** button on the Fleet tab |
+
+## Stop fleet by label
+
+This card sends a stop to every stack on every node that has a label matching the name you type. Labels are matched **by name** across the fleet, so a label called `production` on one node and a separate label also called `production` on another node both match.
+
+1. Open **Fleet > Fleet Actions**.
+2. In the **Stop fleet by label** card, type a label name. The input suggests names that already exist on any node.
+3. Click **Stop matching stacks**.
+4. Confirm the destructive action. Sencho dispatches stops per node.
+5. Results appear inline below the card, grouped by node, with per-stack success or failure rows.
+
+A node that has no label by that name appears in the results with **no matching label** instead of an error.
+
+## Bulk label assign
+
+This card replaces the label set on many stacks at once on a single node.
+
+1. Pick the node you want to update from the dropdown.
+2. Check the stacks you want to update. **Select all** is available once stacks load.
+3. Click each label pill to toggle it. The chosen pills become the new label set for every selected stack.
+4. Click **Apply to N stacks** and confirm.
+
+Selecting no labels and applying clears existing label assignments on the chosen stacks. The selected label set always **replaces** the existing one rather than appending to it.
+
+## Permissions
+
+Both cards require the **admin** role and a **Skipper** or **Admiral** license. Community-tier users see a calm explainer card in this tab instead of the action surface.
+
+## Troubleshooting
+
+**Nothing happens when I click "Stop matching stacks".**
+Verify a label by that name exists on at least one node. The autocomplete suggestions are aggregated from every reachable node; if your label only exists on a node that is currently offline, it will not appear in the suggestions but the request still tries every node.
+
+**A node shows "Label not present" but I know I created the label there.**
+Labels are stored per node. The fleet stop matches by **name** only. If the label was renamed on one node, the new name is what gets matched. Check **Settings > Labels** on the affected node.
+
+**Bulk label assign reports "Invalid stack name" for one row.**
+Stack names must be alphanumeric with dashes and underscores. The endpoint validates each entry independently, so a single bad name does not block the rest of the batch.
+
+**The Fleet Actions tab is missing from Fleet.**
+Confirm the active license is **Skipper** or **Admiral** under **Settings > License**. The tab itself is always visible, but the action cards only render at paid tiers.

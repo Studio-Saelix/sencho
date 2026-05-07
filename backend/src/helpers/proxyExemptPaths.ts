@@ -10,7 +10,7 @@ export const PROXY_EXEMPT_PREFIXES: readonly string[] = [
   '/api/auth/',
   '/api/nodes',
   '/api/license',
-  '/api/fleet',
+  '/api/fleet/',
   '/api/webhooks',
   '/api/meta',
 ];
