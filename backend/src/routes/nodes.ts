@@ -12,6 +12,7 @@ import { CAPABILITIES, getSenchoVersion, fetchRemoteMeta, type RemoteMeta } from
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotCloseCode } from '../pilot/protocol';
 import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
+import { FleetSyncService } from '../services/FleetSyncService';
 import { isValidRemoteUrl } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 
@@ -155,6 +156,15 @@ nodesRouter.post('/', async (req: Request, res: Response) => {
     });
 
     NodeRegistry.getInstance().notifyNodeAdded(id);
+
+    // Backfill replicated security state on the new remote so an operator who
+    // adds a node mid-life does not have to wait for the next policy edit
+    // before scan_policies and cve_suppressions land. No-op for local nodes
+    // and pilot-agent nodes (FleetSyncService.pushResource filters them out).
+    if (type === 'remote' && resolvedMode === 'proxy') {
+      FleetSyncService.getInstance().pushResourceAsync('scan_policies');
+      FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
+    }
 
     let enrollment: ReturnType<typeof mintPilotEnrollment> | null = null;
     if (resolvedMode === 'pilot_agent') {
