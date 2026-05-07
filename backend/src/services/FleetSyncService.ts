@@ -1,4 +1,5 @@
 import axios, { AxiosError } from 'axios';
+import { createHash } from 'crypto';
 import { CveSuppression, DatabaseService, Node, ScanPolicy } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
@@ -47,6 +48,21 @@ export class StaleSyncPushError extends Error {
     constructor(public readonly previous: number, public readonly incoming: number) {
         super(`Stale sync push: pushedAt=${incoming} is older than last applied=${previous}`);
         this.name = 'StaleSyncPushError';
+    }
+}
+
+/**
+ * Thrown by `applyIncomingSync` when the incoming `controlIdentity` does not
+ * match the fingerprint cached on first sync. The replica is anchored to a
+ * specific control; an operator must re-anchor explicitly via
+ * POST /api/fleet/role/reanchor before a different control can write. The
+ * route handler catches this specifically and returns 409
+ * CONTROL_IDENTITY_MISMATCH.
+ */
+export class ControlIdentityMismatchError extends Error {
+    constructor(public readonly expected: string, public readonly got: string) {
+        super(`Control identity mismatch: replica is anchored to "${expected}", push from "${got}"`);
+        this.name = 'ControlIdentityMismatchError';
     }
 }
 
@@ -131,13 +147,33 @@ export class FleetSyncService {
     }
 
     /**
-     * Returns the empty string. The receiver treats empty `controlIdentity`
-     * as legacy and accepts. A future change will derive a stable fingerprint
-     * from a system_state key for control-anchor enforcement.
+     * Stable fingerprint that identifies this control instance to its
+     * replicas. Derived by SHA-256-truncating `system_state.instance_id`
+     * (the local UUID generated once on first boot by LicenseService.initialize).
+     *
+     * Anchored on the URL path is fragile: an operator who switches a
+     * control's public hostname would falsely flag drift. Anchoring on the
+     * persisted instance UUID survives hostname rotations; only a full
+     * SQLite reset (or explicit reanchor) breaks the binding.
+     *
+     * Returns the empty string when `instance_id` is missing (very early
+     * boot, before LicenseService.initialize has run). The receiver treats
+     * empty as legacy and accepts.
      */
     public static getControlIdentity(): string {
-        return '';
+        if (FleetSyncService.cachedControlIdentity !== null) {
+            return FleetSyncService.cachedControlIdentity;
+        }
+        const instanceId = DatabaseService.getInstance().getSystemState('instance_id');
+        if (!instanceId) {
+            return '';
+        }
+        const fingerprint = createHash('sha256').update(instanceId).digest('hex').slice(0, 16);
+        FleetSyncService.cachedControlIdentity = fingerprint;
+        return fingerprint;
     }
+
+    private static cachedControlIdentity: string | null = null;
 
     private nextPushedAt(): number {
         const now = Date.now();
@@ -189,26 +225,45 @@ export class FleetSyncService {
     }
 
     /**
-     * Apply a received sync payload on a replica. Runs role flip, identity
-     * cache, row replacement, watermark write, AND staleness comparison inside
-     * a single SQLite transaction so a partial-write window cannot leave the
-     * watermark behind the row state.
+     * Apply a received sync payload on a replica. Runs control-anchor check,
+     * staleness comparison, role flip, identity cache, row replacement, and
+     * watermark write inside a single SQLite transaction so a partial-write
+     * window cannot leave the watermark behind the row state.
      *
-     * Throws `StaleSyncPushError` (rolling back the transaction) when the
-     * incoming `pushedAt` is older than the persisted watermark; the route
-     * handler translates that into 409 STALE_SYNC_PUSH.
+     * Throws (rolling back the transaction):
+     *   - `ControlIdentityMismatchError` when the cached fingerprint differs
+     *     from the incoming non-empty fingerprint. Route translates to 409
+     *     CONTROL_IDENTITY_MISMATCH; an admin must reanchor explicitly.
+     *   - `StaleSyncPushError` when the incoming pushedAt is older than the
+     *     persisted watermark. Route translates to 409 STALE_SYNC_PUSH.
      *
-     * `pushedAt` is optional for back-compat with legacy controls; when absent,
-     * the staleness check is skipped and no watermark is written.
+     * Both `pushedAt` and `controlIdentity` are optional for back-compat with
+     * legacy controls; absent values skip the corresponding check.
      */
     public applyIncomingSync(
         resource: FleetResource,
         rows: ScanPolicy[] | Array<Omit<CveSuppression, 'id'>>,
         targetIdentity: string,
         pushedAt?: number,
+        controlIdentity?: string,
     ): void {
         const db = DatabaseService.getInstance();
         db.transaction(() => {
+            if (controlIdentity && controlIdentity.length > 0) {
+                // The cached fingerprint has three possible states:
+                //   null            fresh install, never received a push.
+                //   ''              post-reanchor, explicitly cleared by an admin.
+                //   '<fingerprint>' anchored to a specific control.
+                // The first two are treated identically as "un-anchored": persist
+                // the incoming fingerprint. Only a non-empty mismatch rejects.
+                const cached = db.getSystemState(SYNC_STATE_KEYS.fleetControlIdentity);
+                if (cached && cached !== controlIdentity) {
+                    throw new ControlIdentityMismatchError(cached, controlIdentity);
+                }
+                if (!cached) {
+                    db.setSystemState(SYNC_STATE_KEYS.fleetControlIdentity, controlIdentity);
+                }
+            }
             if (pushedAt !== undefined && Number.isFinite(pushedAt)) {
                 const watermarkKey = SYNC_STATE_KEYS.receivedPushedAt(resource);
                 const previousRaw = db.getSystemState(watermarkKey);
@@ -228,6 +283,30 @@ export class FleetSyncService {
                 db.replaceReplicatedCveSuppressions(rows as Array<Omit<CveSuppression, 'id'>>);
             }
         });
+    }
+
+    /**
+     * Reset the control anchor on this replica so a different control may
+     * push to it. Clears the cached fingerprint and all replicated rows so
+     * stale state from the prior control does not leak forward. Watermarks
+     * also reset to allow the next control's first push to succeed.
+     *
+     * Intentionally leaves `fleet_role = 'replica'` and `fleet_self_identity`
+     * untouched: the node remains a passive receiver, and the next push
+     * overwrites the cached identity. The static `cachedControlIdentity` is
+     * also flushed defensively in case this process previously acted as a
+     * control before being demoted into a replica role.
+     */
+    public reanchor(): void {
+        const db = DatabaseService.getInstance();
+        db.transaction(() => {
+            db.setSystemState(SYNC_STATE_KEYS.fleetControlIdentity, '');
+            db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('scan_policies'), '');
+            db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('cve_suppressions'), '');
+            db.replaceReplicatedScanPolicies([]);
+            db.replaceReplicatedCveSuppressions([]);
+        });
+        FleetSyncService.cachedControlIdentity = null;
     }
 
     /**

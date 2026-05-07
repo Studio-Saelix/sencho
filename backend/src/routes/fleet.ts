@@ -4,7 +4,7 @@ import semver from 'semver';
 import si from 'systeminformation';
 import type Dockerode from 'dockerode';
 import { DatabaseService, type Node } from '../services/DatabaseService';
-import { FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
+import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -321,6 +321,9 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
   const pushedAt = typeof body.pushedAt === 'number' && Number.isFinite(body.pushedAt) && body.pushedAt > 0
     ? body.pushedAt
     : null;
+  // controlIdentity is optional for back-compat. The receiver anchors to the
+  // first non-empty fingerprint it sees and rejects mismatches afterward.
+  const controlIdentity = typeof body.controlIdentity === 'string' ? body.controlIdentity : '';
   if (!rows) {
     res.status(400).json({ error: 'rows array is required' });
     return;
@@ -343,6 +346,7 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
       rows,
       targetIdentity,
       pushedAt ?? undefined,
+      controlIdentity || undefined,
     );
     res.json({ success: true, applied: rows.length });
   } catch (error) {
@@ -353,8 +357,40 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
       });
       return;
     }
+    if (error instanceof ControlIdentityMismatchError) {
+      res.status(409).json({
+        error: error.message,
+        code: SYNC_ERROR_CODES.controlIdentityMismatch,
+        expected: error.expected,
+        got: error.got,
+      });
+      return;
+    }
     console.error('[FleetSync] Failed to apply incoming sync:', error);
     res.status(500).json({ error: 'Failed to apply sync' });
+  }
+});
+
+// Reset the control anchor on this replica. An admin must opt in explicitly
+// with `{override: true}` because reanchor wipes all replicated rows; the
+// next push from a different control will re-populate them. Used when a
+// control is permanently rebuilt or replaced and must be re-bound to its
+// existing replicas.
+fleetRouter.post('/role/reanchor', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body ?? {};
+  if (body.override !== true) {
+    res.status(400).json({
+      error: 'Reanchor requires explicit override. Send { "override": true } to confirm.',
+    });
+    return;
+  }
+  try {
+    FleetSyncService.getInstance().reanchor();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[FleetSync] Reanchor failed:', error);
+    res.status(500).json({ error: 'Failed to reset control anchor' });
   }
 });
 
