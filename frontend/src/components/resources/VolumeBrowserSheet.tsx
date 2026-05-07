@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { HardDrive, RefreshCw } from 'lucide-react';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { RefreshCw } from 'lucide-react';
+import { SystemSheet } from '@/components/ui/system-sheet';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
 import { FileTree } from '@/components/files/FileTree';
 import type { FileEntry } from '@/lib/stackFilesApi';
@@ -66,65 +66,58 @@ export function VolumeBrowserSheet({ volumeName, onClose }: VolumeBrowserSheetPr
     [volumeName]
   );
 
+  const meta = selectedPath || 'No file selected';
+
   return (
-    <Sheet open={!!volumeName} onOpenChange={handleClose}>
-      <SheetContent className="sm:max-w-3xl">
-        <SheetHeader className="pr-10">
-          <SheetTitle className="flex items-center gap-2 min-w-0">
-            <HardDrive className="w-4 h-4 text-muted-foreground shrink-0" strokeWidth={1.5} />
-            <span className="font-mono text-sm truncate">{volumeName}</span>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 ml-auto shrink-0"
-              onClick={() => setRefreshKey((k) => k + 1)}
-              title="Refresh tree"
-              aria-label="Refresh tree"
-            >
-              <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.5} />
-            </Button>
-          </SheetTitle>
-        </SheetHeader>
-
-        {volumeName && (
-          <div className="grid grid-cols-[260px_1fr] gap-3 mt-4 h-[calc(100vh-180px)]">
-            <div className="rounded-md border border-card-border bg-card overflow-hidden">
-              <FileTree
-                key={`${volumeName}:${refreshKey}`}
-                sourceKey={volumeName}
-                loadDir={loadDir}
-                refreshKey={refreshKey}
-                selectedPath={selectedPath}
-                onSelectFile={handleSelectFile}
-              />
-            </div>
-
-            <div className="rounded-md border border-card-border bg-card overflow-hidden flex flex-col">
-              {!selectedPath && (
-                <div className="flex-1 flex items-center justify-center p-6 text-xs text-muted-foreground italic">
-                  Select a file to preview.
-                </div>
-              )}
-              {selectedPath && fileLoading && (
-                <div className="p-3 space-y-2">
-                  <Skeleton className="h-4 w-1/3" />
-                  <Skeleton className="h-4 w-full" />
-                  <Skeleton className="h-4 w-full" />
-                  <Skeleton className="h-4 w-3/4" />
-                </div>
-              )}
-              {selectedPath && !fileLoading && fileResult && (
-                <FileResultPanel path={selectedPath} result={fileResult} />
-              )}
-            </div>
+    <SystemSheet
+      open={!!volumeName}
+      onOpenChange={handleClose}
+      crumb={['Resources', 'Volumes', volumeName ?? '—']}
+      name={volumeName ?? 'Volume'}
+      meta={meta}
+      primaryAction={{
+        label: 'Refresh tree',
+        icon: RefreshCw,
+        onClick: () => setRefreshKey((k) => k + 1),
+      }}
+      footerContext="File reads are recorded in the audit log."
+      size="lg"
+      noScroll
+    >
+      {volumeName && (
+        <div className="grid grid-cols-[260px_1fr] gap-3 px-6 py-5 flex-1 min-h-0">
+          <div className="rounded-md border border-card-border bg-card overflow-hidden">
+            <FileTree
+              key={`${volumeName}:${refreshKey}`}
+              sourceKey={volumeName}
+              loadDir={loadDir}
+              refreshKey={refreshKey}
+              selectedPath={selectedPath}
+              onSelectFile={handleSelectFile}
+            />
           </div>
-        )}
 
-        <p className="mt-3 text-[11px] text-muted-foreground">
-          File reads are recorded in the audit log.
-        </p>
-      </SheetContent>
-    </Sheet>
+          <div className="rounded-md border border-card-border bg-card overflow-hidden flex flex-col">
+            {!selectedPath && (
+              <div className="flex-1 flex items-center justify-center p-6 text-xs text-muted-foreground italic">
+                Select a file to preview.
+              </div>
+            )}
+            {selectedPath && fileLoading && (
+              <div className="p-3 space-y-2">
+                <Skeleton className="h-4 w-1/3" />
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-3/4" />
+              </div>
+            )}
+            {selectedPath && !fileLoading && fileResult && (
+              <FileResultPanel path={selectedPath} result={fileResult} />
+            )}
+          </div>
+        </div>
+      )}
+    </SystemSheet>
   );
 }
 
@@ -143,9 +136,11 @@ function FileResultPanel({ path, result }: { path: string; result: VolumeFileRes
           Showing first {formatBytes(5 * 1024 * 1024)}. Larger files cannot be downloaded from this view.
         </div>
       )}
-      <pre className="flex-1 overflow-auto p-3 font-mono text-[11px] whitespace-pre-wrap break-all leading-relaxed">
-        {decoded}
-      </pre>
+      <ScrollArea className="flex-1">
+        <pre className="p-3 font-mono text-[11px] whitespace-pre-wrap break-all leading-relaxed">
+          {decoded}
+        </pre>
+      </ScrollArea>
     </div>
   );
 }

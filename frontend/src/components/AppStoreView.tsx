@@ -2,11 +2,10 @@ import { useState, useEffect, useMemo } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetFooter } from '@/components/ui/sheet';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Search, Rocket, Loader2, Info, ExternalLink, Star, ShieldCheck } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
@@ -324,277 +323,260 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
                 </ScrollArea>
             </div>
 
-            <Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
-                <SheetContent className="w-full sm:max-w-md flex flex-col h-full" side="right">
-                    {selectedTemplate && (
-                        <div className="flex flex-col h-full">
-                            <SheetHeader className="mb-4 text-left">
-                                {activeNode?.type === 'remote' && (
-                                    <div className="mb-2">
-                                        <Badge variant="secondary" className="text-xs font-normal">
-                                            Deploying to: {activeNode.name}
-                                        </Badge>
-                                    </div>
-                                )}
-                                <div className="flex items-center gap-4 mb-4">
-                                    <div className="w-16 h-16 rounded bg-muted/50 p-1 flex-shrink-0 flex items-center justify-center overflow-hidden border">
-                                        {selectedTemplate.logo && !imgErrors[selectedTemplate.logo] ? (
-                                            <img src={selectedTemplate.logo} alt={selectedTemplate.title} className="w-full h-full object-contain" onError={() => setImgErrors(prev => ({ ...prev, [selectedTemplate.logo!]: true }))} />
-                                        ) : (
-                                            <Rocket className="w-8 h-8 text-muted-foreground" />
-                                        )}
-                                    </div>
-                                    <div className="min-w-0">
-                                        <SheetTitle className="text-xl truncate">{selectedTemplate.title}</SheetTitle>
-                                        <div className="mt-1">
-                                            <SheetDescription className={isDescExpanded ? '' : 'line-clamp-3 text-sm text-muted-foreground'}>
-                                                {selectedTemplate.description}
-                                            </SheetDescription>
-                                            <span className="text-xs text-primary cursor-pointer hover:underline mt-1 inline-block" onClick={() => setIsDescExpanded(!isDescExpanded)}>
-                                                {isDescExpanded ? 'Read less' : 'Read more'}
-                                            </span>
-                                        </div>
-
-                                        {(selectedTemplate.architectures || selectedTemplate.stars !== undefined || selectedTemplate.github_url || selectedTemplate.docs_url) && (
-                                            <div className="mt-3 space-y-2">
-                                                {selectedTemplate.architectures && selectedTemplate.architectures.length > 0 && (
-                                                    <div className="flex flex-wrap gap-1">
-                                                        {selectedTemplate.architectures.map(arch => (
-                                                            <Badge variant="outline" key={arch} className="text-[10px] px-1.5 py-0">
-                                                                {arch}
-                                                            </Badge>
-                                                        ))}
-                                                    </div>
-                                                )}
-
-                                                <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
-                                                    {selectedTemplate.stars !== undefined && (
-                                                        <div className="flex items-center gap-1">
-                                                            <Star className="w-3 h-3 fill-muted-foreground" />
-                                                            <span className="tabular-nums">{selectedTemplate.stars?.toLocaleString()}</span>
-                                                        </div>
-                                                    )}
-                                                    {selectedTemplate.github_url && (
-                                                        <a href={selectedTemplate.github_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-foreground transition-colors">
-                                                            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
-                                                            <span>Source</span>
-                                                        </a>
-                                                    )}
-                                                    {selectedTemplate.docs_url && (
-                                                        <a href={selectedTemplate.docs_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-foreground transition-colors">
-                                                            <ExternalLink className="w-3 h-3" />
-                                                            <span>Docs</span>
-                                                        </a>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
+            <SystemSheet
+                open={isSheetOpen}
+                onOpenChange={setIsSheetOpen}
+                crumb={['App store', selectedTemplate?.title ?? 'Template']}
+                name={selectedTemplate?.title ?? 'Template'}
+                meta={selectedTemplate
+                    ? [
+                        selectedTemplate.architectures?.join(', '),
+                        selectedTemplate.stars !== undefined ? `★ ${selectedTemplate.stars.toLocaleString()}` : null,
+                        activeNode?.type === 'remote' ? `→ ${activeNode.name}` : null,
+                    ].filter(Boolean).join(' · ')
+                    : ''}
+                tabs={selectedTemplate ? [
+                    { id: 'essentials', label: 'Essentials' },
+                    { id: 'advanced', label: 'Advanced' },
+                ] : undefined}
+                activeTab={sheetTab}
+                onTabChange={(id) => setSheetTab(id as 'essentials' | 'advanced')}
+                primaryAction={selectedTemplate ? {
+                    label: isDeploying ? 'Deploying…' : `Deploy ${selectedTemplate.title}`,
+                    icon: isDeploying ? Loader2 : Rocket,
+                    onClick: handleDeploy,
+                    disabled: isDeploying || !stackName.trim() || !can('stack:create'),
+                } : undefined}
+                footerContext={isDeploying ? 'This may take a few minutes for large images.' : undefined}
+                size="md"
+            >
+                {selectedTemplate && (
+                    <>
+                        <SheetSection title="About">
+                            <div className="flex items-start gap-4">
+                                <div className="w-16 h-16 rounded bg-muted/50 p-1 flex-shrink-0 flex items-center justify-center overflow-hidden border">
+                                    {selectedTemplate.logo && !imgErrors[selectedTemplate.logo] ? (
+                                        <img src={selectedTemplate.logo} alt={selectedTemplate.title} className="w-full h-full object-contain" onError={() => setImgErrors(prev => ({ ...prev, [selectedTemplate.logo!]: true }))} />
+                                    ) : (
+                                        <Rocket className="w-8 h-8 text-muted-foreground" />
+                                    )}
                                 </div>
-                            </SheetHeader>
+                                <div className="min-w-0 flex-1">
+                                    <p className={isDescExpanded ? 'text-sm text-stat-subtitle' : 'line-clamp-3 text-sm text-stat-subtitle'}>
+                                        {selectedTemplate.description}
+                                    </p>
+                                    <button
+                                        type="button"
+                                        className="text-xs text-primary cursor-pointer hover:underline mt-1 inline-block"
+                                        onClick={() => setIsDescExpanded(!isDescExpanded)}
+                                    >
+                                        {isDescExpanded ? 'Read less' : 'Read more'}
+                                    </button>
 
-                            <Tabs value={sheetTab} onValueChange={(v) => setSheetTab(v as 'essentials' | 'advanced')} className="flex flex-col flex-1 min-h-0">
-                                <TabsList className="self-start mb-3">
-                                    <TabsTrigger value="essentials">Essentials</TabsTrigger>
-                                    <TabsTrigger value="advanced">Advanced</TabsTrigger>
-                                </TabsList>
-
-                                <TabsContent value="essentials" className="flex-1 min-h-0 mt-0">
-                                    <ScrollArea className="h-full pr-4 -mx-4 px-4">
-                                        <div className="space-y-4 pb-4">
-                                            <div className="space-y-2">
-                                                <Label htmlFor="stackName" className="font-semibold">
-                                                    Stack Name <span className="text-destructive">*</span>
-                                                </Label>
-                                                <Input
-                                                    id="stackName"
-                                                    value={stackName}
-                                                    onChange={(e) => setStackName(e.target.value)}
-                                                    placeholder="e.g. my-app"
-                                                />
-                                                <p className="text-xs text-muted-foreground">
-                                                    This determines the directory name and docker project name.
-                                                </p>
-                                            </div>
-
-                                            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2.5 text-xs text-stat-subtitle">
-                                                Deploy with defaults: the template's recommended ports, volumes, and environment variables.
-                                                Use the Advanced tab to customize.
-                                            </div>
-                                        </div>
-                                    </ScrollArea>
-                                </TabsContent>
-
-                                <TabsContent value="advanced" className="flex-1 min-h-0 mt-0">
-                                    <ScrollArea className="h-full pr-4 -mx-4 px-4">
-                                        <div className="space-y-6 pb-4">
-                                            {selectedTemplate.ports && selectedTemplate.ports.length > 0 && (
-                                                <div className="space-y-4">
-                                                    <h4 className="font-semibold">Ports (Host : Container)</h4>
-                                                    {selectedTemplate.ports.map((p, idx) => {
-                                                        const parts = p.split(':');
-                                                        if (parts.length < 2) return null;
-                                                        const hostPort = portVars[p] || '';
-                                                        const conflict = hostPort ? portsInUse[hostPort] : undefined;
-                                                        return (
-                                                            <div key={idx} className="flex items-center space-x-2">
-                                                                <Input
-                                                                    value={hostPort}
-                                                                    onChange={(e) => {
-                                                                        const val = e.target.value.replace(/[^0-9]/g, '');
-                                                                        setPortVars(prev => ({ ...prev, [p]: val }));
-                                                                    }}
-                                                                    className={cn('w-24 text-center font-mono', hostPort && !isValidPort(hostPort) && 'border-destructive')}
-                                                                />
-                                                                {conflict ? (
-                                                                    <CursorProvider>
-                                                                        <CursorContainer className="inline-flex items-center gap-2">
-                                                                            <span className="text-muted-foreground font-mono">: {parts[1]}</span>
-                                                                            <span className="w-2 h-2 rounded-full bg-warning animate-pulse" />
-                                                                        </CursorContainer>
-                                                                        <Cursor>
-                                                                            <div className="h-2 w-2 rounded-full bg-brand" />
-                                                                        </Cursor>
-                                                                        <CursorFollow side="bottom" sideOffset={4} align="center" transition={{ stiffness: 400, damping: 40, bounce: 0 }}>
-                                                                            <div className="rounded-md border border-card-border bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] px-2.5 py-1.5 shadow-md">
-                                                                                <span className="font-mono tabular-nums text-xs text-stat-value">
-                                                                                    {conflict.stack !== null
-                                                                                        ? <>Port {hostPort} used by <span className="text-brand">{conflict.stack}</span></>
-                                                                                        : <>Port {hostPort} used by an external app</>
-                                                                                    }
-                                                                                </span>
-                                                                            </div>
-                                                                        </CursorFollow>
-                                                                    </CursorProvider>
-                                                                ) : (
-                                                                    <span className="text-muted-foreground font-mono">: {parts[1]}</span>
-                                                                )}
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                            )}
-
-                                            {selectedTemplate.volumes && selectedTemplate.volumes.length > 0 && (
-                                                <div className="space-y-4 pt-4 border-t">
-                                                    <h4 className="font-semibold">Volumes (Host : Container)</h4>
-                                                    {selectedTemplate.volumes.map((v, idx) => {
-                                                        const containerPath = v.container;
-                                                        if (!containerPath) return null;
-                                                        return (
-                                                            <div key={idx} className="space-y-1.5">
-                                                                <Label className="text-xs text-muted-foreground font-mono">Container: {containerPath}</Label>
-                                                                <Input
-                                                                    value={volVars[containerPath] !== undefined ? volVars[containerPath] : ''}
-                                                                    onChange={(e) => setVolVars(prev => ({ ...prev, [containerPath]: e.target.value }))}
-                                                                    placeholder="/path/to/host/dir"
-                                                                />
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                            )}
-
-                                            {selectedTemplate.env && selectedTemplate.env.length > 0 && (
-                                                <div className="space-y-4 pt-4 border-t">
-                                                    <h4 className="font-semibold">Environment Variables</h4>
-                                                    {selectedTemplate.env.map((e, idx) => (
-                                                        <div key={idx} className="space-y-1.5">
-                                                            <Label htmlFor={`env-${e.name}`} className="text-sm">
-                                                                {e.label || e.name}
-                                                            </Label>
-                                                            <Input
-                                                                id={`env-${e.name}`}
-                                                                value={envVars[e.name] !== undefined ? envVars[e.name] : ''}
-                                                                onChange={(ev) => setEnvVars(prev => ({ ...prev, [e.name]: ev.target.value }))}
-                                                                placeholder={e.default || `Enter value for ${e.name}`}
-                                                            />
-                                                            <p className="text-[10px] text-muted-foreground font-mono">
-                                                                {e.name}
-                                                            </p>
-                                                        </div>
+                                    {(selectedTemplate.architectures || selectedTemplate.stars !== undefined || selectedTemplate.github_url || selectedTemplate.docs_url) && (
+                                        <div className="mt-3 space-y-2">
+                                            {selectedTemplate.architectures && selectedTemplate.architectures.length > 0 && (
+                                                <div className="flex flex-wrap gap-1">
+                                                    {selectedTemplate.architectures.map(arch => (
+                                                        <Badge variant="outline" key={arch} className="text-[10px] px-1.5 py-0">
+                                                            {arch}
+                                                        </Badge>
                                                     ))}
                                                 </div>
                                             )}
-
-                                            <div className="space-y-4 pt-4 border-t">
-                                                <h4 className="font-semibold text-sm">Add Custom Variable</h4>
-                                                {customEnvs.map((ce, idx) => (
-                                                    <div key={idx} className="flex gap-2">
-                                                        <Input value={ce.key} readOnly className="w-1/3 bg-muted font-mono text-xs" />
-                                                        <Input value={ce.value} readOnly className="flex-1 bg-muted font-mono text-xs" />
-                                                        <Button variant="ghost" size="icon" className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground" onClick={() => setCustomEnvs(prev => prev.filter((_, i) => i !== idx))}>-</Button>
+                                            <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
+                                                {selectedTemplate.stars !== undefined && (
+                                                    <div className="flex items-center gap-1">
+                                                        <Star className="w-3 h-3 fill-muted-foreground" />
+                                                        <span className="tabular-nums">{selectedTemplate.stars?.toLocaleString()}</span>
                                                     </div>
-                                                ))}
-                                                <div className="flex gap-2">
-                                                    <Input placeholder="KEY" value={newEnvKey} onChange={e => setNewEnvKey(e.target.value)} className="w-1/3 font-mono text-xs" />
-                                                    <Input placeholder="VALUE" value={newEnvVal} onChange={e => setNewEnvVal(e.target.value)} className="flex-1 font-mono text-xs" />
-                                                    <Button variant="secondary" onClick={() => {
-                                                        if (newEnvKey.trim()) {
-                                                            if (selectedTemplate?.env?.find(e => e.name === newEnvKey.trim())) {
-                                                                toast.warning(`"${newEnvKey.trim()}" already exists in template defaults. The custom value will override it.`);
-                                                            }
-                                                            setCustomEnvs(prev => [...prev, { key: newEnvKey, value: newEnvVal }]);
-                                                            setNewEnvKey('');
-                                                            setNewEnvVal('');
-                                                        }
-                                                    }}>+</Button>
-                                                </div>
+                                                )}
+                                                {selectedTemplate.github_url && (
+                                                    <a href={selectedTemplate.github_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-foreground transition-colors">
+                                                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" /></svg>
+                                                        <span>Source</span>
+                                                    </a>
+                                                )}
+                                                {selectedTemplate.docs_url && (
+                                                    <a href={selectedTemplate.docs_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-foreground transition-colors">
+                                                        <ExternalLink className="w-3 h-3" />
+                                                        <span>Docs</span>
+                                                    </a>
+                                                )}
                                             </div>
-
-                                            {trivyAvailable && (
-                                                <div className="flex items-center gap-2 pt-4 border-t">
-                                                    <Checkbox
-                                                        id="auto-scan"
-                                                        checked={autoScan}
-                                                        onCheckedChange={(checked) => setAutoScan(!!checked)}
-                                                    />
-                                                    <Label
-                                                        htmlFor="auto-scan"
-                                                        className="text-sm text-muted-foreground cursor-pointer flex items-center gap-1.5"
-                                                    >
-                                                        <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                        Scan images for vulnerabilities after deploy
-                                                    </Label>
-                                                </div>
-                                            )}
                                         </div>
-                                    </ScrollArea>
-                                </TabsContent>
-                            </Tabs>
-
-                            <SheetFooter className="pt-4 mt-auto border-t sm:justify-start">
-                                <div className="flex flex-col w-full gap-3">
-                                    <Button
-                                        onClick={handleDeploy}
-                                        disabled={isDeploying || !stackName.trim() || !can('stack:create')}
-                                        className="w-full"
-                                        size="lg"
-                                        title={!can('stack:create') ? 'Permission required to deploy' : undefined}
-                                    >
-                                        {isDeploying ? (
-                                            <>
-                                                <Loader2 className="w-5 h-5 mr-2 animate-spin" strokeWidth={1.5} />
-                                                Deploying Stack...
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Rocket className="w-5 h-5 mr-2" strokeWidth={1.5} />
-                                                Deploy {selectedTemplate.title}
-                                            </>
-                                        )}
-                                    </Button>
-                                    {isDeploying && (
-                                        <p className="text-center text-xs text-muted-foreground animate-pulse">
-                                            This may take a few minutes for large images.
-                                        </p>
                                     )}
                                 </div>
-                            </SheetFooter>
-                        </div>
-                    )}
-                </SheetContent>
-            </Sheet>
+                            </div>
+                        </SheetSection>
+
+                        {sheetTab === 'essentials' && (
+                            <SheetSection title="Stack name">
+                                <div className="space-y-2">
+                                    <Label htmlFor="stackName" className="font-semibold">
+                                        Stack Name <span className="text-destructive">*</span>
+                                    </Label>
+                                    <Input
+                                        id="stackName"
+                                        value={stackName}
+                                        onChange={(e) => setStackName(e.target.value)}
+                                        placeholder="e.g. my-app"
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        This determines the directory name and docker project name.
+                                    </p>
+                                </div>
+
+                                <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2.5 text-xs text-stat-subtitle">
+                                    Deploy with defaults: the template's recommended ports, volumes, and environment variables.
+                                    Use the Advanced tab to customize.
+                                </div>
+                            </SheetSection>
+                        )}
+
+                        {sheetTab === 'advanced' && (
+                            <>
+                                {selectedTemplate.ports && selectedTemplate.ports.length > 0 && (
+                                    <SheetSection title="Ports (Host : Container)">
+                                        <div className="space-y-3">
+                                            {selectedTemplate.ports.map((p, idx) => {
+                                                const parts = p.split(':');
+                                                if (parts.length < 2) return null;
+                                                const hostPort = portVars[p] || '';
+                                                const conflict = hostPort ? portsInUse[hostPort] : undefined;
+                                                return (
+                                                    <div key={idx} className="flex items-center space-x-2">
+                                                        <Input
+                                                            value={hostPort}
+                                                            onChange={(e) => {
+                                                                const val = e.target.value.replace(/[^0-9]/g, '');
+                                                                setPortVars(prev => ({ ...prev, [p]: val }));
+                                                            }}
+                                                            className={cn('w-24 text-center font-mono', hostPort && !isValidPort(hostPort) && 'border-destructive')}
+                                                        />
+                                                        {conflict ? (
+                                                            <CursorProvider>
+                                                                <CursorContainer className="inline-flex items-center gap-2">
+                                                                    <span className="text-muted-foreground font-mono">: {parts[1]}</span>
+                                                                    <span className="w-2 h-2 rounded-full bg-warning animate-pulse" />
+                                                                </CursorContainer>
+                                                                <Cursor>
+                                                                    <div className="h-2 w-2 rounded-full bg-brand" />
+                                                                </Cursor>
+                                                                <CursorFollow side="bottom" sideOffset={4} align="center" transition={{ stiffness: 400, damping: 40, bounce: 0 }}>
+                                                                    <div className="rounded-md border border-card-border bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] px-2.5 py-1.5 shadow-md">
+                                                                        <span className="font-mono tabular-nums text-xs text-stat-value">
+                                                                            {conflict.stack !== null
+                                                                                ? <>Port {hostPort} used by <span className="text-brand">{conflict.stack}</span></>
+                                                                                : <>Port {hostPort} used by an external app</>
+                                                                            }
+                                                                        </span>
+                                                                    </div>
+                                                                </CursorFollow>
+                                                            </CursorProvider>
+                                                        ) : (
+                                                            <span className="text-muted-foreground font-mono">: {parts[1]}</span>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </SheetSection>
+                                )}
+
+                                {selectedTemplate.volumes && selectedTemplate.volumes.length > 0 && (
+                                    <SheetSection title="Volumes (Host : Container)">
+                                        <div className="space-y-3">
+                                            {selectedTemplate.volumes.map((v, idx) => {
+                                                const containerPath = v.container;
+                                                if (!containerPath) return null;
+                                                return (
+                                                    <div key={idx} className="space-y-1.5">
+                                                        <Label className="text-xs text-muted-foreground font-mono">Container: {containerPath}</Label>
+                                                        <Input
+                                                            value={volVars[containerPath] !== undefined ? volVars[containerPath] : ''}
+                                                            onChange={(e) => setVolVars(prev => ({ ...prev, [containerPath]: e.target.value }))}
+                                                            placeholder="/path/to/host/dir"
+                                                        />
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </SheetSection>
+                                )}
+
+                                {selectedTemplate.env && selectedTemplate.env.length > 0 && (
+                                    <SheetSection title="Environment variables">
+                                        <div className="space-y-3">
+                                            {selectedTemplate.env.map((e, idx) => (
+                                                <div key={idx} className="space-y-1.5">
+                                                    <Label htmlFor={`env-${e.name}`} className="text-sm">
+                                                        {e.label || e.name}
+                                                    </Label>
+                                                    <Input
+                                                        id={`env-${e.name}`}
+                                                        value={envVars[e.name] !== undefined ? envVars[e.name] : ''}
+                                                        onChange={(ev) => setEnvVars(prev => ({ ...prev, [e.name]: ev.target.value }))}
+                                                        placeholder={e.default || `Enter value for ${e.name}`}
+                                                    />
+                                                    <p className="text-[10px] text-muted-foreground font-mono">
+                                                        {e.name}
+                                                    </p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </SheetSection>
+                                )}
+
+                                <SheetSection title="Custom variables">
+                                    <div className="space-y-3">
+                                        {customEnvs.map((ce, idx) => (
+                                            <div key={idx} className="flex gap-2">
+                                                <Input value={ce.key} readOnly className="w-1/3 bg-muted font-mono text-xs" />
+                                                <Input value={ce.value} readOnly className="flex-1 bg-muted font-mono text-xs" />
+                                                <Button variant="ghost" size="icon" className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground" onClick={() => setCustomEnvs(prev => prev.filter((_, i) => i !== idx))}>-</Button>
+                                            </div>
+                                        ))}
+                                        <div className="flex gap-2">
+                                            <Input placeholder="KEY" value={newEnvKey} onChange={e => setNewEnvKey(e.target.value)} className="w-1/3 font-mono text-xs" />
+                                            <Input placeholder="VALUE" value={newEnvVal} onChange={e => setNewEnvVal(e.target.value)} className="flex-1 font-mono text-xs" />
+                                            <Button variant="secondary" onClick={() => {
+                                                if (newEnvKey.trim()) {
+                                                    if (selectedTemplate?.env?.find(e => e.name === newEnvKey.trim())) {
+                                                        toast.warning(`"${newEnvKey.trim()}" already exists in template defaults. The custom value will override it.`);
+                                                    }
+                                                    setCustomEnvs(prev => [...prev, { key: newEnvKey, value: newEnvVal }]);
+                                                    setNewEnvKey('');
+                                                    setNewEnvVal('');
+                                                }
+                                            }}>+</Button>
+                                        </div>
+                                    </div>
+                                </SheetSection>
+
+                                {trivyAvailable && (
+                                    <SheetSection title="Security">
+                                        <div className="flex items-center gap-2">
+                                            <Checkbox
+                                                id="auto-scan"
+                                                checked={autoScan}
+                                                onCheckedChange={(checked) => setAutoScan(!!checked)}
+                                            />
+                                            <Label
+                                                htmlFor="auto-scan"
+                                                className="text-sm text-muted-foreground cursor-pointer flex items-center gap-1.5"
+                                            >
+                                                <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                Scan images for vulnerabilities after deploy
+                                            </Label>
+                                        </div>
+                                    </SheetSection>
+                                )}
+                            </>
+                        )}
+                    </>
+                )}
+            </SystemSheet>
         </div>
     );
 }

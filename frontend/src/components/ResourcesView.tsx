@@ -7,7 +7,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from "@/components/ui/modal";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Combobox } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
@@ -15,9 +14,8 @@ import { Label } from "@/components/ui/label";
 import { TogglePill } from "@/components/ui/toggle-pill";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { apiFetch } from '@/lib/api';
-import { copyToClipboard } from '@/lib/clipboard';
 import { toast } from '@/components/ui/toast-store';
-import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Copy, Container, Loader2, History, FolderOpen } from 'lucide-react';
+import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen } from 'lucide-react';
 import { CursorProvider, CursorContainer, Cursor, CursorFollow } from '@/components/animate-ui/primitives/animate/cursor';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
@@ -38,6 +36,7 @@ import { ReclaimHero } from './resources/ReclaimHero';
 import { FootprintTreemap } from './resources/FootprintTreemap';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
+import { NetworkDetailSheet, type NetworkInspectData } from './resources/NetworkDetailSheet';
 import { TabLanding, type TabLandingEntry } from './resources/TabLanding';
 
 const NetworkTopologyView = lazy(() => import('./NetworkTopologyView'));
@@ -108,28 +107,7 @@ interface UnmanagedContainer {
     Image: string;
 }
 
-interface NetworkInspectData {
-    Id: string;
-    Name: string;
-    Created: string;
-    Scope: string;
-    Driver: string;
-    Internal: boolean;
-    Attachable: boolean;
-    Labels: Record<string, string>;
-    IPAM: {
-        Driver: string;
-        Config: Array<{ Subnet?: string; Gateway?: string; IPRange?: string }>;
-    };
-    Containers: Record<string, {
-        Name: string;
-        EndpointID: string;
-        MacAddress: string;
-        IPv4Address: string;
-        IPv6Address: string;
-    }>;
-    Options: Record<string, string>;
-}
+// NetworkInspectData is re-exported from ./resources/NetworkDetailSheet
 
 type ResourceFilter = 'all' | 'managed' | 'unmanaged';
 type PruneTarget = 'containers' | 'images' | 'networks' | 'volumes';
@@ -1365,161 +1343,11 @@ export default function ResourcesView() {
             <VolumeBrowserSheet volumeName={browseVolume} onClose={() => setBrowseVolume(null)} />
 
 
-            {/* Network Inspect Sheet */}
-            <Sheet open={!!inspectNetwork} onOpenChange={open => !open && setInspectNetwork(null)}>
-                <SheetContent className="sm:max-w-lg">
-                  <ScrollArea className="h-full">
-                    <SheetHeader>
-                        <SheetTitle className="flex items-center gap-2">
-                            <Network className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                            {inspectNetwork?.Name}
-                        </SheetTitle>
-                    </SheetHeader>
-                    {inspectNetwork && (
-                        <div className="space-y-6 mt-6 pb-6">
-                            {/* Overview */}
-                            <div className="space-y-3">
-                                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Overview</h4>
-                                <div className="grid grid-cols-2 gap-3 text-sm">
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">ID</span>
-                                        <p className="font-mono text-xs mt-0.5 flex items-center gap-1.5">
-                                            {inspectNetwork.Id.substring(0, 12)}
-                                            <button
-                                                className="text-muted-foreground hover:text-foreground transition-colors"
-                                                onClick={async () => { try { await copyToClipboard(inspectNetwork.Id); toast.success('ID copied'); } catch { toast.error('Copy failed.'); } }}
-                                            >
-                                                <Copy className="w-3 h-3" strokeWidth={1.5} />
-                                            </button>
-                                        </p>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Driver</span>
-                                        <span className="text-xs mt-0.5 block"><Badge variant="outline" className="text-[10px] h-5">{inspectNetwork.Driver}</Badge></span>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Scope</span>
-                                        <span className="text-xs mt-0.5 block"><Badge variant="outline" className="text-[10px] h-5">{inspectNetwork.Scope}</Badge></span>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Created</span>
-                                        <p className="text-xs mt-0.5">{new Date(inspectNetwork.Created).toLocaleString()}</p>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Internal</span>
-                                        <p className="text-xs mt-0.5">{inspectNetwork.Internal ? 'Yes' : 'No'}</p>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Attachable</span>
-                                        <p className="text-xs mt-0.5">{inspectNetwork.Attachable ? 'Yes' : 'No'}</p>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* IPAM Config */}
-                            {inspectNetwork.IPAM?.Config?.length > 0 && (
-                                <div className="space-y-3">
-                                    <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">IPAM Configuration</h4>
-                                    <div className="space-y-2">
-                                        {inspectNetwork.IPAM.Config.map((cfg, i) => (
-                                            <div key={i} className="rounded-lg border border-card-border bg-card p-3 shadow-card-bevel space-y-1.5">
-                                                {cfg.Subnet && (
-                                                    <div className="flex justify-between items-center">
-                                                        <span className="text-xs text-muted-foreground">Subnet</span>
-                                                        <span className="font-mono text-xs tabular-nums">{cfg.Subnet}</span>
-                                                    </div>
-                                                )}
-                                                {cfg.Gateway && (
-                                                    <div className="flex justify-between items-center">
-                                                        <span className="text-xs text-muted-foreground">Gateway</span>
-                                                        <span className="font-mono text-xs tabular-nums">{cfg.Gateway}</span>
-                                                    </div>
-                                                )}
-                                                {cfg.IPRange && (
-                                                    <div className="flex justify-between items-center">
-                                                        <span className="text-xs text-muted-foreground">IP Range</span>
-                                                        <span className="font-mono text-xs tabular-nums">{cfg.IPRange}</span>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Options */}
-                            {inspectNetwork.Options && Object.keys(inspectNetwork.Options).length > 0 && (
-                                <div className="space-y-3">
-                                    <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Options</h4>
-                                    <div className="rounded-lg border border-card-border bg-card shadow-card-bevel overflow-hidden">
-                                        <Table>
-                                            <TableBody>
-                                                {Object.entries(inspectNetwork.Options).map(([key, val]) => (
-                                                    <TableRow key={key} className="hover:bg-muted/30">
-                                                        <TableCell className="font-mono text-xs py-1.5 text-muted-foreground">{key}</TableCell>
-                                                        <TableCell className="font-mono text-xs py-1.5 text-right">{val}</TableCell>
-                                                    </TableRow>
-                                                ))}
-                                            </TableBody>
-                                        </Table>
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Connected Containers */}
-                            <div className="space-y-3">
-                                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                                    Connected Containers ({Object.keys(inspectNetwork.Containers || {}).length})
-                                </h4>
-                                {Object.keys(inspectNetwork.Containers || {}).length === 0 ? (
-                                    <p className="text-xs text-muted-foreground py-4 text-center">No containers connected to this network.</p>
-                                ) : (
-                                    <div className="space-y-2">
-                                        {Object.entries(inspectNetwork.Containers).map(([id, container]) => (
-                                            <div key={id} className="rounded-lg border border-card-border border-t-card-border-top bg-card p-3 shadow-card-bevel space-y-1.5">
-                                                <div className="flex items-center gap-2">
-                                                    <Container className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
-                                                    <span className="text-sm font-medium truncate">{container.Name}</span>
-                                                </div>
-                                                <div className="grid grid-cols-2 gap-2 pl-5.5">
-                                                    <div>
-                                                        <span className="text-[10px] text-muted-foreground">IPv4</span>
-                                                        <p className="font-mono text-xs tabular-nums">{container.IPv4Address || 'N/A'}</p>
-                                                    </div>
-                                                    <div>
-                                                        <span className="text-[10px] text-muted-foreground">MAC</span>
-                                                        <p className="font-mono text-xs tabular-nums">{container.MacAddress || 'N/A'}</p>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Labels */}
-                            {inspectNetwork.Labels && Object.keys(inspectNetwork.Labels).length > 0 && (
-                                <div className="space-y-3">
-                                    <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Labels</h4>
-                                    <div className="rounded-lg border border-card-border bg-card shadow-card-bevel overflow-hidden">
-                                        <Table>
-                                            <TableBody>
-                                                {Object.entries(inspectNetwork.Labels).map(([key, val]) => (
-                                                    <TableRow key={key} className="hover:bg-muted/30">
-                                                        <TableCell className="font-mono text-xs py-1.5 text-muted-foreground">{key}</TableCell>
-                                                        <TableCell className="font-mono text-xs py-1.5 text-right">{val}</TableCell>
-                                                    </TableRow>
-                                                ))}
-                                            </TableBody>
-                                        </Table>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    )}
-                  </ScrollArea>
-                </SheetContent>
-            </Sheet>
+            {/* Network detail sheet */}
+            <NetworkDetailSheet
+                network={inspectNetwork}
+                onClose={() => setInspectNetwork(null)}
+            />
 
             <VulnerabilityScanSheet
                 scanId={inspectScanId}
