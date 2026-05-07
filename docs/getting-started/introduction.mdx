@@ -55,6 +55,8 @@ Add a remote Sencho instance by URL and token and it becomes another node in the
 - [Fleet snapshots](/features/fleet-backups) (a.k.a. Sencho Cloud Backup) take point-in-time copies of every `compose.yaml` and `.env` across the fleet, with per-stack restore.
 - [Remote updates](/features/remote-updates) check the Sencho version on every node and apply per-node updates from the console.
 - [Fleet Actions](/features/fleet-actions) bundles fleet-wide bulk operations: stop every stack with a given label across the fleet, or apply a label set to many stacks on one node in a single round trip.
+- [Federation](/features/fleet-federation) gives the operator explicit overrides on top of the blueprint reconciler: cordon a node out of rotation, pin a stack to a host, hold ground while you investigate.
+- [Fleet Secrets](/features/fleet-secrets) stores versioned env-var bundles encrypted at rest and pushes them to selected stacks on selected nodes with a diff preview before any write.
 
 ### Mesh
 
@@ -103,7 +105,7 @@ Some nodes can't accept an inbound connection (CG-NAT, locked-down VLAN, no publ
 
 ## Tiers at a glance
 
-Sencho ships in three tiers: **Community**, **Skipper**, and **Admiral**. Community covers single- and multi-node deploy, monitor, and security basics. Skipper adds automation and advanced fleet management. Admiral covers enterprise-grade controls (audit log, host console, cross-node Mesh traffic management, fleet-wide policy push). The full matrix lives on the [licensing page](/features/licensing).
+Sencho ships in three tiers: **Community**, **Skipper**, and **Admiral**. Community covers single- and multi-node deploy, monitor, and security basics. Skipper adds automation, fleet secrets, and advanced fleet management. Admiral covers enterprise-grade controls (audit log, host console, cross-node Mesh traffic management, federation overrides, fleet-wide policy push). The full matrix lives on the [licensing page](/features/licensing).
 
 ## Where to next
 
