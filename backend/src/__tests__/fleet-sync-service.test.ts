@@ -11,6 +11,8 @@ const {
   mockGetLocalCveSuppressions,
   mockReplaceReplicatedScanPolicies,
   mockReplaceReplicatedCveSuppressions,
+  mockClearOrphanPolicyEvaluations,
+  mockClearReplicatedRows,
   mockRecordFleetSyncSuccess,
   mockRecordFleetSyncFailure,
   mockGetSystemState,
@@ -25,6 +27,8 @@ const {
   mockGetLocalCveSuppressions: vi.fn().mockReturnValue([]),
   mockReplaceReplicatedScanPolicies: vi.fn(),
   mockReplaceReplicatedCveSuppressions: vi.fn(),
+  mockClearOrphanPolicyEvaluations: vi.fn(),
+  mockClearReplicatedRows: vi.fn(),
   mockRecordFleetSyncSuccess: vi.fn(),
   mockRecordFleetSyncFailure: vi.fn(),
   mockGetSystemState: vi.fn().mockReturnValue(null),
@@ -42,6 +46,8 @@ vi.mock('../services/DatabaseService', () => ({
       getLocalCveSuppressions: mockGetLocalCveSuppressions,
       replaceReplicatedScanPolicies: mockReplaceReplicatedScanPolicies,
       replaceReplicatedCveSuppressions: mockReplaceReplicatedCveSuppressions,
+      clearOrphanPolicyEvaluations: mockClearOrphanPolicyEvaluations,
+      clearReplicatedRows: mockClearReplicatedRows,
       recordFleetSyncSuccess: mockRecordFleetSyncSuccess,
       recordFleetSyncFailure: mockRecordFleetSyncFailure,
       getSystemState: mockGetSystemState,
@@ -474,7 +480,7 @@ describe('FleetSyncService.reanchor', () => {
     expect(mockSetSystemState).toHaveBeenCalledWith('fleet_control_identity', '');
     expect(mockSetSystemState).toHaveBeenCalledWith('received_pushed_at:scan_policies', '');
     expect(mockSetSystemState).toHaveBeenCalledWith('received_pushed_at:cve_suppressions', '');
-    expect(mockReplaceReplicatedScanPolicies).toHaveBeenCalledWith([]);
+    expect(mockClearReplicatedRows).toHaveBeenCalled();
   });
 });
 

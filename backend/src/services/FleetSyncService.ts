@@ -303,10 +303,42 @@ export class FleetSyncService {
             db.setSystemState(SYNC_STATE_KEYS.fleetControlIdentity, '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('scan_policies'), '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('cve_suppressions'), '');
-            db.replaceReplicatedScanPolicies([]);
-            db.replaceReplicatedCveSuppressions([]);
+            db.clearReplicatedRows();
         });
         FleetSyncService.cachedControlIdentity = null;
+    }
+
+    /**
+     * Demote this replica back to a standalone control. Atomic transaction:
+     *   - flips `fleet_role` to 'control'
+     *   - clears `fleet_self_identity`, `fleet_control_identity`, and both
+     *     `received_pushed_at:*` watermarks
+     *   - drops every replicated_from_control row from scan_policies and
+     *     cve_suppressions
+     *   - nulls out any orphaned policy_evaluation cache
+     *
+     * After this returns, local writes to scan_policies and cve_suppressions
+     * succeed again (`blockIfReplica` no longer trips).
+     *
+     * Returns `false` if the instance is already a control (no work done);
+     * the route translates that to 409 so the UI doesn't show a misleading
+     * success toast.
+     */
+    public demote(): boolean {
+        const db = DatabaseService.getInstance();
+        if (FleetSyncService.getRole() === 'control') {
+            return false;
+        }
+        db.transaction(() => {
+            db.setSystemState(SYNC_STATE_KEYS.fleetRole, 'control');
+            db.setSystemState(SYNC_STATE_KEYS.fleetSelfIdentity, '');
+            db.setSystemState(SYNC_STATE_KEYS.fleetControlIdentity, '');
+            db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('scan_policies'), '');
+            db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('cve_suppressions'), '');
+            db.clearReplicatedRows();
+        });
+        FleetSyncService.cachedControlIdentity = null;
+        return true;
     }
 
     /**

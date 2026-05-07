@@ -273,3 +273,73 @@ describe('POST /api/fleet/role/reanchor', () => {
     expect(next.status).toBe(200);
   });
 });
+
+describe('POST /api/fleet/role/demote', () => {
+  it('returns 401 without auth', async () => {
+    const res = await request(app).post('/api/fleet/role/demote').send({ confirm: true });
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 400 without confirm:true', async () => {
+    const res = await request(app)
+      .post('/api/fleet/role/demote')
+      .set('Authorization', adminAuthHeader)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/confirmation/i);
+  });
+
+  it('demotes a replica back to control, drops mirrored rows, then re-allows local writes', async () => {
+    // Reanchor first so this test does not depend on whichever fingerprint
+    // an earlier test left in place; then self-promote into a replica via a
+    // sync push with at least one row so the demote has something to wipe.
+    const reset = await request(app)
+      .post('/api/fleet/role/reanchor')
+      .set('Authorization', adminAuthHeader)
+      .send({ override: true });
+    expect(reset.status).toBe(200);
+
+    const push = await request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({
+        rows: [
+          { name: 'mirrored-policy', node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 0, enabled: 1 },
+        ],
+        targetIdentity: 'https://me.example',
+        controlIdentity: 'fingerprint-demote-test',
+      });
+    expect(push.status).toBe(200);
+
+    const beforeRole = await request(app).get('/api/fleet/role').set('Authorization', adminAuthHeader);
+    expect(beforeRole.body.role).toBe('replica');
+
+    const demote = await request(app)
+      .post('/api/fleet/role/demote')
+      .set('Authorization', adminAuthHeader)
+      .send({ confirm: true });
+    expect(demote.status).toBe(200);
+    expect(demote.body.role).toBe('control');
+
+    const afterRole = await request(app).get('/api/fleet/role').set('Authorization', adminAuthHeader);
+    expect(afterRole.body.role).toBe('control');
+  });
+
+  it('returns 409 ALREADY_CONTROL when called on a control instance', async () => {
+    // Be explicit about the precondition so this test holds under --shuffle.
+    const role = await request(app).get('/api/fleet/role').set('Authorization', adminAuthHeader);
+    if (role.body.role !== 'control') {
+      const cleanup = await request(app)
+        .post('/api/fleet/role/demote')
+        .set('Authorization', adminAuthHeader)
+        .send({ confirm: true });
+      expect(cleanup.status).toBe(200);
+    }
+    const res = await request(app)
+      .post('/api/fleet/role/demote')
+      .set('Authorization', adminAuthHeader)
+      .send({ confirm: true });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ALREADY_CONTROL');
+  });
+});

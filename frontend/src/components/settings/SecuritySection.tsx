@@ -77,6 +77,9 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
   const [trivyBusy, setTrivyBusy] = useState<null | 'install' | 'update' | 'uninstall' | 'auto-update'>(null);
   const [uninstallConfirm, setUninstallConfirm] = useState(false);
   const [fleetRole, setFleetRole] = useState<FleetRole>('control');
+  const [fleetRoleProbeFailed, setFleetRoleProbeFailed] = useState(false);
+  const [demoteConfirm, setDemoteConfirm] = useState(false);
+  const [demoteBusy, setDemoteBusy] = useState(false);
   const isReplica = fleetRole === 'replica';
 
   const runTrivyOp = async (
@@ -160,17 +163,47 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
     (async () => {
       try {
         const res = await apiFetch('/fleet/role', { localOnly: true });
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (!cancelled) setFleetRoleProbeFailed(true);
+          return;
+        }
         const data = await res.json();
-        if (!cancelled && (data?.role === 'control' || data?.role === 'replica')) {
+        if (cancelled) return;
+        if (data?.role === 'control' || data?.role === 'replica') {
           setFleetRole(data.role);
+          setFleetRoleProbeFailed(false);
+        } else {
+          setFleetRoleProbeFailed(true);
         }
       } catch {
-        /* fallback: treat as control if the check fails */
+        if (!cancelled) setFleetRoleProbeFailed(true);
       }
     })();
     return () => { cancelled = true; };
   }, [isRemote]);
+
+  const handleDemote = async () => {
+    setDemoteBusy(true);
+    try {
+      const res = await apiFetch('/fleet/role/demote', {
+        method: 'POST',
+        localOnly: true,
+        body: JSON.stringify({ confirm: true }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Demote failed');
+      }
+      toast.success('Replica demoted to control');
+      setFleetRole('control');
+      setDemoteConfirm(false);
+      fetchPolicies();
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Demote failed');
+    } finally {
+      setDemoteBusy(false);
+    }
+  };
 
   const openCreate = () => {
     setEditingId(null);
@@ -273,13 +306,40 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
         <div
           role="status"
           aria-live="polite"
+          className="flex items-start justify-between gap-3 rounded-lg border border-card-border bg-muted/30 px-4 py-3"
+        >
+          <div className="flex items-start gap-2">
+            <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} aria-hidden="true" />
+            <div className="text-sm">
+              <div className="font-medium">Managed by control node</div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Security policies replicate from the control Sencho instance. View them here for audit; edit them on the control.
+              </p>
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() => setDemoteConfirm(true)}
+            disabled={demoteBusy}
+          >
+            Demote to control
+          </Button>
+        </div>
+      )}
+
+      {!isRemote && fleetRoleProbeFailed && !isReplica && (
+        <div
+          role="status"
+          aria-live="polite"
           className="flex items-start gap-2 rounded-lg border border-card-border bg-muted/30 px-4 py-3"
         >
           <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} aria-hidden="true" />
           <div className="text-sm">
-            <div className="font-medium">Managed by control node</div>
+            <div className="font-medium">Fleet role could not be determined</div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Security policies replicate from the control Sencho instance. View them here for audit; edit them on the control.
+              Treating this instance as a control. Refresh the page to retry.
             </p>
           </div>
         </div>
@@ -545,6 +605,20 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
       >
         <p className="text-sm text-stat-subtitle">
           Removes the managed Trivy binary. Vulnerability scanning stops working until Trivy is reinstalled or a host binary is provided.
+        </p>
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={demoteConfirm}
+        onOpenChange={setDemoteConfirm}
+        variant="destructive"
+        kicker="FLEET · DEMOTE · IRREVERSIBLE"
+        title="Demote replica to control"
+        confirmLabel={demoteBusy ? 'Demoting...' : 'Demote'}
+        onConfirm={handleDemote}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Removes every replicated scan policy and CVE suppression mirrored from the control. Local edits to security policies on this instance become available again.
         </p>
       </ConfirmModal>
     </div>

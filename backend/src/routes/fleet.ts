@@ -371,6 +371,36 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
   }
 });
 
+// Demote this replica back to a standalone control. Wipes all replicated
+// security rules and the cached fingerprint, then flips `fleet_role` to
+// 'control'. The local UI's write controls become available again.
+// `{confirm: true}` body is required so a misclick cannot destroy mirrored
+// state.
+fleetRouter.post('/role/demote', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body ?? {};
+  if (body.confirm !== true) {
+    res.status(400).json({
+      error: 'Demote requires explicit confirmation. Send { "confirm": true } to proceed.',
+    });
+    return;
+  }
+  try {
+    const demoted = FleetSyncService.getInstance().demote();
+    if (!demoted) {
+      res.status(409).json({
+        error: 'This instance is already a control; nothing to demote.',
+        code: 'ALREADY_CONTROL',
+      });
+      return;
+    }
+    res.json({ success: true, role: 'control' });
+  } catch (error) {
+    console.error('[FleetSync] Demote failed:', error);
+    res.status(500).json({ error: 'Failed to demote replica' });
+  }
+});
+
 // Reset the control anchor on this replica. An admin must opt in explicitly
 // with `{override: true}` because reanchor wipes all replicated rows; the
 // next push from a different control will re-populate them. Used when a
