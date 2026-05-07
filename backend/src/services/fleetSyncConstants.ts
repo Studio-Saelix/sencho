@@ -59,6 +59,7 @@ export type FleetResource = 'scan_policies' | 'cve_suppressions';
 export const SYNC_STATE_KEYS = {
     fleetRole: 'fleet_role',
     fleetSelfIdentity: 'fleet_self_identity',
+    fleetControlIdentity: 'fleet_control_identity',
     receivedPushedAt: (resource: FleetResource): string => `received_pushed_at:${resource}`,
     truncationAlertAt: (resource: FleetResource): string => `fleet_sync_truncation_alert_at:${resource}`,
 } as const;
@@ -67,4 +68,5 @@ export const SYNC_STATE_KEYS = {
 export const SYNC_ERROR_CODES = {
     staleSyncPush: 'STALE_SYNC_PUSH',
     payloadTooLarge: 'SYNC_PAYLOAD_TOO_LARGE',
+    controlIdentityMismatch: 'CONTROL_IDENTITY_MISMATCH',
 } as const;

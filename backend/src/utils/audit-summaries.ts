@@ -87,6 +87,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /fleet/snapshots/*/restore': 'Restored fleet backup',
   'POST /fleet/nodes/*/update': 'Triggered fleet node update',
   'POST /fleet/update-all': 'Triggered fleet-wide update',
+  'POST /fleet/role/reanchor': 'Re-anchored fleet replica',
 
   // Cloud backup
   'PUT /cloud-backup/config': 'Updated cloud backup config',

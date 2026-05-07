@@ -10,6 +10,7 @@ const {
   mockGetLocalScanPolicies,
   mockGetLocalCveSuppressions,
   mockReplaceReplicatedScanPolicies,
+  mockReplaceReplicatedCveSuppressions,
   mockRecordFleetSyncSuccess,
   mockRecordFleetSyncFailure,
   mockGetSystemState,
@@ -23,6 +24,7 @@ const {
   mockGetLocalScanPolicies: vi.fn().mockReturnValue([]),
   mockGetLocalCveSuppressions: vi.fn().mockReturnValue([]),
   mockReplaceReplicatedScanPolicies: vi.fn(),
+  mockReplaceReplicatedCveSuppressions: vi.fn(),
   mockRecordFleetSyncSuccess: vi.fn(),
   mockRecordFleetSyncFailure: vi.fn(),
   mockGetSystemState: vi.fn().mockReturnValue(null),
@@ -39,6 +41,7 @@ vi.mock('../services/DatabaseService', () => ({
       getLocalScanPolicies: mockGetLocalScanPolicies,
       getLocalCveSuppressions: mockGetLocalCveSuppressions,
       replaceReplicatedScanPolicies: mockReplaceReplicatedScanPolicies,
+      replaceReplicatedCveSuppressions: mockReplaceReplicatedCveSuppressions,
       recordFleetSyncSuccess: mockRecordFleetSyncSuccess,
       recordFleetSyncFailure: mockRecordFleetSyncFailure,
       getSystemState: mockGetSystemState,
@@ -370,5 +373,125 @@ describe('FleetSyncService.applyIncomingSync transactional', () => {
       (c) => typeof c[0] === 'string' && c[0].startsWith('received_pushed_at:'),
     );
     expect(watermarkWrites).toHaveLength(0);
+  });
+});
+
+/** Reset the static fingerprint cache between tests; the static field is private. */
+function resetControlIdentityCache(): void {
+  (FleetSyncService as unknown as { cachedControlIdentity: string | null }).cachedControlIdentity = null;
+}
+
+describe('FleetSyncService control anchor', () => {
+  it('persists controlIdentity on first sync (no cached fingerprint)', () => {
+    mockGetSystemState.mockImplementation((key: string) => {
+      if (key === 'fleet_control_identity') return null;
+      return null;
+    });
+    FleetSyncService.getInstance().applyIncomingSync(
+      'scan_policies',
+      [],
+      'https://me.example',
+      undefined,
+      'fingerprint-aaa',
+    );
+    expect(mockSetSystemState).toHaveBeenCalledWith('fleet_control_identity', 'fingerprint-aaa');
+  });
+
+  it('rejects with ControlIdentityMismatchError when cached fingerprint differs', async () => {
+    const { ControlIdentityMismatchError } = await import('../services/FleetSyncService');
+    mockGetSystemState.mockImplementation((key: string) => {
+      if (key === 'fleet_control_identity') return 'fingerprint-original';
+      return null;
+    });
+    expect(() => {
+      FleetSyncService.getInstance().applyIncomingSync(
+        'scan_policies',
+        [],
+        'https://me.example',
+        undefined,
+        'fingerprint-different',
+      );
+    }).toThrow(ControlIdentityMismatchError);
+  });
+
+  it('accepts subsequent push when controlIdentity matches the cached fingerprint', () => {
+    mockGetSystemState.mockImplementation((key: string) => {
+      if (key === 'fleet_control_identity') return 'fingerprint-aaa';
+      return null;
+    });
+    expect(() => {
+      FleetSyncService.getInstance().applyIncomingSync(
+        'scan_policies',
+        [],
+        'https://me.example',
+        undefined,
+        'fingerprint-aaa',
+      );
+    }).not.toThrow();
+    // Cached identity is not re-written when matching to avoid noisy churn.
+    const writes = mockSetSystemState.mock.calls.filter((c) => c[0] === 'fleet_control_identity');
+    expect(writes).toHaveLength(0);
+  });
+
+  it('treats empty incoming controlIdentity as legacy and accepts (back-compat)', () => {
+    mockGetSystemState.mockImplementation((key: string) => {
+      if (key === 'fleet_control_identity') return 'fingerprint-aaa';
+      return null;
+    });
+    expect(() => {
+      FleetSyncService.getInstance().applyIncomingSync(
+        'scan_policies',
+        [],
+        'https://me.example',
+        undefined,
+        '',
+      );
+    }).not.toThrow();
+  });
+
+  it('treats empty cached fingerprint (post-reanchor) as un-anchored', () => {
+    mockGetSystemState.mockImplementation((key: string) => {
+      if (key === 'fleet_control_identity') return '';
+      return null;
+    });
+    expect(() => {
+      FleetSyncService.getInstance().applyIncomingSync(
+        'scan_policies',
+        [],
+        'https://me.example',
+        undefined,
+        'fingerprint-new-control',
+      );
+    }).not.toThrow();
+    expect(mockSetSystemState).toHaveBeenCalledWith('fleet_control_identity', 'fingerprint-new-control');
+  });
+});
+
+describe('FleetSyncService.reanchor', () => {
+  it('clears cached fingerprint, watermarks, and replicated rows in one transaction', () => {
+    FleetSyncService.getInstance().reanchor();
+    expect(mockTransaction).toHaveBeenCalled();
+    expect(mockSetSystemState).toHaveBeenCalledWith('fleet_control_identity', '');
+    expect(mockSetSystemState).toHaveBeenCalledWith('received_pushed_at:scan_policies', '');
+    expect(mockSetSystemState).toHaveBeenCalledWith('received_pushed_at:cve_suppressions', '');
+    expect(mockReplaceReplicatedScanPolicies).toHaveBeenCalledWith([]);
+  });
+});
+
+describe('FleetSyncService.getControlIdentity', () => {
+  it('returns a stable 16-hex-char fingerprint derived from instance_id', () => {
+    mockGetSystemState.mockImplementation((key: string) => (key === 'instance_id' ? 'uuid-abc-def' : null));
+    resetControlIdentityCache();
+    const fp1 = FleetSyncService.getControlIdentity();
+    expect(fp1).toMatch(/^[0-9a-f]{16}$/);
+    resetControlIdentityCache();
+    const fp2 = FleetSyncService.getControlIdentity();
+    expect(fp2).toBe(fp1);
+  });
+
+  it('returns empty string when instance_id is missing', () => {
+    resetControlIdentityCache();
+    mockGetSystemState.mockImplementation(() => null);
+    expect(FleetSyncService.getControlIdentity()).toBe('');
   });
 });
