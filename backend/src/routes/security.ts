@@ -410,7 +410,12 @@ securityRouter.get(
 
 securityRouter.get('/policies', authMiddleware, (req: Request, res: Response): void => {
   if (!requirePaid(req, res)) return;
-  res.json(DatabaseService.getInstance().getScanPolicies());
+  // Replicas see only policies that apply to themselves: local-only rows plus
+  // fleet-wide and self-identity-matched replicated rows. Identity-scoped
+  // rows targeting other replicas are filtered out at the SQL boundary.
+  const policies = DatabaseService.getInstance()
+    .getScanPoliciesForUi(FleetSyncService.getRole(), FleetSyncService.getSelfIdentity());
+  res.json(policies);
 });
 
 securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): void => {
