@@ -10,23 +10,7 @@ import type { ComboboxOption } from '@/components/ui/combobox';
 import { Tabs, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { springs } from '@/lib/motion';
-import {
-    Dialog,
-    DialogContent,
-    DialogTitle,
-    DialogDescription,
-} from '@/components/ui/dialog';
-import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
-    AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
@@ -76,6 +60,7 @@ export function NotificationRoutingSection() {
     const [showForm, setShowForm] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
     const [testingId, setTestingId] = useState<number | null>(null);
+    const [deleteRouteId, setDeleteRouteId] = useState<number | null>(null);
     const [stackOptions, setStackOptions] = useState<ComboboxOption[]>([]);
     const [labelOptions, setLabelOptions] = useState<StackLabel[]>([]);
 
@@ -202,9 +187,10 @@ export function NotificationRoutingSection() {
         }
     };
 
-    const handleDelete = async (id: number) => {
+    const handleDelete = async () => {
+        if (deleteRouteId == null) return;
         try {
-            const res = await apiFetch(`/notification-routes/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/notification-routes/${deleteRouteId}`, { method: 'DELETE' });
             if (res.ok) {
                 toast.success('Route deleted.');
                 fetchRoutes();
@@ -214,8 +200,12 @@ export function NotificationRoutingSection() {
             }
         } catch {
             toast.error('Network error.');
+        } finally {
+            setDeleteRouteId(null);
         }
     };
+
+    const deleteTargetRoute = deleteRouteId != null ? routes.find(r => r.id === deleteRouteId) : null;
 
     const handleTest = async (id: number) => {
         setTestingId(id);
@@ -317,14 +307,13 @@ export function NotificationRoutingSection() {
                     </SettingsPrimaryButton>
                 </div>
 
-                <Dialog open={showForm} onOpenChange={(open) => { if (!open) resetForm(); }}>
-                    <DialogContent className="sm:max-w-[500px]">
-                        <DialogTitle>{editingId ? 'Edit Route' : 'New Routing Rule'}</DialogTitle>
-                        <DialogDescription className="sr-only">
-                            {editingId ? 'Edit a notification routing rule' : 'Create a notification routing rule'}
-                        </DialogDescription>
-
-                        <div className="space-y-4 pt-2">
+                <Modal open={showForm} onOpenChange={(open) => { if (!open) resetForm(); }} size="lg">
+                    <ModalHeader
+                        kicker={editingId ? 'ROUTING · EDIT RULE' : 'ROUTING · NEW RULE'}
+                        title={editingId ? 'Edit routing rule' : 'New routing rule'}
+                        description={editingId ? 'Edit a notification routing rule' : 'Create a notification routing rule'}
+                    />
+                    <ModalBody>
                             <div className="space-y-2">
                                 <Label>Name</Label>
                                 <Input
@@ -484,15 +473,18 @@ export function NotificationRoutingSection() {
                                 </div>
                             </div>
 
-                            <div className="flex justify-end gap-2 pt-2">
-                                <Button variant="outline" size="sm" onClick={resetForm}>Cancel</Button>
-                                <SettingsPrimaryButton size="sm" onClick={handleSave} disabled={saving}>
-                                    {saving ? <><RefreshCw className="w-4 h-4 animate-spin" />Saving</> : editingId ? 'Update' : 'Create'}
-                                </SettingsPrimaryButton>
-                            </div>
-                        </div>
-                    </DialogContent>
-                </Dialog>
+                    </ModalBody>
+                    <ModalFooter
+                        secondary={
+                            <Button variant="outline" size="sm" onClick={resetForm}>Cancel</Button>
+                        }
+                        primary={
+                            <SettingsPrimaryButton size="sm" onClick={handleSave} disabled={saving}>
+                                {saving ? <><RefreshCw className="w-4 h-4 animate-spin" />Saving</> : editingId ? 'Update' : 'Create'}
+                            </SettingsPrimaryButton>
+                        }
+                    />
+                </Modal>
 
                 {loading && (
                     <div className="space-y-3">
@@ -554,35 +546,15 @@ export function NotificationRoutingSection() {
                                 <Button variant="ghost" size="sm" onClick={() => startEdit(route)} title="Edit">
                                     <Pencil className="w-4 h-4" strokeWidth={1.5} />
                                 </Button>
-                                <AlertDialog>
-                                    <AlertDialogTrigger asChild>
-                                        <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
-                                            title="Delete"
-                                        >
-                                            <Trash2 className="w-4 h-4" strokeWidth={1.5} />
-                                        </Button>
-                                    </AlertDialogTrigger>
-                                    <AlertDialogContent>
-                                        <AlertDialogHeader>
-                                            <AlertDialogTitle>Delete routing rule?</AlertDialogTitle>
-                                            <AlertDialogDescription>
-                                                Deleting <strong>{route.name}</strong> will remove this routing rule. Alerts for the associated stacks will fall back to your global notification channels.
-                                            </AlertDialogDescription>
-                                        </AlertDialogHeader>
-                                        <AlertDialogFooter>
-                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                            <AlertDialogAction
-                                                onClick={() => handleDelete(route.id)}
-                                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                            >
-                                                Delete
-                                            </AlertDialogAction>
-                                        </AlertDialogFooter>
-                                    </AlertDialogContent>
-                                </AlertDialog>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                                    title="Delete"
+                                    onClick={() => setDeleteRouteId(route.id)}
+                                >
+                                    <Trash2 className="w-4 h-4" strokeWidth={1.5} />
+                                </Button>
                             </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
@@ -616,6 +588,20 @@ export function NotificationRoutingSection() {
                         </div>
                     </div>
                 ))}
+
+                <ConfirmModal
+                    open={deleteRouteId != null}
+                    onOpenChange={(open) => { if (!open) setDeleteRouteId(null); }}
+                    variant="destructive"
+                    kicker="ROUTING · DELETE · IRREVERSIBLE"
+                    title="Delete routing rule"
+                    confirmLabel="Delete"
+                    onConfirm={handleDelete}
+                >
+                    <p className="text-sm text-stat-subtitle">
+                        Deletes <span className="font-medium text-stat-value">{deleteTargetRoute?.name ?? 'this rule'}</span>. Alerts for the associated stacks will fall back to your global notification channels.
+                    </p>
+                </ConfirmModal>
             </div>
           </CapabilityGate>
         </AdmiralGate>

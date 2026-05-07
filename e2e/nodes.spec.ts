@@ -46,8 +46,8 @@ test.describe('Node management', () => {
     await page.locator('#node-api-url').fill('http://localhost:6379');
     // api_token is required to enable the submit button; use a dummy value since we're testing URL validation
     await page.locator('#node-api-token').fill('dummy-token');
-    // Use .last() to target the dialog submit button, not the trigger
-    await page.getByRole('button', { name: /add node/i }).last().click();
+    // Scope to the dialog so we target the submit button, not the trigger
+    await page.getByRole('dialog').getByRole('button', { name: /add node/i }).click();
 
     await expect(page.getByText(/loopback|localhost/i)).toBeVisible({ timeout: 5_000 });
   });
@@ -59,7 +59,7 @@ test.describe('Node management', () => {
     await page.locator('#node-api-url').fill('not-a-url-at-all');
     // api_token is required to enable the submit button; use a dummy value since we're testing URL validation
     await page.locator('#node-api-token').fill('dummy-token');
-    await page.getByRole('button', { name: /add node/i }).last().click();
+    await page.getByRole('dialog').getByRole('button', { name: /add node/i }).click();
 
     await expect(page.getByText(/valid url|invalid url/i)).toBeVisible({ timeout: 5_000 });
   });
