@@ -175,30 +175,26 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
 
 ## Troubleshooting
 
-<Accordion title="The compose editor is read-only and I can't type">
-You have not entered edit mode yet. Click **edit** in the Anatomy panel header (or the **Edit** button at the top of the editor card) to enable typing. If the **Edit** button is missing entirely, your role lacks the `stack:edit` permission; ask an admin to grant it.
-</Accordion>
-
-<Accordion title="Save & Deploy is disabled">
-A deploy is already running for this stack. Watch the action bar for the spinning state to clear, then save again.
-</Accordion>
-
-<Accordion title="The .env tab is greyed out">
-The stack has no env file to edit. Add an `env_file:` entry to a service in `compose.yaml` and save, or create a `.env` file in the stack directory through the **Files** tab.
-</Accordion>
-
-<Accordion title='"Container is not running" error when opening a bash session'>
-The container stopped between clicking the button and the exec starting. Start the container from the action bar (or the row's **Start service** option) and try again.
-</Accordion>
-
-<Accordion title='"Failed to start shell" error when opening a bash session'>
-The container image has no shell binary at `/bin/bash` or `/bin/sh`. Use an image that includes a shell, or install one in your Dockerfile.
-</Accordion>
-
-<Accordion title='Bash session connects but immediately shows "Session ended"'>
-The shell process inside the container exited as soon as it started. Check the container logs (the **View logs** button on the same row) for errors; the container's entrypoint may be overriding the shell, or the container itself may be in a crash loop.
-</Accordion>
-
-<Accordion title="Bash session is unresponsive">
-The WebSocket dropped silently. Close the modal and reopen it to start a fresh session; the bash modal does not reconnect automatically.
-</Accordion>
+<AccordionGroup>
+  <Accordion title="The compose editor is read-only and I can't type">
+    You have not entered edit mode yet. Click **edit** in the Anatomy panel header (or the **Edit** button at the top of the editor card) to enable typing. If the **Edit** button is missing entirely, your role lacks the `stack:edit` permission; ask an admin to grant it.
+  </Accordion>
+  <Accordion title="Save & Deploy is disabled">
+    A deploy is already running for this stack. Watch the action bar for the spinning state to clear, then save again.
+  </Accordion>
+  <Accordion title="The .env tab is greyed out">
+    The stack has no env file to edit. Add an `env_file:` entry to a service in `compose.yaml` and save, or create a `.env` file in the stack directory through the **Files** tab.
+  </Accordion>
+  <Accordion title='"Container is not running" error when opening a bash session'>
+    The container stopped between clicking the button and the exec starting. Start the container from the action bar (or the row's **Start service** option) and try again.
+  </Accordion>
+  <Accordion title='"Failed to start shell" error when opening a bash session'>
+    The container image has no shell binary at `/bin/bash` or `/bin/sh`. Use an image that includes a shell, or install one in your Dockerfile.
+  </Accordion>
+  <Accordion title='Bash session connects but immediately shows "Session ended"'>
+    The shell process inside the container exited as soon as it started. Check the container logs (the **View logs** button on the same row) for errors; the container's entrypoint may be overriding the shell, or the container itself may be in a crash loop.
+  </Accordion>
+  <Accordion title="Bash session is unresponsive">
+    The WebSocket dropped silently. Close the modal and reopen it to start a fresh session; the bash modal does not reconnect automatically.
+  </Accordion>
+</AccordionGroup>

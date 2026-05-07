@@ -63,10 +63,11 @@ Sencho attributes every recorded event to the user who was authenticated when th
 
 ## Troubleshooting
 
-<Accordion title="The Activity tab shows 'No activity recorded yet'">
-The activity log is populated by operations performed through Sencho on this stack: deploys, restarts, starts, stops, and image updates. Trigger one of those actions and the entry appears within a few seconds.
-</Accordion>
-
-<Accordion title="Operational events don't appear in the bell notification dropdown">
-The notification dropdown surfaces system alerts and error-level events. User-initiated operational events (start, stop, restart, deploy, update) appear exclusively in the per-stack Activity tab, keeping the global tray focused on conditions that need your attention.
-</Accordion>
+<AccordionGroup>
+  <Accordion title="The Activity tab shows 'No activity recorded yet'">
+    The activity log is populated by operations performed through Sencho on this stack: deploys, restarts, starts, stops, and image updates. Trigger one of those actions and the entry appears within a few seconds.
+  </Accordion>
+  <Accordion title="Operational events don't appear in the bell notification dropdown">
+    The notification dropdown surfaces system alerts and error-level events. User-initiated operational events (start, stop, restart, deploy, update) appear exclusively in the per-stack Activity tab, keeping the global tray focused on conditions that need your attention.
+  </Accordion>
+</AccordionGroup>
