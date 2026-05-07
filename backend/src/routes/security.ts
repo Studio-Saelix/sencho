@@ -14,6 +14,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
+import { validateStackPatternForRedos } from './fleet';
 import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
@@ -423,13 +424,20 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
   if (!POLICY_SEVERITIES.has(max_severity)) {
     res.status(400).json({ error: 'max_severity must be CRITICAL, HIGH, MEDIUM, or LOW' }); return;
   }
+  const normalizedPattern = stack_pattern ? String(stack_pattern) : null;
+  if (normalizedPattern !== null) {
+    const patternError = validateStackPatternForRedos(normalizedPattern);
+    if (patternError) {
+      res.status(400).json({ error: patternError }); return;
+    }
+  }
   try {
     const resolvedNodeId = node_id != null ? Number(node_id) : null;
     const policy = DatabaseService.getInstance().createScanPolicy({
       name: name.trim(),
       node_id: resolvedNodeId,
       node_identity: FleetSyncService.resolveIdentityForNodeId(resolvedNodeId),
-      stack_pattern: stack_pattern ? String(stack_pattern) : null,
+      stack_pattern: normalizedPattern,
       max_severity,
       block_on_deploy: block_on_deploy ? 1 : 0,
       enabled: enabled === false ? 0 : 1,
@@ -459,7 +467,16 @@ securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response
     updates.node_id = resolvedNodeId;
     updates.node_identity = FleetSyncService.resolveIdentityForNodeId(resolvedNodeId);
   }
-  if (body.stack_pattern !== undefined) updates.stack_pattern = body.stack_pattern ? String(body.stack_pattern) : null;
+  if (body.stack_pattern !== undefined) {
+    const normalizedPattern = body.stack_pattern ? String(body.stack_pattern) : null;
+    if (normalizedPattern !== null) {
+      const patternError = validateStackPatternForRedos(normalizedPattern);
+      if (patternError) {
+        res.status(400).json({ error: patternError }); return;
+      }
+    }
+    updates.stack_pattern = normalizedPattern;
+  }
   if (body.max_severity !== undefined) {
     if (!POLICY_SEVERITIES.has(body.max_severity)) {
       res.status(400).json({ error: 'max_severity must be CRITICAL, HIGH, MEDIUM, or LOW' }); return;
