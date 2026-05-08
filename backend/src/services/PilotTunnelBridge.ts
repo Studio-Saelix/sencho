@@ -101,8 +101,8 @@ export class TcpStream extends EventEmitter {
 /**
  * Narrow surface that Sencho Mesh consumes from a registered pilot tunnel.
  * `PilotTunnelManager.getBridge` returns this interface (not the concrete
- * bridge) so MeshService cannot reach into transport internals — close
- * code, loopback URL, the per-stream maps, the underscored helpers, etc.
+ * bridge) so MeshService cannot reach into transport internals: close code,
+ * loopback URL, the per-stream maps, the underscored helpers, etc.
  * Keep this set minimal: it is the contract a future alternative transport
  * (a stub for tests, a different routing strategy) would have to implement.
  */

@@ -1,14 +1,18 @@
 /**
- * Route-level coverage for the security invariant "a pilot_enroll JWT is
- * one-shot at the upgrade handler, not just at the DB layer".
+ * Route-level coverage for the rejection paths inside handlePilotTunnel.
  *
- * pilot-enrollment.test.ts already verifies that consumePilotEnrollment is
- * one-shot at the DB layer. That is necessary but not sufficient: a future
+ * The headline invariant is "a pilot_enroll JWT is one-shot at the upgrade
+ * handler, not just at the DB layer". pilot-enrollment.test.ts already
+ * verifies the DB layer. That is necessary but not sufficient: a future
  * refactor of handlePilotTunnel that re-orders mint and consume, or that
  * grants the WebSocket upgrade before checking the consume result, would
- * silently break the invariant while the DB-layer test stays green. This
- * file drives the actual upgrade handler with a consumed enrollment token
- * and asserts the rejection lands on the wire as a 401.
+ * silently break the invariant while the DB-layer test stays green.
+ *
+ * This file drives handlePilotTunnel directly with a stub IncomingMessage
+ * and Duplex socket. Each test exercises a different early-return branch
+ * (missing header, wrong-secret JWT, never-stored row, expired row,
+ * already-consumed row, unknown node) and asserts the rejection lands on
+ * the wire with the right HTTP status before any upgrade attempt.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { EventEmitter } from 'events';
@@ -54,8 +58,11 @@ function makeStubSocket(): StubSocket {
 function makeStubReq(authHeader: string | undefined, agentVersion = 'test-1.0'): IncomingMessage {
     const headers: Record<string, string> = { 'x-sencho-agent-version': agentVersion };
     if (authHeader !== undefined) headers['authorization'] = authHeader;
-    // Cast through unknown — handlePilotTunnel only reads `headers` from req,
-    // so the rest of the IncomingMessage surface is irrelevant for this test.
+    // Cast through unknown: handlePilotTunnel only reads `headers` from
+    // req, and on the reject path only calls socket.write(string) and
+    // socket.destroy() on the Duplex. Anything else we add to the handler
+    // (e.g. reading req.socket.remoteAddress for rate-limiting) silently
+    // no-ops against the stub, so update both stubs when the surface grows.
     return { headers } as unknown as IncomingMessage;
 }
 
@@ -93,7 +100,7 @@ beforeEach(() => {
     });
 });
 
-describe('handlePilotTunnel — replay rejection at the route layer', () => {
+describe('handlePilotTunnel: rejection paths in the upgrade handler', () => {
     it('rejects an enrollment token whose row was already consumed', async () => {
         const { token, hash } = mintEnroll(nodeId);
 
@@ -200,7 +207,7 @@ describe('handlePilotTunnel — replay rejection at the route layer', () => {
     it('rejects a pilot_tunnel-scoped JWT for an unknown node', async () => {
         // pilot_tunnel scope is the long-lived credential persisted on the
         // agent. A pilot_tunnel JWT for a node that has been deleted (or
-        // never existed) must be rejected at the upgrade handler — the
+        // never existed) must be rejected at the upgrade handler: the
         // node lookup is the gate, not the JWT signature alone.
         const db = DatabaseService.getInstance();
         const jwtSecret = db.getGlobalSettings().auth_jwt_secret;

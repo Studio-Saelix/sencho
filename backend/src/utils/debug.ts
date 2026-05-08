@@ -6,14 +6,14 @@
  * Acceptable: error paths, per-request paths, per-tunnel paths,
  * once-per-stream paths. Each call costs one Map lookup in Node's
  * require cache, one method call into the cached settings object, and
- * a property access — fine for these cadences.
+ * a property access. Fine for these cadences.
  *
  * NOT acceptable: per-frame paths in steady state (WebSocket message
- * loops, container stats streams, log-tail demuxers). The try/catch
- * frame setup and the hop into DatabaseService add up at thousands of
- * calls per second. If you need diagnostic logging in a per-frame
- * loop, snapshot the result once outside the loop and read the
- * snapshot inside.
+ * loops, container stats streams, log-tail demuxers). The require
+ * lookup and singleton dispatch add up at thousands of calls per
+ * second. If you need diagnostic logging in a per-frame loop,
+ * snapshot the result once outside the loop and read the snapshot
+ * inside.
  */
 
 export function isDebugEnabled(): boolean {
