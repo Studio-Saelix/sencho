@@ -5,6 +5,9 @@ import { EventEmitter } from 'events';
 import jwt from 'jsonwebtoken';
 import { DatabaseService } from './DatabaseService';
 import DockerController from './DockerController';
+import { LicenseService } from './LicenseService';
+import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
+import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { generateOverrideYaml, MeshAlias } from './MeshComposeOverride';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -359,10 +362,20 @@ export class MeshService extends EventEmitter {
         const portMap = new Map<number, MeshGlobalAlias>();
         const stacks = db.listMeshStacks();
 
-        for (const row of stacks) {
-            const node = db.getNode(row.node_id);
-            if (!node) continue;
-            const services = await this.inspectStackServices(row.node_id, row.stack_name).catch(() => []);
+        // Inspect all stacks in parallel; each remote-node lookup involves an
+        // HTTP fetch with its own 5 s AbortSignal. Sequential awaiting would
+        // let one slow node stall the whole refresh, which is on a 60 s loop.
+        const inspections = await Promise.allSettled(
+            stacks.map(async (row) => {
+                const node = db.getNode(row.node_id);
+                if (!node) return null;
+                const services = await this.inspectStackServices(row.node_id, row.stack_name);
+                return { row, node, services };
+            }),
+        );
+        for (const result of inspections) {
+            if (result.status !== 'fulfilled' || !result.value) continue;
+            const { row, node, services } = result.value;
             for (const svc of services) {
                 const host = `${svc.service}.${row.stack_name}.${node.name}.sencho`;
                 for (const port of svc.ports) {
@@ -388,12 +401,14 @@ export class MeshService extends EventEmitter {
     }
 
     /**
-     * Inspect a stack on a node and return its running services with the ports
-     * they listen on. Uses Compose container labels.
+     * Inspect a stack and return its running services with the ports they
+     * listen on. For the LOCAL Docker daemon only — callers targeting a
+     * remote node must use {@link inspectStackServices}, which dispatches
+     * via the HTTP proxy to the remote's `/api/mesh/local-services/:stack`.
      */
-    private async inspectStackServices(nodeId: number, stackName: string): Promise<Array<{ service: string; ports: number[] }>> {
+    public async inspectLocalStackServices(stackName: string): Promise<Array<{ service: string; ports: number[] }>> {
         try {
-            const docker = DockerController.getInstance(nodeId).getDocker();
+            const docker = DockerController.getInstance().getDocker();
             const containers = await docker.listContainers({
                 all: true,
                 filters: { label: [`com.docker.compose.project=${stackName}`] },
@@ -410,7 +425,45 @@ export class MeshService extends EventEmitter {
             }
             return Array.from(byService.entries()).map(([service, ports]) => ({ service, ports: Array.from(ports) }));
         } catch (err) {
-            console.warn('[MeshService] inspectStackServices failed:', sanitizeForLog((err as Error).message));
+            console.warn('[MeshService] inspectLocalStackServices failed:', sanitizeForLog((err as Error).message));
+            return [];
+        }
+    }
+
+    /**
+     * Inspect a stack on a (possibly remote) node and return its running
+     * services with the ports they listen on. Local nodes hit Dockerode
+     * directly; remote nodes (proxy mode and pilot-agent) reach their own
+     * Sencho's `/api/mesh/local-services/:stackName` via the existing
+     * `NodeRegistry.getProxyTarget` resolution chain because Dockerode is not
+     * directly reachable for remote nodes by design.
+     */
+    private async inspectStackServices(nodeId: number, stackName: string): Promise<Array<{ service: string; ports: number[] }>> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) return [];
+        if (node.type !== 'remote') return this.inspectLocalStackServices(stackName);
+
+        const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!target) {
+            console.warn(`[MeshService] inspectStackServices: no proxy target for node ${nodeId} (${sanitizeForLog(node.name)})`);
+            return [];
+        }
+        try {
+            const url = `${target.apiUrl.replace(/\/$/, '')}/api/mesh/local-services/${encodeURIComponent(stackName)}`;
+            const headers: Record<string, string> = {};
+            if (target.apiToken) headers['Authorization'] = `Bearer ${target.apiToken}`;
+            const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+            headers[PROXY_TIER_HEADER] = proxyHeaders.tier;
+            headers[PROXY_VARIANT_HEADER] = proxyHeaders.variant || '';
+            const res = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) });
+            if (!res.ok) {
+                console.error(`[MeshService] inspectStackServices: HTTP ${res.status} from node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return [];
+            }
+            const body = await res.json() as { services?: Array<{ service: string; ports: number[] }> };
+            return body.services ?? [];
+        } catch (err) {
+            console.error('[MeshService] inspectStackServices remote unreachable:', sanitizeForLog((err as Error).message));
             return [];
         }
     }
