@@ -3,56 +3,120 @@ title: Introduction
 description: What Sencho is and why you might want it.
 ---
 
-Sencho is a self-hosted Docker Compose management dashboard. It gives you a clean web UI to deploy, manage, and monitor your Docker Compose stacks - locally or across multiple remote servers - without touching a terminal.
+Sencho is a self-hosted Docker Compose dashboard. It puts a cockpit on top of one Docker host or a fleet of them, so you can deploy stacks, watch them run, and intervene when something goes sideways without leaving the browser.
+
+There is no SSH and no remote Docker socket. Every node is a Sencho instance talking to its own local Docker, and Sencho-to-Sencho calls go over plain HTTP with a token.
 
 <Frame>
-  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho dashboard showing system stats and container metrics" />
+  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho cockpit dashboard with status masthead, system gauges, and stack health table" />
 </Frame>
 
 ## Key concepts
 
-- **Stacks** - a Docker Compose project living in your `COMPOSE_DIR`. Sencho treats each subdirectory as a stack.
-- **Nodes** - a Sencho instance. Your local machine is always the default node. Add remote nodes by pointing Sencho at another Sencho instance's API URL.
-- **Resources** - images, volumes, and networks that belong to your stacks (managed) or exist outside them (external/unused).
+A few words show up everywhere in Sencho. Knowing them up front makes the rest of the docs (and the UI) easier to read.
+
+- **Stack** is one Compose project: a directory under `COMPOSE_DIR` with a `compose.yaml` and friends. Each subdirectory is one stack.
+- **Node** is a Sencho instance. The local node is always present. Remote nodes are added by their Sencho URL plus an API token; Sencho never reaches into them with SSH or a remote Docker socket.
+- **Fleet** is the set of nodes you manage from one console.
+- **Resources** are the images, volumes, and networks Docker accumulates, classified as managed (created by a stack), external (attached but not owned), or unused (safe to prune).
+- **Blueprint** is a declarative spec for one or more stacks, applied across selected nodes by a reconciler that converges drift back to the spec.
+- **Mesh** is a managed sidecar overlay that gives stacks stable service discovery to each other across nodes.
+- **Pilot** is an outbound agent that lets a node be managed by the console without exposing an inbound port.
 
 <Note>
-  Sencho never accesses remote servers directly via SSH or Docker TCP. Remote management works by proxying API requests to another running Sencho instance.
+  Remote management is HTTP between Sencho instances. Each remote runs the same Sencho binary against its own local Docker; the console only proxies requests with a long-lived token.
 </Note>
 
 ## What you can do
 
-### Stack lifecycle
-- **Deploy and control stacks** - create, start, stop, restart, update, roll back, and delete Compose stacks with one click
-- **Edit files in-browser** - full Monaco editor for `compose.yaml` and `.env` files with syntax highlighting, save-and-deploy in one step
-- **Atomic deployments** - automatic backup and rollback on every deploy. If containers crash, the previous configuration is restored automatically
-- **Stack labels** - organize stacks with custom labels for quick filtering and grouping
+### Run stacks like a cockpit, not a pile of YAML
 
-### Monitoring & observability
-- **Real-time dashboard** - live CPU, RAM, disk, and network stats with 24-hour historical charts
-- **Global log aggregation** - stream logs from all containers across all stacks in a single view, with filtering by stack, level, and keyword search
-- **Alerts & notifications** - threshold-based alerts (CPU, memory, network, restart count) routed to Discord, Slack, or any webhook endpoint
-- **Notification routing** - fine-grained control over which alerts go to which channels
-- **Audit log** - searchable trail of every mutating action with timestamps, user attribution, and node context
+A selected stack opens with its container, live metrics, full log stream, anatomy panel (entrypoints, mounts, networks), and a row of actions across the top.
 
-### Infrastructure
-- **Multi-node management** - add remote Sencho instances as nodes and manage them identically to your local machine
-- **Fleet view** - monitor your entire infrastructure from a single screen with health metrics, container counts, and resource usage
-- **Fleet-wide backups** - point-in-time snapshots of every compose and env file across all nodes, with per-stack restore
-- **Remote updates** - check for and apply Sencho updates across your fleet from the dashboard
+<Frame>
+  <img src="/images/introduction/stack-view.png" alt="Plex stack open in Sencho with running container, anatomy panel, and live log stream" />
+</Frame>
 
-### Resources & registry
-- **Resource hub** - browse, filter, and prune Docker images, volumes, and networks with managed/external/unused classification
-- **App Store** - deploy from 190+ pre-configured application templates with category filtering and one-click setup
-- **Private registries** - store credentials for Docker Hub, GHCR, AWS ECR, or self-hosted registries with automatic injection during deploys
+- Deploy, start, stop, restart, update, and roll back from one bar of buttons. See [Stack management](/features/stack-management).
+- Edit `compose.yaml` and `.env` in a built-in [Monaco editor](/features/editor) with syntax highlighting and save-and-deploy in one step.
+- Browse the on-disk files of a stack, including bind mounts, with the [stack file explorer](/features/stack-file-explorer).
+- Every deploy snapshots the prior configuration and rolls back automatically if the new containers fail to come up. See [atomic deployments](/features/atomic-deployments) for the exact behavior.
+- Organize at scale with [stack labels](/features/stack-labels) and filter chips in the [sidebar](/features/sidebar). Paste any `docker run` command into the create-stack flow and it converts to a Compose stack.
 
-### Automation & integration
-- **Webhooks** - trigger stack actions from CI/CD pipelines via HTTP with HMAC-SHA256 authentication
-- **Scheduled operations** - run stack actions on a cron schedule directly from the UI
-- **Auto-update policies** - configure automatic image update checks and apply updates on your terms
-- **API tokens** - create scoped tokens for programmatic access and external integrations
+### Run one machine or many
 
-### Administration
-- **RBAC** - create viewer accounts with read-only access while keeping deploy and edit permissions locked to admins
-- **SSO** - authenticate via external identity providers
-- **Host console** - interactive terminal on the host OS directly in the browser; no SSH required
-- **Docker Run converter** - paste any `docker run` command and convert it to a Compose stack
+Add a remote Sencho instance by URL and token and it becomes another node in the same surface. The fleet view holds the whole picture: status masthead, per-node CPU / RAM / disk, container counts, and version drift.
+
+<Frame>
+  <img src="/images/introduction/fleet-overview.png" alt="Sencho fleet view with three node cards and per-node metrics" />
+</Frame>
+
+- [Fleet view](/features/fleet-view) and [multi-node management](/features/multi-node) cover the basics: search, sort, expand, drill in.
+- [Fleet snapshots](/features/fleet-backups) (a.k.a. Sencho Cloud Backup) take point-in-time copies of every `compose.yaml` and `.env` across the fleet, with per-stack restore.
+- [Remote updates](/features/remote-updates) check the Sencho version on every node and apply per-node updates from the console.
+- [Fleet Actions](/features/fleet-actions) bundles fleet-wide bulk operations: stop every stack with a given label across the fleet, or apply a label set to many stacks on one node in a single round trip.
+- [Federation](/features/fleet-federation) gives the operator explicit overrides on top of the blueprint reconciler: cordon a node out of rotation, pin a stack to a host, hold ground while you investigate.
+- [Fleet Secrets](/features/fleet-secrets) stores versioned env-var bundles encrypted at rest and pushes them to selected stacks on selected nodes with a diff preview before any write.
+
+### Mesh
+
+Stacks on different nodes need to call each other often enough that doing it by hand is tedious and error-prone. [Sencho Mesh](/features/sencho-mesh) plants a managed sidecar in opted-in stacks and gives services stable hostnames across the fleet, with an activity stream you can watch in real time.
+
+### Blueprints
+
+[Blueprints](/features/blueprint-model) describe one or more stacks declaratively and apply them to selected nodes through a reconciler. The reconciler captures a compose snapshot before any stateful eviction, so reapplying a Blueprint is safe even when it replaces an existing stack.
+
+### Monitoring and observability
+
+- The [dashboard](/features/dashboard) hits you with a status line, a unified gauge strip, a stack-health table sorted by load, and a fleet heartbeat.
+- [Global observability](/features/global-observability) streams logs from every container on every node into one searchable view.
+- [Alerts](/features/alerts-notifications) on CPU, memory, disk, restart count, and similar thresholds, [routed](/features/notification-routing) to Discord, Slack, or any webhook by rules.
+- [Audit log](/features/audit-log) keeps a searchable trail of every mutating action with actor and node attribution.
+
+### Resources you can actually clean up
+
+The Resources hub treats images, volumes, and networks as a single inventory, classified as managed, external, or unused, with a "you can reclaim X" header so it is obvious what cleanup is worth doing.
+
+<Frame>
+  <img src="/images/introduction/resources-hub.png" alt="Sencho Resources hub showing reclaimable disk space and image inventory with severity badges" />
+</Frame>
+
+See [Resources](/features/resources) for the full hub, the [App Store](/features/app-store) for a library of one-click templates, and [private registries](/features/private-registries) for credential storage that injects automatically at deploy time.
+
+### Security and identity
+
+- [RBAC](/features/rbac) with five roles (admin, viewer, deployer, node admin, auditor) and per-capability scoped permissions.
+- [SSO](/features/sso) with custom OIDC, one-click presets for common providers, and LDAP / Active Directory.
+- [Two-factor authentication](/features/two-factor-authentication) with TOTP and backup codes.
+- [Vulnerability scanning](/features/vulnerability-scanning) via Trivy with [CVE suppressions](/features/cve-suppressions) and [deploy-blocking scan policies](/features/deploy-enforcement) on paid tiers.
+- [Image signature verification](/operations/verifying-images) for cosign-signed releases.
+
+### Automation and integration
+
+- [Webhooks](/features/webhooks) trigger stack actions from CI / CD with HMAC-SHA256 signatures.
+- [API tokens](/features/api-tokens) cover programmatic access for scripts and external tools.
+- [Scheduled operations](/features/scheduled-operations) run deploys, restarts, scans, and snapshots on cron.
+- [Auto-update policies](/features/auto-update-policies) check registries on a schedule and apply updates only on the rules you set.
+- [Auto-heal policies](/features/auto-heal-policies) restart containers that stay in an unhealthy Docker healthcheck state past a threshold, with cooldown and per-hour caps.
+
+### Pilot and remote ops
+
+Some nodes can't accept an inbound connection (CG-NAT, locked-down VLAN, no public IP). The [Pilot agent](/features/pilot-agent) opens an outbound tunnel to the console node so it can be managed without exposing a port. When you are already on a node and want to drop into a shell, the [host console](/features/host-console) gives you an interactive terminal in the browser.
+
+## Tiers at a glance
+
+Sencho ships in three tiers: **Community**, **Skipper**, and **Admiral**. Community covers single- and multi-node deploy, monitor, and security basics. Skipper adds automation, fleet secrets, and advanced fleet management. Admiral covers enterprise-grade controls (audit log, host console, cross-node Mesh traffic management, federation overrides, fleet-wide policy push). The full matrix lives on the [licensing page](/features/licensing).
+
+## Where to next
+
+<CardGroup cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/getting-started/quickstart">
+    Install Sencho, deploy a first stack, add a node.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/getting-started/configuration">
+    Environment variables, compose dir, and core settings.
+  </Card>
+  <Card title="Self-hosting" icon="server" href="/operations/self-hosting">
+    Reverse proxy, TLS, backups, and production patterns.
+  </Card>
+</CardGroup>

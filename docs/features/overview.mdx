@@ -1,116 +1,204 @@
 ---
 title: Features Overview
-description: A high-level tour of everything Sencho can do.
+description: A high-level tour of everything Sencho can do, organized by area.
 ---
 
-## Dashboard
+Sencho is a self-hosted cockpit for Docker Compose. The catalog below groups every shipped feature by area so you can scan the surface area at a glance and jump into the deep-dive page for the bits you care about. Tier callouts are inline with each entry; if no tier is mentioned, the feature is available on every Sencho installation.
 
-The Home view shows real-time system stats at a glance: active containers, exited containers, Docker network activity, and host resource usage (CPU, RAM, disk). Historical CPU and RAM charts display trends over the last 24 hours. A Docker Run converter lets you paste any `docker run` command and convert it to a Compose stack. [Learn more →](/features/dashboard)
+<Frame>
+  <img src="/images/overview/dashboard-hero.png" alt="Home dashboard showing the system status masthead, the CPU, memory, disk, and network gauge strip with sparklines, and the stack health table sorted by load" />
+</Frame>
 
-## Stack management
+## Stacks & Deployments
 
-Deploy, start, stop, restart, update, and remove Docker Compose stacks through a point-and-click interface. Right-click any stack in the sidebar for a context menu with quick actions including alerts configuration, update checks, and deployment controls. [Learn more →](/features/stack-management)
+<Frame>
+  <img src="/images/overview/stack-anatomy.png" alt="Stack anatomy view with action buttons, container card, live logs, and a structured panel listing ports, volumes, healthcheck, and network" />
+</Frame>
 
-## Stack labels
+### Stack management
 
-Tag your stacks with custom colored labels like `production`, `staging`, or `media-server`. Filter the sidebar by label, identify stacks at a glance, and organize your infrastructure visually. Skipper or Admiral. [Learn more →](/features/stack-labels)
+Deploy, start, stop, restart, update, and remove Docker Compose stacks through a point-and-click interface. Right-click any stack in the sidebar for a context menu with quick actions, including alerts configuration, update checks, and deployment controls. [Learn more →](/features/stack-management)
 
-## Editor
+### Stack activity
 
-Full in-browser Monaco editor for your `compose.yaml` and `.env` files with syntax highlighting. Toggle edit mode, save to disk, or save and deploy in one step. The container panel shows per-container live stats (CPU, RAM, network), with buttons to open the app, stream logs, or launch a bash terminal. [Learn more →](/features/editor)
+Every stack has its own event log showing deploys, restarts, starts, stops, and image updates, each event attributed to the user or system that triggered it. The most recent 50 events load immediately and new events stream in live without page refresh; pagination fetches older events on demand. [Learn more →](/features/stack-activity)
 
-## Resources hub
+### Editor
 
-View and manage all Docker images, volumes, and networks. Resources are classified as:
+Full in-browser Monaco editor for `compose.yaml` and `.env` files with syntax highlighting. Toggle edit mode, save to disk, or save and deploy in one step. The container panel shows per-container live stats (CPU, RAM, network), with buttons to open the app, stream logs, or launch a bash terminal. [Learn more →](/features/editor)
 
-| Label | Meaning |
-|-------|---------|
-| **Managed** | Owned by a Sencho stack |
-| **External** | Part of another Compose project |
-| **Unused / Reclaimable** | Safe to prune |
+### Stack file explorer
 
-Run scoped prune operations to clean up Sencho-managed resources only, or target all Docker resources when needed. [Learn more →](/features/resources)
+Browse, edit, upload, and manage files inside a stack's directory from the dashboard. Read-only browsing and text-file viewing are available on every tier; upload, download, edit, folder creation, and file deletion are Skipper or Admiral features. [Learn more →](/features/stack-file-explorer)
 
-## App Store
+### Deploy progress
+
+Stream live output from stack actions in a structured log view with stage badges (PULL, BUILD, CREATE, START, STOP) so you can track each step of the deployment. The modal auto-closes on success and minimizes to a status pill that persists across navigation. [Learn more →](/features/deploy-progress)
+
+### Resources hub
+
+View and manage all Docker images, volumes, and networks. Resources are classified as Managed (owned by a Sencho stack), External (part of another Compose project), or Unused / Reclaimable (safe to prune). Run scoped prune operations to clean up Sencho-managed resources only, or target all Docker resources when needed. [Learn more →](/features/resources)
+
+### App Store
 
 Browse pre-configured application templates. Filter by category (Media, Automation, Development, etc.), configure environment variables, volumes, and ports, and deploy with a single click. Customize the template source URL to use your own registry. [Learn more →](/features/app-store)
 
-## Global observability
+### Atomic deployments
+
+Sencho snapshots your compose and environment files before applying changes. If containers crash after deploy, the previous configuration is restored automatically. Skipper or Admiral. [Learn more →](/features/atomic-deployments)
+
+### Deploy enforcement
+
+Block deploys that violate a scan policy before `docker compose up` runs, with an admin bypass path and a full audit trail. The pre-flight gate enumerates images and rejects deploys when any image meets or exceeds the policy's severity threshold; drift detection continues post-deploy and on schedule. Skipper or Admiral. [Learn more →](/features/deploy-enforcement)
+
+### Blueprints
+
+Fleet-wide compose templates that Sencho keeps in sync across the nodes you choose. One declaration covers many nodes via label selectors, drift detection always runs, and stateful blueprints get confirmation prompts before first deploy and before eviction. Skipper or Admiral. [Learn more →](/features/blueprint-model)
+
+### Git sources
+
+Link a stack to a Git repository and keep `compose.yaml` in sync via manual pulls or webhook triggers. Review a diff before applying changes, create stacks directly from a repo, and optionally sync sibling `.env` files for consistent configuration. [Learn more →](/features/git-sources)
+
+### Stack labels
+
+Tag your stacks with custom colored labels like `production`, `staging`, or `media-server`. Filter the sidebar by label, identify stacks at a glance, and organize your infrastructure visually. Skipper or Admiral. [Learn more →](/features/stack-labels)
+
+## Observability
+
+### Dashboard
+
+The Home view shows real-time system stats at a glance: active containers, exited containers, Docker network activity, and host resource usage (CPU, RAM, disk). Historical CPU and RAM charts display trends over the last 24 hours. A Docker Run converter lets you paste any `docker run` command and convert it to a Compose stack. [Learn more →](/features/dashboard)
+
+### Global search
+
+Jump to any page, node, or stack from anywhere in the app with `Ctrl+K` (`Cmd+K` on macOS). The palette groups results into Pages, Nodes, and Stacks; cross-node search fans out across every online node; and keyboard navigation keeps your hands on the keys. [Learn more →](/features/global-search)
+
+### Global observability
 
 The **Logs** view aggregates output from all containers across all stacks into a single scrollable stream. Filter by stack, log level (stdout/stderr), or search for keywords. Switch to developer mode for real-time SSE streaming instead of polling. [Learn more →](/features/global-observability)
 
-## Host console
-
-Open an interactive terminal on the host OS directly in the browser with full xterm.js emulation and color support. No SSH client required. Admin-only access. [Learn more →](/features/host-console)
-
-## Multi-node support
-
-Add remote Sencho instances as nodes. All dashboard operations (stack management, logs, stats) work identically whether you're targeting your local machine or a server on the other side of the world. Uses a transparent HTTP proxy model; no SSH or shared Docker sockets required. [Learn more →](/features/multi-node)
-
-## Node compatibility
-
-When you manage multiple nodes running different Sencho versions, the dashboard automatically detects each node's capabilities and disables features that aren't supported on older instances. No errors, no broken pages. [Learn more →](/features/node-compatibility)
-
-## Fleet View
-
-Monitor your entire infrastructure from a single screen. The fleet dashboard shows all nodes with health metrics, container counts, and resource usage. Skipper and Admiral users unlock fleet health summary cards, container drill-down, search, sorting, filtering, and critical node detection. [Learn more →](/features/fleet-view)
-
-## Remote updates
-
-Check for outdated nodes and trigger over-the-air updates from the Fleet View. When the gateway is running a newer version than a remote node, a one-click update pulls the latest image and recreates the container automatically. Per-node updates and the Check Updates view are available on every tier; the bulk **Update All** action is Skipper or Admiral. [Learn more →](/features/remote-updates)
-
-## Alerts & notifications
+### Alerts & notifications
 
 Configure threshold-based alerts (CPU, memory, network, restart count) per stack. Route notifications to Discord, Slack, or any generic webhook endpoint. Alerts are evaluated every minute with configurable duration and cooldown. [Learn more →](/features/alerts-notifications)
 
-## Notification routing
+### Notification routing
 
 Route alerts to specific channels with per-stack routing rules. Send production alerts to a critical Slack channel while routing dev stack alerts to a less urgent Discord channel. Admiral only. [Learn more →](/features/notification-routing)
 
-## Webhooks
-
-Trigger stack actions from external CI/CD pipelines via HTTP webhooks. Create a webhook targeting a specific stack and action, then call it from GitHub Actions, GitLab CI, or any system that can send an HTTP POST. Requests are authenticated with HMAC-SHA256 signatures. [Learn more →](/features/webhooks)
-
-## API tokens
-
-Generate scoped API tokens for CI/CD pipelines, scripts, and automation workflows. Each token is assigned a permission level (Read Only, Deploy Only, or Full Admin) so you can follow the principle of least privilege. Admiral only. [Learn more →](/features/api-tokens)
-
-## Auto-update policies
-
-Define schedules for Sencho to automatically check your container images for updates and apply them when new versions are available. Each policy targets a specific stack and runs on a cron schedule, with full run history for auditability. Think of it as a built-in Watchtower integrated into your dashboard. Skipper or Admiral. [Learn more →](/features/auto-update-policies)
-
-## Scheduled operations
-
-Automate recurring maintenance tasks like stack restarts, fleet snapshots, and system prunes on a cron schedule. Every execution is logged with full history so you always know what ran and when. Scheduled scans, updates, and snapshots are available on Skipper and Admiral; other scheduled actions remain Admiral only. [Learn more →](/features/scheduled-operations)
-
-## RBAC & user management
-
-Create viewer accounts with read-only access to dashboards, logs, and file contents, while keeping deploy and edit permissions locked to admins. Sencho supports two roles on Skipper: Admin (full access) and Viewer (read-only), with three additional roles on Admiral. [Learn more →](/features/rbac)
-
-## SSO & LDAP authentication
-
-Authenticate with your existing identity provider. Custom OIDC (Authelia, Keycloak, Authentik, any spec-compliant OIDC provider) is available on every tier. Skipper adds one-click Google, GitHub, and Okta presets. Admiral adds LDAP / Active Directory for enterprise directories. SSO works alongside password authentication and auto-provisions accounts on first login with configurable role mapping. [Learn more →](/features/sso)
-
-## Atomic deployments
-
-Skipper and Admiral users get automatic backup and rollback on every deployment. Before applying changes, Sencho snapshots your compose and environment files. If containers crash after deploy, the previous configuration is restored automatically. [Learn more →](/features/atomic-deployments)
-
-## Fleet-wide backups
-
-Create point-in-time snapshots of every compose file and environment file across all nodes. Snapshots are stored centrally and can be browsed by node and stack. Restore individual stacks from any snapshot with optional one-click redeploy, even to remote nodes. Manual snapshots are available on every tier; scheduled fleet snapshots are Skipper or Admiral. [Learn more →](/features/fleet-backups)
-
-## Private registries
-
-Store credentials for private Docker registries: Docker Hub organizations, GHCR, AWS ECR, and self-hosted registries. Sencho injects them automatically during deploy and pull operations. ECR short-lived tokens are refreshed on every operation. Admiral only. [Learn more →](/features/private-registries)
-
-## Vulnerability scanning
-
-Scan container images for known CVEs with [Trivy](https://trivy.dev). Manual scanning, secret and misconfiguration detection, scan comparison, and CVE suppressions are available on every tier; scheduled scans, scan policies that gate deploys, SBOM generation, and SARIF export are available on Skipper and Admiral. Auto-update of the managed Trivy binary is Admiral. [Learn more →](/features/vulnerability-scanning)
-
-## Audit log
+### Audit log
 
 Track every mutating action across your Sencho instance with a searchable audit trail. See who deployed, stopped, deleted, or changed settings, with timestamps, user attribution, and node context. Admiral only. [Learn more →](/features/audit-log)
 
-## Licensing & billing
+## Fleet & Multi-Node
+
+<Frame>
+  <img src="/images/overview/fleet-topology.png" alt="Fleet topology view showing the local node connected by curved links to two remote rack cards, each rendered with a status pill, hostname, CPU, memory, and disk bars" />
+</Frame>
+
+### Multi-node support
+
+Add remote Sencho instances as nodes. All dashboard operations (stack management, logs, stats) work identically whether you are targeting your local machine or a server on the other side of the world. Uses a transparent HTTP proxy model; no SSH or shared Docker sockets required. [Learn more →](/features/multi-node)
+
+### Pilot Agent
+
+Add remote nodes behind NAT, residential networks, or corporate firewalls without exposing any inbound port. The agent runs inside a container on the remote host and holds an outbound WebSocket tunnel to your primary instance; every request rides through the tunnel. [Learn more →](/features/pilot-agent)
+
+### Sencho Mesh
+
+Connect containers across nodes by hostname over the Pilot tunnel so multi-node fleets feel like one machine. Opt a stack into the mesh and its services become reachable from any other meshed stack at a stable hostname, with no VPN or firewall changes. Admiral only. [Learn more →](/features/sencho-mesh)
+
+### Fleet View
+
+Monitor your entire infrastructure from a single screen. The fleet dashboard shows all nodes with health metrics, container counts, and resource usage. Search, sort, filtering, stack drill-down, the Grid / Topology toggle, and critical-node detection are available on every tier; the bulk **Update All** action inside the Node Updates modal is Skipper or Admiral. [Learn more →](/features/fleet-view)
+
+### Fleet Federation
+
+Operator-driven placement controls for fleets running Blueprints. Cordon nodes to mark them unschedulable for new work, or pin a blueprint to a specific node to override selector matches. Cordon affects new placements only; existing deployments remain unchanged. Admiral only. [Learn more →](/features/fleet-federation)
+
+### Fleet Actions
+
+Run fleet-wide bulk operations from one place: stop stacks across nodes by label selector, or bulk-assign labels to many stacks at once on a single node. Skipper or Admiral. [Learn more →](/features/fleet-actions)
+
+### Fleet Sync
+
+When several Sencho instances run as a fleet, the control instance is the source of truth for security configuration and replicates rules to every remote automatically. Replicas show rules read-only and reject direct write attempts with `403 Forbidden`. [Learn more →](/features/fleet-sync)
+
+### Fleet Secrets
+
+Centralized, encrypted, versioned env-var bundles you can push to labeled nodes' stacks. Bundles are encrypted at rest with AES-256-GCM, every save bumps a version, and every push records a per-node diff in the audit log using overlay merge semantics. Skipper or Admiral. [Learn more →](/features/fleet-secrets)
+
+### Fleet-wide backups
+
+Create point-in-time snapshots of every compose file and environment file across all nodes. Snapshots are stored centrally and can be browsed by node and stack. Restore individual stacks from any snapshot with optional one-click redeploy, even to remote nodes. Manual snapshots are available on every tier; scheduled fleet snapshots are Skipper or Admiral. [Learn more →](/features/fleet-backups)
+
+### Remote updates
+
+Check for outdated nodes and trigger over-the-air updates from the Fleet View. When the gateway is running a newer version than a remote node, a one-click update pulls the latest image and recreates the container automatically. Per-node updates and the Check Updates view are available on every tier; the bulk **Update All** action is Skipper or Admiral. [Learn more →](/features/remote-updates)
+
+### Scheduled operations
+
+Automate recurring maintenance tasks like stack restarts, fleet snapshots, and system prunes on a cron schedule. Every execution is logged with full history so you always know what ran and when. Scheduled scans, updates, and snapshots are available on Skipper and Admiral; other scheduled actions remain Admiral only. [Learn more →](/features/scheduled-operations)
+
+## Security & Identity
+
+### Two-factor authentication
+
+Protect your Sencho account with a time-based one-time password (TOTP) from an authenticator app and ten single-use backup codes for sign-in recovery. Enroll by scanning a QR code or typing the secret; on every sign-in, Sencho asks for the current six-digit code after your password passes. [Learn more →](/features/two-factor-authentication)
+
+### RBAC & user management
+
+Create viewer accounts with read-only access to dashboards, logs, and file contents, while keeping deploy and edit permissions locked to admins. Skipper supports two roles (Admin and Viewer); Admiral adds three more (Deployer, Node Admin, Auditor) plus scoped permissions per stack or node. [Learn more →](/features/rbac)
+
+### SSO & LDAP authentication
+
+Authenticate with your existing identity provider. Custom OIDC (Authelia, Keycloak, Authentik, any spec-compliant OIDC provider) is available on every tier. Skipper adds preset providers for Google, GitHub, and Okta. Admiral adds LDAP / Active Directory for enterprise directories. SSO works alongside password authentication and auto-provisions accounts on first login with configurable role mapping. [Learn more →](/features/sso)
+
+### API tokens
+
+Generate scoped API tokens for CI/CD pipelines, scripts, and automation workflows. Each token is assigned a permission level (Read Only, Deploy Only, or Full Admin) so you can follow the principle of least privilege. Admiral only. [Learn more →](/features/api-tokens)
+
+### Vulnerability scanning
+
+Scan container images for known CVEs with [Trivy](https://trivy.dev). Manual scanning, secret and misconfiguration detection, scan comparison, and CVE suppressions are available on every tier; scheduled scans, scan policies that gate deploys, SBOM generation, and SARIF export are available on Skipper and Admiral. Auto-update of the managed Trivy binary is Admiral. [Learn more →](/features/vulnerability-scanning)
+
+### CVE suppressions
+
+Accept known-benign vulnerabilities so scan results stay focused on findings that actually need action. Suppressed findings remain in the database and raw counts but are visually dimmed in scan drawers and comparison sheets with your reason shown, optionally expiring after a specified number of days. [Learn more →](/features/cve-suppressions)
+
+### Private registries
+
+Store credentials for private Docker registries: Docker Hub organizations, GHCR, AWS ECR, and self-hosted registries. Sencho injects them automatically during deploy and pull operations. ECR short-lived tokens are refreshed on every operation. Admiral only. [Learn more →](/features/private-registries)
+
+## Automation
+
+### Auto-Update Readiness
+
+Review pending container updates across your fleet with risk tags (`patch`, `minor`, `major`, `digest rebuild`), one-line changelog previews, and rollback targets on a single board. The hero counts pending updates and tells you how many are ready to apply without human review; major version jumps and stacks with blocked registries are counted separately for review. Skipper or Admiral. [Learn more →](/features/auto-update-policies)
+
+### Auto-Heal Policies
+
+Automatically restart containers that fail Docker healthchecks for longer than a specified threshold. Each policy ships with safety rails: a cooldown period, hourly restart cap, recent-user-action suppression, and auto-disable on repeated restart failures. Skipper or Admiral. [Learn more →](/features/auto-heal-policies)
+
+### Webhooks
+
+Trigger stack actions from external CI/CD pipelines via HTTP webhooks. Create a webhook targeting a specific stack and action, then call it from GitHub Actions, GitLab CI, or any system that can send an HTTP POST. Requests are authenticated with HMAC-SHA256 signatures. [Learn more →](/features/webhooks)
+
+## Platform
+
+### Stack sidebar
+
+Manage, group, and pin your stacks from the primary sidebar, organized by label. Pinned stacks sit in a dedicated `PINNED` group at the top, the context menu groups actions by purpose (Inspect, Organize, Lifecycle, Destructive), and an activity footer shows the most recent stack event. [Learn more →](/features/sidebar)
+
+### Host console
+
+Open an interactive terminal on the host OS directly in the browser with full xterm.js emulation and color support. No SSH client required. Admin-only access. [Learn more →](/features/host-console)
+
+## Reference
+
+### Node compatibility
+
+When you manage multiple nodes running different Sencho versions, the dashboard automatically detects each node's capabilities and disables features that are not supported on older instances. No errors, no broken pages. [Learn more →](/features/node-compatibility)
+
+### Licensing & billing
 
 Sencho is free for personal use with the Community tier. Skipper and Admiral unlock RBAC, webhooks, fleet backups, atomic deployments, and advanced fleet features. Manage your license, view subscription details, and access the billing portal from Settings. [Learn more →](/features/licensing)
