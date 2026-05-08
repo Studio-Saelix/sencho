@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.75.0](https://github.com/Studio-Saelix/sencho/compare/v0.74.4...v0.75.0) (2026-05-08)
+
+
+### Added
+
+* drop stack labels and network topology to Community tier ([#995](https://github.com/Studio-Saelix/sencho/issues/995)) ([1803512](https://github.com/Studio-Saelix/sencho/commit/1803512f706cde7d46dc12e5173ece3d1355880c))
+* **mesh:** bidirectional routing via tcp_open_reverse and central relay ([#1003](https://github.com/Studio-Saelix/sencho/issues/1003)) ([567e524](https://github.com/Studio-Saelix/sencho/commit/567e52445099cbd8e13b8386ed94c14e37cb1fc9))
+* **mesh:** collapse sidecar into Sencho process via in-process forwarder ([#1000](https://github.com/Studio-Saelix/sencho/issues/1000)) ([f599110](https://github.com/Studio-Saelix/sencho/commit/f599110386e744c4329887237a210a2f6597addd))
+
 ## [0.74.4](https://github.com/Studio-Saelix/sencho/compare/v0.74.3...v0.74.4) (2026-05-08)
 
 
