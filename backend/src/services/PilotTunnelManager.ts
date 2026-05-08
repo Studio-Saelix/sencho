@@ -72,10 +72,10 @@ export class PilotTunnelManager extends EventEmitter {
      */
     public async registerTunnel(nodeId: number, ws: WebSocket, agentVersion?: string): Promise<void> {
         const existing = this.bridges.get(nodeId);
+        const replaced = existing != null;
         if (existing) {
             existing.close(PilotCloseCode.Replaced, 'replaced by newer tunnel');
             this.bridges.delete(nodeId);
-            PilotMetrics.increment('tunnels_replaced');
         }
 
         // Hard cap: only counts tunnels for *other* nodes since we just
@@ -85,6 +85,11 @@ export class PilotTunnelManager extends EventEmitter {
             PilotMetrics.increment('tunnels_rejected_capacity');
             throw new PilotTunnelCapacityError(PILOT_TUNNEL_HARD_LIMIT);
         }
+
+        // Bump the replaced counter only after the cap check passes, so a
+        // rejection does not double-count as both a replacement and a
+        // capacity rejection.
+        if (replaced) PilotMetrics.increment('tunnels_replaced');
         if (this.bridges.size >= PILOT_TUNNEL_SOFT_LIMIT && !this.softWarned) {
             console.warn(`[Pilot] Active tunnel count at soft limit (${this.bridges.size}/${PILOT_TUNNEL_HARD_LIMIT}); reconnect storm or runaway enrollment likely.`);
             this.softWarned = true;

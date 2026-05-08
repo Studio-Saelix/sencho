@@ -122,6 +122,7 @@ export class PilotTunnelBridge extends EventEmitter {
     private readonly streams = new Map<number, StreamState>();
     private readonly connectedAt = Date.now();
     private readonly pausedReqs = new Map<number, IncomingMessage>();
+    private readonly tcpAwaitingDrain = new Set<number>();
     private loopbackUrl = '';
     private pingTimer?: NodeJS.Timeout;
     private drainTimer?: NodeJS.Timeout;
@@ -212,15 +213,21 @@ export class PilotTunnelBridge extends EventEmitter {
         this.sendBinary(BinaryFrameType.TcpData, streamId, payload);
         s.bytesOut += payload.length;
         this.refreshIdleTimer(streamId, s);
-        return this.tunnelWs.bufferedAmount <= BUFFER_HIGH_WATER_MARK;
+        const ok = this.tunnelWs.bufferedAmount <= BUFFER_HIGH_WATER_MARK;
+        if (!ok) {
+            // Backpressure: caller will pause until 'drain'. Track this TCP
+            // stream so checkDrain knows to fire 'drain' on it (and so the
+            // drain timer keeps running for TCP-only backpressure scenarios).
+            this.tcpAwaitingDrain.add(streamId);
+            this.ensureDrainTimer();
+        }
+        return ok;
     }
 
     /** @internal Called only by TcpStream.end / .destroy. */
     public _closeTcpStream(streamId: number): void {
-        const s = this.streams.get(streamId);
-        if (!s) return;
-        this.clearIdleTimer(s);
-        this.streams.delete(streamId);
+        if (!this.streams.has(streamId)) return;
+        this.removeStream(streamId);
         this.sendJson({ t: 'tcp_close', s: streamId });
     }
 
@@ -243,7 +250,15 @@ export class PilotTunnelBridge extends EventEmitter {
         this.closed = true;
         if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; }
         this.stopDrainTimer();
+        // Resume any paused IncomingMessage so its end event can fire and
+        // its parser unwinds; the loopback close below will tear down the
+        // socket either way, but this avoids holding a dangling parser
+        // state across teardown.
+        for (const [, req] of this.pausedReqs) {
+            try { req.resume(); } catch { /* ignore */ }
+        }
         this.pausedReqs.clear();
+        this.tcpAwaitingDrain.clear();
 
         for (const [, state] of this.streams) {
             this.clearIdleTimer(state);
@@ -307,15 +322,13 @@ export class PilotTunnelBridge extends EventEmitter {
         req.on('error', () => {
             const s = this.streams.get(streamId);
             if (s) this.teardownStream(s);
-            this.streams.delete(streamId);
+            this.removeStream(streamId);
         });
 
         res.on('close', () => {
             // Client disconnected before response finished.
-            const s = this.streams.get(streamId);
-            if (s) {
-                this.clearIdleTimer(s);
-                this.streams.delete(streamId);
+            if (this.streams.has(streamId)) {
+                this.removeStream(streamId);
                 this.sendJson({ t: 'http_err', s: streamId, code: 'tunnel_down', message: 'client aborted' });
             }
         });
@@ -359,14 +372,12 @@ export class PilotTunnelBridge extends EventEmitter {
         socket.on('error', () => {
             const s = this.streams.get(streamId);
             if (s) this.teardownStream(s);
-            this.streams.delete(streamId);
+            this.removeStream(streamId);
         });
         socket.on('close', () => {
-            const s = this.streams.get(streamId);
-            if (s) {
-                this.clearIdleTimer(s);
+            if (this.streams.has(streamId)) {
                 this.sendJson({ t: 'ws_close', s: streamId, code: 1006, reason: 'client closed' });
-                this.streams.delete(streamId);
+                this.removeStream(streamId);
             }
         });
     }
@@ -570,9 +581,12 @@ export class PilotTunnelBridge extends EventEmitter {
         if (this.pausedReqs.has(streamId)) return;
         try { req.pause(); } catch { /* ignore */ }
         this.pausedReqs.set(streamId, req);
-        if (!this.drainTimer) {
-            this.drainTimer = setInterval(() => this.checkDrain(), DRAIN_CHECK_INTERVAL_MS);
-        }
+        this.ensureDrainTimer();
+    }
+
+    private ensureDrainTimer(): void {
+        if (this.drainTimer || this.closed) return;
+        this.drainTimer = setInterval(() => this.checkDrain(), DRAIN_CHECK_INTERVAL_MS);
     }
 
     private checkDrain(): void {
@@ -585,10 +599,14 @@ export class PilotTunnelBridge extends EventEmitter {
             try { req.resume(); } catch { /* ignore */ }
         }
         this.pausedReqs.clear();
-        // Also let any TCP-stream caller waiting on backpressure proceed.
-        for (const s of this.streams.values()) {
-            if (s.kind === 'tcp' && s.accepted) s.handle.emit('drain');
+        // Fire 'drain' only on TCP streams that signaled backpressure; do not
+        // wake every accepted TCP stream because that violates the documented
+        // event contract on TcpStream.
+        for (const streamId of this.tcpAwaitingDrain) {
+            const s = this.streams.get(streamId);
+            if (s && s.kind === 'tcp' && s.accepted) s.handle.emit('drain');
         }
+        this.tcpAwaitingDrain.clear();
         this.stopDrainTimer();
     }
 
@@ -616,6 +634,8 @@ export class PilotTunnelBridge extends EventEmitter {
         if (!s) return;
         this.clearIdleTimer(s);
         this.streams.delete(streamId);
+        this.pausedReqs.delete(streamId);
+        this.tcpAwaitingDrain.delete(streamId);
     }
 
     private onStreamIdle(streamId: number): void {
@@ -624,6 +644,8 @@ export class PilotTunnelBridge extends EventEmitter {
         // Tear down the loopback side and tell the agent to release its half.
         this.teardownStream(s);
         this.streams.delete(streamId);
+        this.pausedReqs.delete(streamId);
+        this.tcpAwaitingDrain.delete(streamId);
         if (s.kind === 'tcp') {
             this.sendJson({ t: 'tcp_close', s: streamId });
         } else if (s.kind === 'ws') {

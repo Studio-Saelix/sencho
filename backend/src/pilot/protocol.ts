@@ -18,12 +18,17 @@
 export const PROTOCOL_VERSION = 1;
 
 /**
- * Hard ceiling on a single tunnel WebSocket frame, in bytes. Applied as
- * `maxPayload` on both the gateway-side `WebSocketServer` and the agent-side
- * `WebSocket` client, and re-checked at decode for defense-in-depth. 8 MB
- * comfortably accommodates compose YAML, image-list responses, and exec
- * stream chunks while bounding the decode buffer a buggy or malicious peer
- * can force the other side to allocate.
+ * Hard ceiling on a single tunnel WebSocket frame, in bytes. Authoritative
+ * enforcement is at the WebSocket layer: `maxPayload` on the gateway-side
+ * `WebSocketServer` and the agent-side `WebSocket` client both reject
+ * oversized frames before they reach the decoder. The decoder also enforces
+ * the same cap for two narrow cases: (1) tests that build Buffers locally
+ * and skip the WebSocket layer, and (2) defense-in-depth if a future
+ * codepath ever passes user-controlled bytes to the decoder directly.
+ *
+ * 8 MB comfortably accommodates compose YAML, image-list responses, and
+ * exec stream chunks while bounding the decode buffer a buggy or malicious
+ * peer can force the other side to allocate.
  */
 export const MAX_FRAME_SIZE_BYTES = 8 * 1024 * 1024;
 
@@ -185,8 +190,13 @@ export function encodeJsonFrame(frame: JsonFrame): string {
 }
 
 export function decodeJsonFrame(raw: string): JsonFrame {
-    if (raw.length > MAX_FRAME_SIZE_BYTES) {
-        throw new Error(`json frame too large: ${raw.length} bytes`);
+    // Compare against UTF-8 byte length, not the string's UTF-16 code-unit
+    // count: multi-byte payloads can otherwise sneak ~3x the byte budget
+    // through a `raw.length` check. Cheap because Buffer.byteLength does
+    // not allocate.
+    const byteLen = Buffer.byteLength(raw, 'utf8');
+    if (byteLen > MAX_FRAME_SIZE_BYTES) {
+        throw new Error(`json frame too large: ${byteLen} bytes`);
     }
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || typeof parsed.t !== 'string') {

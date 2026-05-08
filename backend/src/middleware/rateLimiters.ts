@@ -162,8 +162,13 @@ export const enrollmentLimiter = rateLimit({
     // so the body check is bypassed there by skipping the skip when the
     // path already targets enrollment.
     if (req.path.endsWith('/pilot/enroll')) return false;
-    const body = req.body as { mode?: string; type?: string } | undefined;
-    return !(body && body.type === 'remote' && body.mode === 'pilot_agent');
+    // Express.json() runs globally before route handlers in app.ts, so
+    // req.body is parsed by the time this fires. If a future refactor moves
+    // body parsing per-route the worst case is "limiter applies even to
+    // proxy-mode" rather than "limiter is bypassed entirely".
+    if (!req.body) return false;
+    const body = req.body as { mode?: string; type?: string };
+    return !(body.type === 'remote' && body.mode === 'pilot_agent');
   },
 });
 

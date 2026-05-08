@@ -76,11 +76,19 @@ class PilotAgent {
     private readonly idleTimers = new Map<number, NodeJS.Timeout>();
     private shuttingDown = false;
     private readonly agentVersion: string;
+    /**
+     * Optional CA bundle read once at agent construction. Cached so that a
+     * later rotation (file renamed, secret rotated) does not surprise the
+     * agent with a process exit on the next reconnect; container restart is
+     * the documented way to pick up a new CA bundle.
+     */
+    private readonly customCa: Buffer | null;
 
     constructor(options: AgentOptions) {
         this.options = options;
         this.token = options.initialToken;
         this.agentVersion = getSenchoVersion() || '0.0.0';
+        this.customCa = readPilotCaBundle();
     }
 
     public start(): void {
@@ -100,7 +108,6 @@ class PilotAgent {
         if (this.shuttingDown) return;
 
         const wsUrl = this.options.primaryUrl.replace(/^http/, 'ws').replace(/\/$/, '') + '/api/pilot/tunnel';
-        const customCa = readPilotCaBundle();
         const ws = new WebSocket(wsUrl, {
             headers: {
                 Authorization: `Bearer ${this.token}`,
@@ -112,7 +119,9 @@ class PilotAgent {
             // SENCHO_PILOT_CA_FILE; rejectUnauthorized stays true. There is
             // intentionally no env var to disable TLS verification — that
             // would defeat the entire trust model of the tunnel credential.
-            ...(customCa ? { ca: customCa } : {}),
+            // The bundle is read once at agent construction (this.customCa);
+            // rotate by restarting the container.
+            ...(this.customCa ? { ca: this.customCa } : {}),
         });
         this.ws = ws;
 

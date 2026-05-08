@@ -109,8 +109,16 @@ describe('PilotTunnelBridge concurrent stream cap', () => {
             filled.push(handle);
         }
 
-        // The (cap+1)th openTcpStream returns null per the cap check.
+        // Confirm all 1024 slot allocations actually serialized a tcp_open
+        // frame on the tunnel. If a slot were short-circuited without
+        // sending the frame, this would catch the regression.
+        const sentCount = mockWs.sent.length;
+        expect(sentCount).toBe(MAX_STREAMS_PER_TUNNEL);
+
+        // The (cap+1)th openTcpStream returns null per the cap check, and
+        // does NOT consume a stream id (no tcp_open is sent).
         expect(bridge.openTcpStream({ stack: 's', service: 'svc', port: 80 })).toBeNull();
+        expect(mockWs.sent.length).toBe(sentCount);
 
         // And a loopback HTTP request lands on the 503 branch of
         // handleLoopbackRequest.
@@ -126,5 +134,7 @@ describe('PilotTunnelBridge concurrent stream cap', () => {
             req.end();
         });
         expect(overflow).toBe(503);
+        // The 503 path also does not allocate a stream or send any frame.
+        expect(mockWs.sent.length).toBe(sentCount);
     }, 15_000);
 });
