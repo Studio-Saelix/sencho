@@ -7,7 +7,6 @@ import { DatabaseService, type UserRole } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { COOKIE_NAME } from '../helpers/constants';
 import { handlePilotTunnel } from './pilotTunnel';
-import { handleMeshControl } from './meshControl';
 import { handleNotificationsWs } from './notifications';
 import { handleRemoteForwarder } from './remoteForwarder';
 import { handleLogsWs } from './logs';
@@ -31,8 +30,7 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
  *
  * Dispatch order (first match wins):
  *   1. `/api/pilot/tunnel`        -> handlePilotTunnel (own auth, own wss)
- *   2. `/api/mesh/control`        -> handleMeshControl (sidecar JWT, local-only)
- *   3. shared cookie/Bearer auth + JWT verify (rejects unauthenticated)
+ *   2. shared cookie/Bearer auth + JWT verify (rejects unauthenticated)
  *   3. API token scope gate (read-only / deploy-only restricted to logs + notifications)
  *   4. `/ws/notifications` local -> handleNotificationsWs
  *   5. remote nodeId path         -> handleRemoteForwarder
@@ -54,10 +52,6 @@ export function attachUpgrade(
       const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
       if (reqUrl.pathname === '/api/pilot/tunnel') {
         await handlePilotTunnel(req, socket, head, pilotTunnelWss);
-        return;
-      }
-      if (reqUrl.pathname === '/api/mesh/control') {
-        await handleMeshControl(req, socket, head, wss);
         return;
       }
     } catch {

@@ -13,7 +13,8 @@ export interface MeshNodeStatus {
     nodeId: number;
     nodeName: string;
     enabled: boolean;
-    sidecarRunning: boolean;
+    /** Forwarder state for the LOCAL Sencho instance only. `null` for non-local nodes — cross-node forwarder state lands in Phase B. */
+    localForwarderListening: boolean | null;
     pilotConnected: boolean;
     optedInStacks: string[];
     activeStreamCount: number;
@@ -36,7 +37,7 @@ export interface MeshRouteDiagnostic {
 
 export interface MeshNodeDiagnostic {
     nodeId: number;
-    sidecar: { running: boolean; restartCount: number };
+    forwarder: { listening: boolean; listenerCount: number };
     pilot: { connected: boolean; bufferedAmount: number; lastSeen: number | null };
     activeStreams: Array<{ streamId: number; alias?: string; bytesIn: number; bytesOut: number; ageMs: number }>;
     aliasCache: Array<{ host: string; targetNodeId: number; port: number }>;
@@ -45,14 +46,14 @@ export interface MeshNodeDiagnostic {
 export interface MeshProbeResult {
     ok: boolean;
     latencyMs?: number;
-    where?: 'sidecar' | 'pilot_tunnel' | 'agent_resolve' | 'agent_dial' | 'target_port';
+    where?: 'no_route' | 'pilot_tunnel' | 'agent_resolve' | 'agent_dial' | 'target_port';
     code?: string;
     message?: string;
 }
 
 export interface MeshActivityEvent {
     ts: number;
-    source: 'sidecar' | 'pilot' | 'mesh';
+    source: 'pilot' | 'mesh';
     level: 'info' | 'warn' | 'error';
     type: string;
     nodeId?: number;
