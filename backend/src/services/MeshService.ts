@@ -188,18 +188,24 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     /**
-     * Bind the forwarder's listeners to the local-owned alias ports and
-     * release any listeners no longer in the alias set. Called from
+     * Bind the forwarder's listeners to every alias port across the fleet
+     * and release any listeners no longer in the alias set. Called from
      * `start`, after each `refreshAliasCache` tick, and after every
-     * opt-in / opt-out / disable on the local node so the bound port set
-     * follows the DB state.
+     * opt-in / opt-out / disable so the bound port set follows the DB
+     * state.
+     *
+     * Every meshed node binds every alias port — not just ports it owns —
+     * because meshed containers' `extra_hosts: <alias>:host-gateway`
+     * entries resolve to the SOURCE node's gateway, so the source node is
+     * where the inbound TCP connection lands. `handleAccept` then
+     * dispatches to the same-node fast path or the cross-node bridge based
+     * on the resolved alias's owner. Fleet-wide port collisions are
+     * blocked at opt-in time (`optInStack` checks `aliasByPort`), so
+     * binding every alias port is unambiguous.
      */
     private async syncForwarderListeners(): Promise<void> {
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        const wantPorts = new Set<number>();
-        for (const alias of this.aliasByPort.values()) {
-            if (alias.nodeId === localNodeId) wantPorts.add(alias.port);
-        }
+        const wantPorts = new Set<number>(this.aliasByPort.keys());
         const havePorts = new Set(this.forwarder.getListenerPorts());
         for (const port of havePorts) {
             if (!wantPorts.has(port)) {
