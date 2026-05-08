@@ -15,7 +15,7 @@
  * of the tunnel beyond the framing protocol; the goal is to confirm the
  * wires connect end-to-end.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import http from 'http';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
@@ -68,7 +68,14 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-    PilotTunnelManager.getInstance().closeTunnel(nodeId);
+    const mgr = PilotTunnelManager.getInstance();
+    mgr.closeTunnel(nodeId);
+    // The manager is a process-singleton; any tunnel-up / tunnel-down
+    // listeners attached during this file's run survive into other test
+    // files in the same Vitest worker. Clear them so a sibling test that
+    // asserts listener counts or counts emissions is not polluted.
+    mgr.removeAllListeners('tunnel-up');
+    mgr.removeAllListeners('tunnel-down');
     pilotTunnelWss.close();
     mainWss.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -184,9 +191,14 @@ describe('pilot tunnel handshake (in-process integration)', () => {
         await first.nextJsonFrame(); // enroll_ack
         first.ws.close();
         await first.closed;
-        // Wait one tick so the server's close handler runs and removes the
-        // tunnel from the manager before the next attempt registers a new one.
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        // Poll for the manager to actually drop the tunnel rather than
+        // sleeping a fixed window. The chain (ws close -> bridge
+        // onTunnelClose -> bridge.close -> 'closed' event -> manager
+        // delete) hops through several event-loop ticks.
+        await vi.waitFor(
+            () => expect(PilotTunnelManager.getInstance().hasActiveTunnel(nodeId)).toBe(false),
+            { timeout: 2000 },
+        );
 
         // Second connect with the same enrollment token must fail at the
         // upgrade handshake (HTTP 401 is sent before the WS upgrade).
@@ -196,13 +208,22 @@ describe('pilot tunnel handshake (in-process integration)', () => {
                 'x-sencho-agent-version': 'integration-test/1.0',
             },
         });
-        const result = await new Promise<{ kind: 'error' | 'open'; status?: number }>((resolve) => {
+        const result = await new Promise<{ kind: 'error' | 'open'; status?: number; error?: Error }>((resolve) => {
             ws.on('unexpected-response', (_req, res) => {
                 resolve({ kind: 'error', status: res.statusCode });
                 res.destroy();
             });
             ws.on('open', () => resolve({ kind: 'open' }));
-            ws.on('error', () => { /* unexpected-response fires too */ });
+            ws.on('error', (err) => {
+                // Reject-path triggers both 'unexpected-response' and 'error'
+                // ("Unexpected server response: 401"). We resolve from the
+                // unexpected-response handler; only escalate here if the
+                // message shape does not match the expected reject path,
+                // which would indicate a different failure (ECONNREFUSED, etc.).
+                if (!/Unexpected server response/.test(err.message)) {
+                    resolve({ kind: 'error', error: err });
+                }
+            });
         });
 
         expect(result.kind).toBe('error');
@@ -221,7 +242,10 @@ describe('pilot tunnel handshake (in-process integration)', () => {
         const longLivedToken = ack.payload.token;
         first.ws.close();
         await first.closed;
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await vi.waitFor(
+            () => expect(PilotTunnelManager.getInstance().hasActiveTunnel(nodeId)).toBe(false),
+            { timeout: 2000 },
+        );
 
         // Reconnect with the long-lived token: no enrollment row needed,
         // the upgrade handler accepts the pilot_tunnel scope directly.
