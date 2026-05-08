@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.74.4](https://github.com/Studio-Saelix/sencho/compare/v0.74.3...v0.74.4) (2026-05-08)
+
+
+### Fixed
+
+* **pilot:** generate auth_jwt_secret on pilot-agent boot ([#997](https://github.com/Studio-Saelix/sencho/issues/997)) ([3d1cf0f](https://github.com/Studio-Saelix/sencho/commit/3d1cf0f8f15f6d331f55bad88264ac5ab952f83c))
+
 ## [0.74.3](https://github.com/Studio-Saelix/sencho/compare/v0.74.2...v0.74.3) (2026-05-08)
 
 
