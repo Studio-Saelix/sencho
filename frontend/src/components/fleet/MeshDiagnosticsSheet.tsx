@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { toast } from '@/components/ui/toast-store';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
-import { RefreshCw, ServerCog } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { MeshNodeDiagnostic } from '@/types/mesh';
 
@@ -28,7 +27,6 @@ function ageFmt(ms: number): string {
 export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: Props) {
     const [diag, setDiag] = useState<MeshNodeDiagnostic | null>(null);
     const [loading, setLoading] = useState(false);
-    const [restarting, setRestarting] = useState(false);
     const [updatedAt, setUpdatedAt] = useState<number | null>(null);
 
     const refresh = async () => {
@@ -50,29 +48,13 @@ export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: P
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open, nodeId]);
 
-    const restart = async () => {
-        if (nodeId == null) return;
-        setRestarting(true);
-        try {
-            const res = await apiFetch(`/mesh/nodes/${nodeId}/sidecar/restart`, {
-                method: 'POST', localOnly: true,
-            });
-            if (res.ok) {
-                toast.success('Sidecar restart requested');
-                await refresh();
-            } else {
-                toast.error('Sidecar restart failed');
-            }
-        } finally {
-            setRestarting(false);
-        }
-    };
-
-    const sidecarLabel = diag ? (diag.sidecar.running ? 'sidecar running' : 'sidecar off') : 'sidecar ?';
+    const forwarderLabel = diag
+        ? (diag.forwarder.listening ? `forwarder listening (${diag.forwarder.listenerCount})` : 'forwarder idle')
+        : 'forwarder ?';
     const pilotLabel = diag ? (diag.pilot.connected ? 'pilot connected' : 'pilot disconnected') : 'pilot ?';
     const streamsLabel = `${diag?.activeStreams.length ?? 0} streams`;
     const aliasesLabel = `${diag?.aliasCache.length ?? 0} aliases`;
-    const meta = `${sidecarLabel} · ${pilotLabel} · ${streamsLabel} · ${aliasesLabel}`;
+    const meta = `${forwarderLabel} · ${pilotLabel} · ${streamsLabel} · ${aliasesLabel}`;
 
     const footerContext = updatedAt ? `Updated ${formatTimeAgo(updatedAt)}` : (loading ? 'Loading…' : 'Never updated');
 
@@ -89,21 +71,15 @@ export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: P
                 onClick: () => { void refresh(); },
                 disabled: loading,
             }}
-            secondaryActions={[
-                {
-                    label: 'Restart sidecar',
-                    icon: ServerCog,
-                    onClick: () => { void restart(); },
-                    disabled: restarting,
-                },
-            ]}
             footerContext={footerContext}
             size="md"
         >
-            <SheetSection title="Pilot · sidecar · transport">
+            <SheetSection title="Forwarder · pilot · transport">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-                    <div className="text-stat-subtitle">Sidecar</div>
-                    <div className="font-mono text-stat-value">{diag?.sidecar.running ? 'running' : 'off'}</div>
+                    <div className="text-stat-subtitle">Forwarder</div>
+                    <div className="font-mono text-stat-value">
+                        {diag?.forwarder.listening ? `listening on ${diag.forwarder.listenerCount} port${diag.forwarder.listenerCount === 1 ? '' : 's'}` : 'idle'}
+                    </div>
                     <div className="text-stat-subtitle">Pilot tunnel</div>
                     <div className="font-mono text-stat-value">{diag?.pilot.connected ? 'connected' : 'disconnected'}</div>
                     <div className="text-stat-subtitle">Buffered</div>
@@ -111,6 +87,9 @@ export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: P
                     <div className="text-stat-subtitle">Last seen</div>
                     <div className="font-mono text-stat-value">{diag?.pilot.lastSeen ? new Date(diag.pilot.lastSeen).toLocaleTimeString() : '-'}</div>
                 </div>
+                <p className="text-[11px] text-stat-subtitle leading-snug mt-2">
+                    Mesh runs in-process on each node; no separate container.
+                </p>
             </SheetSection>
 
             <SheetSection title="Active streams">

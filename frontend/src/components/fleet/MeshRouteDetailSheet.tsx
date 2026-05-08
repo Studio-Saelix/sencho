@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, Activity, ServerCog, Hash } from 'lucide-react';
+import { Loader2, Activity, Hash } from 'lucide-react';
 import type { MeshRouteDiagnostic, MeshActivityEvent, MeshProbeResult } from '@/types/mesh';
 import { meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
 
@@ -146,7 +146,6 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
                         )}
                         {events.map((e, i) => (
                             <div key={i} className="flex items-start gap-2 text-[11px] font-mono">
-                                {e.source === 'sidecar' && <ServerCog className="w-3 h-3 mt-0.5 text-stat-subtitle" />}
                                 {e.source === 'pilot' && <Hash className="w-3 h-3 mt-0.5 text-stat-subtitle" />}
                                 {e.source === 'mesh' && <Activity className="w-3 h-3 mt-0.5 text-stat-subtitle" />}
                                 <span className={`tabular-nums ${e.level === 'error' ? 'text-destructive' : e.level === 'warn' ? 'text-warning' : 'text-stat-value'}`}>
