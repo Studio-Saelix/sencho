@@ -71,6 +71,34 @@ The agent reconnects automatically if the tunnel drops (transient network blip, 
 
 If the agent container is destroyed before its first successful connect, or the enrollment token expires before you paste it on the remote, open the node's edit dialog on the primary and click **Regenerate enrollment token**. A fresh 15-minute token is issued and the previous tunnel (if any) is disconnected so the new agent replaces it cleanly.
 
+## Self-signed primary TLS certs
+
+If your primary terminates TLS with an internal CA and the agent cannot validate the certificate against the system trust store, point the agent at the CA bundle with `SENCHO_PILOT_CA_FILE`. Mount the bundle into the agent container and add the env var:
+
+```bash
+docker run -d --restart=unless-stopped --name sencho-agent \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v sencho-agent-data:/app/data \
+  -v /opt/docker/sencho:/app/compose \
+  -v /etc/ssl/internal-ca.pem:/etc/ssl/internal-ca.pem:ro \
+  -e SENCHO_MODE=pilot \
+  -e SENCHO_PRIMARY_URL=https://sencho.internal.example.com \
+  -e SENCHO_ENROLL_TOKEN=<short-lived token> \
+  -e SENCHO_PILOT_CA_FILE=/etc/ssl/internal-ca.pem \
+  saelix/sencho:latest
+```
+
+The agent uses the bundle as the only trust anchor for the tunnel WebSocket. TLS verification stays on; there is no env var to disable verification globally because that would defeat the credential trust model.
+
+## Resource limits
+
+Each tunnel has fixed protocol-level ceilings to keep one misbehaving agent from impacting the primary:
+
+- **Frame size:** individual WebSocket frames are capped at 8 MB. Single requests and responses larger than that are rejected and the tunnel reconnects.
+- **Concurrent streams:** at most 1024 multiplexed HTTP, WebSocket, or Mesh-TCP streams per tunnel. Above the cap the bridge returns 503 and the agent rejects new incoming streams with a typed error frame.
+- **Stream idle:** any stream with no activity for 10 minutes is closed and removed.
+- **System-wide tunnels:** a single primary accepts up to 256 concurrent pilot tunnels. Past the soft warning at 128 the primary logs a WARN; past the hard cap of 256 new tunnels are refused with WebSocket close code 1013 (Try Again Later) so the agent backs off rather than tight-looping.
+
 ## Troubleshooting
 
 <AccordionGroup>
@@ -92,5 +120,21 @@ If the agent container is destroyed before its first successful connect, or the 
 
   <Accordion title="Primary was restored from backup and the agent will not reconnect">
     The agent's persisted tunnel credential is signed with the primary's JWT secret. If that secret is rotated or the primary is rebuilt from scratch, existing tunnels stop verifying. Regenerate enrollment for the affected node and restart the agent container so it consumes the fresh token.
+  </Accordion>
+
+  <Accordion title="Tunnel rejected with 'pilot tunnel cap reached' (close code 1013)">
+    The primary is at the system-wide concurrent tunnel cap of 256. A reconnect storm or runaway enrollment is the usual cause. Inspect the primary's logs for the `[Pilot] Active tunnel count at soft limit` warning that fires at 128 to find the trend, and check `GET /api/system/pilot-tunnels` (admin-only) for the per-node breakdown to identify a flapping agent. The agent backs off and retries automatically once headroom returns.
+  </Accordion>
+
+  <Accordion title="Bridge returns 503 'pilot tunnel: stream cap reached'">
+    A single tunnel is at the 1024 concurrent stream cap. The most common trigger is a UI session that opened many long-poll streams and never closed them, or a script firing parallel API calls without bound. Reload the affected browser tab so its WebSocket and SSE streams reset. If the cap is being hit by automation, throttle the caller; the cap protects the primary's memory from a runaway agent or proxy.
+  </Accordion>
+
+  <Accordion title="Tunnel closes immediately with 'protocol error' (close code 1002)">
+    The agent sent a frame larger than the 8 MB ceiling, or the wire decoder rejected a malformed frame. Run the agent with developer mode enabled on the primary (Settings → Developer) to surface the diagnostic decode log, then check the primary's logs for `[PilotBridge:diag] Malformed frame from agent`. The agent reconnects automatically; persistent failures usually mean a version mismatch between primary and agent images.
+  </Accordion>
+
+  <Accordion title="HTTP 429 'Too many enrollment requests'">
+    Enrollment endpoints are rate-limited to 10 requests per minute per user (or per IP, when unauthenticated) so a script accidentally minting tokens in a loop cannot exhaust the database. Wait sixty seconds and retry. If you genuinely need to bulk-enroll many nodes, space the requests out or contact the operator who runs the primary about raising the limit.
   </Accordion>
 </AccordionGroup>

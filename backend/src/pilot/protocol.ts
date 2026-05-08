@@ -17,6 +17,39 @@
 
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Hard ceiling on a single tunnel WebSocket frame, in bytes. Authoritative
+ * enforcement is at the WebSocket layer: `maxPayload` on the gateway-side
+ * `WebSocketServer` and the agent-side `WebSocket` client both reject
+ * oversized frames before they reach the decoder. The decoder also enforces
+ * the same cap for two narrow cases: (1) tests that build Buffers locally
+ * and skip the WebSocket layer, and (2) defense-in-depth if a future
+ * codepath ever passes user-controlled bytes to the decoder directly.
+ *
+ * 8 MB comfortably accommodates compose YAML, image-list responses, and
+ * exec stream chunks while bounding the decode buffer a buggy or malicious
+ * peer can force the other side to allocate.
+ */
+export const MAX_FRAME_SIZE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Maximum concurrent multiplexed streams on a single tunnel. Beyond this the
+ * bridge refuses new loopback requests with 503 and the agent rejects new
+ * incoming streams with the appropriate error frame. Sized for normal Sencho
+ * fanout (UI tabs polling stats, logs, stack lifecycle) with substantial
+ * headroom; the realistic ceiling under load is closer to single digits per
+ * tunnel.
+ */
+export const MAX_STREAMS_PER_TUNNEL = 1024;
+
+/**
+ * Per-stream idle timeout. A stream that sees no inbound or outbound activity
+ * for this long is closed and removed from the stream map. Protects against
+ * leaked streams (one side crashed, peer never noticed) leaking memory over
+ * long uptimes.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
 // --- Binary frame types (first byte of a binary WS frame) ---
 
 export enum BinaryFrameType {
@@ -157,6 +190,14 @@ export function encodeJsonFrame(frame: JsonFrame): string {
 }
 
 export function decodeJsonFrame(raw: string): JsonFrame {
+    // Compare against UTF-8 byte length, not the string's UTF-16 code-unit
+    // count: multi-byte payloads can otherwise sneak ~3x the byte budget
+    // through a `raw.length` check. Cheap because Buffer.byteLength does
+    // not allocate.
+    const byteLen = Buffer.byteLength(raw, 'utf8');
+    if (byteLen > MAX_FRAME_SIZE_BYTES) {
+        throw new Error(`json frame too large: ${byteLen} bytes`);
+    }
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || typeof parsed.t !== 'string') {
         throw new Error('invalid frame: missing type discriminator');
@@ -188,6 +229,9 @@ export interface DecodedBinaryFrame {
 export function decodeBinaryFrame(buf: Buffer): DecodedBinaryFrame {
     if (buf.length < 5) {
         throw new Error(`binary frame too short: ${buf.length} bytes`);
+    }
+    if (buf.length > MAX_FRAME_SIZE_BYTES) {
+        throw new Error(`binary frame too large: ${buf.length} bytes`);
     }
     const type = buf.readUInt8(0) as BinaryFrameType;
     if (type !== BinaryFrameType.HttpReqBody &&
@@ -228,7 +272,12 @@ export const PilotCloseCode = {
 
 /**
  * Monotonic stream id generator. Primary is the sole allocator.
- * Wraps at 2^31 (well above practical per-tunnel concurrency).
+ *
+ * Wraps at 2^31. With MAX_STREAMS_PER_TUNNEL = 1024 the allocator
+ * cannot collide with a still-live stream during a single tunnel
+ * lifetime: the wrap distance (~2.1 billion) is more than six orders
+ * of magnitude larger than the cap. A new tunnel restarts the
+ * sequence at 1, so cross-tunnel reuse is also harmless.
  */
 export class StreamIdAllocator {
     private next: number;

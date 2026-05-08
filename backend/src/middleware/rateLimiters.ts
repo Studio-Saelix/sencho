@@ -145,6 +145,33 @@ export const ssoRateLimiter = rateLimit({
   message: { error: 'Too many SSO attempts. Please try again later.' },
 });
 
+// Pilot enrollment limiter. Enrollment mints a JWT and writes a
+// pilot_enrollments row, so it deserves a stricter ceiling than the global
+// API limiter (200/min). Applied on the regenerate route directly and on
+// `POST /api/nodes` only when the body resolves to pilot_agent mode (the
+// limiter's `skip` function reads the parsed body).
+export const enrollmentLimiter = rateLimit({
+  ...rateLimitBase,
+  max: process.env.NODE_ENV === 'production' ? 10 : 100,
+  keyGenerator: rateLimitKeyGenerator,
+  message: { error: 'Too many enrollment requests. Please try again shortly.' },
+  skip: (req: Request) => {
+    // Only gate `POST /api/nodes` calls that actually create a pilot agent;
+    // proxy-mode node creation falls back to the global limiter. The
+    // dedicated `/pilot/enroll` route applies this limiter unconditionally,
+    // so the body check is bypassed there by skipping the skip when the
+    // path already targets enrollment.
+    if (req.path.endsWith('/pilot/enroll')) return false;
+    // Express.json() runs globally before route handlers in app.ts, so
+    // req.body is parsed by the time this fires. If a future refactor moves
+    // body parsing per-route the worst case is "limiter applies even to
+    // proxy-mode" rather than "limiter is bypassed entirely".
+    if (!req.body) return false;
+    const body = req.body as { mode?: string; type?: string };
+    return !(body.type === 'remote' && body.mode === 'pilot_agent');
+  },
+});
+
 // Trivy install/update limiter. Install + update are expensive (binary download,
 // sha256 verification) so a 10-minute window prevents accidental thrashing.
 export const trivyInstallLimiter = rateLimit({

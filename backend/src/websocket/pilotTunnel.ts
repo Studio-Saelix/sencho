@@ -4,7 +4,8 @@ import type { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { DatabaseService } from '../services/DatabaseService';
-import { PilotTunnelManager } from '../services/PilotTunnelManager';
+import { PilotTunnelCapacityError, PilotTunnelManager } from '../services/PilotTunnelManager';
+import { PilotMetrics } from '../services/PilotMetrics';
 import { encodeJsonFrame as encodePilotJsonFrame, PROTOCOL_VERSION as PILOT_PROTOCOL_VERSION } from '../pilot/protocol';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as rejectSocket } from './reject';
@@ -63,6 +64,7 @@ export async function handlePilotTunnel(
       jwtSecret,
       { expiresIn: '365d' },
     );
+    PilotMetrics.increment('enroll_acks');
   }
 
   const agentVersionHeader = req.headers['x-sencho-agent-version'];
@@ -90,6 +92,12 @@ export async function handlePilotTunnel(
     try {
       await PilotTunnelManager.getInstance().registerTunnel(decoded.nodeId!, ws, agentVersion);
     } catch (err) {
+      if (err instanceof PilotTunnelCapacityError) {
+        // 1013 (Try Again Later) signals the agent to back off rather than
+        // tight-loop reconnect on a saturated gateway.
+        try { ws.close(1013, 'pilot tunnel cap reached'); } catch { /* ignore */ }
+        return;
+      }
       console.error('[Pilot] Failed to register tunnel:', getErrorMessage(err, 'unknown'));
       try { ws.close(1011, 'registration failed'); } catch { /* ignore */ }
     }

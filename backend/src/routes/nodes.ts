@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { requireAdmiral } from '../middleware/tierGates';
+import { enrollmentLimiter } from '../middleware/rateLimiters';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
@@ -120,7 +121,7 @@ nodesRouter.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-nodesRouter.post('/', async (req: Request, res: Response) => {
+nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   if (!requirePermission(req, res, 'node:manage')) return;
   try {
@@ -190,7 +191,7 @@ nodesRouter.post('/', async (req: Request, res: Response) => {
   }
 });
 
-nodesRouter.post('/:id/pilot/enroll', async (req: Request, res: Response) => {
+nodesRouter.post('/:id/pilot/enroll', enrollmentLimiter, async (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   const nodeIdStr = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdStr)) return;
