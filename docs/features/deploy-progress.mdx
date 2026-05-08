@@ -3,77 +3,111 @@ title: Deploy Progress Modal
 description: Stream live output from stack deploy, install, update, restart, and stop operations in a structured log view.
 ---
 
-When you trigger a stack action (Deploy, Install, Update, Stop, Restart, or Down), an optional progress modal opens and streams structured output from `docker compose` in real time. Each line is parsed into a timestamped row with a stage badge (PULL, BUILD, CREATE, START, STOP, etc.) so you can track the deployment lifecycle as it runs.
+When you trigger a stack action that runs through `docker compose` (Deploy, Update, Install from the App Store, Apply with deploy from a Git Source), an optional progress modal opens and streams the output in real time. Each line is parsed into a timestamped row with a stage badge so you can track the deployment lifecycle as it runs. The modal can be minimized to a small pill that follows you across navigation, so you can leave the App Store mid-install and still see the status from any screen.
 
 ## Enabling deploy progress
 
-The modal is opt-in. Go to **Settings > Appearance** and enable **Show deploy progress modal**. The setting is saved per browser and takes effect immediately without a reload.
+The modal is opt-in. Open **Settings > Appearance > Display** and enable **Deploy progress modal**. The setting is **off by default**, saved to the current browser only, and synced across tabs in the same browser without a reload.
+
+<Frame>
+  <img src="/images/deploy-progress/setting-toggle.png" alt="Settings · Identity · Appearance panel with the Deploy progress modal field toggled to Enabled and the helper text 'Stream live output for deploy, restart, update, install, and Git operations.'" />
+</Frame>
 
 ## Using the modal
 
-The modal opens automatically when you trigger an action. It stays centered on screen and does not block access to the rest of the UI.
+The modal opens automatically when you trigger an action. It floats centered in the viewport and does not block access to the rest of the UI.
 
 ### What the modal shows
 
-- A **header** with the action name, stack name, and elapsed time
-- A **status indicator** showing the current state (Connecting, streaming line count, Succeeded, or the error message)
-- A **structured log body** with one row per output line, each tagged with a stage badge and timestamp
-- A **footer** with a "Raw output" toggle and minimize/close controls
+- **Header**: the action verb (Deploying, Updating, Installing, Restarting, Stopping), the stack name in monospace truncated at 200 px, and an elapsed-time chip that appears once the connection moves past the initial **Connecting...** state.
+- **Status indicator** in the upper right: one of `Connecting...` while the stream attaches, a live `<n> lines` counter while output is flowing, `Succeeded · closes in <n>s` after a clean finish, or the failure message itself when the run errors out.
+- **Structured log body**: one row per output line. Each row carries a timestamp, a fixed-width stage badge, and the log message. Error rows have a destructive left border and tinted background so they stand out without scanning.
+- **Footer**: a `Raw output` / `Hide raw` toggle on the left, with **Minimize** and **Close** buttons on the right.
+
+<Frame>
+  <img src="/images/deploy-progress/modal-streaming.png" alt="Deploy progress modal mid-flight, showing the elapsed timer, a live line count in the header, and a populated body of timestamped LOG rows from a docker compose pull" />
+</Frame>
 
 ### Stage badges
 
-Each log row carries a badge indicating what phase of the operation it came from:
+Each log row is classified by content. Most lines render as **LOG** because the badges are gated on Docker Compose's `[+] Pulling` / `[+] Creating` / `[+] Starting` progress prefixes, which only appear when Compose is run in TTY mode. The full set of badges Sencho can render:
 
 | Badge | Meaning |
 |-------|---------|
-| PULL | Image layer being fetched from a registry |
-| BUILD | Image build step running |
-| CREATE | Container being created |
-| START | Container starting |
-| STOP | Container stopping |
-| DOWN | Container or network being removed |
-| WARN | Warning from Docker or compose |
-| ERR | Error line |
-| LOG | General output |
+| PULL | Image layer being fetched (`[+] Pulling` or `Pulling from`) |
+| BUILD | Image build step (`[+] Building`) |
+| CREATE | Container being created (`[+] Creating`) |
+| START | Container starting (`[+] Starting`) |
+| STOP | Container stopping (`[+] Stopping` / `[+] Stopped`) |
+| DOWN | Container or network being removed (`[+] Removing` / `[+] Removed`) |
+| WARN | Daemon warning line (prefix `WARN[`) |
+| ERR | Error line (`Error response from daemon` or text starting with `error`) |
+| LOG | Default for any line that does not match the patterns above |
 
-Error rows have a rose left border and a tinted background so they stand out without requiring a full scan of the log.
+**ERR** rows pick up the destructive left border and the tinted background. **WARN** rows use a softer warning tint without the border.
 
 ### Raw output toggle
 
-Click **Raw output** in the footer to reveal the raw terminal view alongside the structured rows. This is useful when you want to see the full unprocessed Docker output, including progress bars and multi-line build steps that the parser collapses to single rows.
+Click **Raw output** in the footer to expand a 200 px raw terminal panel beneath the structured rows. The raw view shows the unprocessed compose stream, including the progress bars and ANSI-formatted output that the structured parser does not render. Clicking the toggle a second time (now labelled **Hide raw**) collapses the panel.
+
+<Frame>
+  <img src="/images/deploy-progress/modal-raw-output.png" alt="Deploy progress modal with the Raw output panel expanded, showing structured rows above and the green-on-black raw terminal stream below" />
+</Frame>
 
 ### Auto-close on success
 
-When an action completes successfully, the modal closes automatically after a few seconds. Hover over the modal to pause the timer. Click the close button to dismiss it immediately.
+When an action completes successfully, the status indicator switches to `Succeeded · closes in <n>s` and a 4-second countdown begins. Hover anywhere over the modal to pause the countdown; moving the cursor away restarts a fresh 4 seconds. Clicking **Close** dismisses the modal immediately.
+
+<Frame>
+  <img src="/images/deploy-progress/modal-succeeded.png" alt="Deploy progress modal in the succeeded state with a green checkmark, the text 'Succeeded' and 'closes in 2s' in the header, and the full structured log body visible beneath" />
+</Frame>
 
 ### On failure
 
-If the action fails, the modal stays open and highlights the error row in the log. The status indicator shows the error message. The modal remains open until you close it manually.
+If the action fails, the modal stays open. The status indicator switches to a destructive icon and shows the error message itself, truncated to 200 px in the header with the full text available on hover. Error rows in the body pick up the destructive left border so they are easy to find when scrolling. The modal stays open until you click **Close**.
+
+<Frame>
+  <img src="/images/deploy-progress/modal-failed.png" alt="Deploy progress modal in the failed state, with the truncated error message visible in the header and several ERR rows highlighted with a destructive border in the body" />
+</Frame>
 
 ### Minimize to pill
 
-Click **Minimize** to collapse the modal to a small status pill anchored at the bottom center of the screen. The pill shows the action and stack name with a color-coded status dot (cyan pulse for in-progress, green for success, rose for error). Click the pill to expand the modal back.
+Click **Minimize** to collapse the modal to a small status pill anchored at the bottom center of the viewport. The pill shows the action verb, the stack name in monospace, and a status dot that animates while the run is in flight (brand color, pulsing) and goes solid green or red at completion. Click the pill to expand the modal back.
 
-The pill survives navigation, so you can leave the App Store page mid-install and still see the status from any screen.
+The pill is mounted as a portal, so it persists across navigation: leave the App Store mid-install and the pill follows you to the dashboard, the editor, or any other view.
+
+<Frame>
+  <img src="/images/deploy-progress/pill.png" alt="Minimized deploy progress pill anchored at the bottom center of a stack editor view, showing the brand-colored pulsing dot and the text 'Updating docs-demo'" />
+</Frame>
 
 ## Supported entry points
 
-The progress modal fires for the following actions:
+The modal opens for the following actions:
 
-- Stack **Deploy**, **Update**, **Restart**, **Stop**, and **Down** from the stack editor
-- **Install** from the App Store
-- **Apply** from a Git Source panel (when the apply includes a deploy)
+- **Deploy**, **Update**, **Restart**, **Stop** from the stack editor's action bar.
+- **Install** from the App Store.
+- **Apply** from a Git Source panel when the apply request includes a deploy.
+
+Of those, **Deploy**, **Update**, **Install**, and Git **Apply** route through `docker compose up` and produce a populated structured-log body. **Restart** and **Stop** call the Docker Engine directly to act on existing containers; they bypass compose, so the modal opens, registers `0 lines`, and finishes. Useful as a confirmation surface for those actions, but with no log content.
+
+The HTTP API also exposes a `down` action (compose-level teardown) that streams its output the same way Deploy and Update do, but no UI control currently triggers it; the `down` endpoint is reachable from automation and from Sencho's own internal cleanup paths.
 
 ## Troubleshooting
 
-<Accordion title="The modal shows 'Connecting...' and no rows appear">
-Check that the WebSocket connection to Sencho is not blocked by an upstream proxy or firewall. Sencho uses a WebSocket on the same port and path as the main API. If you are running behind nginx or a reverse proxy, ensure `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";` are configured. See the [configuration guide](/getting-started/configuration) for a complete nginx example.
-</Accordion>
-
-<Accordion title="The structured rows are empty but raw output shows content">
-Some compose wrappers or custom Docker plugins emit non-standard output. The parser falls back to `LOG` rows for lines it cannot classify. If the structured view is empty, open Raw output to see the full stream.
-</Accordion>
-
-<Accordion title="I toggled the setting but nothing changed">
-The setting is read from localStorage and updates in the current tab without a reload. If the change did not take effect, try refreshing the page.
-</Accordion>
+<AccordionGroup>
+  <Accordion title="The modal shows 'Connecting...' and no rows appear">
+    The modal opens a WebSocket to the same host and port as the rest of the API and registers itself as the recipient of compose output. If the connection cannot upgrade, the status stays at **Connecting...** indefinitely. Check that an upstream proxy or firewall is not blocking WebSocket upgrades. For nginx, ensure `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";` are configured. See the [configuration guide](/getting-started/configuration#reverse-proxy-setup) for a full nginx example.
+  </Accordion>
+  <Accordion title="Restart or Stop opens the modal but shows 0 lines">
+    Restart and Stop hit the Docker Engine directly to act on the existing containers; they do not invoke `docker compose`, so there is no compose stream to render. The modal still opens to confirm the action and to surface a failure if one occurs. For a fully populated structured log, use **Deploy** or **Update** instead.
+  </Accordion>
+  <Accordion title="The structured rows are all LOG and I don't see PULL or CREATE badges">
+    The badges are matched on Docker Compose's `[+] Pulling`, `[+] Creating`, and `[+] Starting` progress prefixes, which Compose only emits when it detects an interactive TTY. Sencho spawns `docker compose` without a TTY, so most output falls back to the **LOG** badge. The structured row, the timestamp, the message, and the destructive styling for **ERR** rows all still apply; only the colored stage chip is missing.
+  </Accordion>
+  <Accordion title="The structured rows are empty but raw output shows content">
+    Some compose wrappers and Docker plugins emit non-standard output. The parser falls back to a **LOG** row for any line it cannot classify, but if a line is consumed entirely by ANSI control sequences it can drop out of the structured view. Toggle **Raw output** to see the full stream.
+  </Accordion>
+  <Accordion title="I toggled the setting but the modal does not appear">
+    The setting is stored in `localStorage` under `sencho.deploy-feedback.enabled` and applies to the current tab without a reload. Other tabs in the same browser pick up the change through a `storage` event. If a tab still does not honour the setting, refresh that tab. The setting does not sync across browsers or devices; each one carries its own choice.
+  </Accordion>
+</AccordionGroup>
