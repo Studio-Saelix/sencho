@@ -24,7 +24,6 @@ import type { ScanSummary, VulnSeverity } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
-import { PaidGate } from './PaidGate';
 import { CapabilityGate } from './CapabilityGate';
 import LazyBoundary from './LazyBoundary';
 import { formatBytes } from '@/lib/utils';
@@ -935,28 +934,26 @@ export default function ResourcesView() {
                                 />
                             )}
                             <div className="flex items-center gap-2 pr-3">
-                                {isPaid && (
-                                    <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
-                                        <button
-                                            onClick={() => setNetworkViewMode('list')}
-                                            className={cn(
-                                                'px-2.5 py-1 rounded-md text-xs font-medium transition-all duration-200',
-                                                networkViewMode === 'list' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                                            )}
-                                        >
-                                            List
-                                        </button>
-                                        <button
-                                            onClick={() => setNetworkViewMode('topology')}
-                                            className={cn(
-                                                'px-2.5 py-1 rounded-md text-xs font-medium transition-all duration-200 flex items-center gap-1',
-                                                networkViewMode === 'topology' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                                            )}
-                                        >
-                                            Topology
-                                        </button>
-                                    </div>
-                                )}
+                                <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
+                                    <button
+                                        onClick={() => setNetworkViewMode('list')}
+                                        className={cn(
+                                            'px-2.5 py-1 rounded-md text-xs font-medium transition-all duration-200',
+                                            networkViewMode === 'list' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                                        )}
+                                    >
+                                        List
+                                    </button>
+                                    <button
+                                        onClick={() => setNetworkViewMode('topology')}
+                                        className={cn(
+                                            'px-2.5 py-1 rounded-md text-xs font-medium transition-all duration-200 flex items-center gap-1',
+                                            networkViewMode === 'topology' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                                        )}
+                                    >
+                                        Topology
+                                    </button>
+                                </div>
                                 {isAdmin && networkViewMode === 'list' && (
                                     <Button
                                         variant="outline"
@@ -973,26 +970,24 @@ export default function ResourcesView() {
 
                         {networkViewMode === 'topology' ? (
                             <div className="p-4">
-                                <PaidGate>
-                                    <CapabilityGate capability="network-topology" featureName="Network Topology">
-                                        <LazyBoundary>
-                                            <Suspense fallback={
-                                                <div className="flex items-center justify-center h-[400px] text-muted-foreground gap-2">
-                                                    <span className="text-sm">Loading topology...</span>
-                                                </div>
-                                            }>
-                                                <NetworkTopologyView
-                                                    key={activeNode?.id}
-                                                    onContainerClick={(id, name) => {
-                                                        window.dispatchEvent(new CustomEvent<SenchoOpenLogsDetail>(SENCHO_OPEN_LOGS_EVENT, {
-                                                            detail: { containerId: id, containerName: name },
-                                                        }));
-                                                    }}
-                                                />
-                                            </Suspense>
-                                        </LazyBoundary>
-                                    </CapabilityGate>
-                                </PaidGate>
+                                <CapabilityGate capability="network-topology" featureName="Network Topology">
+                                    <LazyBoundary>
+                                        <Suspense fallback={
+                                            <div className="flex items-center justify-center h-[400px] text-muted-foreground gap-2">
+                                                <span className="text-sm">Loading topology...</span>
+                                            </div>
+                                        }>
+                                            <NetworkTopologyView
+                                                key={activeNode?.id}
+                                                onContainerClick={(id, name) => {
+                                                    window.dispatchEvent(new CustomEvent<SenchoOpenLogsDetail>(SENCHO_OPEN_LOGS_EVENT, {
+                                                        detail: { containerId: id, containerName: name },
+                                                    }));
+                                                }}
+                                            />
+                                        </Suspense>
+                                    </LazyBoundary>
+                                </CapabilityGate>
                             </div>
                         ) : (
                         <Table>

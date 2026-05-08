@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import DockerController, { type CreateNetworkOptions, type NetworkDriver } from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
-import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isValidDockerResourceId, isValidCidr, isValidIPv4 } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
@@ -209,7 +209,6 @@ systemMaintenanceRouter.post('/networks/delete', async (req: Request, res: Respo
 });
 
 systemMaintenanceRouter.get('/networks/topology', async (req: Request, res: Response) => {
-  if (!requirePaid(req, res)) return;
   try {
     const includeSystem = req.query.includeSystem === 'true';
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
