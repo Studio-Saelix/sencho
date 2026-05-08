@@ -1,124 +1,197 @@
 ---
 title: "Blueprints"
-description: "Fleet-wide compose templates that Sencho keeps in sync across the nodes you choose."
+description: "Fleet-wide compose templates that Sencho keeps in sync across the nodes you choose, with stateless or stateful classification, drift detection, and three response modes."
 ---
 
-A **Blueprint** is a docker-compose.yml plus a node selector. Sencho ensures that every node matching the selector runs that stack at the latest revision and reports back when reality drifts from the plan. You declare a stack once; Sencho handles the distribution.
+A **Blueprint** bundles a `docker-compose.yml` with a node selector and a drift policy. Every minute Sencho compares the live state on each targeted node against the blueprint's desired revision, and either reports the drift, dispatches a notification, or auto-corrects, depending on the mode you picked. You declare a stack once; Sencho handles the distribution and the reconciliation loop.
 
-Blueprints live under **Fleet → Deployments**.
+Blueprints live under **Fleet · Deployments**.
 
 <Note>
-Blueprints are a Skipper feature. Configuring blueprints requires an admin role; viewers see the catalog read-only.
+  Blueprints require a Sencho **Skipper** or **Admiral** license. Community Edition hides the **Deployments** tab. Creating, editing, and withdrawing blueprints requires an admin role; operators and viewers see the catalog read-only. Pinning a blueprint to a node from the Federation tab is Admiral-only.
 </Note>
 
 ## What problem this solves
 
-Without Blueprints, running the same stack on multiple nodes means SSHing or clicking through each node's stack manager and keeping them in sync by hand. When something drifts (someone restarts a container, edits a compose, or a node forgets to pull a new image) you find out when it breaks.
+Without Blueprints, running the same stack on multiple nodes means clicking through each node's stack manager and keeping them in sync by hand. When something drifts (someone restarts a container, edits the compose file, or a node forgets to pull a new image) you find out when it breaks.
 
 With Blueprints you get:
 
-- **One declaration covers many nodes.** Pick nodes by label (`production`) or by ID. The set is recomputed every reconciliation tick — adding a node with the right label deploys the stack automatically.
-- **Drift detection always on.** Every tick, Sencho compares each target node's actual state to the desired one. You choose what happens when drift is found.
-- **Safety rails for stateful workloads.** Blueprints are classified as stateless or stateful at author time; stateful blueprints get explicit confirmation prompts before first deploy and before eviction.
+- **One declaration covers many nodes.** Pick nodes by label or by node ID. The set is recomputed every reconciliation tick, so adding a node with the right label deploys the stack automatically.
+- **Drift detection always on.** Every tick, Sencho compares each target node's actual state to the desired one. You choose what happens when drift is found: surface it, notify, or auto-fix.
+- **Safety rails for stateful workloads.** Blueprints are classified as stateless or stateful at author time. Stateful blueprints get explicit confirmation prompts before first deploy and before eviction.
+
+## The catalog
+
+The Deployments tab opens on a catalog of every blueprint configured on this instance. Each tile shows the name, an optional description, the classification chip (stateless, stateful, or unknown), the active-vs-targeted node count, and the current drift mode. Filter chips at the top break the catalog down by drift mode and let you isolate any tile that has drift.
+
+<Frame>
+  <img src="/images/blueprint-model/catalog.png" alt="Deployments tab catalog showing two blueprints: caddy-edge with a green stateless chip and a 1/1 active count, and pg-fleet with an amber stateful chip and a 0/1 active count. Filter chips above the tiles read All 2, Drifted 0, Observe 0, Suggest 2, Enforce 0." />
+</Frame>
+
+The first time you visit the tab, the catalog is empty and a three-step explainer walks you through Author, Target, and Reconcile, with a **Create your first Blueprint** button at the bottom.
+
+<Frame>
+  <img src="/images/blueprint-model/empty-state.png" alt="Empty Deployments tab with the headline 'Declare once. Distribute everywhere.' followed by three numbered cards (01 Author, 02 Target, 03 Reconcile) and a Create your first Blueprint button at the bottom right." />
+</Frame>
 
 ## Anatomy of a Blueprint
 
 | Field | Purpose |
 |---|---|
-| **Name** | Used as the stack directory on every targeted node (`<COMPOSE_DIR>/<blueprint-name>/`). Lowercase letters, digits, hyphens, and underscores. |
+| **Name** | Used as the stack directory on every targeted node (`<COMPOSE_DIR>/<blueprint-name>/`). Lowercase letters, digits, hyphens, and underscores only. |
 | **Description** | Short prose for the catalog tile and detail header. |
-| **Compose** | Standard `docker-compose.yml`. The same file ships to every targeted node. |
-| **Selector** | Either `labels` (any/all expressions) or a list of node IDs. |
-| **Drift policy** | Observe, Suggest, or Enforce. See below. |
-| **Reconciler enabled** | Toggle the reconciliation loop without deleting the blueprint. |
+| **Compose** | Standard `docker-compose.yml`. The same file ships to every targeted node. Sencho parses it on save and classifies the blueprint as stateless, stateful, or unknown. |
+| **Selector** | Either label expressions (any-of plus all-of) or a list of node IDs picked by hand. |
+| **Drift policy** | Observe, Suggest, or Enforce. Drift detection always runs; only the response differs. |
+| **Reconciler enabled** | Toggle the reconciliation loop without deleting the blueprint. The **Disable** button on the detail sheet flips this toggle off; **Enable** turns it back on. Useful when you want to pause auto-deploys without losing the configuration. |
 
-Sencho writes a `.blueprint.json` marker into each targeted node's stack directory. The marker carries the blueprint ID, revision, and the timestamp of the last apply. The reconciler refuses to touch any directory that does not carry a matching marker — so a Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node.
+Sencho writes a `.blueprint.json` marker into each targeted node's stack directory. The marker carries the blueprint ID, revision, and the timestamp of the last apply. The reconciler refuses to touch any directory that does not carry a matching marker, so a Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node. When the directory exists without a matching marker, the deployment row enters the `Name conflict` status until you rename one of the two.
 
-## Selectors
+## The editor
 
-A **labels** selector matches any node whose labels satisfy the expression:
+**New Blueprint** opens a single editor dialog with everything inline: name and description fields, a Monaco YAML editor with the classification banner sitting above it, the selector picker (Labels or Specific nodes), the drift policy cards, and the Reconciler enabled toggle.
 
-```
-all = [docker]
-any = [production, staging]
-```
+<Frame>
+  <img src="/images/blueprint-model/editor-dialog.png" alt="Blueprint editor dialog titled 'Declare a fleet-wide compose template'. The compose section carries a Stateless · portable banner with a 1 SIGNAL toggle. Below it are the Selector tabs (Labels selected, Specific nodes available), a Drift policy row with three cards (Observe Detect & display, Suggest Detect & notify selected, Enforce Detect & auto-fix), and a Reconciler enabled checkbox." />
+</Frame>
 
-This resolves to nodes that have *every* label in `all` AND *at least one* label in `any`. Either side may be empty. An entirely empty labels selector matches nothing — choose at least one label.
+### Classification banner
 
-A **nodes** selector picks specific node IDs by hand. Useful when you want a one-off blueprint that runs only on a known node.
+The banner above the YAML editor shows what Sencho found when it parsed your compose file:
 
-Add labels to nodes from **Settings → Nodes** — each node row has a Labels column with a `+` button.
+- **Stateless · portable** when no persistent volumes were detected, or only `tmpfs` mounts. Sencho can deploy and evict the blueprint freely on any node.
+- **Stateful · pins to data** when named volumes or bind mounts were detected. Each node holds its own data; Sencho does not replicate volumes between nodes.
+- **State unknown** when `external: true` volumes were detected. Sencho cannot prove portability and treats the blueprint as stateful for safety.
 
-## Drift policy
+Click the signals toggle on the right of the banner (`1 SIGNAL`, `2 SIGNALS`, etc.) to expand the list of reasons Sencho classified the way it did, line by line.
 
-Drift detection runs every minute regardless of the policy. Only the response differs:
+<Frame>
+  <img src="/images/blueprint-model/classification-banner.png" alt="Classification banner in the Stateless · portable variant, expanded to show one signal: 'no persistent volumes detected'." />
+</Frame>
 
-| Mode | What happens on drift |
+### Selector
+
+A **Labels** selector matches any node whose labels satisfy the expression. The picker is split into two pill rows: **Match nodes with ANY of these labels** (the OR set), and **AND ALSO require ALL of these** (the AND set). Either side may be empty. The dialog renders a one-line summary just below the pills, so you can see exactly which nodes the expression resolves to before you save.
+
+A **Specific nodes** selector picks nodes by ID with a checkbox list. Use it when you want a one-off blueprint that runs only on a known node, or when no labels exist yet.
+
+Add labels to nodes from **Settings · System · Nodes**. Each node row carries a Labels column with a `+` button.
+
+<Frame>
+  <img src="/images/blueprint-model/node-labels.png" alt="Settings · System · Nodes page with a four-row table. The Local row shows a 'production' label pill in the Labels column. A floating Add label popover is anchored to another row's + button, with a 'prod' placeholder input and helper text 'Labels group nodes for fleet-wide blueprints. Use lowercase letters, digits, dot, dash, underscore.'" />
+</Frame>
+
+### Drift policy
+
+The three policy cards in the editor map exactly to the three modes the reconciler runs against every tick:
+
+| Card label | Reconciler behavior |
 |---|---|
-| **Observe** | Drift surfaces in the deployment table; no notification, no auto-fix. |
-| **Suggest** (default) | Sencho dispatches a `blueprint_drift_detected` notification through your notification routes, if any. |
-| **Enforce** | Sencho re-deploys the blueprint silently when drift is detected. A notification fires only when an auto-fix attempt fails. |
+| **Observe** · Detect & display, no notifications | Drift surfaces in the deployment table; no notification, no auto-fix. |
+| **Suggest** · Detect & notify, operator decides | Sencho dispatches a `blueprint_drift_detected` notification through your notification routes, if any. |
+| **Enforce** · Detect & auto-fix, silent on success | Sencho re-deploys the blueprint silently when drift is detected. A `blueprint_drift_correction_failed` notification fires only when the auto-fix attempt fails. |
 
-Even **Observe** keeps Sencho honest about what it found — the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
+Even **Observe** keeps Sencho honest about what it found: the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
 
 For **stateful** blueprints under Enforce, Sencho declines auto-fixes that would destroy named volumes (for example, when you rename a volume in the compose). The drift downgrades to Suggest semantics for that event with the reason `auto-fix declined: would destroy volume data`.
 
-## Stateless vs Stateful Blueprints
+## The detail sheet
 
-Sencho classifies your compose at author time:
+Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<n> nodes · <drift mode> · rev <n>`), the action bar (Apply now, Edit, Disable, Delete), the description, the deployment table, and a collapsible compose source.
 
-- **Stateless** — no persistent volumes detected, or only `tmpfs`. Sencho can deploy and evict freely.
-- **Stateful** — named volumes or bind mounts detected. Each node holds its own data; Sencho does not replicate volumes between nodes.
-- **State unknown** — `external: true` volumes detected. Sencho cannot prove portability and treats the blueprint as stateful for safety.
+<Frame>
+  <img src="/images/blueprint-model/detail-sheet.png" alt="Blueprint detail sheet for caddy-edge. The header shows '1 node · suggest · rev 1'. The action bar has Apply now, Edit, Disable, and a destructive Delete. The Deployments table has one row: Local · Active · just now · - · Withdraw." />
+</Frame>
 
-The classification appears as a chip on the catalog tile and as a banner above the YAML editor. Click the banner to see exactly what made Sencho classify the way it did.
+The deployment table lists every node currently in the blueprint's resolved selector set. Each row carries the node name, the deployment status, the last-activity timestamp, a notes column (drift summary or the last error message), and the action available for that row.
 
-### Safety rails on stateful blueprints
+Possible status values:
 
-| Trigger | What Sencho does |
+| Status | Meaning |
 |---|---|
-| Selector matches a node that has never run this blueprint | Deployment enters `pending_state_review`. The reconciler refuses to deploy until you click **Confirm deploy** in the deployment table. |
-| A node leaves the selector while a deployment is active | Deployment enters `evict_blocked`. The reconciler refuses to evict until you choose **Snapshot, then evict** or **Evict and destroy data**. |
-| You target more than one node | The editor warns: "Each node will hold its own data — Sencho does not replicate volumes between nodes." |
-
-Stateless blueprints flow through these states automatically.
+| **Pending** | The reconciler has acquired the deployment lock and is about to start. |
+| **Awaiting confirmation** | A stateful blueprint reached a new node. The reconciler refuses to deploy until you click **Confirm deploy** in the action column. |
+| **Deploying** | The compose action is in flight on this node. |
+| **Active** | The container set matches the blueprint's revision. |
+| **Drifted** | The reconciler detected a difference between the live state and the desired one. |
+| **Correcting** | An Enforce-mode auto-fix is in flight. |
+| **Failed** | The deployment or withdrawal errored. The notes column carries the message. |
+| **Withdrawing** | A withdraw is in flight. |
+| **Withdrawn** | The deployment was successfully removed; the row is about to be cleared. |
+| **Evict blocked** | A node left the selector while a stateful deployment was active. The reconciler refuses to evict until you choose an explicit mode. |
+| **Name conflict** | A directory by the blueprint's name already exists on the node and does not carry our marker file. The reconciler will not touch it. |
 
 ## Working with Blueprints
 
 ### Create
 
-1. Go to **Fleet → Deployments**.
+1. Go to **Fleet · Deployments**.
 2. Click **New Blueprint**.
 3. Fill in the name, description, compose YAML, selector, and drift policy.
-4. Watch the classification banner update as you type — it tells you whether the blueprint is portable or pinned.
+4. Watch the classification banner update as you type. It tells you whether the blueprint is portable or pinned to data.
 5. Click **Create blueprint**. Sencho immediately runs one reconciliation tick.
 
 ### Apply on demand
 
-The reconciler runs every minute. To trigger it now (for example, after editing the selector or compose), click **Apply now** on the detail sheet.
+The reconciler runs every minute. To trigger it now, for example after editing the selector or the compose file, click **Apply now** on the detail sheet. The action also resurfaces a deployment that is in `Failed` status by retrying it.
 
 ### Edit
 
-Click **Edit** on the detail sheet. Editing the compose bumps the revision; the reconciler will redeploy on every targeted node on the next tick. Stateful blueprints follow the volume-destroying drift rule under Enforce.
+Click **Edit** on the detail sheet. Editing the compose bumps the revision. The reconciler will redeploy on every targeted node on the next tick. Stateful blueprints follow the volume-destroying-drift rule under Enforce.
+
+### Confirm a stateful first deploy
+
+The first time a stateful blueprint reaches a node, the deployment row enters **Awaiting confirmation**. Click **Confirm deploy** in the action column to open the state review dialog. **Deploy fresh** creates empty named volumes on the target node and starts the stack with the default state from each container image. **Restore from snapshot** is reserved for the future Volume Migration feature and is currently disabled.
+
+<Frame>
+  <img src="/images/blueprint-model/state-review-dialog.png" alt="State review dialog titled 'Deploy pg-fleet to Local?'. The kicker reads 'PG-FLEET · DEPLOY' and the body explains the blueprint is stateful and has never run on this node. Two option cards follow: 'Deploy fresh' with a play icon (active), and 'Restore from snapshot' marked as coming with the future Volume Migration feature (disabled). A Cancel button sits at the bottom right." />
+</Frame>
 
 ### Withdraw a single deployment
 
-In the deployment table, click **Withdraw** on the node's row. For stateless blueprints, Sencho runs `docker compose down` and removes the directory. For stateful blueprints, you choose between **Snapshot, then evict** (records the compose definition to Fleet → Snapshots, then evicts) and **Evict and destroy data** (typed-confirm, destroys named volumes).
+In the deployment table, click **Withdraw** on the node's row. For stateless blueprints, Sencho confirms once and runs `docker compose down` plus a directory removal. For stateful blueprints, the eviction dialog asks how to handle the data on this node:
+
+- **Snapshot, then evict (recommended)** captures the blueprint's compose definition into **Fleet · Snapshots** before running `docker compose down`. The volume bytes still leave the node when compose tears down the named volumes; the snapshot only preserves the YAML so you can redeploy it elsewhere.
+- **Evict and destroy data** runs the eviction without a snapshot. Type the blueprint name to confirm.
+
+<Frame>
+  <img src="/images/blueprint-model/eviction-dialog.png" alt="Eviction dialog titled 'Stop pg-fleet on Local'. A warning callout explains named volumes or bind mounts were detected and that evicting destroys the named volumes managed by this stack on Local. Two option cards follow: 'Snapshot, then evict (recommended)' with a camera icon, and 'Evict and destroy data' with a typed-confirm input pre-filled with the blueprint name placeholder." />
+</Frame>
 
 <Note>
-**Snapshot, then evict** captures the compose definition only. Volume bytes are not shipped. The named volumes managed by this stack on the target node are removed by `docker compose down` just as with **Evict and destroy data**. To preserve data, capture volumes manually before withdrawing (see *Migrating stateful data between nodes* below).
+  **Snapshot, then evict** captures the compose definition only. Volume bytes are not shipped. The named volumes managed by this stack on the target node are removed by `docker compose down` just as with **Evict and destroy data**. To preserve data, capture volumes manually before withdrawing (see *Migrating stateful data between nodes* below).
 </Note>
 
 ### Delete the blueprint
 
-Stateless blueprints withdraw all deployments and then delete. Stateful blueprints with active deployments refuse to delete — withdraw each deployment explicitly first.
+Stateless blueprints withdraw all deployments and then delete in a single click. Stateful blueprints with active or pending deployments refuse to delete to avoid silent orphans. Withdraw each deployment explicitly first, then delete.
+
+## Federation: pin a blueprint to a single node
+
+Admiral users can pin a blueprint to a specific node from **Fleet · Federation**. A pinned blueprint deploys only to its pinned node, regardless of the configured selector, and overrides the cordon flag on that node. The Blueprint detail sheet shows a read-only `Pin` section when a pin is in place; pin management itself lives in the Federation tab.
+
+See [Fleet Federation](/features/fleet-federation) for the cordon and pin model.
+
+## Cordoned nodes
+
+Cordoning a node prevents the reconciler from selecting it for **new** placements and skips state-review provisioning on it. Existing deployments on a cordoned node keep running, and drift checks continue normally. Pin policy overrides cordon, so a blueprint pinned to a cordoned node still deploys.
+
+## Notifications
+
+Two notification events fire from the reconciler:
+
+- `blueprint_drift_detected` (warning severity), in Observe and Suggest modes when drift is detected. In Observe the row updates silently in the table; in Suggest the notification is also dispatched through your notification routes.
+- `blueprint_drift_correction_failed` (error severity), in Enforce mode when an auto-fix attempt fails.
+
+Both events route through the standard alert pipeline. Configure delivery channels under [Notification routing](/features/notification-routing).
 
 ## Migrating stateful data between nodes (manual)
 
 Sencho's compose-native lane does not include automatic volume shipping. **Snapshot, then evict** is a compose-only safety net: it preserves the YAML so you can redeploy elsewhere, but it does not move data. To relocate a stateful Blueprint's data from node A to node B, do it by hand before withdrawing:
 
-1. Stop the Blueprint deployment on node A from the deployment table. *Tip:* use **Snapshot, then evict** so the compose YAML is parked in Fleet → Snapshots while you handle volumes.
-2. Use your host tooling (`docker run --rm -v <volume>:/data busybox tar -czf - /data > snapshot.tar.gz`, or app-aware tooling such as `pg_basebackup` / `mysqldump` / `mongodump`) to capture the volume on node A.
+1. Stop the Blueprint deployment on node A from the deployment table. Use **Snapshot, then evict** so the compose YAML is parked in Fleet · Snapshots while you handle volumes.
+2. Use your host tooling (`docker run --rm -v <volume>:/data busybox tar -czf - /data > snapshot.tar.gz`, or app-aware tooling such as `pg_basebackup`, `mysqldump`, or `mongodump`) to capture the volume on node A.
 3. Transfer the artifact to node B and restore it into the named volume there.
 4. Update the Blueprint's selector to include node B; click **Apply now**.
 
@@ -126,38 +199,41 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 ## Troubleshooting
 
-### "Name conflict" on a deployment row
-
-A directory by the blueprint's name already exists on that node and does not carry our `.blueprint.json` marker. Most likely cause: a manually created stack with the same name. Resolution: rename either the existing stack or the blueprint, then click **Apply now**.
-
-### Stateful blueprint stuck in "Awaiting confirmation"
-
-Click **Confirm deploy** on the row, then choose **Deploy fresh**. Sencho will create empty named volumes and start the stack.
-
-### Drift never gets corrected
-
-Confirm the drift policy is `enforce` and the blueprint is enabled. Open the detail sheet to see the deployment row's status and the most recent drift summary. If the drift was caused by a compose change that would destroy named volumes, Enforce intentionally downgrades — change the compose to one that preserves volumes, or withdraw and re-deploy with explicit operator confirmation.
-
-### Cannot disable a blueprint
-
-Blueprints with active or drifted deployments refuse to disable; you would orphan them silently. Withdraw the deployments first, then disable.
-
-### Where is my data after "Snapshot, then evict"?
-
-The named volumes managed by the stack on the target node are removed when the eviction runs `docker compose down`. The snapshot in Fleet → Snapshots holds the compose definition only; volume bytes are not included. To preserve data, capture the volume by hand before withdrawing (see *Migrating stateful data between nodes*). Bind mounts on the host filesystem are left in place by both eviction modes.
-
-### "Failed to capture compose snapshot before eviction"
-
-Sencho aborted the eviction because the pre-eviction compose snapshot could not be written. The deployment is still in place. Check the database is reachable (the snapshot lives in `fleet_snapshots`), then retry. If you accept data loss and want to evict regardless, use **Evict and destroy data** instead.
+<AccordionGroup>
+  <Accordion title="A deployment row shows 'Name conflict' and refuses to deploy">
+    A directory by the blueprint's name already exists on that node and does not carry the `.blueprint.json` marker. The most likely cause is a manually created stack with the same name. Resolution: rename either the existing stack or the blueprint, then click **Apply now** on the detail sheet to retry.
+  </Accordion>
+  <Accordion title="A stateful deployment is stuck in 'Awaiting confirmation'">
+    The reconciler will not auto-deploy a stateful blueprint to a node it has never run on. Click **Confirm deploy** on the row, then choose **Deploy fresh** in the dialog. Sencho will create empty named volumes and start the stack.
+  </Accordion>
+  <Accordion title="Drift is reported but never gets corrected">
+    Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the drift was caused by a compose change that would destroy named volumes, Enforce intentionally downgrades to Suggest semantics for that event. Either change the compose to one that preserves the volumes, or withdraw the deployment with explicit operator confirmation and let the new revision deploy fresh.
+  </Accordion>
+  <Accordion title="Disabling a blueprint is rejected">
+    Blueprints with active or drifted deployments refuse to disable, because doing so would orphan the running containers without a follow-up plan. Withdraw each affected deployment first, then disable the blueprint.
+  </Accordion>
+  <Accordion title="The data is gone after 'Snapshot, then evict'">
+    Both eviction modes run `docker compose down`, which removes the named volumes managed by the stack on the target node. The snapshot stored in **Fleet · Snapshots** captures the compose definition only; the volume bytes are not included. To preserve data, capture the volume by hand before withdrawing (see *Migrating stateful data between nodes*). Bind mounts on the host filesystem are left in place by both eviction modes.
+  </Accordion>
+  <Accordion title="Eviction was aborted with 'Failed to capture compose snapshot before eviction'">
+    Sencho aborted the eviction because the pre-eviction compose snapshot could not be written to the database. The deployment is still in place; nothing was destroyed. Check that the database is reachable, then retry the eviction. If you accept data loss and want to evict regardless, use **Evict and destroy data** instead.
+  </Accordion>
+  <Accordion title="A pinned blueprint did not deploy to nodes in its selector">
+    By design. A pin replaces the selector entirely with the single pinned node, even if the selector resolves to other nodes. Either clear the pin in the Federation tab to restore selector-driven placement, or move the pin to a different node.
+  </Accordion>
+  <Accordion title="The reconciler took a minute to react to a change I just made">
+    The reconciler tick interval is one minute. To force an immediate evaluation after editing the selector, the compose, or the drift policy, click **Apply now** on the detail sheet. **Apply now** is also the recovery action for a row in `Failed` status.
+  </Accordion>
+</AccordionGroup>
 
 ## What's not in scope
 
 By design, Blueprints do not include:
 
-- A distributed storage layer (no CSI, no Longhorn-style replication)
-- Automatic volume migration between nodes
-- Per-node parameter overrides or templating (one compose, all nodes)
-- Staged or canary rollouts
-- Versioning history with one-click rollback (re-paste the prior compose to revert)
+- A distributed storage layer (no CSI, no Longhorn-style replication).
+- Automatic volume migration between nodes.
+- Per-node parameter overrides or templating (one compose, all nodes).
+- Staged or canary rollouts.
+- Versioning history with one-click rollback. To revert, paste the prior compose into the editor and save.
 
 These omissions keep Blueprints honest: a compose-native fleet primitive that distributes the file you already have to the nodes you choose.
