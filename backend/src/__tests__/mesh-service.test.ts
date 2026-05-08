@@ -79,6 +79,57 @@ describe('MeshService.optInStack', () => {
             .rejects.toThrow(/invalid stack name/);
         expect(db.isMeshStackEnabled(localNodeId, '../../etc/passwd')).toBe(false);
     });
+
+    it('forwarder binds every alias port across the fleet, not just local-owned ports', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+
+        // Seed local- and remote-owned aliases directly into
+        // aliasByPort so we exercise syncForwarderListeners without a
+        // live remote Sencho. The model: every meshed node binds every
+        // alias port because meshed containers' extra_hosts:host-gateway
+        // entries land on the SOURCE node's gateway, so the source node
+        // is where the inbound TCP connection is intercepted.
+        const aliasByPort = (svc as unknown as { aliasByPort: Map<number, unknown> }).aliasByPort;
+        aliasByPort.set(9000, {
+            host: 'echo.local-stack.Local.sencho',
+            nodeId: localNodeId, nodeName: 'Local',
+            stackName: 'local-stack', serviceName: 'echo', port: 9000,
+        });
+        aliasByPort.set(9001, {
+            host: 'echo.remote-stack.remote-pilot.sencho',
+            nodeId: remoteNodeId, nodeName: 'remote-pilot',
+            stackName: 'remote-stack', serviceName: 'echo', port: 9001,
+        });
+
+        // Stub the forwarder so the test never touches a real net.Server.
+        const listened: number[] = [];
+        const fwd = (svc as unknown as {
+            forwarder: { listen: (p: number) => Promise<void>; unlisten: (p: number) => Promise<void>; getListenerPorts: () => number[] };
+        }).forwarder;
+        const realListen = fwd.listen.bind(fwd);
+        const realUnlisten = fwd.unlisten.bind(fwd);
+        const realGetListenerPorts = fwd.getListenerPorts.bind(fwd);
+        fwd.listen = async (p: number) => { listened.push(p); };
+        fwd.unlisten = async () => { /* no-op */ };
+        fwd.getListenerPorts = () => [...listened];
+
+        try {
+            await (svc as unknown as { syncForwarderListeners: () => Promise<void> }).syncForwarderListeners();
+            expect(listened.sort()).toEqual([9000, 9001]);
+        } finally {
+            fwd.listen = realListen;
+            fwd.unlisten = realUnlisten;
+            fwd.getListenerPorts = realGetListenerPorts;
+            aliasByPort.clear();
+            db.deleteNode(remoteNodeId);
+        }
+    });
 });
 
 describe('MeshService activity log', () => {
