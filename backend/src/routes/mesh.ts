@@ -4,6 +4,7 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { MeshError, MeshService } from '../services/MeshService';
 import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isValidStackName } from '../utils/validation';
 
 export const meshRouter = Router();
 
@@ -46,6 +47,26 @@ meshRouter.post('/nodes/:nodeId/disable', async (req: Request, res: Response): P
         res.json({ ok: true });
     } catch (err) {
         res.status(500).json({ error: (err as Error).message });
+    }
+});
+
+/**
+ * Returns the LOCAL Docker daemon's services for a stack with their listening
+ * ports. Always queries this Sencho instance's own Dockerode regardless of
+ * `x-node-id`. Central calls this endpoint against each remote node via the
+ * existing proxy chain (`NodeRegistry.getProxyTarget`) so it can build the
+ * cross-fleet alias cache without violating the local-only Dockerode rule.
+ */
+meshRouter.get('/local-services/:stackName', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    const stackName = req.params.stackName as string;
+    if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    try {
+        const services = await MeshService.getInstance().inspectLocalStackServices(stackName);
+        res.json({ services });
+    } catch (err) {
+        console.warn('[mesh] /local-services failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to list local services' });
     }
 });
 
