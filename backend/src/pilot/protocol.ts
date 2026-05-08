@@ -262,7 +262,12 @@ export const PilotCloseCode = {
 
 /**
  * Monotonic stream id generator. Primary is the sole allocator.
- * Wraps at 2^31 (well above practical per-tunnel concurrency).
+ *
+ * Wraps at 2^31. With MAX_STREAMS_PER_TUNNEL = 1024 the allocator
+ * cannot collide with a still-live stream during a single tunnel
+ * lifetime: the wrap distance (~2.1 billion) is more than six orders
+ * of magnitude larger than the cap. A new tunnel restarts the
+ * sequence at 1, so cross-tunnel reuse is also harmless.
  */
 export class StreamIdAllocator {
     private next: number;

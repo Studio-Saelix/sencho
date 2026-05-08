@@ -117,8 +117,12 @@ class PilotAgent {
         this.ws = ws;
 
         ws.on('open', () => {
-            console.log('[Pilot] Tunnel connected to', this.options.primaryUrl);
-            this.backoff = RECONNECT_MIN_MS;
+            // Backoff intentionally NOT reset here: a TCP-level connect that
+            // immediately fails the protocol handshake (incompatible version,
+            // bad token consumed at upgrade) would otherwise reset the
+            // backoff and tight-loop reconnects. The reset moves to the
+            // handleJsonFrame 'hello' case once we have a clean handshake.
+            console.log('[Pilot] Tunnel connected to', sanitizeForLog(this.options.primaryUrl));
             try {
                 ws.send(encodeJsonFrame({
                     t: 'hello',
@@ -257,6 +261,11 @@ class PilotAgent {
                     try { ws.close(1002, 'incompatible version'); } catch { /* ignore */ }
                     process.exit(1);
                 }
+                // Clean handshake: it is now safe to reset the reconnect
+                // backoff. Doing this earlier (in 'open') would let a peer
+                // that always rejects the handshake drive us into a tight
+                // reconnect loop.
+                this.backoff = RECONNECT_MIN_MS;
                 break;
             }
             case 'ctrl': {
