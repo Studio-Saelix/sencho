@@ -6,8 +6,11 @@ import WebSocket from 'ws';
 import { getSenchoVersion } from '../services/CapabilityRegistry';
 import {
     BinaryFrameType,
+    MAX_FRAME_SIZE_BYTES,
+    MAX_STREAMS_PER_TUNNEL,
     MeshErrCode,
     PROTOCOL_VERSION,
+    STREAM_IDLE_TIMEOUT_MS,
     decodeBinaryFrame,
     decodeJsonFrame,
     encodeBinaryFrame,
@@ -16,6 +19,7 @@ import {
     wsDataToString,
 } from './protocol';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isDebugEnabled } from '../utils/debug';
 
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -69,13 +73,22 @@ class PilotAgent {
     private readonly httpStreams = new Map<number, { req: http.ClientRequest }>();
     private readonly wsStreams = new Map<number, WebSocket>();
     private readonly tcpStreams = new Map<number, MeshTcpStream>();
+    private readonly idleTimers = new Map<number, NodeJS.Timeout>();
     private shuttingDown = false;
     private readonly agentVersion: string;
+    /**
+     * Optional CA bundle read once at agent construction. Cached so that a
+     * later rotation (file renamed, secret rotated) does not surprise the
+     * agent with a process exit on the next reconnect; container restart is
+     * the documented way to pick up a new CA bundle.
+     */
+    private readonly customCa: Buffer | null;
 
     constructor(options: AgentOptions) {
         this.options = options;
         this.token = options.initialToken;
         this.agentVersion = getSenchoVersion() || '0.0.0';
+        this.customCa = readPilotCaBundle();
     }
 
     public start(): void {
@@ -101,12 +114,24 @@ class PilotAgent {
                 'x-sencho-agent-version': this.agentVersion,
             },
             handshakeTimeout: 15_000,
+            maxPayload: MAX_FRAME_SIZE_BYTES,
+            // Self-signed deployments can supply an internal CA bundle via
+            // SENCHO_PILOT_CA_FILE; rejectUnauthorized stays true. There is
+            // intentionally no env var to disable TLS verification — that
+            // would defeat the entire trust model of the tunnel credential.
+            // The bundle is read once at agent construction (this.customCa);
+            // rotate by restarting the container.
+            ...(this.customCa ? { ca: this.customCa } : {}),
         });
         this.ws = ws;
 
         ws.on('open', () => {
-            console.log('[Pilot] Tunnel connected to', this.options.primaryUrl);
-            this.backoff = RECONNECT_MIN_MS;
+            // Backoff intentionally NOT reset here: a TCP-level connect that
+            // immediately fails the protocol handshake (incompatible version,
+            // bad token consumed at upgrade) would otherwise reset the
+            // backoff and tight-loop reconnects. The reset moves to the
+            // handleJsonFrame 'hello' case once we have a clean handshake.
+            console.log('[Pilot] Tunnel connected to', sanitizeForLog(this.options.primaryUrl));
             try {
                 ws.send(encodeJsonFrame({
                     t: 'hello',
@@ -150,6 +175,58 @@ class PilotAgent {
             try { stream.socket.destroy(); } catch { /* ignore */ }
         }
         this.tcpStreams.clear();
+        for (const [, timer] of this.idleTimers) clearTimeout(timer);
+        this.idleTimers.clear();
+    }
+
+    private streamCount(): number {
+        return this.httpStreams.size + this.wsStreams.size + this.tcpStreams.size;
+    }
+
+    private refreshIdleTimer(streamId: number): void {
+        const existing = this.idleTimers.get(streamId);
+        if (existing) clearTimeout(existing);
+        const timer = setTimeout(() => this.onStreamIdle(streamId), STREAM_IDLE_TIMEOUT_MS);
+        this.idleTimers.set(streamId, timer);
+    }
+
+    private clearIdleTimer(streamId: number): void {
+        const timer = this.idleTimers.get(streamId);
+        if (timer) {
+            clearTimeout(timer);
+            this.idleTimers.delete(streamId);
+        }
+    }
+
+    private onStreamIdle(streamId: number): void {
+        this.idleTimers.delete(streamId);
+        const ws = this.ws;
+        const httpEntry = this.httpStreams.get(streamId);
+        if (httpEntry) {
+            try { httpEntry.req.destroy(); } catch { /* ignore */ }
+            this.httpStreams.delete(streamId);
+            if (ws) {
+                try { ws.send(encodeJsonFrame({ t: 'http_err', s: streamId, code: 'timeout', message: 'agent idle timeout' })); } catch { /* ignore */ }
+            }
+            return;
+        }
+        const wsEntry = this.wsStreams.get(streamId);
+        if (wsEntry) {
+            try { wsEntry.close(1001, 'idle'); } catch { /* ignore */ }
+            this.wsStreams.delete(streamId);
+            if (ws) {
+                try { ws.send(encodeJsonFrame({ t: 'ws_close', s: streamId, code: 1001, reason: 'idle' })); } catch { /* ignore */ }
+            }
+            return;
+        }
+        const tcpEntry = this.tcpStreams.get(streamId);
+        if (tcpEntry) {
+            try { tcpEntry.socket.destroy(); } catch { /* ignore */ }
+            this.tcpStreams.delete(streamId);
+            if (ws) {
+                try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: streamId })); } catch { /* ignore */ }
+            }
+        }
     }
 
     private scheduleReconnect(): void {
@@ -176,7 +253,9 @@ class PilotAgent {
                 this.handleJsonFrame(frame);
             }
         } catch (err) {
-            console.warn('[Pilot] Malformed frame from primary:', sanitizeForLog((err as Error).message));
+            // Per-frame; diag-gated to avoid log floods from a misbehaving
+            // primary or a malformed frame arriving in a tight loop.
+            if (isDebugEnabled()) console.warn('[Pilot:diag] Malformed frame from primary:', sanitizeForLog((err as Error).message));
         }
     }
 
@@ -191,6 +270,11 @@ class PilotAgent {
                     try { ws.close(1002, 'incompatible version'); } catch { /* ignore */ }
                     process.exit(1);
                 }
+                // Clean handshake: it is now safe to reset the reconnect
+                // backoff. Doing this earlier (in 'open') would let a peer
+                // that always rejects the handshake drive us into a tight
+                // reconnect loop.
+                this.backoff = RECONNECT_MIN_MS;
                 break;
             }
             case 'ctrl': {
@@ -220,18 +304,21 @@ class PilotAgent {
                 const entry = this.httpStreams.get(frame.streamId);
                 if (!entry) return;
                 try { entry.req.write(frame.payload); } catch { /* ignore */ }
+                this.refreshIdleTimer(frame.streamId);
                 break;
             }
             case BinaryFrameType.WsMessageBinary: {
                 const ws = this.wsStreams.get(frame.streamId);
                 if (!ws) return;
                 try { ws.send(frame.payload, { binary: true }); } catch { /* ignore */ }
+                this.refreshIdleTimer(frame.streamId);
                 break;
             }
             case BinaryFrameType.TcpData: {
                 const stream = this.tcpStreams.get(frame.streamId);
                 if (!stream) return;
                 try { stream.socket.write(frame.payload); } catch { /* ignore */ }
+                this.refreshIdleTimer(frame.streamId);
                 break;
             }
             default:
@@ -244,6 +331,17 @@ class PilotAgent {
     private onHttpReq(frame: Extract<ReturnType<typeof decodeJsonFrame>, { t: 'http_req' }>): void {
         const ws = this.ws;
         if (!ws) return;
+        if (this.streamCount() >= MAX_STREAMS_PER_TUNNEL) {
+            try {
+                ws.send(encodeJsonFrame({
+                    t: 'http_err',
+                    s: frame.s,
+                    code: 'agent_error',
+                    message: 'agent stream cap reached',
+                }));
+            } catch { /* ignore */ }
+            return;
+        }
 
         const req = http.request({
             host: '127.0.0.1',
@@ -265,17 +363,21 @@ class PilotAgent {
                     headers: outHeaders,
                 }));
             } catch { /* ignore */ }
+            this.refreshIdleTimer(frame.s);
 
             res.on('data', (chunk: Buffer) => {
                 try { ws.send(encodeBinaryFrame(BinaryFrameType.HttpResBody, frame.s, chunk), { binary: true }); } catch { /* ignore */ }
+                this.refreshIdleTimer(frame.s);
             });
             res.on('end', () => {
                 try { ws.send(encodeJsonFrame({ t: 'http_res_end', s: frame.s })); } catch { /* ignore */ }
                 this.httpStreams.delete(frame.s);
+                this.clearIdleTimer(frame.s);
             });
             res.on('error', () => {
                 try { ws.send(encodeJsonFrame({ t: 'http_err', s: frame.s, code: 'bad_response', message: 'upstream error' })); } catch { /* ignore */ }
                 this.httpStreams.delete(frame.s);
+                this.clearIdleTimer(frame.s);
             });
         });
 
@@ -289,15 +391,18 @@ class PilotAgent {
                 }));
             } catch { /* ignore */ }
             this.httpStreams.delete(frame.s);
+            this.clearIdleTimer(frame.s);
         });
 
         this.httpStreams.set(frame.s, { req });
+        this.refreshIdleTimer(frame.s);
     }
 
     private onHttpReqEnd(streamId: number): void {
         const entry = this.httpStreams.get(streamId);
         if (!entry) return;
         try { entry.req.end(); } catch { /* ignore */ }
+        this.refreshIdleTimer(streamId);
     }
 
     // --- WebSocket dispatch (tunnel -> loopback) ---
@@ -305,15 +410,28 @@ class PilotAgent {
     private onWsOpen(frame: Extract<ReturnType<typeof decodeJsonFrame>, { t: 'ws_open' }>): void {
         const ws = this.ws;
         if (!ws) return;
+        if (this.streamCount() >= MAX_STREAMS_PER_TUNNEL) {
+            try {
+                ws.send(encodeJsonFrame({
+                    t: 'ws_reject',
+                    s: frame.s,
+                    status: 503,
+                    message: 'agent stream cap reached',
+                }));
+            } catch { /* ignore */ }
+            return;
+        }
 
         const target = `ws://127.0.0.1:${this.options.loopbackPort}${frame.path}`;
         const client = new WebSocket(target, {
             headers: { ...frame.headers, host: `127.0.0.1:${this.options.loopbackPort}` },
+            maxPayload: MAX_FRAME_SIZE_BYTES,
         });
 
         client.on('open', () => {
             try { ws.send(encodeJsonFrame({ t: 'ws_accept', s: frame.s, headers: {} })); } catch { /* ignore */ }
             this.wsStreams.set(frame.s, client);
+            this.refreshIdleTimer(frame.s);
         });
         client.on('message', (data, isBinary) => {
             if (isBinary) {
@@ -321,14 +439,17 @@ class PilotAgent {
             } else {
                 try { ws.send(encodeJsonFrame({ t: 'ws_msg_text', s: frame.s, data: wsDataToString(data) ?? '' })); } catch { /* ignore */ }
             }
+            this.refreshIdleTimer(frame.s);
         });
         client.on('close', (code, reason) => {
             try { ws.send(encodeJsonFrame({ t: 'ws_close', s: frame.s, code, reason: reason?.toString?.() })); } catch { /* ignore */ }
             this.wsStreams.delete(frame.s);
+            this.clearIdleTimer(frame.s);
         });
         client.on('error', () => {
             try { ws.send(encodeJsonFrame({ t: 'ws_reject', s: frame.s, status: 502, message: 'agent websocket failed' })); } catch { /* ignore */ }
             this.wsStreams.delete(frame.s);
+            this.clearIdleTimer(frame.s);
         });
     }
 
@@ -336,6 +457,7 @@ class PilotAgent {
         const ws = this.wsStreams.get(streamId);
         if (!ws) return;
         try { ws.send(data); } catch { /* ignore */ }
+        this.refreshIdleTimer(streamId);
     }
 
     private onWsClose(streamId: number, code: number, reason?: string): void {
@@ -343,6 +465,7 @@ class PilotAgent {
         if (!ws) return;
         try { ws.close(code, reason); } catch { /* ignore */ }
         this.wsStreams.delete(streamId);
+        this.clearIdleTimer(streamId);
     }
 
     // --- Sencho Mesh TCP dispatch (tunnel -> Compose service container) ---
@@ -354,6 +477,12 @@ class PilotAgent {
     private async onTcpOpen(frame: Extract<ReturnType<typeof decodeJsonFrame>, { t: 'tcp_open' }>): Promise<void> {
         const ws = this.ws;
         if (!ws) return;
+        if (this.streamCount() >= MAX_STREAMS_PER_TUNNEL) {
+            try {
+                ws.send(encodeJsonFrame({ t: 'tcp_open_ack', s: frame.s, ok: false, err: 'agent_error' }));
+            } catch { /* ignore */ }
+            return;
+        }
 
         const target = await this.resolveMeshTarget(frame.stack, frame.service, frame.port);
         if (!target.ok) {
@@ -367,6 +496,7 @@ class PilotAgent {
         socket.setTimeout(MESH_CONNECT_TIMEOUT_MS);
         const entry: MeshTcpStream = { socket, accepted: false };
         this.tcpStreams.set(frame.s, entry);
+        this.refreshIdleTimer(frame.s);
 
         const sendAck = (ok: boolean, err?: MeshErrCode) => {
             try { ws.send(encodeJsonFrame({ t: 'tcp_open_ack', s: frame.s, ok, err })); } catch { /* ignore */ }
@@ -376,17 +506,20 @@ class PilotAgent {
             entry.accepted = true;
             socket.setTimeout(0);
             sendAck(true);
+            this.refreshIdleTimer(frame.s);
         });
         socket.on('data', (chunk: Buffer) => {
             try {
                 ws.send(encodeBinaryFrame(BinaryFrameType.TcpData, frame.s, chunk), { binary: true });
             } catch { /* ignore */ }
+            this.refreshIdleTimer(frame.s);
         });
         socket.on('timeout', () => {
             if (entry.accepted) return;
             entry.accepted = true;
             sendAck(false, 'unreachable');
             this.tcpStreams.delete(frame.s);
+            this.clearIdleTimer(frame.s);
             try { socket.destroy(); } catch { /* ignore */ }
         });
         socket.on('error', (err) => {
@@ -394,15 +527,18 @@ class PilotAgent {
                 entry.accepted = true;
                 sendAck(false, 'unreachable');
                 this.tcpStreams.delete(frame.s);
+                this.clearIdleTimer(frame.s);
                 return;
             }
             console.warn('[Pilot] tcp stream error:', sanitizeForLog(err.message));
             if (this.tcpStreams.delete(frame.s)) {
+                this.clearIdleTimer(frame.s);
                 try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: frame.s })); } catch { /* ignore */ }
             }
         });
         socket.on('close', () => {
             if (this.tcpStreams.delete(frame.s)) {
+                this.clearIdleTimer(frame.s);
                 try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: frame.s })); } catch { /* ignore */ }
             }
         });
@@ -412,6 +548,7 @@ class PilotAgent {
         const entry = this.tcpStreams.get(streamId);
         if (!entry) return;
         this.tcpStreams.delete(streamId);
+        this.clearIdleTimer(streamId);
         try { entry.socket.destroy(); } catch { /* ignore */ }
     }
 
@@ -473,6 +610,24 @@ function readPersistedToken(): string | null {
         }
     } catch { /* ignore */ }
     return null;
+}
+
+/**
+ * Load the optional CA bundle pointed at by SENCHO_PILOT_CA_FILE so a pilot
+ * agent can verify a self-signed primary cert without disabling TLS
+ * verification globally. Returns the file contents or null if the var is
+ * unset; surfaces a clear error and exits if the file cannot be read so the
+ * operator does not silently fall back to the default trust store.
+ */
+function readPilotCaBundle(): Buffer | null {
+    const caFile = process.env.SENCHO_PILOT_CA_FILE;
+    if (!caFile) return null;
+    try {
+        return fs.readFileSync(caFile);
+    } catch (err) {
+        console.error('[Pilot] Failed to read SENCHO_PILOT_CA_FILE:', sanitizeForLog((err as Error).message));
+        process.exit(1);
+    }
 }
 
 function persistToken(token: string): void {

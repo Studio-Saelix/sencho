@@ -1,6 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import { createHash } from 'crypto';
-import { CveSuppression, DatabaseService, Node, ScanPolicy } from './DatabaseService';
+import { CveSuppression, DatabaseService, MisconfigAcknowledgement, Node, ScanPolicy } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { isDebugEnabled } from '../utils/debug';
@@ -14,7 +14,11 @@ import {
 
 export type { FleetResource };
 
-export const FLEET_RESOURCES: readonly FleetResource[] = ['scan_policies', 'cve_suppressions'];
+export const FLEET_RESOURCES: readonly FleetResource[] = [
+    'scan_policies',
+    'cve_suppressions',
+    'misconfig_acknowledgements',
+];
 
 export function isFleetResource(value: unknown): value is FleetResource {
     return typeof value === 'string' && (FLEET_RESOURCES as readonly string[]).includes(value);
@@ -175,6 +179,9 @@ export class FleetSyncService {
 
     private static cachedControlIdentity: string | null = null;
 
+    /** Node ids already warned about as pilot-agent skip candidates. */
+    private static readonly warnedPilotAgents = new Set<number>();
+
     private nextPushedAt(): number {
         const now = Date.now();
         const next = now > FleetSyncService.lastPushedAt ? now : FleetSyncService.lastPushedAt + 1;
@@ -191,8 +198,21 @@ export class FleetSyncService {
             return;
         }
         const db = DatabaseService.getInstance();
-        const nodes = db.getNodes().filter((n): n is Node & { id: number } => {
-            return n.type === 'remote' && Boolean(n.api_url) && Boolean(n.api_token) && n.id != null;
+        const allNodes = db.getNodes();
+        // Pilot-agent nodes do not accept fleet-sync HTTP pushes; security
+        // rules for them are out of scope until pilot tunneling is built. Warn
+        // once per node id so the operator knows their pilot remote will not
+        // receive replicated policies.
+        for (const n of allNodes) {
+            if (n.mode === 'pilot_agent' && n.id != null && !FleetSyncService.warnedPilotAgents.has(n.id)) {
+                console.warn(
+                    `[FleetSync] Skipping pilot-agent node "${n.name}" (id=${n.id}); fleet sync over pilot tunnel is out of scope.`,
+                );
+                FleetSyncService.warnedPilotAgents.add(n.id);
+            }
+        }
+        const nodes = allNodes.filter((n): n is Node & { id: number } => {
+            return n.type === 'remote' && n.mode !== 'pilot_agent' && Boolean(n.api_url) && Boolean(n.api_token) && n.id != null;
         });
         if (nodes.length === 0) {
             if (isDebugEnabled()) {
@@ -266,7 +286,9 @@ export class FleetSyncService {
      */
     public applyIncomingSync(
         resource: FleetResource,
-        rows: ScanPolicy[] | Array<Omit<CveSuppression, 'id'>>,
+        rows: ScanPolicy[]
+            | Array<Omit<CveSuppression, 'id'>>
+            | Array<Omit<MisconfigAcknowledgement, 'id'>>,
         targetIdentity: string,
         pushedAt?: number,
         controlIdentity?: string,
@@ -299,13 +321,48 @@ export class FleetSyncService {
             }
             db.setSystemState(SYNC_STATE_KEYS.fleetRole, 'replica');
             if (targetIdentity) {
+                const cachedSelf = db.getSystemState(SYNC_STATE_KEYS.fleetSelfIdentity);
+                if (cachedSelf && cachedSelf !== targetIdentity) {
+                    // Operator changed how the control sees this node (e.g. an
+                    // api_url switch). Notify so they can audit any
+                    // identity-scoped policies that may need re-targeting.
+                    void NotificationService.getInstance()
+                        .dispatchAlert(
+                            'warning',
+                            'system',
+                            `Fleet self-identity changed from "${cachedSelf}" to "${targetIdentity}". Identity-scoped policies are reapplied on the next sync.`,
+                        )
+                        .catch((err) => {
+                            console.warn('[FleetSync] Failed to dispatch identity-drift alert:', err);
+                        });
+                }
                 db.setSystemState(SYNC_STATE_KEYS.fleetSelfIdentity, targetIdentity);
             }
             if (resource === 'scan_policies') {
                 db.replaceReplicatedScanPolicies(rows as ScanPolicy[]);
             } else if (resource === 'cve_suppressions') {
                 db.replaceReplicatedCveSuppressions(rows as Array<Omit<CveSuppression, 'id'>>);
+            } else if (resource === 'misconfig_acknowledgements') {
+                // Rows are shape-validated upstream by
+                // validateMisconfigAcknowledgementRow before this method runs,
+                // so a single declared-type assignment is honest.
+                const ackRows = rows as Array<Omit<MisconfigAcknowledgement, 'id'>>;
+                db.replaceReplicatedMisconfigAcknowledgements(ackRows);
             }
+            // F4: persist an audit-log entry for the operator on the replica
+            // side. Without this, mirrored security-rule changes happen
+            // silently from the replica's perspective. Username 'system' and
+            // ip 'control' make the source unambiguous in the audit panel.
+            db.insertAuditLog({
+                timestamp: Date.now(),
+                username: 'system',
+                method: 'POST',
+                path: `/api/fleet/sync/${resource}`,
+                status_code: 200,
+                node_id: 0,
+                ip_address: 'control',
+                summary: `Replicated ${resource} from ${controlIdentity || 'legacy control'}: replaced ${rows.length} row(s)`,
+            });
         });
     }
 
@@ -327,6 +384,7 @@ export class FleetSyncService {
             db.setSystemState(SYNC_STATE_KEYS.fleetControlIdentity, '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('scan_policies'), '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('cve_suppressions'), '');
+            db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('misconfig_acknowledgements'), '');
             db.clearReplicatedRows();
         });
         FleetSyncService.cachedControlIdentity = null;
@@ -359,6 +417,7 @@ export class FleetSyncService {
             db.setSystemState(SYNC_STATE_KEYS.fleetControlIdentity, '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('scan_policies'), '');
             db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('cve_suppressions'), '');
+            db.setSystemState(SYNC_STATE_KEYS.receivedPushedAt('misconfig_acknowledgements'), '');
             db.clearReplicatedRows();
         });
         FleetSyncService.cachedControlIdentity = null;
@@ -462,6 +521,15 @@ export class FleetSyncService {
                 created_at: s.created_at,
                 expires_at: s.expires_at,
             }));
+        } else if (resource === 'misconfig_acknowledgements') {
+            rows = db.getLocalMisconfigAcknowledgements().map((a) => ({
+                rule_id: a.rule_id,
+                stack_pattern: a.stack_pattern,
+                reason: a.reason,
+                created_by: a.created_by,
+                created_at: a.created_at,
+                expires_at: a.expires_at,
+            }));
         } else {
             return [];
         }
@@ -504,16 +572,33 @@ export class FleetSyncService {
     }
 
     private formatError(err: unknown): string {
+        let raw: string;
         if (err instanceof AxiosError) {
             if (err.response) {
                 const data = err.response.data;
                 const detail = typeof data === 'object' && data && 'error' in data
                     ? String((data as { error: unknown }).error)
                     : err.response.statusText;
-                return `HTTP ${err.response.status}: ${detail}`;
+                raw = `HTTP ${err.response.status}: ${detail}`;
+            } else {
+                raw = err.message;
             }
-            return err.message;
+        } else {
+            raw = err instanceof Error ? err.message : String(err);
         }
-        return err instanceof Error ? err.message : String(err);
+        return FleetSyncService.redactSensitive(raw);
+    }
+
+    /**
+     * Strip Bearer tokens and JWT-shaped substrings from an error message
+     * before it lands on disk in `fleet_sync_status.last_error` (visible in the
+     * UI sync-status panel) or in any log line. Caps the result at 500 chars
+     * to bound storage growth on pathological remote responses.
+     */
+    private static redactSensitive(message: string): string {
+        const redacted = message
+            .replace(/Bearer\s+[A-Za-z0-9\-._~+/=]+/gi, 'Bearer [redacted]')
+            .replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted-jwt]');
+        return redacted.length > 500 ? redacted.slice(0, 497) + '...' : redacted;
     }
 }

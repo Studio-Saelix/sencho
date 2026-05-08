@@ -13,6 +13,7 @@ const {
   mockReplaceReplicatedCveSuppressions,
   mockClearOrphanPolicyEvaluations,
   mockClearReplicatedRows,
+  mockInsertAuditLog,
   mockRecordFleetSyncSuccess,
   mockRecordFleetSyncFailure,
   mockGetSystemState,
@@ -29,6 +30,7 @@ const {
   mockReplaceReplicatedCveSuppressions: vi.fn(),
   mockClearOrphanPolicyEvaluations: vi.fn(),
   mockClearReplicatedRows: vi.fn(),
+  mockInsertAuditLog: vi.fn(),
   mockRecordFleetSyncSuccess: vi.fn(),
   mockRecordFleetSyncFailure: vi.fn(),
   mockGetSystemState: vi.fn().mockReturnValue(null),
@@ -48,6 +50,7 @@ vi.mock('../services/DatabaseService', () => ({
       replaceReplicatedCveSuppressions: mockReplaceReplicatedCveSuppressions,
       clearOrphanPolicyEvaluations: mockClearOrphanPolicyEvaluations,
       clearReplicatedRows: mockClearReplicatedRows,
+      insertAuditLog: mockInsertAuditLog,
       recordFleetSyncSuccess: mockRecordFleetSyncSuccess,
       recordFleetSyncFailure: mockRecordFleetSyncFailure,
       getSystemState: mockGetSystemState,
@@ -499,5 +502,95 @@ describe('FleetSyncService.getControlIdentity', () => {
     resetControlIdentityCache();
     mockGetSystemState.mockImplementation(() => null);
     expect(FleetSyncService.getControlIdentity()).toBe('');
+  });
+});
+
+describe('FleetSyncService incoming-sync side effects', () => {
+  it('writes a system audit log entry on every applied sync', () => {
+    FleetSyncService.getInstance().applyIncomingSync(
+      'scan_policies',
+      [],
+      'https://me.example',
+      1_700_000_000_000,
+      'fingerprint-aaa',
+    );
+    expect(mockInsertAuditLog).toHaveBeenCalledWith(expect.objectContaining({
+      username: 'system',
+      method: 'POST',
+      path: '/api/fleet/sync/scan_policies',
+      ip_address: 'control',
+      summary: expect.stringContaining('Replicated scan_policies from fingerprint-aaa'),
+    }));
+  });
+
+  it('emits an identity-drift notification when the targetIdentity changes', () => {
+    mockGetSystemState.mockImplementation((key: string) => {
+      if (key === 'fleet_self_identity') return 'https://old.example';
+      return null;
+    });
+    FleetSyncService.getInstance().applyIncomingSync(
+      'scan_policies',
+      [],
+      'https://new.example',
+    );
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'warning',
+      'system',
+      expect.stringContaining('Fleet self-identity changed'),
+    );
+  });
+
+  it('does not emit identity-drift when there is no prior identity (first sync)', () => {
+    mockGetSystemState.mockImplementation(() => null);
+    FleetSyncService.getInstance().applyIncomingSync(
+      'scan_policies',
+      [],
+      'https://first.example',
+    );
+    const driftCalls = mockDispatchAlert.mock.calls.filter((c) =>
+      typeof c[2] === 'string' && c[2].includes('self-identity changed'),
+    );
+    expect(driftCalls).toHaveLength(0);
+  });
+});
+
+describe('FleetSyncService.pushResource pilot-agent skip', () => {
+  it('skips pilot-agent nodes and logs warn-once per node id', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    mockGetNodes.mockReturnValue([
+      { id: 50, type: 'remote', mode: 'pilot_agent', api_url: '', api_token: '', name: 'PilotNode' },
+    ]);
+    await FleetSyncService.getInstance().pushResource('scan_policies');
+    await FleetSyncService.getInstance().pushResource('scan_policies');
+    const pilotWarns = warnSpy.mock.calls.filter((c) =>
+      typeof c[0] === 'string' && c[0].includes('pilot-agent') && c[0].includes('PilotNode'),
+    );
+    expect(pilotWarns).toHaveLength(1);
+    expect(mockAxiosPost).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+});
+
+describe('FleetSyncService.formatError redaction', () => {
+  it('redacts Bearer tokens and JWT-shaped values from error messages', async () => {
+    mockGetNodes.mockReturnValue([
+      { id: 51, type: 'remote', api_url: 'https://leak.example', api_token: 'tok', name: 'leak' },
+    ]);
+    mockGetLocalScanPolicies.mockReturnValue([]);
+    mockAxiosPost.mockImplementation(async () => {
+      const { AxiosError } = await import('axios');
+      const err = new AxiosError('Request failed');
+      (err as unknown as { response: unknown }).response = {
+        status: 500,
+        statusText: 'Server Error',
+        data: { error: 'Authorization: Bearer abc.def-_~+/=secrettoken denied; jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signaturePart' },
+      };
+      throw err;
+    });
+    await FleetSyncService.getInstance().pushResource('scan_policies');
+    const failure = mockRecordFleetSyncFailure.mock.calls[0];
+    expect(failure[2]).not.toMatch(/Bearer\s+[A-Za-z0-9]/);
+    expect(failure[2]).toContain('[redacted]');
+    expect(failure[2]).toContain('[redacted-jwt]');
   });
 });

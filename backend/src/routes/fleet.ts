@@ -48,11 +48,32 @@ function validateScanPolicyRow(row: unknown): string | null {
   if (typeof r.name !== 'string' || r.name.length === 0 || r.name.length > 200) return 'name must be a non-empty string';
   if (typeof r.max_severity !== 'string' || !POLICY_SEVERITIES.has(r.max_severity)) return 'max_severity must be CRITICAL, HIGH, MEDIUM, or LOW';
   if (r.stack_pattern !== null && typeof r.stack_pattern !== 'string') return 'stack_pattern must be a string or null';
-  if (typeof r.stack_pattern === 'string' && r.stack_pattern.length > 200) return 'stack_pattern is too long';
+  if (typeof r.stack_pattern === 'string') {
+    const patternError = validateStackPatternForRedos(r.stack_pattern);
+    if (patternError) return patternError;
+  }
   if (typeof r.node_identity !== 'string') return 'node_identity must be a string';
   if (r.node_identity.length > 500) return 'node_identity is too long';
   if (!isIntFlag(r.block_on_deploy)) return 'block_on_deploy must be 0 or 1';
   if (!isIntFlag(r.enabled)) return 'enabled must be 0 or 1';
+  return null;
+}
+
+/**
+ * Reject `stack_pattern` inputs that would compile to a backtracking-prone
+ * regex. The matcher in `getMatchingPolicy` substitutes `*` with `.*`, so a
+ * pattern like `***...` becomes a chain of adjacent `.*` runs that exhibit
+ * catastrophic backtracking on long inputs.
+ *
+ * Caps mirror the limit in routes/security.ts so a control creating a policy
+ * sees the same error as a replica receiving one. Length is gated at 200 by
+ * the surrounding row validator.
+ */
+export function validateStackPatternForRedos(pattern: string): string | null {
+  if (pattern.length > 200) return 'stack_pattern is too long';
+  const stars = (pattern.match(/\*/g) ?? []).length;
+  if (stars > 8) return 'stack_pattern has too many wildcards (max 8)';
+  if (/\*{4,}/.test(pattern)) return 'stack_pattern must not contain 4+ consecutive wildcards';
   return null;
 }
 
@@ -64,6 +85,24 @@ function validateCveSuppressionRow(row: unknown): string | null {
   if (typeof r.pkg_name === 'string' && r.pkg_name.length > 200) return 'pkg_name is too long';
   if (r.image_pattern !== null && typeof r.image_pattern !== 'string') return 'image_pattern must be a string or null';
   if (typeof r.image_pattern === 'string' && r.image_pattern.length > 300) return 'image_pattern is too long';
+  if (typeof r.reason !== 'string') return 'reason must be a string';
+  if (r.reason.length > 2000) return 'reason is too long';
+  if (typeof r.created_by !== 'string' || r.created_by.length > 200) return 'created_by must be a string';
+  if (typeof r.created_at !== 'number') return 'created_at must be a number';
+  if (r.expires_at !== null && typeof r.expires_at !== 'number') return 'expires_at must be a number or null';
+  return null;
+}
+
+function validateMisconfigAcknowledgementRow(row: unknown): string | null {
+  if (!row || typeof row !== 'object') return 'row must be an object';
+  const r = row as Record<string, unknown>;
+  if (typeof r.rule_id !== 'string' || r.rule_id.length === 0 || r.rule_id.length > 200) return 'rule_id must be a non-empty string up to 200 chars';
+  if (r.stack_pattern !== null && typeof r.stack_pattern !== 'string') return 'stack_pattern must be a string or null';
+  if (typeof r.stack_pattern === 'string') {
+    if (r.stack_pattern.length > 300) return 'stack_pattern is too long';
+    const patternError = validateStackPatternForRedos(r.stack_pattern);
+    if (patternError) return patternError;
+  }
   if (typeof r.reason !== 'string') return 'reason must be a string';
   if (r.reason.length > 2000) return 'reason is too long';
   if (typeof r.created_by !== 'string' || r.created_by.length > 200) return 'created_by must be a string';
@@ -306,7 +345,11 @@ fleetRouter.get('/role', authMiddleware, (req: Request, res: Response): void => 
 fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response): void => {
   if (!requireNodeProxy(req, res)) return;
   const resource = req.params.resource;
-  if (resource !== 'scan_policies' && resource !== 'cve_suppressions') {
+  if (
+    resource !== 'scan_policies'
+    && resource !== 'cve_suppressions'
+    && resource !== 'misconfig_acknowledgements'
+  ) {
     res.status(400).json({ error: `Unsupported sync resource: ${resource}` });
     return;
   }
@@ -332,7 +375,12 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
     res.status(413).json({ error: `Too many rows (max ${MAX_SYNC_ROWS})` });
     return;
   }
-  const validator = resource === 'scan_policies' ? validateScanPolicyRow : validateCveSuppressionRow;
+  const validator =
+    resource === 'scan_policies'
+      ? validateScanPolicyRow
+      : resource === 'cve_suppressions'
+        ? validateCveSuppressionRow
+        : validateMisconfigAcknowledgementRow;
   for (let i = 0; i < rows.length; i++) {
     const err = validator(rows[i]);
     if (err) {

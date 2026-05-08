@@ -562,6 +562,22 @@ export interface CveSuppression {
     replicated_from_control: number;
 }
 
+/**
+ * Operator-acknowledged misconfiguration finding. Acknowledgements match by
+ * rule_id and an optional stack_pattern glob, are applied at read time, and
+ * never modify the persisted finding row. Mirrors `cve_suppressions` shape.
+ */
+export interface MisconfigAcknowledgement {
+    id: number;
+    rule_id: string;
+    stack_pattern: string | null;
+    reason: string;
+    created_by: string;
+    created_at: number;
+    expires_at: number | null;
+    replicated_from_control: number;
+}
+
 export interface ScanSummary {
     image_ref: string;
     highest_severity: VulnSeverity | null;
@@ -975,6 +991,21 @@ export class DatabaseService {
       -- COALESCE makes NULL scope slots collide the way users expect (NULL == NULL here).
       CREATE UNIQUE INDEX IF NOT EXISTS idx_cve_suppressions_unique
         ON cve_suppressions(cve_id, COALESCE(pkg_name, ''), COALESCE(image_pattern, ''));
+
+      CREATE TABLE IF NOT EXISTS misconfig_acknowledgements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_id TEXT NOT NULL,
+        stack_pattern TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        replicated_from_control INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_misconfig_ack_rule ON misconfig_acknowledgements(rule_id);
+      CREATE INDEX IF NOT EXISTS idx_misconfig_ack_expires ON misconfig_acknowledgements(expires_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_misconfig_ack_unique
+        ON misconfig_acknowledgements(rule_id, COALESCE(stack_pattern, ''));
 
       CREATE TABLE IF NOT EXISTS stack_labels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2097,6 +2128,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
+            this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
         })();
     }
@@ -3525,6 +3557,33 @@ export class DatabaseService {
             .all() as ScanPolicy[];
     }
 
+    /**
+     * Variant of `getScanPolicies` for the security-settings UI.
+     *
+     * On a control instance: returns the full set, identical to
+     * `getScanPolicies`.
+     *
+     * On a replica: returns only the policies that apply to THIS replica.
+     * Replicated rows scoped to a different replica's identity (the
+     * `node_identity` of a sibling node in the fleet) are filtered out so
+     * an operator on Replica A cannot enumerate the names of identity-scoped
+     * policies meant for Replica B. Internal evaluators
+     * (`getMatchingPolicy`, `evaluateScanAgainstPolicies`) keep using the
+     * unfiltered list because they already enforce identity matching at
+     * evaluation time.
+     */
+    public getScanPoliciesForUi(role: 'control' | 'replica', selfIdentity: string): ScanPolicy[] {
+        const all = this.getScanPolicies();
+        if (role === 'control') return all;
+        return all.filter((p) => {
+            if (p.replicated_from_control === 0) return true;
+            // Fleet-wide replicated rows have an empty node_identity and
+            // apply on every replica.
+            if (!p.node_identity) return true;
+            return p.node_identity === selfIdentity;
+        });
+    }
+
     public getScanPolicy(id: number): ScanPolicy | null {
         return (
             (this.db
@@ -3612,6 +3671,12 @@ export class DatabaseService {
      * Replace all policies that were replicated from a control node with the
      * provided rows in a single transaction. Local-only policies (created on
      * this instance directly) are left untouched.
+     *
+     * Replicated policies always insert with fresh ids on the replica, so any
+     * `vulnerability_scans.policy_evaluation` row pointing at a replicated
+     * policy from the previous push refers to a now-deleted id. Clear those
+     * orphaned cache entries inside the same transaction so a replica's UI
+     * stops showing violations from a policy that no longer exists.
      */
     public replaceReplicatedScanPolicies(rows: ScanPolicy[]): void {
         const now = Date.now();
@@ -3635,6 +3700,7 @@ export class DatabaseService {
                     p.updated_at ?? now,
                 );
             }
+            this.clearOrphanPolicyEvaluations();
         });
         txn(rows);
     }
@@ -3872,6 +3938,104 @@ export class DatabaseService {
         txn(rows);
     }
 
+    // --- Misconfig Acknowledgements ---
+
+    public getMisconfigAcknowledgements(): MisconfigAcknowledgement[] {
+        return this.db
+            .prepare('SELECT * FROM misconfig_acknowledgements ORDER BY rule_id, stack_pattern')
+            .all() as MisconfigAcknowledgement[];
+    }
+
+    /** Local-only acknowledgements; mirrors `getLocalCveSuppressions`. */
+    public getLocalMisconfigAcknowledgements(): MisconfigAcknowledgement[] {
+        return this.db
+            .prepare('SELECT * FROM misconfig_acknowledgements WHERE replicated_from_control = 0 ORDER BY rule_id, stack_pattern')
+            .all() as MisconfigAcknowledgement[];
+    }
+
+    public getMisconfigAcknowledgement(id: number): MisconfigAcknowledgement | null {
+        return (
+            (this.db.prepare('SELECT * FROM misconfig_acknowledgements WHERE id = ?')
+                .get(id) as MisconfigAcknowledgement | undefined) ?? null
+        );
+    }
+
+    public createMisconfigAcknowledgement(
+        ack: Omit<MisconfigAcknowledgement, 'id'>,
+    ): MisconfigAcknowledgement {
+        const result = this.db
+            .prepare(
+                `INSERT INTO misconfig_acknowledgements
+                    (rule_id, stack_pattern, reason, created_by, created_at, expires_at, replicated_from_control)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+                ack.rule_id,
+                ack.stack_pattern,
+                ack.reason,
+                ack.created_by,
+                ack.created_at,
+                ack.expires_at,
+                ack.replicated_from_control ?? 0,
+            );
+        return { ...ack, id: result.lastInsertRowid as number };
+    }
+
+    public updateMisconfigAcknowledgement(
+        id: number,
+        updates: Partial<Pick<MisconfigAcknowledgement, 'reason' | 'stack_pattern' | 'expires_at'>>,
+    ): MisconfigAcknowledgement | null {
+        const existing = this.getMisconfigAcknowledgement(id);
+        if (!existing) return null;
+        const ALLOWED = new Set(['reason', 'stack_pattern', 'expires_at']);
+        const fields: string[] = [];
+        const values: unknown[] = [];
+        for (const [key, value] of Object.entries(updates)) {
+            if (!ALLOWED.has(key)) continue;
+            fields.push(`${key} = ?`);
+            values.push(value);
+        }
+        if (fields.length === 0) return existing;
+        values.push(id);
+        this.db
+            .prepare(`UPDATE misconfig_acknowledgements SET ${fields.join(', ')} WHERE id = ?`)
+            .run(...(values as never[]));
+        return this.getMisconfigAcknowledgement(id);
+    }
+
+    public deleteMisconfigAcknowledgement(id: number): void {
+        this.db.prepare('DELETE FROM misconfig_acknowledgements WHERE id = ?').run(id);
+    }
+
+    /**
+     * Replace all replicated misconfig acknowledgements in a single transaction.
+     * Preserves rows flagged as locally created on this instance.
+     */
+    public replaceReplicatedMisconfigAcknowledgements(
+        rows: Array<Omit<MisconfigAcknowledgement, 'id'>>,
+    ): void {
+        const deleteStmt = this.db.prepare('DELETE FROM misconfig_acknowledgements WHERE replicated_from_control = 1');
+        const insertStmt = this.db.prepare(
+            `INSERT INTO misconfig_acknowledgements
+                (rule_id, stack_pattern, reason, created_by, created_at, expires_at, replicated_from_control)
+             VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        );
+        const txn = this.db.transaction((items: Array<Omit<MisconfigAcknowledgement, 'id'>>) => {
+            deleteStmt.run();
+            for (const a of items) {
+                insertStmt.run(
+                    a.rule_id,
+                    a.stack_pattern,
+                    a.reason,
+                    a.created_by,
+                    a.created_at,
+                    a.expires_at,
+                );
+            }
+        });
+        txn(rows);
+    }
+
     /**
      * Null out `vulnerability_scans.policy_evaluation` rows whose `$.policyId`
      * no longer exists in `scan_policies`. Used after replicated rows are
@@ -3891,15 +4055,16 @@ export class DatabaseService {
     }
 
     /**
-     * Atomically delete every replicated_from_control row from both
-     * scan_policies and cve_suppressions, then null out any orphaned
-     * policy_evaluation cache. Used by the demote endpoint and any future
-     * "drop replicated state" operation.
+     * Atomically delete every replicated_from_control row from scan_policies,
+     * cve_suppressions, and misconfig_acknowledgements, then null out any
+     * orphaned policy_evaluation cache. Used by the demote endpoint and any
+     * future "drop replicated state" operation.
      */
     public clearReplicatedRows(): void {
         this.transaction(() => {
             this.db.prepare('DELETE FROM scan_policies WHERE replicated_from_control = 1').run();
             this.db.prepare('DELETE FROM cve_suppressions WHERE replicated_from_control = 1').run();
+            this.db.prepare('DELETE FROM misconfig_acknowledgements WHERE replicated_from_control = 1').run();
             this.clearOrphanPolicyEvaluations();
         });
     }

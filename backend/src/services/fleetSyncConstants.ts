@@ -60,7 +60,7 @@ export const STALE_THRESHOLD_MS = 60 * 60 * 1000;
  * their arguments without a cycle through FleetSyncService. The ordering
  * below mirrors `FLEET_RESOURCES` in FleetSyncService.
  */
-export type FleetResource = 'scan_policies' | 'cve_suppressions';
+export type FleetResource = 'scan_policies' | 'cve_suppressions' | 'misconfig_acknowledgements';
 
 /**
  * `system_state` keys read or written by Fleet Sync. Centralized so a typo
