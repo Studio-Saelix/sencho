@@ -590,8 +590,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         src.on('close', () => teardown());
     }
 
-    /** Find the bridge-network IP of the first container of `<stack>/<service>`. */
-    private async resolveContainerIp(target: MeshTarget): Promise<string | null> {
+    /**
+     * Find the bridge-network IP of the first container of
+     * `<stack>/<service>`. Public so the central-side
+     * `PilotTunnelBridge` reverse-open handler (Phase B) can dial the same
+     * target shape when a pilot's mesh forwarder routes traffic back to
+     * central.
+     */
+    public async resolveContainerIp(target: { stack: string; service: string }): Promise<string | null> {
         try {
             const docker = DockerController.getInstance().getDocker();
             // Compose default container name pattern; -1 is the first replica.
@@ -644,28 +650,54 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         return info.NetworkSettings?.IPAddress || null;
     }
 
-    private openCrossNode(target: MeshTarget, src: net.Socket): void {
+    /**
+     * Pluggable reverse dialer. Set by `PilotAgent` on a pilot host; left
+     * null on a central host. When set, `openCrossNode` routes outbound
+     * mesh dials through the agent's `tcp_open_reverse` path; when unset,
+     * `openCrossNode` uses the central-side `PilotTunnelManager.getBridge`
+     * directly. Lets the same MeshService code work on both sides.
+     */
+    private reverseDialer: ReverseMeshDialer | null = null;
+
+    public setReverseDialer(dialer: ReverseMeshDialer | null): void {
+        this.reverseDialer = dialer;
+    }
+
+    private dialMeshTcpStream(target: MeshTarget): MeshTcpStreamLike | null {
+        if (this.reverseDialer) {
+            return this.reverseDialer.openMeshTcpStream({
+                nodeId: target.nodeId,
+                stack: target.stack,
+                service: target.service,
+                port: target.port,
+            });
+        }
         const ptm = PilotTunnelManager.getInstance();
-        if (!ptm.hasActiveTunnel(target.nodeId)) {
+        if (!ptm.hasActiveTunnel(target.nodeId)) return null;
+        const bridge = ptm.getBridge(target.nodeId);
+        if (!bridge) return null;
+        return bridge.openTcpStream({ stack: target.stack, service: target.service, port: target.port });
+    }
+
+    private openCrossNode(target: MeshTarget, src: net.Socket): void {
+        const tcpStream = this.dialMeshTcpStream(target);
+        if (!tcpStream) {
             this.logActivity({
                 source: 'pilot', level: 'error', type: 'tunnel.fail',
                 nodeId: target.nodeId, alias: target.alias,
-                message: `no active pilot tunnel to node ${target.nodeId}`,
+                message: this.reverseDialer
+                    ? `cannot open reverse mesh stream to node ${target.nodeId}`
+                    : `no active pilot tunnel to node ${target.nodeId}`,
             });
             try { src.destroy(); } catch { /* ignore */ }
             return;
         }
-        const bridge = ptm.getBridge(target.nodeId);
-        if (!bridge) { try { src.destroy(); } catch { /* ignore */ } return; }
-        const tcpStream = bridge.openTcpStream({ stack: target.stack, service: target.service, port: target.port });
-        if (!tcpStream) { try { src.destroy(); } catch { /* ignore */ } return; }
-
         const record = this.registerActiveStream(target.alias, tcpStream.streamId);
         const t0 = Date.now();
         tcpStream.on('open', () => {
             this.logActivity({
                 source: 'mesh', level: 'info', type: 'route.resolve.ok',
-                nodeId: target.nodeId, alias: target.alias, streamId: tcpStream.streamId,
+                nodeId: target.nodeId, alias: target.alias, streamId: record.streamId,
                 message: `cross-node connect to ${target.alias}`,
             });
             this.routeLatencyMap.set(target.alias, Date.now() - t0);
@@ -677,14 +709,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         tcpStream.on('error', (err: Error) => {
             this.logActivity({
                 source: 'pilot', level: 'error', type: 'tunnel.fail',
-                nodeId: target.nodeId, alias: target.alias, streamId: tcpStream.streamId,
+                nodeId: target.nodeId, alias: target.alias, streamId: record.streamId,
                 message: err.message,
             });
-            this.activeStreams.delete(tcpStream.streamId);
+            this.activeStreams.delete(record.streamId);
             try { src.destroy(); } catch { /* ignore */ }
         });
         tcpStream.on('close', () => {
-            this.activeStreams.delete(tcpStream.streamId);
+            this.activeStreams.delete(record.streamId);
             try { src.end(); } catch { /* ignore */ }
         });
         src.on('data', (chunk: Buffer) => {
@@ -911,4 +943,32 @@ export class MeshError extends Error {
         super(message);
         this.code = code;
     }
+}
+
+/**
+ * Common surface of an outbound mesh TCP stream as MeshService consumes
+ * it. Both the central-side `PilotTunnelBridge.TcpStream` and the
+ * pilot-side `ReverseTcpStreamHandle` (from `pilot/agent.ts`) implement
+ * this shape structurally so MeshService.openCrossNode can splice bytes
+ * against either without caring which side initiated the stream.
+ */
+export interface MeshTcpStreamLike {
+    readonly streamId: number;
+    write(chunk: Buffer): boolean;
+    end(): void;
+    destroy(): void;
+    on(event: 'open', listener: () => void): this;
+    on(event: 'data', listener: (chunk: Buffer) => void): this;
+    on(event: 'error', listener: (err: Error) => void): this;
+    on(event: 'close', listener: () => void): this;
+}
+
+/**
+ * Pilot-side reverse dialer. Set by `PilotAgent` when the agent boots
+ * (Phase B); leaves MeshService.openCrossNode able to route outbound
+ * cross-node mesh traffic over the agent's outbound `tcp_open_reverse`
+ * frame instead of central's `PilotTunnelManager.getBridge`.
+ */
+export interface ReverseMeshDialer {
+    openMeshTcpStream(target: { nodeId: number; stack: string; service: string; port: number }): MeshTcpStreamLike | null;
 }

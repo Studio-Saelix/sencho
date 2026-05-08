@@ -1,8 +1,9 @@
 import http, { IncomingMessage, Server as HttpServer, ServerResponse } from 'http';
-import { Socket } from 'net';
+import net, { Socket } from 'net';
 import { EventEmitter } from 'events';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
+    AGENT_REVERSE_ID_BASE,
     BinaryFrameType,
     DecodedBinaryFrame,
     MAX_STREAMS_PER_TUNNEL,
@@ -57,7 +58,34 @@ interface TcpStreamState extends StreamMeta {
     accepted: boolean;
 }
 
-type StreamState = HttpStreamState | WsStreamState | TcpStreamState;
+/**
+ * Pilot-initiated reverse stream where the agent's mesh forwarder asked the
+ * primary to dial a service ON the primary's local Docker host. The primary
+ * holds the resulting `net.Socket` and pumps bytes between the socket and
+ * the tunnel `TcpData` frames keyed on the agent-allocated `s`.
+ */
+interface ReverseLocalTcpStreamState extends StreamMeta {
+    kind: 'reverse_local';
+    socket: Socket;
+    bytesIn: number;
+    bytesOut: number;
+}
+
+/**
+ * Pilot-initiated reverse stream where the target is *another* pilot. The
+ * primary acts as a transparent relay: it allocates a forward `TcpStream`
+ * on the target pilot's bridge and splices bytes between this bridge's
+ * incoming `TcpData` frames (keyed on the source agent's `s`) and the
+ * target stream's `write` / `'data'`.
+ */
+interface ReverseRelayTcpStreamState extends StreamMeta {
+    kind: 'reverse_relay';
+    target: TcpStream;
+    bytesIn: number;
+    bytesOut: number;
+}
+
+type StreamState = HttpStreamState | WsStreamState | TcpStreamState | ReverseLocalTcpStreamState | ReverseRelayTcpStreamState;
 
 /**
  * Sencho Mesh TCP stream handle. EventEmitter-based duplex-like surface that
@@ -513,11 +541,23 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 }
                 break;
             }
+            case 'tcp_open_reverse': {
+                this.handleTcpOpenReverse(frame);
+                break;
+            }
             case 'tcp_close': {
                 const s = this.streams.get(frame.s);
-                if (!s || s.kind !== 'tcp') return;
-                this.removeStream(frame.s);
-                s.handle.emit('close');
+                if (!s) return;
+                if (s.kind === 'tcp') {
+                    this.removeStream(frame.s);
+                    s.handle.emit('close');
+                } else if (s.kind === 'reverse_local') {
+                    this.removeStream(frame.s);
+                    try { s.socket.destroy(); } catch { /* ignore */ }
+                } else if (s.kind === 'reverse_relay') {
+                    this.removeStream(frame.s);
+                    try { s.target.destroy(); } catch { /* ignore */ }
+                }
                 break;
             }
             default:
@@ -551,10 +591,19 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 // Agent never originates request bodies; ignore for defense-in-depth.
                 break;
             case BinaryFrameType.TcpData: {
-                if (s.kind !== 'tcp') return;
-                s.bytesIn += frame.payload.length;
-                this.refreshIdleTimer(frame.streamId, s);
-                s.handle.emit('data', frame.payload);
+                if (s.kind === 'tcp') {
+                    s.bytesIn += frame.payload.length;
+                    this.refreshIdleTimer(frame.streamId, s);
+                    s.handle.emit('data', frame.payload);
+                } else if (s.kind === 'reverse_local') {
+                    s.bytesIn += frame.payload.length;
+                    this.refreshIdleTimer(frame.streamId, s);
+                    try { s.socket.write(frame.payload); } catch { /* ignore */ }
+                } else if (s.kind === 'reverse_relay') {
+                    s.bytesIn += frame.payload.length;
+                    this.refreshIdleTimer(frame.streamId, s);
+                    s.target.write(frame.payload);
+                }
                 break;
             }
             default:
@@ -673,11 +722,140 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             } else if (state.rawSocket) {
                 try { state.rawSocket.destroy(); } catch { /* ignore */ }
             }
-        } else {
+        } else if (state.kind === 'tcp') {
             try {
                 if (!state.accepted) state.handle.emit('error', new Error('tunnel closed before accept'));
                 state.handle.emit('close');
             } catch { /* ignore */ }
+        } else if (state.kind === 'reverse_local') {
+            try { state.socket.destroy(); } catch { /* ignore */ }
+        } else if (state.kind === 'reverse_relay') {
+            try { state.target.destroy(); } catch { /* ignore */ }
         }
+    }
+
+    // ---- Phase B: pilot-initiated reverse mesh streams ----
+
+    /**
+     * Handle an inbound `tcp_open_reverse` from the agent. The agent's
+     * `MeshForwarder` accepted a connection destined for a node other than
+     * the agent's own and is asking the primary to dial the target. Two
+     * cases:
+     *
+     *   - target is the primary's own node: dial a local container directly
+     *     and splice bytes between the resulting socket and the tunnel.
+     *   - target is another pilot: open a forward `TcpStream` on the target
+     *     pilot's bridge and relay bytes between the two tunnels (primary
+     *     in the middle).
+     *
+     * Stream id is allocated by the agent; the primary stores state keyed
+     * on the agent's id. Agent ids are required to be in the upper half of
+     * the 32-bit space so they cannot collide with primary-allocated ids
+     * for forward `tcp_open` streams on the same tunnel.
+     */
+    private handleTcpOpenReverse(frame: { s: number; targetNodeId: number; stack: string; service: string; port: number }): void {
+        const { s, targetNodeId, stack, service, port } = frame;
+        if (s < AGENT_REVERSE_ID_BASE) {
+            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'agent_error' });
+            return;
+        }
+        if (this.streams.has(s) || this.streams.size >= MAX_STREAMS_PER_TUNNEL) {
+            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'agent_error' });
+            return;
+        }
+        // Lazy-import services that import this module to avoid a cycle.
+        void (async () => {
+            const { NodeRegistry } = await import('./NodeRegistry');
+            const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            if (targetNodeId === localNodeId) {
+                await this.acceptReverseLocal(s, { stack, service, port });
+            } else {
+                await this.acceptReverseRelay(s, targetNodeId, { stack, service, port });
+            }
+        })().catch((err) => {
+            if (isDebugEnabled()) console.warn('[PilotBridge:diag] reverse-open dispatch failed:', sanitizeForLog((err as Error).message));
+            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'agent_error' });
+        });
+    }
+
+    private async acceptReverseLocal(s: number, target: { stack: string; service: string; port: number }): Promise<void> {
+        const { MeshService } = await import('./MeshService');
+        const ip = await MeshService.getInstance().resolveContainerIp({ stack: target.stack, service: target.service });
+        if (!ip) {
+            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'no_target' });
+            return;
+        }
+        const socket = net.createConnection({ host: ip, port: target.port });
+        const state: ReverseLocalTcpStreamState = { kind: 'reverse_local', socket, bytesIn: 0, bytesOut: 0 };
+        this.streams.set(s, state);
+        this.refreshIdleTimer(s, state);
+
+        const teardown = (sendClose: boolean) => {
+            if (!this.streams.has(s)) return;
+            this.removeStream(s);
+            try { socket.destroy(); } catch { /* ignore */ }
+            if (sendClose) this.sendJson({ t: 'tcp_close', s });
+        };
+
+        // Pre-connect failure: ack-fail and drop. The handler is removed in
+        // 'connect' below so post-connect errors fall through to the
+        // mid-stream teardown path instead of double-firing.
+        const onPreConnectError = () => {
+            if (!this.streams.has(s)) return;
+            this.streams.delete(s);
+            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
+        };
+        socket.once('error', onPreConnectError);
+        socket.once('connect', () => {
+            socket.off('error', onPreConnectError);
+            this.sendJson({ t: 'tcp_open_ack', s, ok: true });
+            socket.on('data', (chunk: Buffer) => {
+                const cur = this.streams.get(s);
+                if (!cur || cur.kind !== 'reverse_local') return;
+                this.sendBinary(BinaryFrameType.TcpData, s, chunk);
+                cur.bytesOut += chunk.length;
+                this.refreshIdleTimer(s, cur);
+            });
+            socket.on('close', () => teardown(true));
+            socket.on('error', () => teardown(true));
+        });
+    }
+
+    private async acceptReverseRelay(s: number, targetNodeId: number, target: { stack: string; service: string; port: number }): Promise<void> {
+        const { PilotTunnelManager } = await import('./PilotTunnelManager');
+        const targetBridge = PilotTunnelManager.getInstance().getBridge(targetNodeId);
+        if (!targetBridge) {
+            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
+            return;
+        }
+        const targetStream = targetBridge.openTcpStream(target);
+        if (!targetStream) {
+            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
+            return;
+        }
+        const state: ReverseRelayTcpStreamState = { kind: 'reverse_relay', target: targetStream, bytesIn: 0, bytesOut: 0 };
+        this.streams.set(s, state);
+        this.refreshIdleTimer(s, state);
+
+        targetStream.once('open', () => {
+            this.sendJson({ t: 'tcp_open_ack', s, ok: true });
+        });
+        targetStream.on('data', (chunk: Buffer) => {
+            const cur = this.streams.get(s);
+            if (!cur || cur.kind !== 'reverse_relay') return;
+            this.sendBinary(BinaryFrameType.TcpData, s, chunk);
+            cur.bytesOut += chunk.length;
+            this.refreshIdleTimer(s, cur);
+        });
+        targetStream.once('error', () => {
+            if (!this.streams.has(s)) return;
+            this.streams.delete(s);
+            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
+        });
+        targetStream.once('close', () => {
+            if (!this.streams.has(s)) return;
+            this.removeStream(s);
+            this.sendJson({ t: 'tcp_close', s });
+        });
     }
 }

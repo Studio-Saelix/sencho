@@ -75,6 +75,7 @@ export type JsonFrame =
     | WsCloseFrame
     | ControlFrame
     | TcpOpenFrame
+    | TcpOpenReverseFrame
     | TcpOpenAckFrame
     | TcpCloseFrame;
 
@@ -157,13 +158,38 @@ export interface ControlFrame {
 }
 
 /**
- * Sencho Mesh TCP frames. The primary asks the agent to open a TCP connection
- * to a Compose service on the agent's local Docker host. Bytes flow as
- * BinaryFrameType.TcpData. Mid-stream failures send tcp_close.
+ * Sencho Mesh TCP frames. Two directions:
+ *
+ *   - `tcp_open` (primary -> agent): primary asks the agent to open a TCP
+ *     connection to a Compose service on the agent's local Docker host.
+ *     Stream id is allocated by the primary's `StreamIdAllocator` (low
+ *     range, starts at 1).
+ *
+ *   - `tcp_open_reverse` (agent -> primary): the agent's mesh forwarder
+ *     accepted a connection destined for another node and asks the primary
+ *     to dial that node. If `targetNodeId` matches the primary's own node,
+ *     the primary dials a local container directly. Otherwise the primary
+ *     relays via its bridge to the target pilot. Stream id is allocated by
+ *     the agent and uses the upper half of the 32-bit space
+ *     (>= 0x40000001) so it cannot collide with primary-allocated ids on
+ *     the same tunnel; the wrap distance (~2^30 vs the 1024 stream cap)
+ *     makes collisions statistically unreachable.
+ *
+ * In both directions, `tcp_open_ack` confirms acceptance, bytes flow as
+ * `BinaryFrameType.TcpData`, and `tcp_close` ends the stream.
  */
 export interface TcpOpenFrame {
     t: 'tcp_open';
     s: number;
+    stack: string;
+    service: string;
+    port: number;
+}
+
+export interface TcpOpenReverseFrame {
+    t: 'tcp_open_reverse';
+    s: number;
+    targetNodeId: number;
     stack: string;
     service: string;
     port: number;
@@ -182,6 +208,14 @@ export interface TcpCloseFrame {
     t: 'tcp_close';
     s: number;
 }
+
+/**
+ * Stream id space split for `tcp_open` (primary-allocated) vs
+ * `tcp_open_reverse` (agent-allocated). Used by the agent's reverse
+ * allocator and by the primary's `tcp_open_reverse` handler to verify
+ * incoming ids are in the agent half.
+ */
+export const AGENT_REVERSE_ID_BASE = 0x40000001;
 
 // --- Serialize / parse ---
 
@@ -271,24 +305,29 @@ export const PilotCloseCode = {
 // --- Stream id allocation ---
 
 /**
- * Monotonic stream id generator. Primary is the sole allocator.
+ * Monotonic stream id generator.
  *
- * Wraps at 2^31. With MAX_STREAMS_PER_TUNNEL = 1024 the allocator
- * cannot collide with a still-live stream during a single tunnel
- * lifetime: the wrap distance (~2.1 billion) is more than six orders
- * of magnitude larger than the cap. A new tunnel restarts the
- * sequence at 1, so cross-tunnel reuse is also harmless.
+ * Wraps at 2^31 back to the configured `start` value (not back to `1`),
+ * so allocators initialized with `AGENT_REVERSE_ID_BASE` stay in the
+ * agent half of the id space across the wrap. With
+ * MAX_STREAMS_PER_TUNNEL = 1024 the allocator cannot collide with a
+ * still-live stream during a single tunnel lifetime: the wrap distance
+ * (~2.1 billion) is more than six orders of magnitude larger than the
+ * cap. A new tunnel restarts the sequence at `start`, so cross-tunnel
+ * reuse is also harmless.
  */
 export class StreamIdAllocator {
+    private readonly start: number;
     private next: number;
 
     constructor(start = 1) {
+        this.start = start;
         this.next = start;
     }
 
     allocate(): number {
         const id = this.next;
-        this.next = this.next >= 0x7fffffff ? 1 : this.next + 1;
+        this.next = this.next >= 0x7fffffff ? this.start : this.next + 1;
         return id;
     }
 }

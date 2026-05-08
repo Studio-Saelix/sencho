@@ -3,6 +3,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+    AGENT_REVERSE_ID_BASE,
     BinaryFrameType,
     decodeBinaryFrame,
     decodeJsonFrame,
@@ -102,5 +103,35 @@ describe('Mesh TcpData binary frames', () => {
             const buf = encodeBinaryFrame(t, 1, Buffer.from('x'));
             expect(() => decodeBinaryFrame(buf)).not.toThrow();
         }
+    });
+});
+
+describe('Phase B: tcp_open_reverse', () => {
+    it('roundtrips a tcp_open_reverse frame including targetNodeId', () => {
+        const raw = encodeJsonFrame({
+            t: 'tcp_open_reverse',
+            s: AGENT_REVERSE_ID_BASE + 7,
+            targetNodeId: 12,
+            stack: 'api',
+            service: 'db',
+            port: 5432,
+        });
+        const decoded = decodeJsonFrame(raw);
+        expect(decoded.t).toBe('tcp_open_reverse');
+        if (decoded.t !== 'tcp_open_reverse') throw new Error('narrowing');
+        expect(decoded.s).toBe(AGENT_REVERSE_ID_BASE + 7);
+        expect(decoded.targetNodeId).toBe(12);
+        expect(decoded.stack).toBe('api');
+        expect(decoded.service).toBe('db');
+        expect(decoded.port).toBe(5432);
+    });
+
+    it('AGENT_REVERSE_ID_BASE is in the upper half of the 32-bit space and clears primary allocator collision risk', () => {
+        // Primary allocator wraps at 0x7fffffff. Agent base must be above
+        // that range so primary's id sequence (1..0x7fffffff) and the
+        // agent's reverse sequence never collide on the same tunnel for
+        // the lifetime of the tunnel (well beyond MAX_STREAMS_PER_TUNNEL).
+        expect(AGENT_REVERSE_ID_BASE).toBeGreaterThan(0x40000000);
+        expect(AGENT_REVERSE_ID_BASE).toBeLessThan(0x80000000);
     });
 });
