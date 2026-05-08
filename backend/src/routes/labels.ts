@@ -24,7 +24,6 @@ export const activeBulkActions = new Set<string>();
 export const labelsRouter = Router();
 
 labelsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   try {
     const nodeId = req.nodeId ?? 0;
     const labels = DatabaseService.getInstance().getLabels(nodeId);
@@ -37,7 +36,6 @@ labelsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promi
 });
 
 labelsRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireBody(req, res)) return;
   try {
     const nodeId = req.nodeId ?? 0;
@@ -77,7 +75,6 @@ labelsRouter.post('/', authMiddleware, async (req: Request, res: Response): Prom
 });
 
 labelsRouter.get('/assignments', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   try {
     const nodeId = req.nodeId ?? 0;
     const db = DatabaseService.getInstance();
@@ -108,7 +105,6 @@ labelsRouter.get('/assignments', authMiddleware, async (req: Request, res: Respo
 });
 
 labelsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireBody(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'label ID');
@@ -152,7 +148,6 @@ labelsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Pr
 });
 
 labelsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'label ID');
     if (id === null) return;
@@ -260,7 +255,6 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
 export const stackLabelsRouter = Router();
 
 stackLabelsRouter.put('/:stackName/labels', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireBody(req, res)) return;
   try {
     const stackName = req.params.stackName as string;
