@@ -2,8 +2,11 @@ import fs from 'fs';
 import net from 'net';
 import path from 'path';
 import http from 'http';
+import jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
 import { getSenchoVersion } from '../services/CapabilityRegistry';
+import { DatabaseService } from '../services/DatabaseService';
+import { NodeRegistry } from '../services/NodeRegistry';
 import {
     BinaryFrameType,
     MAX_FRAME_SIZE_BYTES,
@@ -23,6 +26,8 @@ import { isDebugEnabled } from '../utils/debug';
 
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
+const LOOPBACK_TOKEN_TTL_SECONDS = 300;
+const LOOPBACK_TOKEN_REFRESH_SECONDS = 240;
 const PING_INTERVAL_MS = 30_000;
 const TOKEN_PATH = path.join(process.env.DATA_DIR || '/app/data', 'pilot.jwt');
 
@@ -63,7 +68,7 @@ interface AgentOptions {
     enrolling: boolean;
 }
 
-class PilotAgent {
+export class PilotAgent {
     private readonly options: AgentOptions;
     private token: string;
     private backoff = RECONNECT_MIN_MS;
@@ -84,11 +89,52 @@ class PilotAgent {
      */
     private readonly customCa: Buffer | null;
 
+    /** Cached pilot_tunnel-scoped token signed by the LOCAL Sencho's `auth_jwt_secret`, used to authenticate forwarded HTTP and WS requests against the local loopback Sencho. */
+    private loopbackToken: string | null = null;
+    private loopbackTokenIssuedAt = 0;
+
     constructor(options: AgentOptions) {
         this.options = options;
         this.token = options.initialToken;
         this.agentVersion = getSenchoVersion() || '0.0.0';
         this.customCa = readPilotCaBundle();
+    }
+
+    /**
+     * Mint or reuse a `pilot_tunnel`-scoped JWT signed by the AGENT's local
+     * `auth_jwt_secret`. The central proxy strips browser cookies before it
+     * forwards a request through the tunnel; without an inline auth header on
+     * the loopback request, the agent's local `authMiddleware` would 401 every
+     * proxied call. The token's claim shape mirrors what the central mints at
+     * enrollment, so the loopback `authMiddleware` accepts it via the existing
+     * `pilot_tunnel` branch with no special-case bypass.
+     */
+    private getLoopbackAuthHeader(): string | null {
+        const now = Math.floor(Date.now() / 1000);
+        if (this.loopbackToken && now - this.loopbackTokenIssuedAt < LOOPBACK_TOKEN_REFRESH_SECONDS) {
+            return `Bearer ${this.loopbackToken}`;
+        }
+        try {
+            const secret = DatabaseService.getInstance().getGlobalSettings().auth_jwt_secret;
+            if (!secret) return null;
+            const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            this.loopbackToken = jwt.sign({ scope: 'pilot_tunnel', nodeId }, secret, { expiresIn: LOOPBACK_TOKEN_TTL_SECONDS });
+            this.loopbackTokenIssuedAt = now;
+            return `Bearer ${this.loopbackToken}`;
+        } catch (err) {
+            if (isDebugEnabled()) console.warn('[Pilot:diag] loopback token mint failed:', sanitizeForLog((err as Error).message));
+            return null;
+        }
+    }
+
+    private buildLoopbackHeaders(frameHeaders: Record<string, string>): Record<string, string> {
+        const auth = this.getLoopbackAuthHeader();
+        const headers: Record<string, string> = {
+            ...frameHeaders,
+            host: `127.0.0.1:${this.options.loopbackPort}`,
+        };
+        if (auth) headers.authorization = auth;
+        return headers;
     }
 
     public start(): void {
@@ -348,7 +394,7 @@ class PilotAgent {
             port: this.options.loopbackPort,
             method: frame.method,
             path: frame.path,
-            headers: { ...frame.headers, host: `127.0.0.1:${this.options.loopbackPort}` },
+            headers: this.buildLoopbackHeaders(frame.headers),
         }, (res) => {
             const outHeaders: Record<string, string> = {};
             for (const [k, v] of Object.entries(res.headers)) {
@@ -424,7 +470,7 @@ class PilotAgent {
 
         const target = `ws://127.0.0.1:${this.options.loopbackPort}${frame.path}`;
         const client = new WebSocket(target, {
-            headers: { ...frame.headers, host: `127.0.0.1:${this.options.loopbackPort}` },
+            headers: this.buildLoopbackHeaders(frame.headers),
             maxPayload: MAX_FRAME_SIZE_BYTES,
         });
 
