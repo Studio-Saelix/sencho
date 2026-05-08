@@ -63,7 +63,7 @@
     "express-rate-limit": "^8.3.1",
     "helmet": "^8.1.0",
     "http-proxy": "^1.18.1",
-    "http-proxy-middleware": "^3.0.5",
+    "http-proxy-middleware": "^4.0.0",
     "isomorphic-git": "^1.37.5",
     "jsonwebtoken": "^9.0.3",
     "ldapts": "^8.1.7",
