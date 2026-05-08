@@ -603,13 +603,31 @@ type MeshResolveResult =
     | { ok: true; host: string; port: number }
     | { ok: false; err: MeshErrCode };
 
-function readPersistedToken(): string | null {
+/**
+ * Read the persisted long-lived tunnel token from disk if present. ENOENT is
+ * the normal first-boot case and stays silent. Any other error class
+ * (EACCES, EIO, EISDIR, etc.) almost certainly means the volume is
+ * misconfigured or corrupt; log at ERROR with the path and the errno so the
+ * operator has an actionable signal, then return null. Returning null here
+ * lets the caller fall back to SENCHO_ENROLL_TOKEN if one is set, or exit
+ * with a clear "no credentials" message if not.
+ *
+ * Calls readFileSync directly rather than racing existsSync + readFileSync
+ * to avoid TOCTOU and to surface the actual errno on real failures.
+ *
+ * @internal exported for unit tests
+ */
+export function readPersistedToken(): string | null {
     try {
-        if (fs.existsSync(TOKEN_PATH)) {
-            return fs.readFileSync(TOKEN_PATH, 'utf8').trim() || null;
-        }
-    } catch { /* ignore */ }
-    return null;
+        return fs.readFileSync(TOKEN_PATH, 'utf8').trim() || null;
+    } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return null;
+        console.error(
+            `[Pilot] Failed to read persisted tunnel token at ${sanitizeForLog(TOKEN_PATH)}: ${sanitizeForLog(code ?? 'unknown')} - ${sanitizeForLog((err as Error).message)}`,
+        );
+        return null;
+    }
 }
 
 /**
@@ -630,13 +648,26 @@ function readPilotCaBundle(): Buffer | null {
     }
 }
 
-function persistToken(token: string): void {
+/**
+ * Persist the long-lived tunnel token so the agent can reconnect after a
+ * container restart without re-enrolling. On failure we log at ERROR (not
+ * WARN) with an explicit "next agent restart will require re-enrollment"
+ * message: a silent warning here meant the operator saw the next-boot
+ * re-enrollment loop with no signal pointing at the disk. The current
+ * tunnel session continues with the in-memory token regardless.
+ *
+ * @internal exported for unit tests
+ */
+export function persistToken(token: string): void {
     try {
         const dir = path.dirname(TOKEN_PATH);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(TOKEN_PATH, token, { mode: 0o600 });
     } catch (err) {
-        console.warn('[Pilot] Failed to persist tunnel token:', (err as Error).message);
+        const code = (err as NodeJS.ErrnoException).code;
+        console.error(
+            `[Pilot] Failed to persist tunnel token at ${sanitizeForLog(TOKEN_PATH)} (${sanitizeForLog(code ?? 'unknown')}: ${sanitizeForLog((err as Error).message)}). Continuing with the in-memory token; the next agent restart will require re-enrollment until the volume is writable.`,
+        );
     }
 }
 
