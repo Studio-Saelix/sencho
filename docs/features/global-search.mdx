@@ -3,10 +3,10 @@ title: Global Search
 description: Jump to any page, node, or stack from anywhere in the app with a single keystroke.
 ---
 
-The **global search palette** lets you move around Sencho without reaching for the mouse. It covers top-level navigation, every configured node, and every stack on every online node in your fleet.
+The **global search palette** lets you move around Sencho without reaching for the mouse. It covers the destinations the top bar exposes for your tier and role, every configured node, and every stack on every online node in your fleet.
 
 <Frame>
-  <img src="/images/global-search/palette-stacks.png" alt="Sencho global search palette filtering stacks across nodes" />
+  <img src="/images/global-search/palette-pages.png" alt="Sencho global search palette open with no query, the Pages group listing Home, Fleet, Resources, App Store, Logs, and Auto-Update each with a leading icon." />
 </Frame>
 
 ## Opening the palette
@@ -21,38 +21,48 @@ The shortcut works from the dashboard, editor, fleet view, resources, and every 
 
 ## What you can find
 
-The palette groups results into three sections:
+The palette groups results into three sections.
 
 | Group | What it contains | What happens when you pick one |
 |-------|------------------|--------------------------------|
-| **Pages** | Every top-level navigation destination (Home, Fleet, Resources, App Store, Logs, Auto-Update, Console, Audit, Schedules) | Navigates to that page |
-| **Nodes** | Every node in your fleet, with a green dot for online and a grey dot for offline | Switches the active node without leaving the current page |
-| **Stacks** | Every compose stack on every online node, matched by filename | Switches to the stack's node and opens it in the editor |
+| **Pages** | The same set of destinations the top bar shows you. Home, Fleet, Resources, App Store, and Logs always appear; Auto-Update appears for admins on Skipper or higher; Console and Schedules appear for admins on Admiral; Audit appears for any role on Admiral with the audit permission. | Navigates to that page |
+| **Nodes** | Every node in your fleet, with a green dot for online and a grey dot for offline. The currently active node carries a small **ACTIVE** chip on the right. | Switches the active node without leaving the current page |
+| **Stacks** | Every compose stack on every online node, matched on the compose filename (extension included). | Switches to the stack's node and opens it in the editor |
 
-Each stack row shows a status dot (running, exited, or unknown) on the left and the node name as a tag on the right. That way you always know which host a match lives on before you pick it.
+Each stack row shows a status dot on the left (green for running, grey for exited, faded grey for unknown) and the node name as a mono tag on the right. That way you always know which host a match lives on before you pick it.
+
+<Frame>
+  <img src="/images/global-search/palette-nodes.png" alt="Global search palette scrolled to the Nodes group, with the active node showing a small ACTIVE chip on the right and a green online dot to the left of each node name." />
+</Frame>
 
 ## Typing to filter
 
-Start typing and the results narrow in real time. Matching is substring-based, so you can type a fragment from anywhere in a stack's filename or a node's name. Examples:
+Start typing and the results narrow in real time. Pages and nodes filter instantly; stack search debounces for about 250 ms before fanning out across the fleet, so a fast typist sees the Stacks group fill in a beat after the rest. Matching is substring-based, so you can type a fragment from anywhere in a stack's filename or a node's name. Examples:
 
-- `fleet` — jumps to the Fleet page.
-- `opsix` — selects the Opsix node and switches the active context to it.
-- `db` — lists every stack with "db" in its name, showing which node each one lives on.
+- `fleet` jumps to the Fleet page.
+- `local` selects the Local node and switches the active context to it.
+- `db` lists every stack with "db" in its filename, showing which node each one lives on.
+
+<Frame>
+  <img src="/images/global-search/palette-stacks.png" alt="Global search palette with the query 'saelix' producing three Stacks rows, each with a green status dot on the left and a mono OPSIX node tag on the right." />
+</Frame>
 
 When a query matches stacks on a remote node, selecting one switches the active node and opens the editor on that stack in a single action.
 
 ## Cross-node search
 
-Stack search fans out across every online node in your fleet. Offline nodes are skipped so one unreachable host never slows the palette down. Results from the active node and remote nodes appear together, sorted by the order nodes were added.
+Stack search fans out across every online node in your fleet. Offline nodes are skipped so one unreachable host never slows the palette down. Results from the active node and remote nodes appear together, grouped in the order nodes appear in your fleet list.
 
-The palette caps the Stacks group at 50 results. If you have more matches than that, keep typing to narrow the query and the extras will come into view.
+The Stacks group caps at 50 rows. When a query matches more than that, a `Showing first 50 of N` line renders below the list so you know there is more to find. Keep typing to narrow the query; the line disappears once fewer than 50 matches remain.
+
+While the fleet is responding, the empty area reads `Searching...` until the first batch of stack hits arrives. If no group has a hit at all, the empty area reads `No results.`
 
 ## Keyboard navigation
 
 Once the palette is open:
 
-- <kbd>↑</kbd> / <kbd>↓</kbd> — move through the results.
-- <kbd>Enter</kbd> — pick the highlighted result.
-- <kbd>Esc</kbd> — close the palette.
+- <kbd>↑</kbd> / <kbd>↓</kbd> moves through the results.
+- <kbd>Enter</kbd> picks the highlighted result.
+- <kbd>Esc</kbd> closes the palette.
 
 Offline nodes show as greyed-out and are not selectable.
