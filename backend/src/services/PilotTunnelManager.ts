@@ -5,6 +5,33 @@ import { DatabaseService } from './DatabaseService';
 import { PilotCloseCode } from '../pilot/protocol';
 
 /**
+ * Soft warning threshold: a single instance handling more than this many
+ * concurrent pilot tunnels is unusual and likely indicates a reconnect storm
+ * or operator misconfiguration. Logged at WARN.
+ */
+const PILOT_TUNNEL_SOFT_LIMIT = 128;
+
+/**
+ * Hard ceiling on concurrent pilot tunnels per primary. Beyond this the
+ * gateway refuses to register new tunnels (the upgrade handler closes the
+ * socket with 1013 try-again-later) so a runaway reconnect storm cannot
+ * exhaust gateway memory.
+ */
+const PILOT_TUNNEL_HARD_LIMIT = 256;
+
+/**
+ * Thrown by registerTunnel when the system-wide cap is exceeded. The pilot
+ * upgrade handler catches this and closes the WebSocket cleanly so the agent
+ * backs off rather than tight-looping.
+ */
+export class PilotTunnelCapacityError extends Error {
+    constructor(public readonly limit: number) {
+        super(`pilot tunnel cap (${limit}) reached`);
+        this.name = 'PilotTunnelCapacityError';
+    }
+}
+
+/**
  * PilotTunnelManager: singleton registry of active pilot tunnels.
  *
  * Each enrolled pilot-agent node holds one outbound WebSocket to the primary.
@@ -20,6 +47,7 @@ import { PilotCloseCode } from '../pilot/protocol';
 export class PilotTunnelManager extends EventEmitter {
     private static instance: PilotTunnelManager;
     private bridges: Map<number, PilotTunnelBridge> = new Map();
+    private softWarned = false;
 
     private constructor() {
         super();
@@ -45,6 +73,19 @@ export class PilotTunnelManager extends EventEmitter {
         if (existing) {
             existing.close(PilotCloseCode.Replaced, 'replaced by newer tunnel');
             this.bridges.delete(nodeId);
+        }
+
+        // Hard cap: only counts tunnels for *other* nodes since we just
+        // released the matching slot above. A reconnect by the same node
+        // does not consume new capacity.
+        if (this.bridges.size >= PILOT_TUNNEL_HARD_LIMIT) {
+            throw new PilotTunnelCapacityError(PILOT_TUNNEL_HARD_LIMIT);
+        }
+        if (this.bridges.size >= PILOT_TUNNEL_SOFT_LIMIT && !this.softWarned) {
+            console.warn(`[Pilot] Active tunnel count at soft limit (${this.bridges.size}/${PILOT_TUNNEL_HARD_LIMIT}); reconnect storm or runaway enrollment likely.`);
+            this.softWarned = true;
+        } else if (this.bridges.size < PILOT_TUNNEL_SOFT_LIMIT) {
+            this.softWarned = false;
         }
 
         const bridge = new PilotTunnelBridge(nodeId, ws);
