@@ -1,85 +1,179 @@
 ---
 title: Global Observability
-description: A unified, searchable log stream from every container across all your stacks.
+description: A unified, searchable log stream from every running container on the active node.
 ---
 
-The **Logs** tab aggregates output from all running containers into a single scrollable view. Instead of tailing logs one container at a time, you see everything in one place, with contextual metrics and filtering to focus on what matters.
+The **Logs** tab aggregates output from every running container on the active node into a single live feed. Instead of tailing one container at a time, you scan everything in one place, with a live event-rate readout, stream / level / stack filters, and a downloadable replay of the current buffer.
 
 <Frame>
-  <img src="/images/global-observability/global-observability-overview.png" alt="Global Observability view with live masthead, signal rail, and streaming log feed" />
+  <img src="/images/global-observability/global-observability-overview.png" alt="Global Observability page with the live logs masthead, four-tile signal rail, filter strip, and a feed body showing day-banded rows in info green and error rose." />
 </Frame>
 
-## Cockpit layout
+## Status masthead
 
-The page is laid out as a vertical stack of surfaces, each with a distinct role:
+The masthead at the top of the page is the single place to read the stream's current condition.
 
-| Surface | What it shows |
-|---------|---------------|
-| **Masthead** | Stream state (`Streaming`, `Idle`, or `Offline`) with a live status dot. Right side shows time since the last event and current session uptime. |
-| **Signal rail** | Four tiles: `EVENTS / MIN` with a 60-second sparkline, `ERRORS` count, `WARNINGS` count, and distinct `CONTAINERS` count. Values reflect the current buffer. |
-| **Filter strip** | Search box, stacks multi-select, stream pills (`All`, `Out`, `Err`), and level pills (`All`, `Info`, `Warn`, `Error`). |
-| **Feed** | Chronological rows grouped by day-banded headers (`NOW`, `2M AGO`, `TODAY 14:20`). Each row shows a severity dot, timestamp, container name, and message. Error rows are tinted rose; warning rows tinted amber. |
-| **Chip strip** | Floating bottom-right controls for `Pause`, `Clear`, and `Download`. |
+<Frame>
+  <img src="/images/global-observability/masthead.png" alt="Logs masthead with the kicker 'LIVE LOGS · NODE · LOCAL', the state word 'Streaming' in editorial italics next to a pulsing brand-cyan dot, and the meta tiles 'LAST EVENT NOW' and 'SESSION 1M 43S' on the right." />
+</Frame>
 
-## Streaming
+It carries:
 
-Logs stream live via Server-Sent Events the moment you open the page. The masthead dot pulses cyan while the stream is active; it settles to grey when no events have arrived in the last ten seconds, and turns rose if the connection fails.
+- A **kicker** in uppercase mono tracking that reads `LIVE LOGS · NODE · <NAME>`. The local node renders as `LOCAL`; remote nodes render with their configured name uppercased.
+- A **pulsing dot** that mirrors the stream tone: brand cyan and pulsing while events arrive within the live window, gray and steady when the stream goes quiet, solid rose when the underlying SSE connection has errored.
+- A **state word** set in the editorial display face: `Streaming` while the dot is live, `Idle` when the stream has gone quiet, `Offline` when the connection has failed.
+- A **LAST EVENT** stat that names the band of the most recent event using the same vocabulary as the feed (`NOW`, `2M AGO`, `1H AGO`, then the calendar date), so you can see how stale the latest line is at a glance.
+- A **SESSION** stat counting how long this Logs tab has been open, formatted with uppercase letter suffixes: `1H 43M` once the session crosses an hour, `0M 12S` under it. The session resets when you switch the active node, since the stream re-connects against the new node.
 
-If your browser cannot open an `EventSource` connection, Sencho falls back to polling every five seconds automatically. The transport choice is transparent, and no setting is needed to enable streaming.
+The state word flips to `Idle` after ten seconds without an event. That is a feature of the readout, not the stream: the SSE connection stays open in the background and the dot will pulse cyan again on the next event.
 
-## Log format
+## Signal rail
 
-Each row shows:
+A four-tile rail directly under the masthead summarizes the current buffer.
 
-- **Severity dot** - green for `INFO`, amber for `WARN`, rose with a soft glow for `ERROR`
-- **Timestamp** - when the log line was emitted (24-hour local time)
-- **Container name** - the specific container that produced the line, rendered in brand cyan
-- **Message** - the raw log output, tinted rose for `STDERR` lines
+<Frame>
+  <img src="/images/global-observability/signal-rail.png" alt="Four-tile signal rail: 'EVENTS / MIN' showing 20 with a 60-second sparkline, 'ERRORS' showing 418 in destructive red, 'WARNINGS' showing 9 in amber, 'CONTAINERS' showing 8 in stat-value white." />
+</Frame>
 
-Rows for errors are tinted rose across the full width; warnings are tinted amber. The whole-row tint makes problems easy to scan without reading every line.
+| Tile | What it shows |
+|------|---------------|
+| **EVENTS / MIN** | Total events received in the last sixty seconds, with a 60-bucket sparkline (one bucket per second) under the number. The sparkline shifts left every tick so you read it as a live rhythm rather than a static chart. |
+| **ERRORS** | Count of `ERROR`-level lines in the buffer. Tints destructive red whenever the count is above zero; otherwise the number sits in subtitle gray. |
+| **WARNINGS** | Count of `WARN`-level lines in the buffer. Tints warning amber whenever the count is above zero; otherwise the number sits in subtitle gray. |
+| **CONTAINERS** | Count of distinct container names present in the in-memory buffer (after the **Clear** cutoff). Containers whose last entry has aged out of the buffer drop out of the count. |
 
-## Day bands
+All four counters are scoped to what is currently in the buffer. **Clear** sweeps them along with the visible rows.
 
-When consecutive log rows span a large time gap, a tracked-mono header is drawn between them showing how long ago the next block of rows was emitted. Labels roll up as time passes: recent events are `NOW`, then `2M AGO`, `12M AGO`, `1H AGO`, and eventually a full calendar date.
+## Filter strip
 
-## Filtering logs
+A row of controls between the signal rail and the feed lets you narrow what you see without touching the underlying stream.
 
-Use the filter strip above the feed to narrow what you see:
+<Frame>
+  <img src="/images/global-observability/filter-strip.png" alt="Filter strip with a 'Search logs...' textbox, a 'STACKS · ALL' dropdown trigger, a stream segmented control with 'ALL OUT ERR' (ALL selected), and a level segmented control with 'ALL INFO WARN ERROR' (ALL selected)." />
+</Frame>
 
 | Control | What it does |
-|---------|-------------|
-| **Search** | Full-text filter across the message, container name, and stack name (case-insensitive). |
-| **Stacks** | Checkbox dropdown; select one or more stacks to show only their containers' logs. Displays "All" when nothing is selected. |
-| **Stream pills** | Filter by output stream: `All`, `Out` (STDOUT), or `Err` (STDERR). |
-| **Level pills** | Filter by severity: `All`, `Info`, `Warn`, or `Error`. |
+|---------|--------------|
+| **Search** | Case-insensitive substring filter against the message body, container name, and stack name. |
+| **Stacks** | Dropdown of every stack discovered on the active node; ticking one or more boxes restricts the feed to those stacks. The trigger reads `Stacks · All` when nothing is selected and `Stacks · <n>` once at least one box is ticked. |
+| **Stream** | Segmented control with `All`, `Out`, `Err` for filtering by stream source. `Out` is `STDOUT`, `Err` is `STDERR`. |
+| **Level** | Segmented control with `All`, `Info`, `Warn`, `Error` for filtering by detected severity. |
 
-Filters combine. For example, you can show only `Error` lines from a specific stack while searching for a keyword.
+Filters AND together and run in the browser, so there is no per-keystroke round-trip to the backend. Switching them does not lose any buffered data; rows reappear if you broaden the filter again.
 
-## Pause and resume
+## Feed
 
-Click **Pause** in the chip strip to freeze the feed while you inspect a run of events. The stream keeps filling in the background, and a cyan pill appears showing how many new events are waiting. Click the pill or **Resume** to flush them and return to live mode.
+The body of the page is a chronological list of every log line in the buffer that passes the current filter.
 
-## Controls
+<Frame>
+  <img src="/images/global-observability/feed-bands.png" alt="Feed body showing day band headers '3M AGO' and '2M AGO' between groups of rows. Each row shows a green INFO dot, a 24-hour timestamp, a cyan container name (seerr, profilarr), and the raw log message." />
+</Frame>
 
-| Button | What it does |
+Each row carries:
+
+- A small **severity dot** tinted by detected level: success green for `INFO`, warning amber for `WARN`, destructive rose with a soft glow for `ERROR`.
+- A **timestamp** in 24-hour local time (`HH:MM:SS`), set in tabular nums so columns line up across rows.
+- A **container name** in brand cyan. Hover to see the full `<stack>/<container>` path in a tooltip; the displayed name is the compose service name with the project prefix and replica suffix stripped.
+- A **message** containing the raw log output. `STDERR`-source lines render in destructive rose; `STDOUT`-source lines render in stat-value white.
+
+A row's whole-row tint follows its detected level. Error rows pick up a subtle destructive wash, warning rows pick up an amber wash, info rows have no tint and gain a subtle accent on hover. The detected level is independent of the source, so an `STDOUT` line that contains the word `ERROR:` still gets the rose row tint.
+
+When consecutive rows span more than a minute, a tracked-mono **band header** is inserted between them. Bands roll up over time: `NOW` for the last sixty seconds, then `2M AGO`, `12M AGO`, `1H AGO`, and eventually the calendar date.
+
+The feed shows the most recent three hundred rows that pass the filter. If more rows match, a `Showing last 300 of <n>` notice sits at the top of the feed so you know lines have been clipped, even though the full ring buffer behind the scenes still holds them.
+
+The feed uses two empty states, both rendered as a tracked-mono kicker over an italic caption. Before any event arrives, the body shows `Awaiting events` over `Logs will appear here as containers emit them.` When the current filter excludes every row in the buffer, the body shows `No matches` over `Try a broader filter to see logs again.`
+
+The viewport autoscrolls to follow new rows. If you scroll up to read older entries, autoscroll pauses so the feed doesn't yank you back. Scrolling within fifty pixels of the bottom re-engages it.
+
+## Pause, clear, download
+
+A floating control strip is anchored to the bottom-right of the feed.
+
+<Frame>
+  <img src="/images/global-observability/paused-resume-chip.png" alt="Floating control strip with a brand-cyan '22 NEW · RESUME' pill on the left and the Pause/Clear/Download chip group on the right. The Pause button shows a play icon and the label 'RESUME', indicating the stream is currently paused." />
+</Frame>
+
+| Action | What it does |
 |--------|--------------|
-| **Pause / Resume** | Freezes and resumes the feed without disconnecting the stream. |
-| **Clear** | Clears the current log buffer in the UI. Does not delete logs from Docker. |
-| **Download** | Exports the currently filtered logs as a `.txt` file. The filename includes an ISO timestamp for easy identification. |
+| **Pause / Resume** | Freezes the feed without dropping the SSE connection. New events keep flowing into the in-memory buffer so the page does not lose ground. While paused, a brand-cyan **`<n> NEW · RESUME`** pill appears to the left of the strip and counts the events queued since you paused; clicking either the pill or the **Resume** button flushes them and returns to the live view. The pause toggle's icon and label flip between play / `RESUME` and pause / `PAUSE` in lockstep with the state. |
+| **Clear** | Hides every row that arrived before the click; counters reset to match. The underlying Docker logs are untouched. New events that arrive after the click reappear in the feed. |
+| **Download** | Exports the rows currently passing the filter as a `.txt` file. The filename is `sencho-logs-<ISO8601>.txt` (with `:` and `.` replaced by `-` so Windows accepts the name) and each line is formatted as `[<ISO timestamp>] [<stack>/<container>] <LEVEL>: <message>`. The button disables when the filter currently matches zero rows. |
 
-## Auto-scroll
+## Filtering by level
 
-The feed automatically scrolls to the bottom as new rows arrive. If you scroll up to inspect older entries, auto-scroll pauses so you are not pulled away. Scrolling back to the bottom re-enables it.
+The **Level** segmented control drops the feed to a single severity. Pairing it with **Stacks** is a fast way to investigate a misbehaving stack.
+
+<Frame>
+  <img src="/images/global-observability/error-only-filter.png" alt="Logs page with the Level filter set to 'Error'. The feed shows only error-tinted rows from the sencho and radarr containers, with day bands '6M AGO' through 'NOW' visible." />
+</Frame>
+
+The level on each row is detected from the message body, not the stream source. Sencho's parser scans the line for keywords (`info`, `debug`, `warn`, `error`) and structured fields (`level=...`, `[INFO]`, `Exception:`) before falling back to a source-based default of `STDERR → ERROR`, `STDOUT → INFO`. That means an `STDOUT` line containing `ERROR:` classifies as `ERROR` (and gets the rose tint), and an `STDERR` line containing `info` classifies as `INFO` (and gets the green dot).
+
+## How streaming works
+
+The page opens an `EventSource` against `/api/logs/global/stream?nodeId=<id>` as soon as it mounts. Each event is one log line emitted by `docker logs --follow` against every running container on the active node, demultiplexed and parsed before it leaves the server. When the connection opens, the server replays the last five hundred lines per container before switching to live tail, so you see immediate context instead of an empty feed while you wait for the next event.
+
+A 30-second SSE keep-alive comment is written every tick to defeat reverse-proxy idle timeouts, so the stream stays open behind nginx, Cloudflare, Caddy, and so on without configuration.
+
+If the browser cannot open the `EventSource` connection at all (a corporate proxy that strips SSE, an outbound block on the streaming endpoint), the page silently falls back to polling `/api/logs/global` every five seconds. The polling endpoint returns the last five hundred lines on each call as a single snapshot. The transport choice is automatic; you cannot pick one explicitly.
 
 ## Display limits
 
-To keep the browser responsive, the log viewer enforces two capacity limits:
+Two budgets keep the page responsive even on a chatty fleet:
 
-- **Memory buffer** - a maximum of 2,000 log entries are held in memory at a time. Older entries are dropped as new ones arrive.
-- **Rendered rows** - only the most recent 300 entries from the filtered set are rendered as DOM nodes. If more entries match, a notice appears at the top of the feed showing how many entries exist versus how many are displayed.
+- **Buffer** of two thousand entries in the browser's memory. As new events arrive past the cap, the oldest entries are dropped. The buffer keeps filling while the feed is paused, so a long pause does not stretch memory unbounded.
+- **Rendered rows** capped at three hundred. Beyond that, the `Showing last 300 of <n>` banner appears so you know more matches exist behind the slice.
 
-For deeper investigation, use the [per-container log viewer](/features/editor#log-viewer) in the Editor tab, or `docker compose logs` directly from the [Host Console](/features/host-console).
+When you need to chase older lines than the buffer holds, jump to the [per-container log viewer](/features/editor#log-viewer) in the Editor tab or run `docker compose logs` from the [Host Console](/features/host-console).
+
+## Active node
+
+The Logs tab is scoped to one node at a time, the active node selected from the sidebar's node switcher.
+
+- The kicker reads `LIVE LOGS · NODE · LOCAL` for the local node and `LIVE LOGS · NODE · <NAME>` for any registered remote node, so you always know which fleet member you are watching.
+- Switching the active node tears down the SSE connection, clears the buffer, and opens a fresh stream against the new node. The session timer in the masthead resets at the same moment.
+- There is no fleet-wide aggregation view. To compare two nodes, open the Logs tab in two browser tabs and switch the active node in each.
+
+## Refresh cadence
+
+The page is built from several independent loops so the masthead and the sparkline animate without flooding the network:
+
+| Surface | Cadence |
+|---------|---------|
+| UI tick (uptime, band labels, live-window check) | 1 second |
+| Buffer flush from the SSE batch into the visible feed | 500 ms |
+| Polling fallback when SSE never opens | 5 seconds |
+| SSE keep-alive heartbeat from the server | 30 seconds |
+| Sparkline rolling window | 60 buckets × 1 second = 60 seconds |
+| `Idle` threshold (no events received) | 10 seconds |
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The masthead reads 'Offline' and a 'Failed to fetch logs. Retrying...' banner is visible">
+    The polling fallback got an HTTP error when it tried to read `/api/logs/global`. The most common cause is that the active remote node is unreachable; check the same node from **Settings · Nodes** and confirm the API token is still valid. If the active node is local, check the host's Docker daemon is reachable on the socket Sencho is configured to use. The page retries the request every five seconds; once it succeeds, the banner clears on its own.
+  </Accordion>
+  <Accordion title="The dot is gray and the state reads 'Idle' even though logs are appearing further down the page">
+    `Idle` only checks whether an event has arrived in the last ten seconds. If your fleet is genuinely quiet (a maintenance window, a single low-traffic container), the dot rests gray and the band headers in the feed roll up to `2M AGO`, `5M AGO`, and so on. The next event flips the dot back to brand cyan and the state word back to `Streaming` on the next one-second tick.
+  </Accordion>
+  <Accordion title="A line that says 'ERROR' renders without the rose row tint">
+    Severity is detected once per line by scanning the message body. Some loggers print `ERROR` as part of a stack trace header on a line that does not itself match the parser's keyword set, in which case the line is classified by its source: `STDOUT` falls back to `INFO`. To force the row to your preferred level, change the application's log format to something the parser recognises (`level=error`, `[ERROR]`, or a leading `Error:` / `Exception:`). The behavior is intentional: it keeps a noisy `STDOUT` line that quotes the word `ERROR` from polluting the error count.
+  </Accordion>
+  <Accordion title="The Resume pill keeps growing while I read a paused feed">
+    The buffer caps at two thousand entries even while paused. Once you cross the cap, the oldest queued events drop, and the pill's count reflects the size of the queue the next flush will deliver, not the total number of events that arrived during the pause. Resume to flush, then re-pause if you need to keep reading; the page will not lose its place because autoscroll only re-engages when you scroll back to the bottom.
+  </Accordion>
+  <Accordion title="Clear hid the rows but a few old lines came back a moment later">
+    **Clear** records the click time and hides every row whose timestamp is earlier than that moment, but the SSE stream keeps delivering events whose timestamps were generated by Docker before the click. A line emitted at `16:51:43.987` that arrives at the browser at `16:51:44.020` will still pass the filter even if you clicked **Clear** at `16:51:44.000`. The lag is normally a few hundred milliseconds; click **Clear** again to hide them.
+  </Accordion>
+  <Accordion title="Logs disappear when I switch the active node">
+    The page is scoped to one node at a time. Switching the active node tears down the current SSE connection, drops the in-browser buffer, and connects against the new node. To compare two nodes side by side, open the Logs tab in two browser tabs and switch the active node in each.
+  </Accordion>
+  <Accordion title="I want to see logs from every node at once">
+    The Logs tab does not aggregate across the fleet. Use the per-container log viewer in the Editor for a single container's history, or jump to the Host Console for ad-hoc `docker compose logs` against any node. Fleet-wide aggregation is not on the current roadmap; pipe container logs to your existing observability stack (Loki, ELK, Datadog) if you need cross-node search.
+  </Accordion>
+</AccordionGroup>
 
 <Note>
-  Log data retention on the backend is controlled by **Settings → Developer → Notification Log Retention** (default: 30 days). This affects historical notification and alert logs stored in Sencho's database, not the live container stream shown here.
+  Log retention on the backend is controlled by **Settings · Developer · Notification Log Retention** (default thirty days). That setting governs alert and notification history stored in Sencho's database. It does not apply to the live container stream this page renders, which is bound entirely by Docker's own log driver and the in-browser buffers above.
 </Note>
