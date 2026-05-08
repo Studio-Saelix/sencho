@@ -20,17 +20,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
   const proxy = createProxyMiddleware<Request, Response>({
     target: 'http://localhost:0', // placeholder - overridden per-request by router
     changeOrigin: true,
-    router: (req) => {
-      const node = NodeRegistry.getInstance().getNode(req.nodeId);
-      return node?.api_url?.replace(/\/$/, '');
-    },
+    router: (req) => req.proxyTarget?.apiUrl.replace(/\/$/, ''),
     // When mounted at app.use('/api/', ...), Express strips the '/api/' prefix from
     // req.url before the middleware sees it. Re-add it so the remote Sencho instance
     // receives the full path (e.g. '/stats' becomes '/api/stats').
     pathRewrite: (path) => '/api' + path,
     on: {
       proxyReq: (proxyReq, req) => {
-        const node = NodeRegistry.getInstance().getNode(req.nodeId);
         // Strip headers that must not reach the remote instance:
         // - x-node-id: remote Sencho treats all requests as local
         // - cookie: the browser's sencho_token is signed with THIS instance's JWT secret;
@@ -38,8 +34,9 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         //   Authentication is handled exclusively via the Bearer token below.
         proxyReq.removeHeader('x-node-id');
         proxyReq.removeHeader('cookie');
-        if (node?.api_token) {
-          proxyReq.setHeader('Authorization', `Bearer ${node.api_token}`);
+        // Pilot-agent targets carry an empty token; see NodeRegistry.getProxyTarget.
+        if (req.proxyTarget?.apiToken) {
+          proxyReq.setHeader('Authorization', `Bearer ${req.proxyTarget.apiToken}`);
         }
         // Distributed License Enforcement: assert the main instance's license
         // tier to the remote node so tier-gated routes honor the main's
@@ -107,13 +104,21 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       return;
     }
 
-    if (!node.api_url || !node.api_token) {
-      res.status(503).json({
-        error: `Remote node "${node.name}" has no API URL or token configured. Update it in Settings → Nodes.`,
-      });
+    const target = NodeRegistry.getInstance().getProxyTarget(req.nodeId);
+    if (!target) {
+      if (node.mode === 'pilot_agent') {
+        res.status(503).json({
+          error: `Pilot tunnel to "${node.name}" is disconnected. Operations will resume when the agent reconnects.`,
+        });
+      } else {
+        res.status(503).json({
+          error: `Remote node "${node.name}" has no API URL or token configured. Update it in Settings → Nodes.`,
+        });
+      }
       return;
     }
 
+    req.proxyTarget = target;
     proxy(req, res, next);
   };
 }

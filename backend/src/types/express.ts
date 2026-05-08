@@ -19,6 +19,8 @@ declare global {
       mfaPendingUserId?: number;
       /** True when the pending MFA session originated from an SSO login (LDAP or OIDC) rather than a password login. */
       mfaPendingSso?: boolean;
+      /** Cached remote-proxy target resolved by `remoteNodeProxy`'s outer gate so the http-proxy router/proxyReq callbacks do not re-resolve. */
+      proxyTarget?: { apiUrl: string; apiToken: string };
     }
   }
 }
