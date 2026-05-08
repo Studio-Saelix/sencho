@@ -3,11 +3,24 @@ title: SSO Setup Guide
 description: Step-by-step instructions for connecting Sencho to your identity provider.
 ---
 
-SSO can be configured via environment variables (shown below) or from the Settings UI after first boot.
+SSO can be configured from the Settings UI or seeded via environment variables (shown below).
 
 <Note>
-  **Tier availability.** Custom OIDC is available on every tier, including Community. The Google, GitHub, and Okta one-click presets require Skipper or higher. LDAP / Active Directory requires Admiral. See [Licensing & Billing](/features/licensing#feature-breakdown) for the full breakdown.
+  **Tier availability.** Custom OIDC is available on every tier, including Community. The Google, GitHub, and Okta preset providers require Skipper or higher. LDAP / Active Directory requires Admiral. See [Licensing & Billing](/features/licensing#feature-breakdown) for the full breakdown.
 </Note>
+
+<Frame>
+  <img src="/images/sso/sso-quickstart-overview.png" alt="Settings > SSO panel showing all five provider cards with PROVIDERS and ENABLED stats in the masthead" />
+</Frame>
+
+## How to configure
+
+You can wire SSO two ways. Both reach the same database row, and you can mix and match.
+
+- **Environment variables** seed the SSO configuration the first time Sencho boots with that variable set. They are useful for infrastructure-as-code, fresh deployments, and disaster recovery. After a configuration row exists in the database, the database is authoritative; subsequent restarts do not re-read the env vars or overwrite changes you made in the UI.
+- **Settings > SSO** in the dashboard lets admins enable, edit, save, and remove providers without restarting. Changes apply immediately. Each provider card has a **Test Connection** button that validates connectivity before you commit (LDAP bind plus search for LDAP, OIDC discovery plus token endpoint reachability for OIDC).
+
+If you want a guided UI walkthrough rather than the env-var path below, jump to the [SSO feature page](/features/sso#configuration).
 
 ## Google OIDC
 
@@ -33,7 +46,7 @@ services:
       - /opt/compose:/opt/compose
 ```
 
-Restart Sencho. A "Google" button will appear on the login page.
+A **Google** button appears on the login page after the first boot with these variables set. To override the button label, set `SSO_OIDC_GOOGLE_DISPLAY_NAME` (and the equivalent `_DISPLAY_NAME` variable for any other provider).
 
 ## GitHub OAuth
 
@@ -128,11 +141,19 @@ If your provider uses non-standard claim names, add claim mapping:
       - SSO_LDAP_DEFAULT_ROLE=viewer
 ```
 
-After starting Sencho, verify the connection in **Settings > SSO** using the **Test Connection** button.
+Once Sencho is running, open **Settings > SSO**, expand the LDAP card, and click **Test Connection**. Sencho binds with the service account, runs the search filter, and reports the result inline.
+
+<Frame>
+  <img src="/images/sso/sso-quickstart-ldap-test.png" alt="LDAP provider card expanded showing the configuration form with example values, the Verify TLS certificate toggle, and Save and Test Connection buttons" />
+</Frame>
 
 <Warning>
   If your LDAP server is on the Docker host (not in a container), use the host's LAN IP or `host.docker.internal` (Docker Desktop) instead of `localhost`.
 </Warning>
+
+<Tip>
+  For self-signed LDAPS certificates, set `SSO_LDAP_TLS_REJECT_UNAUTHORIZED=false` (or untick **Verify TLS certificate** in the UI). Use only when you control the certificate authority.
+</Tip>
 
 ## Role mapping
 
@@ -188,6 +209,7 @@ services:
       - SSO_LDAP_SEARCH_BASE=ou=users,dc=example,dc=com
       - SSO_LDAP_SEARCH_FILTER=(sAMAccountName={{username}})
       - SSO_LDAP_ADMIN_GROUP_DN=cn=sencho-admins,ou=groups,dc=example,dc=com
+      # - SSO_LDAP_TLS_REJECT_UNAUTHORIZED=false   # uncomment for self-signed LDAPS
       # Role mapping & callback
       - SSO_OIDC_ADMIN_CLAIM=groups
       - SSO_OIDC_ADMIN_CLAIM_VALUE=sencho-admins

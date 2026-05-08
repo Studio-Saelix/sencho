@@ -59,13 +59,6 @@ interface TcpStreamState extends StreamMeta {
 
 type StreamState = HttpStreamState | WsStreamState | TcpStreamState;
 
-export interface TcpStreamSummary {
-    streamId: number;
-    bytesIn: number;
-    bytesOut: number;
-    openedAt: number;
-}
-
 /**
  * Sencho Mesh TCP stream handle. EventEmitter-based duplex-like surface that
  * MeshService consumes to bridge a local socket to a Compose service on the
@@ -106,6 +99,19 @@ export class TcpStream extends EventEmitter {
 }
 
 /**
+ * Narrow surface that Sencho Mesh consumes from a registered pilot tunnel.
+ * `PilotTunnelManager.getBridge` returns this interface (not the concrete
+ * bridge) so MeshService cannot reach into transport internals: close code,
+ * loopback URL, the per-stream maps, the underscored helpers, etc.
+ * Keep this set minimal: it is the contract a future alternative transport
+ * (a stub for tests, a different routing strategy) would have to implement.
+ */
+export interface MeshTunnelHandle {
+    openTcpStream(target: { stack: string; service: string; port: number }): TcpStream | null;
+    getBufferedAmount(): number;
+}
+
+/**
  * Per-tunnel bridge: hosts a loopback HTTP server that demuxes requests into
  * wire frames sent over the pilot WebSocket, and remuxes response frames back
  * to the loopback caller.
@@ -114,7 +120,7 @@ export class TcpStream extends EventEmitter {
  * as just another remote target, so HTTP and WebSocket proxy logic, header
  * stripping/injection, and license-tier propagation all work unchanged.
  */
-export class PilotTunnelBridge extends EventEmitter {
+export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle {
     private readonly tunnelWs: WebSocket;
     private readonly loopback: HttpServer;
     private readonly wsUpgradeServer: WebSocketServer;
@@ -229,20 +235,6 @@ export class PilotTunnelBridge extends EventEmitter {
         if (!this.streams.has(streamId)) return;
         this.removeStream(streamId);
         this.sendJson({ t: 'tcp_close', s: streamId });
-    }
-
-    /**
-     * Snapshot of active TCP streams for the diagnostics sheet. Cheap; called
-     * on demand by MeshService.
-     */
-    public listTcpStreams(): TcpStreamSummary[] {
-        const out: TcpStreamSummary[] = [];
-        for (const [streamId, s] of this.streams) {
-            if (s.kind === 'tcp') {
-                out.push({ streamId, bytesIn: s.bytesIn, bytesOut: s.bytesOut, openedAt: s.openedAt });
-            }
-        }
-        return out;
     }
 
     public close(code = 1000, reason = 'closed by primary'): void {

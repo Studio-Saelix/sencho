@@ -3,50 +3,75 @@ title: Stack Management
 description: Create, deploy, control, and remove Docker Compose stacks.
 ---
 
-A **stack** in Sencho is a Docker Compose project: a directory inside your `COMPOSE_DIR` that contains at least a `compose.yaml` (or `docker-compose.yml`) file. Sencho automatically discovers every subdirectory as a stack.
+A **stack** in Sencho is a Docker Compose project: a directory inside your `COMPOSE_DIR` that contains at least a `compose.yaml` (or `docker-compose.yml`) file. Sencho discovers every subdirectory as a stack and surfaces them in the left sidebar.
 
 <Frame>
-  <img src="/images/stack-management/create-stack-dialog.png" alt="New stack dialog" />
+  <img src="/images/stack-management/sidebar-grouped.png" alt="Sencho sidebar showing the stack list grouped by label, with filter chips at the top" />
 </Frame>
 
 ## Creating a stack
 
-Click **Create Stack** in the left sidebar. Enter a name and click **Create**.
+Click **Create Stack** in the left sidebar to open the **New stack** dialog. Pick a source from the tabs at the top:
+
+- **Empty**: start with a blank `compose.yaml` and write it from scratch.
+- **From Git**: clone a Git repository so its compose file becomes the stack source. Future webhook pulls keep it in sync. See [Git Sources](/features/git-sources) for the full sync flow.
+- **From Docker Run**: paste a `docker run` command and let Sencho convert it to compose YAML.
+
+<Frame>
+  <img src="/images/stack-management/create-stack-dialog.png" alt="New stack dialog on the Empty tab with a stack name field" />
+</Frame>
 
 **Naming rules:**
 - Lowercase letters, numbers, and hyphens only (e.g. `my-app`, `nextcloud`)
 - No spaces or special characters
 - Must be unique; duplicates are rejected
 
-Sencho creates a new directory inside `COMPOSE_DIR` with a blank `compose.yaml` file. You'll land in the editor automatically.
+Sencho creates a new directory inside `COMPOSE_DIR` with the chosen seed file. You land in the editor for the new stack and can deploy it from there.
 
-## Convert from a docker run command
+### From Git
 
-If you have a `docker run` command handy (from a README, a forum post, or your shell history), Sencho can turn it into a ready-to-deploy `compose.yaml` without hand translation.
-
-Open the **New stack** dialog and switch to the **From Docker Run** tab.
+The **From Git** tab clones a public or private repository and treats its compose file as the stack's source of truth.
 
 <Frame>
-  <img src="/images/stack-management/convert-tab-empty.png" alt="Create stack dialog on the From Docker Run tab" />
+  <img src="/images/stack-management/create-stack-git.png" alt="New stack dialog on the From Git tab with repository URL, branch, compose file path, authentication, and apply behavior fields" />
 </Frame>
 
-### How to use it
+Fill in:
+
+- **Stack Name**: same naming rules as the Empty tab.
+- **Repository URL**: HTTPS only. SSH URLs are not supported.
+- **Branch**: defaults to `main`.
+- **Compose file path**: path inside the repository, defaults to `compose.yaml`.
+- **Also sync sibling .env file**: when checked, a `.env` next to the compose file is pulled along with it.
+- **Authentication**: pick **Public (no auth)** or **Personal Access Token** for private repos.
+- **Apply behavior**: controls what happens on future webhook pulls:
+  - **Review only**: diffs surface in the sidebar; you apply manually.
+  - **Auto-write files**: pulls write to disk; you redeploy manually.
+  - **Auto-deploy**: pulls write and redeploy automatically.
+- **Deploy after create**: deploys the stack immediately after the repo is cloned.
+
+Click **Create from Git**. Sencho clones the repo, writes the compose file into the stack directory, and (when **Deploy after create** is checked) runs `docker compose up -d`.
+
+### Convert from a docker run command
+
+If you have a `docker run` command from a README, a forum post, or your shell history, the **From Docker Run** tab turns it into a ready-to-deploy `compose.yaml` without hand translation.
+
+<Frame>
+  <img src="/images/stack-management/convert-tab-empty.png" alt="New stack dialog on the From Docker Run tab with stack name and command paste fields" />
+</Frame>
+
+**How to use it:**
 
 1. Enter a **Stack Name**. Same rules as the Empty tab (lowercase, hyphens, unique).
 2. Paste your full command into **Paste your docker run command**. The whole command should be on one logical line; line continuations with `\` are fine.
 3. Click **Convert**. Sencho parses the command and shows the resulting compose YAML in a read-only preview below.
-4. Review the YAML. If it looks right, click **Create Stack**. Sencho creates the stack directory and writes the converted YAML into `compose.yaml`.
-5. The editor opens on the new stack. Click **Start** to deploy it.
+4. Review the YAML. If it looks right, click **Create Stack**. Sencho creates the stack directory and writes the converted YAML into `compose.yaml`, then opens the editor on the new stack.
 
 <Frame>
-  <img src="/images/stack-management/convert-tab-result.png" alt="Converted compose YAML preview before creating the stack" />
+  <img src="/images/stack-management/convert-tab-result.png" alt="Converted compose YAML preview shown after a successful conversion" />
 </Frame>
 
-<Frame>
-  <img src="/images/stack-management/convert-stack-created.png" alt="Newly created stack loaded in the editor after conversion" />
-</Frame>
-
-### Supported flags
+**Supported flags:**
 
 The converter handles the flags you reach for most often:
 
@@ -71,45 +96,74 @@ The converter handles the flags you reach for most often:
 
 The image tag is taken from the final positional argument (for example `nginx:alpine`). Any trailing command arguments are preserved as the service `command`.
 
-### Troubleshooting
+**Troubleshooting conversion:**
 
 <Frame>
-  <img src="/images/stack-management/convert-tab-error.png" alt="Error toast shown when the converter cannot parse the input" />
+  <img src="/images/stack-management/convert-tab-error.png" alt="Error toast shown above the New stack dialog when the converter cannot parse the input" />
 </Frame>
 
 If the converter cannot produce a usable compose file, the request fails with a clear error toast. Common causes:
 
 - **Not a docker run command.** The input must begin with `docker run` and include an image reference. Free-form text, `docker compose` commands, and shell pipelines are rejected.
-- **Unrecognized flag.** The parser supports the flags listed above. Rare flags (such as `--userns`, `--ipc`, custom runtime options) may not be recognized. Remove the flag, convert the rest, and add it back by hand in the editor.
-- **Quoting issues.** Multi-line commands with embedded quotes sometimes confuse the parser. Paste the command as a single line with escaped quotes, or simplify the command first.
+- **Unrecognized flag.** The parser supports the flags listed above. Rare flags (such as `--userns`, `--ipc`, custom runtime options) are not recognized. Remove the flag, convert the rest, and add it back by hand in the editor.
+- **Quoting issues.** Multi-line commands with embedded quotes can confuse the parser. Paste the command as a single line with escaped quotes, or simplify the command first.
 - **Command is too long.** The endpoint accepts commands up to 8192 characters. Longer inputs are rejected; trim anything you do not need and convert in pieces.
 
-When a flag is not supported, paste the output you do get into the **Empty** tab as a starting point and fill in the rest by editing `compose.yaml` directly.
+When a flag is not supported, paste the partial output into the **Empty** tab as a starting point and fill in the rest by editing `compose.yaml` directly.
 
 ## The stack list
 
-All discovered stacks appear in the left sidebar. Each shows a color-coded status indicator:
+All discovered stacks appear in the left sidebar. The list groups stacks by label (Skipper+) and by pinned status, so the most relevant entries surface at the top.
+
+### Status indicator
+
+Each row leads with a two-character status indicator that summarizes the stack's runtime state.
 
 | Indicator | Meaning |
 |-----------|---------|
 | `UP` (green) | All containers running |
 | `DN` (red) | One or more containers exited |
-| No indicator | No containers / status unknown |
+| (blank) | No containers running, status unknown, or the stack has never been deployed |
 
-Use the **search box** above the list to filter stacks by name.
+A small fuchsia dot to the right of the stack name flags that an image update is available. A pulsing brand-color dot on the **Git Source** affordance signals the upstream branch has moved ahead of the working copy.
+
+### Search and filter chips
+
+The search box above the list filters stacks by name. The chip row below it filters by state and is independent of search.
+
+<Frame>
+  <img src="/images/stack-management/filter-chips.png" alt="Sidebar filter chip row showing All, Up, Down, and Updates with count badges" />
+</Frame>
+
+- **All**: every stack discovered in `COMPOSE_DIR`.
+- **Up**: stacks where every container is running.
+- **Down**: stacks with at least one stopped or exited container.
+- **Updates**: stacks with a pending image update.
+
+Each chip carries a live count. Click **Hide filters** in the top-right of the row to collapse the chips when you want a denser list. Search and chips combine: filtering by **Updates** and typing a few characters returns the intersection.
+
+### Pinned and label groups
+
+The list is grouped to keep frequently used stacks reachable.
+
+- **PINNED**: sits at the very top when at least one stack is pinned. Pin a stack with **Pin to top** in the kebab menu (`P` shortcut).
+- **Label groups**: each label produces its own collapsible section, header rendered uppercase. Labels are a Skipper+ feature; see [Stack Labels](/features/stack-labels) for color and assignment options.
+- **UNLABELED**: bottom group with everything that has no label.
+
+Click any group header to collapse or expand it. The group's stack count appears in the header.
 
 ## Stack header
 
 Opening a stack puts identity and state front and center.
 
 <Frame>
-  <img src="/images/stack-view/identity-header.png" alt="Stack identity header with breadcrumb, title, state pill, image digest, and action row" />
+  <img src="/images/stack-view/identity-header.png" alt="Stack identity header showing breadcrumb, title, state pill, image and digest, and action row" />
 </Frame>
 
 The header answers three questions at a glance:
 
-- **What is this?** A breadcrumb (`node › stacks › name`) and the stack name as the title.
-- **Is it healthy?** A pulsing pill to the right of the title reports the live state:
+- **What is this?** A breadcrumb (`LOCAL · STACKS · NAME`) and the stack name as the title.
+- **Is it healthy?** A state pill to the right of the title reports the live state:
   - `running · healthy` (green) when at least one container reports a passing healthcheck.
   - `running · unhealthy` (red) when any container reports a failing healthcheck.
   - `running · starting` (amber) during the Docker healthcheck start period.
@@ -117,26 +171,32 @@ The header answers three questions at a glance:
   - `exited` (red) when no containers are up.
 - **What does it ship?** A mono line under the title shows the primary image tag and the short image digest, with a copy button to grab the full digest.
 
+The action row to the right of the header keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, and Delete; the next sections cover both surfaces.
+
 ## Container health strip
 
 Below the header, each container in the stack gets a single row that answers "is this piece working, and how do I reach it?" without expanding anything.
 
 <Frame>
-  <img src="/images/stack-view/health-strip-logs.png" alt="Stack view showing the per-container health strip above the structured logs viewer" />
+  <img src="/images/stack-view/containers.png" alt="CONTAINERS section showing a container card with health badge, uptime, port mapping, open link, and CPU, memory, and network stat tiles" />
 </Frame>
 
 Each row includes:
 
-- **Health badge.** A colored glyph reports the Docker healthcheck state: `✓` green for passing, `✗` red for failing, `…` amber while the healthcheck start period is still in flight. Containers without a `healthcheck:` block show a neutral `✓`.
+- **Health badge.** A colored glyph reports the Docker healthcheck state: `✓` green for passing, `✗` red for failing, `…` amber while the healthcheck start period is in flight. Containers without a `healthcheck:` block show a neutral `✓`.
 - **Container name** in mono.
-- **Meta line.** Uptime (`up 20 hours`), healthcheck state when one is defined, and the primary port mapping (`6875 → 80/tcp`).
+- **Meta line.** Uptime (`up 12 hours`) and the primary port mapping (`8989 → 8989/tcp`).
 - **Open link.** When the container publishes a port, an `open ↗` link launches the app in a new tab using the active node's hostname.
-- **Live stat tiles.** Three tiles show CPU, memory, and network I/O with a rolling 60-sample sparkline. The sparkline uses the cyan data color and refreshes roughly every 1.5 seconds.
-- **Action icons.** Shortcuts to open this container's logs or a bash shell.
+- **Live stat tiles.** Three tiles show CPU, memory, and network I/O with a rolling sparkline. The sparkline uses the cyan data color and refreshes roughly every 1.5 seconds.
+- **Action icons.** Shortcuts to **View logs**, open a bash shell, and the per-service kebab.
 
 ## Logs viewer
 
 The logs area at the bottom of the stack view has two modes. Toggle between them with the segmented control in the top-right of the panel; your choice is remembered for next time.
+
+<Frame>
+  <img src="/images/stack-view/logs-viewer.png" alt="Logs panel in Structured mode with toolbar, level filter pills, and timestamped INFO log rows" />
+</Frame>
 
 **Structured** (default) parses every line into a DOM row with three columns: local time, level badge, and message. Level detection is automatic:
 
@@ -146,8 +206,8 @@ The logs area at the bottom of the stack view has two modes. Toggle between them
 
 The toolbar includes:
 
-- **Following indicator.** A pulsing green dot reads `following` while auto-scroll is engaged. Scrolling up stops follow; a `resume follow` link re-engages it and jumps to the bottom.
-- **Level filter.** `all · info · warn · err` pills. The `err` pill shows the running error count as a badge.
+- **Following indicator.** A green dot reads `following` while auto-scroll is engaged. Scrolling up stops follow; a `resume follow` link re-engages it and jumps to the bottom.
+- **Level filter.** `ALL · INFO · WARN · ERR` pills. The `ERR` pill shows the running error count as a badge.
 - **Download.** Exports the current buffer as a plain text file.
 
 The structured viewer holds up to 10,000 lines; older entries are dropped from the top as new ones arrive.
@@ -156,35 +216,45 @@ The structured viewer holds up to 10,000 lines; older entries are dropped from t
 
 ## Anatomy panel
 
-The right half of the stack view is the anatomy panel: a read-only summary of what the compose file declares, without making you open the YAML editor.
+The right column of the stack view is a two-tab panel: **Anatomy** is the read-only summary of what the compose file declares, and **Activity** is the audit log for that stack.
 
 <Frame>
-  <img src="/images/stack-view/anatomy-panel.png" alt="Stack view with the anatomy panel on the right showing services, ports, volumes, env file, network, and source" />
+  <img src="/images/stack-view/anatomy-panel.png" alt="Anatomy panel with services, ports, volumes, restart, env_file, network, and source rows, plus a footer link for the exposed port" />
 </Frame>
 
-Each row maps one compose concept to the value it resolves to right now:
+The header carries:
 
-- **Services** — Cyan pills, one per key under `services:`.
-- **Ports** — `{host} → {container}/{proto}` per service, host port highlighted.
-- **Volumes** — `{host-path} → {container-path}` per mount.
-- **Restart** — The effective restart policy.
-- **Env file** — Filename plus a count of defined variables. If the compose file references a `${VAR}` that the env file does not define and has no `:-default`, the missing name is called out inline in rose italic.
-- **Network** — Derived network name and driver (default `{stack}_default · bridge`).
-- **Source** — `git · {host}/{repo}#{branch}` when Git Source is configured, else `local`. The whole row is clickable and opens the Git Source dialog. A pulsing cyan dot appears when upstream has moved ahead of the working copy.
+- **Anatomy / Activity tabs.** Activity is documented on its own page; see [Stack Activity](/features/stack-activity).
+- **Files** button. Opens the in-stack file explorer; see [Stack File Explorer](/features/stack-file-explorer).
+- **Edit** button. Slides the Monaco editor over the panel for inline compose and env edits.
 
-If an image update is available for the primary service, an inline banner appears below the rows with the version bump (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button that runs the update against the current scheduled-task pipeline. Major bumps show a rose banner and require explicit review before applying.
+Each row inside the **Anatomy** tab maps one compose concept to the value it resolves to right now:
+
+- **Services**: Cyan pills, one per key under `services:`.
+- **Ports**: `{host} → {container}/{proto}` per service, host port highlighted.
+- **Volumes**: `{host-path} → {container-path}` per mount.
+- **Restart**: The effective restart policy.
+- **Env file**: Filename plus a count of defined variables. If the compose file references a `${VAR}` that the env file does not define and has no `:-default`, the missing name is called out inline.
+- **Network**: Derived network name and driver (default `{stack}_default · bridge`).
+- **Source**: `git · {host}/{repo}#{branch}` when Git Source is configured, else `local`. The whole row is clickable and opens the Git Source dialog. A pulsing dot appears when upstream has moved ahead of the working copy.
+
+A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
+
+If an image update is available for the primary service, an inline banner appears below the rows with the version bump (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button that runs the update on this stack. Major bumps show a rose banner and require explicit review before applying.
 
 ### Editing compose.yaml
 
-Anatomy is the default surface. When you need to change the compose file, click **edit compose.yaml** in the anatomy header. The Monaco editor slides in over the anatomy panel with the full editing toolbar (tabs for `compose.yaml` and `.env`, Git Source shortcut, Save / Save & Deploy). Close the editor with the `×` button in its header to return to the anatomy view; unsaved changes are discarded when you close.
+Click **Edit** in the panel header to open the Monaco editor. Tabs at the top switch between `compose.yaml`, `.env` (when one exists), and **Files** (the stack directory tree). The save split-button reads **Save & Deploy** by default; its dropdown also offers **Save Only** and **Discard Changes**. Close the editor to return to the anatomy view; unsaved changes are kept in the buffer until you discard them. See [Compose Editor](/features/editor) for autocomplete, schema validation, and Git Source workflow.
 
 ## Deploying a stack
 
-Select a stack and click **Start** (or **Deploy** from the context menu) in the stack header. This runs `docker compose up -d`, pulling images if needed and creating or recreating containers.
+Select a stack and click **Start** (or **Restart** when it's already running) in the stack header. This runs `docker compose up -d`, pulling images if needed and creating or recreating containers.
+
+For deploy progress, error surfacing, atomic backups, and rollback, see [Atomic Deployments](/features/atomic-deployments).
 
 ## Controlling a running stack
 
-The stack header groups actions by frequency of use. The most common action is the filled cyan button on the left, everyday secondaries sit next to it, and destructive or occasional actions are tucked behind the `⋯` overflow.
+The stack header groups actions by frequency of use. The most common action is the filled cyan button on the left, everyday secondaries sit next to it, and destructive or occasional actions are tucked behind the **More actions** overflow.
 
 **When running:**
 
@@ -193,9 +263,9 @@ The stack header groups actions by frequency of use. The most common action is t
 | Primary | **Restart** | `docker compose restart` | Restarts all containers in the stack. |
 | Secondary | **Stop** | `docker compose stop` | Stops containers without removing them. State is preserved. |
 | Secondary | **Update** | `docker compose pull` + `up -d` | Pulls the latest image tags and recreates containers. |
-| Overflow `⋯` | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists (Skipper+). |
-| Overflow `⋯` | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (Skipper+, admin). |
-| Overflow `⋯` | **Delete** | `down --volumes` + removes files | Stops and removes containers and volumes, then deletes the stack directory. |
+| Overflow | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists (Skipper+). |
+| Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (Skipper+, admin). |
+| Overflow | **Delete** | `down --volumes` + removes files | Stops and removes containers and volumes, then deletes the stack directory. |
 
 **When stopped:**
 
@@ -203,7 +273,7 @@ The stack header groups actions by frequency of use. The most common action is t
 |-----------|--------|---------|--------------|
 | Primary | **Start** | `docker compose up -d` | Starts the stack. |
 | Secondary | **Update** | `docker compose pull` + `up -d` | Pulls the latest image tags and recreates containers. |
-| Overflow `⋯` | **Delete** | Removes files | Deletes the stack directory. |
+| Overflow | **Delete** | Removes files | Deletes the stack directory. |
 
 <Warning>
   **Delete** is irreversible. It removes the stack directory, including `compose.yaml`, `.env`, and any bind-mounted files stored there. Back up important files before deleting.
@@ -213,13 +283,34 @@ The stack header groups actions by frequency of use. The most common action is t
   Stack directories often contain root-owned files, either because Docker Compose creates them, or because the stacks were originally set up outside of Sencho with `sudo`. Sencho handles this automatically: if a normal deletion fails due to permissions, it uses Docker to clean up root-owned files. No manual intervention is needed in the standard setup.
 </Note>
 
+## Bulk mode
+
+Bulk mode lets you run a single lifecycle action across several stacks at once, instead of opening each stack individually.
+
+<Frame>
+  <img src="/images/stack-management/bulk-action-bar.png" alt="Sidebar with bulk mode active, three stacks selected, and the action bar showing Start, Stop, Restart, and Update buttons" />
+</Frame>
+
+**Enter bulk mode** with the toggle next to **Create Stack** in the sidebar, or by pressing `B`. Each stack row turns into a checkbox.
+
+**Select stacks** by clicking rows. The action bar above the list shows `{N} selected` and a **Clear selection** link.
+
+**Run an action** with one of the four buttons:
+
+- **Start**: deploys every selected stack that is currently down.
+- **Stop**: stops every selected stack that is currently running.
+- **Restart**: restarts every selected stack that is currently running.
+- **Update**: pulls the latest image tags and redeploys (Skipper+).
+
+Press `B` again or toggle the bulk mode button to leave bulk mode.
+
 ## Controlling a single service
 
-Inside the stack detail view, each service row has a kebab menu (`⋮`) on the right side. Use it to act on that service without touching the rest of the stack.
+Inside the stack detail view, each container card has a **Service actions** kebab on the right side. Use it to act on that service without touching the rest of the stack.
 
-- **Restart service** — stops and starts all containers for that service.
-- **Stop service** — stops all containers for that service. Only shown when the service is running.
-- **Start service** — starts all containers for that service. Only shown when the service is stopped or exited.
+- **Restart service**: stops and starts all containers for that service.
+- **Stop service**: stops all containers for that service. Only shown when the service is running.
+- **Start service**: starts all containers for that service. Only shown when the service is stopped or exited.
 
 For services running multiple replicas, the action applies to every replica simultaneously. Sibling services are not affected.
 
@@ -229,47 +320,52 @@ For services running multiple replicas, the action applies to every replica simu
 
 ## Stack context menu
 
-Right-click any stack in the sidebar to open the context menu. The menu adapts to the stack's current state; only relevant actions are shown.
-
-**Running stack:**
+Click the kebab on a stack row in the sidebar to open its context menu. The menu adapts to the stack's current state; items are grouped by purpose.
 
 <Frame>
-  <img src="/images/stack-management/context-menu-running.png" alt="Context menu for a running stack" />
+  <img src="/images/stack-management/context-menu.png" alt="Sidebar stack context menu showing inspect, organize, lifecycle, and destructive groups with keyboard shortcuts" />
 </Frame>
 
-**Stopped stack:**
+**inspect**
 
-<Frame>
-  <img src="/images/stack-management/context-menu-stopped.png" alt="Context menu for a stopped stack" />
-</Frame>
+- **Alerts** (`A`): open the alert rule editor for this stack. See [Alerts and Notifications](/features/alerts-notifications).
+- **Auto-Heal** (`H`): configure auto-recovery for this stack (Skipper+). See [Auto-Heal Policies](/features/auto-heal-policies).
+- **Auto-update** (`Enabled` or `Disabled`): toggle automatic updates for this stack (Skipper+). See [Auto-Update Policies](/features/auto-update-policies).
+- **Check updates** (`U`): force an image update check now.
+- **Open App** (`↗`): open the stack's web interface in a new tab. Shown only when the stack is running and exposes a web port.
 
-### Available actions
+**organize**
 
-- **Alerts** - configure metric-based alerting rules for this stack
-- **Labels** - assign organizational labels (Skipper+)
-- **Check for updates** - manually trigger an image update check
-- **Open App** - open the stack's web interface in a new tab (only shown when the stack is running and exposes a web port)
-- **Deploy** - start the stack (shown when stopped)
-- **Stop** - stop all containers (shown when running)
-- **Restart** - restart all containers (shown when running)
-- **Update** - pull latest images and recreate containers (shown when running)
-- **Delete** - stop and remove the stack (admin only)
+- **Labels** (`›`): assign or remove labels (Skipper+). See [Stack Labels](/features/stack-labels).
+- **Pin to top** (`P`): pin or unpin the stack from the **PINNED** group at the top of the list.
 
-All actions are disabled while another operation is in progress on that stack.
+**lifecycle**
+
+- **Stop** (`⌘.`): shown when running.
+- **Restart** (`⌘R`): shown when running.
+- **Update** (`⌘↑`): pulls the latest image tags and redeploys.
+- **Schedule task**: open the scheduler for this stack (Skipper+). See [Scheduled Operations](/features/scheduled-operations).
+- **Deploy** (`⌘↵`): shown when stopped, in place of Stop and Restart.
+
+**destructive**
+
+- **Delete** (`⌘⌫`): admin only.
+
+Items are disabled while another operation is in progress on that stack.
 
 ## Scanning for stacks
 
-If you place Docker Compose files directly into the stacks directory (for example, via `scp`, a file manager, or the command line), you can import them without going through the full "Create Stack" flow.
-
-Click the **folder-search icon** next to the "Create Stack" button in the sidebar. Sencho scans the configured stacks directory and reports what it finds:
+If you place Docker Compose files directly into the stacks directory (for example, via `scp`, a file manager, or the command line), you can import them without going through the full **Create Stack** flow.
 
 <Frame>
-  <img src="/images/stack-scanning/scan-button-sidebar.png" alt="Scan stacks folder button in the sidebar" />
+  <img src="/images/stack-management/sidebar-actions.png" alt="Sidebar action row with Create Stack button, bulk mode toggle, and scan stacks folder icon button" />
 </Frame>
 
-- **New stacks detected** - a success notification lists the newly discovered stack names, and they appear immediately in the sidebar
-- **Stacks removed from disk** - an informational notification lists stacks that are no longer present in the directory
-- **No changes** - a notification confirms no new stacks were found
+Click the **Scan stacks folder** icon button to the right of **Create Stack**. Sencho scans the configured stacks directory and reports what it finds:
+
+- **New stacks detected**: a success notification lists the newly discovered stack names, and they appear immediately in the sidebar.
+- **Stacks removed from disk**: an informational notification lists stacks that are no longer present in the directory.
+- **No changes**: a notification confirms no new stacks were found.
 
 <Tip>
   Any subdirectory inside your `COMPOSE_DIR` that contains a `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml` file is recognized as a valid stack.
@@ -280,3 +376,7 @@ Click the **folder-search icon** next to the "Create Stack" button in the sideba
 ### Service action returns a "service not found" error
 
 The service name used in the action must match the `services:` key in the stack's `compose.yaml`. This error occurs when no running containers match that service name, either because the service was never deployed or because the compose file defines a different name. Verify the service key in your compose file and ensure the stack has been deployed at least once so containers exist for that service.
+
+### Bulk **Update** is missing from the action bar
+
+The bulk **Update** action is a Skipper-tier feature; on Community, it does not appear in the action bar at all. **Start**, **Stop**, and **Restart** are available on every tier.

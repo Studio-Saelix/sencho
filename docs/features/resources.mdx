@@ -1,79 +1,102 @@
 ---
 title: Resources Hub
-description: Browse, filter, and clean up Docker images, volumes, networks, and unmanaged containers.
+description: Browse, filter, scan, and clean up Docker images, volumes, networks, and unmanaged containers from a single view.
 ---
 
-The **Resources** tab gives you a full view of everything Docker is storing on your host, broken down by type and ownership.
+The **Resources** tab shows everything Docker is storing on your host, broken down by ownership, with one-click cleanup, on-demand vulnerability scanning, and a topology view of how your containers connect.
 
 <Frame>
-  <img src="/images/resources/resources-reclaim.png" alt="Resources Hub with reclaim hero, disk footprint treemap, and quick clean panel" />
+  <img src="/images/resources/resources-reclaim.png" alt="Resources Hub with the You can reclaim banner, Docker Disk Footprint treemap, Quick Clean panel, and the Images tab populated below" />
 </Frame>
 
 ## Reclaim hero
 
-When there is reclaimable disk space (unused images, stopped containers, or dangling volumes), an amber banner leads the view with the total amount you can free and a breakdown of what contributes to it. Click **Review & prune** to jump straight into a confirmation dialog scoped to every reclaimable resource at once.
+When there is reclaimable disk space (unused images, stopped containers, or dangling volumes), an amber banner leads the view with the total amount you can free and a `·`-separated breakdown of what contributes to it (for example, `16 unused images · 10 dangling volumes`). Click **Review & prune** to open a single confirmation dialog scoped to every reclaimable resource at once.
 
 The hero stays hidden when there is nothing to reclaim, keeping the view focused on the rest of your inventory.
 
-## Docker disk footprint
+<Note>
+  The banner and the **Review & prune** action are admin-only. Read-only roles still see the rest of the page but cannot trigger destructive operations.
+</Note>
 
-Below the hero, a three-tile treemap shows how your Docker disk usage is distributed:
+## Docker Disk Footprint
+
+The left card under the hero shows how your Docker disk usage is distributed:
 
 | Segment | Meaning |
 |---------|---------|
-| **Sencho Managed** (green) | Images and volumes used by stacks in your `COMPOSE_DIR` |
+| **Sencho managed** (green) | Images and volumes used by stacks in your `COMPOSE_DIR` |
 | **External** (amber) | Images and volumes used by Docker projects outside Sencho |
 | **Reclaimable** (neutral) | Unused images, stopped containers, and dangling volumes safe to delete |
 
-Tile area is proportional to bytes. Click any tile to filter the tabs below to that category.
+Each segment shows its size and its share of the total footprint. Tile area is proportional to bytes. Click any segment to filter the resource tabs below to that category.
 
-## Quick Clean panel
+## Quick Clean
 
-Four prune buttons let you reclaim disk space immediately. By default they operate on **Sencho-managed resources only**, so they will not touch external Docker projects.
+The right card under the hero exposes four prune actions. Each tile has a single primary button that targets **Sencho-managed resources only**, so by default the action will not touch external Docker projects.
 
-| Button | What it removes |
+| Action | What it removes |
 |--------|----------------|
 | **Prune Unused Images** | Images with no running containers in Sencho stacks |
 | **Prune Unused Volumes** | Volumes not attached to any Sencho container |
 | **Prune Dead Networks** | Networks not connected to any Sencho container |
 | **Purge Unmanaged Containers** | Containers Sencho doesn't recognize (started outside it) |
 
-The first three buttons have a **More options** dropdown that lets you target **all Docker resources** instead of Sencho-only. Use this carefully, as it can affect other Compose projects running on the same host. The "Purge Unmanaged Containers" button always targets unmanaged containers only.
+The first three tiles also show a **More options** menu with a single destructive entry, **All Docker (includes external)**, that broadens the prune to every Docker resource on the host. Use it carefully, since it can affect other Compose projects sharing the same daemon. The **Purge Unmanaged Containers** tile has no menu and always targets unmanaged containers only.
 
-A confirmation dialog appears before any destructive operation, showing a summary of what will be removed. While the operation runs, a loading notification appears so you know Sencho is working. Once complete, a success or error notification replaces it with details on how much space was reclaimed.
+A confirmation dialog appears before any destructive operation, with a summary of what will be removed. While the operation runs, a loading notification keeps you informed; on completion it is replaced with a success or error notification, including how much space was reclaimed.
+
+<Note>
+  Quick Clean is admin-only. The panel is hidden for users without admin permissions.
+</Note>
 
 ## Resource tabs
+
+Below the hero, four tabs partition your inventory: **images**, **volumes**, **networks**, and **Unmanaged**. The Unmanaged tab shows a count badge whenever orphan containers are detected.
+
+A **Scan history** button sits on the right of the tab strip when image vulnerability scanning is configured for the node. It opens the full scan record so you can review past results without launching a new scan. See [Vulnerability scanning](/features/vulnerability-scanning) for the full workflow.
 
 ### Images
 
 Lists all Docker images on the host with their ID, repository tag, size, and status.
 
-**Filter buttons:** `All` / `Managed` / `External`
+**Filter chips:** `All`, `Managed`, `External`. Each chip shows the matching count, for example `All 31 · Managed 14 · External 17`.
 
-**Status badges:**
-- `In Use` + stack name - image is actively used by a running container in a Sencho-managed stack
-- `In Use` + `External` - image is used by a container outside Sencho
-- `Unused` - image has no running containers; safe to delete
+**Status column** combines two pieces of information per row:
 
-Click the trash icon on any row to delete an individual image. Sencho will warn you if the image is in use.
+- A usage badge: `In Use` plus the stack name when the image runs in a Sencho-managed stack, `In Use` plus `External` when it runs in another Docker project, or `Unused` when no container references it.
+- A severity badge from any image scan: `Clean`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, or `UNKNOWN`. Click the badge to open the scan results.
+
+**Per-row actions** sit on the right:
+
+- **Inspect** (eye) opens the image detail sheet.
+- **Scan** (shield) opens a menu with `Scan (vulnerabilities)` and `Full scan (vulnerabilities + secrets)`. The full scan is a paid-tier option.
+- **Delete** (trash, admin-only) removes the image. Sencho warns before deleting an image that is still in use.
 
 #### Inspect image
 
-Click the eye icon on any image row to open a detail panel showing:
+Click the eye icon on any image row to open a detail sheet with three sections:
 
-- **Overview** - ID, size, creation date, architecture and OS, author, and all repository tags
-- **Config** - Default `Cmd`, `Entrypoint`, `WorkingDir`, `User`, exposed ports, environment variables, and labels (env and labels are collapsible)
-- **Layers** - Ordered layer history. Each row shows layer index, size, age, and the build command (`CreatedBy`). Empty layers (metadata-only, zero bytes) are dimmed.
+- **Overview** lists the ID, size, creation date, architecture and OS, author, and all repository tags.
+- **Config** shows the default `Cmd`, `Entrypoint`, `WorkingDir`, `User`, exposed ports, environment variables, and labels. Env vars and labels are collapsible.
+- **Layers** lists the layer history in build order. Each row shows the layer index, size, age, and the build command (`CreatedBy`). Empty layers (metadata-only, zero bytes) are dimmed.
 
-The inspect panel is read-only and available to all users.
+The inspect sheet is read-only and available to all roles.
 
 ### Volumes
 
-Lists all Docker volumes. Columns: name, driver, mount point, size, and managed status.
+<Frame>
+  <img src="/images/resources/resources-volumes-tab.png" alt="Volumes tab with Largest 5 and Recently changed landing cards above the volume list" />
+</Frame>
 
-When any volumes are present, a two-card landing strip above the table highlights the **Largest 5** volumes by size and **Recently changed** volumes from the last 24 hours. This makes it easy to spot growing volumes or newly created data at a glance.
+Lists all Docker volumes with name, driver, mount point, and managed status.
 
-**Filter buttons:** `All` / `Managed` / `External`
+A two-card landing strip sits above the table:
+
+- **Largest 5** ranks volumes by on-disk size, with the total volume count alongside.
+- **Recently changed** highlights volumes created or touched in the last 24 hours, with relative timestamps such as `24m ago`.
+
+**Filter chips:** `All`, `Managed`, `External`, each with its count.
 
 <Warning>
   Deleting a volume is permanent. Any data stored in it will be lost. Always back up important volume data before pruning.
@@ -81,7 +104,7 @@ When any volumes are present, a two-card landing strip above the table highlight
 
 #### Browse volume contents
 
-Click the folder icon on any volume row (admin only) to open a read-only browser for that volume. The panel shows a directory tree on the left and a file viewer on the right.
+Click the folder icon on any volume row (admin-only) to open a read-only browser for that volume. The panel shows a directory tree on the left and a file viewer on the right.
 
 - **Read only.** No edits, no writes, no deletions. The browser launches a short-lived helper container with the volume mounted read-only.
 - **Size cap.** Files are read up to 5 MB. Larger files show a truncation banner.
@@ -95,77 +118,94 @@ Click the folder icon on any volume row (admin only) to open a read-only browser
 
 ### Networks
 
-Lists all Docker networks. Columns: ID, name, driver, scope (`local`, `global`, `swarm`), and managed status.
-
-**Filter buttons:** `All` / `Managed` / `External`
-
-System networks (like `bridge`, `host`, `none`) are shown but cannot be deleted.
-
 <Frame>
-  <img src="/images/networks/networks-list.png" alt="Networks list view with filter, inspect, and create actions" />
+  <img src="/images/networks/networks-list.png" alt="Networks tab in List view with filter chips, view-mode toggle, Create Network button, and the network table" />
 </Frame>
 
-#### Create network
+Lists all Docker networks with ID, name, driver, scope (`local`, `global`, `swarm`), and managed status. System networks (`bridge`, `host`, `none`) are shown but cannot be deleted.
 
-Click **+ Create Network** (admin only) to open the creation dialog.
+**Filter chips:** `All`, `Managed`, `External`, each with its count.
+
+A **List | Topology** view-mode toggle sits on the right of the toolbar. **List** is the default tabular view; **Topology** is a paid-tier graph view of how containers connect to networks (covered below).
+
+#### Create Network
+
+In **List** view, the **+ Create Network** button (admin-only) opens the creation dialog.
 
 <Frame>
-  <img src="/images/networks/create-network.png" alt="Create Network dialog with name, driver, subnet, and gateway fields" />
+  <img src="/images/networks/create-network.png" alt="Create network dialog with Name, Driver, Subnet, Gateway fields, and Internal and Attachable toggles" />
 </Frame>
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | **Name** | Yes | Alphanumeric, hyphens, underscores, and dots |
 | **Driver** | No | `bridge` (default), `overlay`, `macvlan`, `host`, or `none` |
-| **Subnet** | No | CIDR notation, e.g. `172.20.0.0/16` |
-| **Gateway** | No | Gateway IP, e.g. `172.20.0.1` |
+| **Subnet** | No | CIDR notation, for example `172.20.0.0/16` |
+| **Gateway** | No | Gateway IP, for example `172.20.0.1` |
 | **Internal** | No | Isolates the network from external access |
 | **Attachable** | No | Allows containers to be manually attached |
 
+The footer shows a **DRIVER** chip that mirrors the selected driver, and a **Create network** button that stays disabled until the form is valid.
+
 #### Inspect network
 
-Click the eye icon on any network row to open a detail panel showing:
-
-- **Overview** - ID, driver, scope, creation date, internal/attachable flags
-- **IPAM configuration** - Subnet, gateway, and IP range
-- **Options** - Driver-specific options applied to the network (when present)
-- **Connected containers** - Container name, IPv4 address, and MAC address
-- **Labels** - All Docker labels applied to the network
+Click the eye icon on any network row to open a detail sheet.
 
 <Frame>
-  <img src="/images/networks/network-inspect.png" alt="Network inspect panel showing IPAM config and connected containers" />
+  <img src="/images/networks/network-inspect.png" alt="Network inspect sheet for arr-net showing the Overview, IPAM configuration, and Connected containers sections" />
 </Frame>
+
+The sheet is grouped into sections:
+
+- **Overview** lists the ID, driver, scope, creation date, and the internal/attachable flags.
+- **IPAM configuration** shows the subnet, gateway, and IP range for each configured address pool.
+- **Options** lists driver-specific options applied to the network (rendered only when present).
+- **Connected** shows every container attached to the network, with its name, IPv4 address, and MAC address. The section header counts the containers.
+- **Labels** lists all Docker labels on the network (rendered only when present).
 
 #### Network topology <span style={{fontSize: '0.75em', color: 'var(--brand)'}}>Skipper</span>
 
-Switch to the **Topology** view to see an interactive graph of your Docker networks and the containers connected to them. The graph uses automatic hierarchical layout (networks on top, containers below) that scales cleanly regardless of how many networks and containers you have.
+Switch to the **Topology** view to see an interactive graph of your Docker networks and the containers attached to them. The graph uses an automatic hierarchical layout (networks on top, containers below) that scales cleanly regardless of how many networks and containers you have.
 
 <Frame>
-  <img src="/images/networks/network-topology.png" alt="Network topology visualization showing containers connected to networks" />
+  <img src="/images/networks/network-topology.png" alt="Network topology graph with arr-net at top and the connected containers fanned out below it, mini-map and zoom controls visible" />
 </Frame>
 
-- **Network nodes** - Dashed border cards showing network name and driver, color-coded by status (managed, external, system)
-- **Container nodes** - Cards showing container name, state indicator, stack badge, image name, and IP addresses per network
-- **Edges** - Animated color-coded connections between networks and their containers
-- **Click-to-logs** - Click any running container node to open its log viewer directly
-- **Refresh** - Use the refresh button in the toolbar to re-fetch the topology on demand
-- Pan, zoom, and drag nodes to explore the topology
-- A mini map in the bottom-right provides an overview
+- **Network nodes** are dashed-border cards showing the network name and driver, color-coded by status (managed, external, system).
+- **Container nodes** are cards showing the container name, a state indicator, the stack badge, the image name, and the IPv4 address per network.
+- **Edges** are animated, color-coded connections between networks and their containers.
+- **Click-to-logs.** Click any running container node to open its log viewer directly.
+- **Refresh.** Use the refresh button in the toolbar to re-fetch the topology on demand.
+- Pan, zoom, and drag nodes to explore the graph.
+- A **mini-map** in the bottom-right gives an overview of the full graph. Zoom and fit-view controls sit on the bottom-left.
 
 ##### Show system networks
 
-By default, system networks (`bridge`, `host`, `none`) are hidden. Toggle **Show system networks** to include them in the graph, which is useful for debugging containers attached to the default bridge network.
+By default, system networks (`bridge`, `host`, `none`) are hidden so the graph stays focused on user networks. Toggle **Show system networks** to include them, which is useful for debugging containers attached to the default bridge.
 
 <Frame>
-  <img src="/images/networks/network-topology-toggle.png" alt="Network topology with system networks visible" />
+  <img src="/images/networks/network-topology-toggle.png" alt="Topology with Show system networks toggled on; arr-net plus the bridge, none, and host system networks all visible at the top" />
 </Frame>
 
 <Note>
-  Network Topology requires a Skipper or Admiral license. Community users see an upgrade prompt.
+  Network Topology requires a Skipper or Admiral license. On Community, the Topology toggle shows an upgrade prompt instead of the graph.
 </Note>
 
 ### Unmanaged
 
-Lists containers running on the host that are not part of any Sencho-managed stack. This includes containers started with `docker run`, or Compose projects outside your `COMPOSE_DIR`.
+<Frame>
+  <img src="/images/resources/resources-unmanaged-tab.png" alt="Unmanaged tab with Select all checkbox, Purge Selected action, and a container row grouped under External Project: sencho" />
+</Frame>
 
-This view is useful for identifying orphaned containers after a failed deployment or after moving stacks in and out of `COMPOSE_DIR`. A badge on the tab shows the count of unmanaged containers when any are detected.
+Lists containers running on the host that are not part of any Sencho-managed stack: containers started with `docker run`, or Compose projects outside your `COMPOSE_DIR`. The tab shows a count badge when any are detected.
+
+Containers are grouped by their external Compose project. Each group has an **External Project** header with the project name and a container count. Each container row shows:
+
+- A row checkbox for multi-selection.
+- The container name (or short ID if unnamed).
+- A state pill, for example `running`.
+- The image reference, in monospace below the name.
+
+The toolbar above the list provides a **Select all** checkbox and a destructive **Purge Selected (N)** button. The button stays disabled until at least one row is checked, and is admin-only.
+
+When no unmanaged containers are detected, the tab shows a success state with the message "No unmanaged containers" and the subline "All running containers are managed by Sencho."

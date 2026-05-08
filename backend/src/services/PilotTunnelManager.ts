@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import { PilotTunnelBridge } from './PilotTunnelBridge';
+import { PilotTunnelBridge, type MeshTunnelHandle } from './PilotTunnelBridge';
 import { DatabaseService } from './DatabaseService';
 import { PilotCloseCode } from '../pilot/protocol';
 import { isDebugEnabled } from '../utils/debug';
@@ -160,11 +160,11 @@ export class PilotTunnelManager extends EventEmitter {
     }
 
     /**
-     * Direct accessor for the per-node bridge. Returns null when no tunnel is
-     * registered. Used by Sencho Mesh to open TCP streams without going
-     * through the loopback HTTP path.
+     * Per-node tunnel handle, returned to MeshService. Returns the bridge
+     * narrowed to the MeshTunnelHandle surface so callers cannot reach
+     * into transport internals (loopback URL, per-stream maps, close API).
      */
-    public getBridge(nodeId: number): PilotTunnelBridge | null {
+    public getBridge(nodeId: number): MeshTunnelHandle | null {
         return this.bridges.get(nodeId) ?? null;
     }
 
@@ -178,22 +178,4 @@ export class PilotTunnelManager extends EventEmitter {
         this.bridges.delete(nodeId);
     }
 
-    /**
-     * Snapshot of currently active tunnels.
-     */
-    public listActive(): Array<{ nodeId: number; loopbackUrl: string; connectedAt: number }> {
-        return Array.from(this.bridges.entries()).map(([nodeId, bridge]) => ({
-            nodeId,
-            loopbackUrl: bridge.getLoopbackUrl(),
-            connectedAt: bridge.getConnectedAt(),
-        }));
-    }
-
-    /**
-     * Record an application-level heartbeat from the agent.
-     */
-    public touch(nodeId: number): void {
-        if (!this.bridges.has(nodeId)) return;
-        DatabaseService.getInstance().updateNode(nodeId, { pilot_last_seen: Date.now() });
-    }
 }
