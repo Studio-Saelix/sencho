@@ -13,7 +13,6 @@ import { apiFetch } from '@/lib/api';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { CursorProvider, CursorContainer, Cursor, CursorFollow } from '@/components/animate-ui/primitives/animate/cursor';
 import { CategorySidebar } from '@/components/appstore/CategorySidebar';
 import { FeaturedHero } from '@/components/appstore/FeaturedHero';
 import { TemplateTile } from '@/components/appstore/TemplateTile';
@@ -252,6 +251,22 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
         return [...base].sort((a, b) => (b.stars ?? 0) - (a.stars ?? 0));
     }, [filtered, featuredTemplate]);
 
+    const essentialsConflicts = useMemo(() => {
+        if (!selectedTemplate?.ports) return [];
+        const seen = new Set<string>();
+        const conflicts: Array<{ host: string; info: PortInUseInfo }> = [];
+        for (const p of selectedTemplate.ports) {
+            const parts = p.split(':');
+            if (parts.length < 2) continue;
+            const host = portVars[p] || parts[0];
+            if (!host || seen.has(host)) continue;
+            seen.add(host);
+            const info = portsInUse[host];
+            if (info) conflicts.push({ host, info });
+        }
+        return conflicts;
+    }, [selectedTemplate, portVars, portsInUse]);
+
     return (
         <div className="flex flex-col h-full gap-5">
             <div className="flex items-center gap-3">
@@ -427,10 +442,30 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
                                     </p>
                                 </div>
 
-                                <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2.5 text-xs text-stat-subtitle">
-                                    Deploy with defaults: the template's recommended ports, volumes, and environment variables.
-                                    Use the Advanced tab to customize.
-                                </div>
+                                {essentialsConflicts.length > 0 ? (
+                                    <div role="status" aria-live="polite" className="mt-3 relative overflow-hidden rounded-md border border-warning/30 bg-warning/8 pl-4 pr-3 py-2.5">
+                                        <span className="absolute inset-y-0 left-0 w-[3px] bg-warning/70 animate-pulse" aria-hidden />
+                                        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-warning">
+                                            Port conflict
+                                        </div>
+                                        <ul className="mt-1 space-y-0.5 text-xs leading-snug text-stat-value">
+                                            {essentialsConflicts.map(({ host, info }) => (
+                                                <li key={host}>
+                                                    Port <span className="font-mono">{host}</span> is in use by{' '}
+                                                    <span className="text-brand">{info.stack ?? 'an external app'}</span>.
+                                                </li>
+                                            ))}
+                                        </ul>
+                                        <p className="mt-1.5 text-xs text-stat-subtitle">
+                                            Switch to the Advanced tab to remap.
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2.5 text-xs text-stat-subtitle">
+                                        Deploy with defaults: the template's recommended ports, volumes, and environment variables.
+                                        Use the Advanced tab to customize.
+                                    </div>
+                                )}
                             </SheetSection>
                         )}
 
@@ -454,28 +489,15 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
                                                             }}
                                                             className={cn('w-24 text-center font-mono', hostPort && !isValidPort(hostPort) && 'border-destructive')}
                                                         />
-                                                        {conflict ? (
-                                                            <CursorProvider>
-                                                                <CursorContainer className="inline-flex items-center gap-2">
-                                                                    <span className="text-muted-foreground font-mono">: {parts[1]}</span>
-                                                                    <span className="w-2 h-2 rounded-full bg-warning animate-pulse" />
-                                                                </CursorContainer>
-                                                                <Cursor>
-                                                                    <div className="h-2 w-2 rounded-full bg-brand" />
-                                                                </Cursor>
-                                                                <CursorFollow side="bottom" sideOffset={4} align="center" transition={{ stiffness: 400, damping: 40, bounce: 0 }}>
-                                                                    <div className="rounded-md border border-card-border bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] px-2.5 py-1.5 shadow-md">
-                                                                        <span className="font-mono tabular-nums text-xs text-stat-value">
-                                                                            {conflict.stack !== null
-                                                                                ? <>Port {hostPort} used by <span className="text-brand">{conflict.stack}</span></>
-                                                                                : <>Port {hostPort} used by an external app</>
-                                                                            }
-                                                                        </span>
-                                                                    </div>
-                                                                </CursorFollow>
-                                                            </CursorProvider>
-                                                        ) : (
-                                                            <span className="text-muted-foreground font-mono">: {parts[1]}</span>
+                                                        <span className="text-muted-foreground font-mono">: {parts[1]}</span>
+                                                        {conflict && (
+                                                            <>
+                                                                <span className="text-xs text-warning font-mono">
+                                                                    in use by{' '}
+                                                                    <span className="text-brand">{conflict.stack ?? 'an external app'}</span>
+                                                                </span>
+                                                                <span className="w-2 h-2 rounded-full bg-warning animate-pulse" aria-hidden />
+                                                            </>
                                                         )}
                                                     </div>
                                                 );
