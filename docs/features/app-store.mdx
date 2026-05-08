@@ -46,8 +46,6 @@ When deploying to a remote node, a badge at the top of the sheet shows the targe
 
 The **Essentials** tab has a single field (the stack name) plus a hint that the template's recommended ports, volumes, and environment variables will be used as-is. Click **Deploy {template}** to ship it in one click. For anything more nuanced, switch to **Advanced**.
 
-If any of the template's default ports are already in use, the hint is replaced by a port-conflict warning that lists each conflicting port and the application using it. Switch to **Advanced** to remap the host port before deploying.
-
 ### Stack name
 
 Pre-filled with the template name in lowercase. You can change it; the same [naming rules](/features/stack-management#creating-a-stack) apply (lowercase, hyphens, no spaces).
@@ -60,10 +58,10 @@ The **Advanced** tab exposes every knob the template declares: port mappings, vo
 
 For each exposed port, the sheet shows an editable **host port** field (left side) and the fixed **container port** (right side). Edit the host port to avoid conflicts with other services on the same machine. Ports must be in the valid range (1 to 65535); invalid values are highlighted and block deployment.
 
-If a host port is already in use by a running container, an amber **"in use by `<stack>`"** message appears inline next to the port, alongside a pulsating warning dot. If the application is managed by Sencho, the stack name is shown; otherwise the indicator reads "in use by an external app".
+If a host port is already in use by a running container, a pulsating warning dot appears next to the port. Hover over the dot to see which application is using the port. If the application is managed by Sencho, the stack name is shown; otherwise the indicator reads "used by an external app".
 
 <Frame>
-  <img src="/images/app-store/app-store-port-conflict.png" alt="Port conflict indicator: an inline amber message names the stack already using the port, next to a pulsating warning dot" />
+  <img src="/images/app-store/app-store-port-conflict.png" alt="Port conflict indicator showing port 8080 is used by heimdall" />
 </Frame>
 
 ### Volumes
