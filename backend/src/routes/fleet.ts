@@ -4,7 +4,8 @@ import semver from 'semver';
 import si from 'systeminformation';
 import type Dockerode from 'dockerode';
 import { DatabaseService, type Node } from '../services/DatabaseService';
-import { FleetSyncService } from '../services/FleetSyncService';
+import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
+import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import DockerController from '../services/DockerController';
@@ -25,6 +26,9 @@ import { POLICY_SEVERITIES } from '../utils/severity';
 import { sanitizeForLog } from '../utils/safeLog';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
+import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { containerActionForStack } from './stacks';
+import { activeBulkActions } from './labels';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
@@ -34,7 +38,6 @@ const UPDATE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const UPDATE_TIMEOUT_MSG = 'Node did not come back online within 5 minutes.';
 const EARLY_FAIL_MS = 180 * 1000; // 3 minutes before declaring a probable pull failure
 
-const MAX_SYNC_ROWS = 5000;
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 
 const isIntFlag = (v: unknown): v is 0 | 1 => v === 0 || v === 1;
@@ -45,11 +48,32 @@ function validateScanPolicyRow(row: unknown): string | null {
   if (typeof r.name !== 'string' || r.name.length === 0 || r.name.length > 200) return 'name must be a non-empty string';
   if (typeof r.max_severity !== 'string' || !POLICY_SEVERITIES.has(r.max_severity)) return 'max_severity must be CRITICAL, HIGH, MEDIUM, or LOW';
   if (r.stack_pattern !== null && typeof r.stack_pattern !== 'string') return 'stack_pattern must be a string or null';
-  if (typeof r.stack_pattern === 'string' && r.stack_pattern.length > 200) return 'stack_pattern is too long';
+  if (typeof r.stack_pattern === 'string') {
+    const patternError = validateStackPatternForRedos(r.stack_pattern);
+    if (patternError) return patternError;
+  }
   if (typeof r.node_identity !== 'string') return 'node_identity must be a string';
   if (r.node_identity.length > 500) return 'node_identity is too long';
   if (!isIntFlag(r.block_on_deploy)) return 'block_on_deploy must be 0 or 1';
   if (!isIntFlag(r.enabled)) return 'enabled must be 0 or 1';
+  return null;
+}
+
+/**
+ * Reject `stack_pattern` inputs that would compile to a backtracking-prone
+ * regex. The matcher in `getMatchingPolicy` substitutes `*` with `.*`, so a
+ * pattern like `***...` becomes a chain of adjacent `.*` runs that exhibit
+ * catastrophic backtracking on long inputs.
+ *
+ * Caps mirror the limit in routes/security.ts so a control creating a policy
+ * sees the same error as a replica receiving one. Length is gated at 200 by
+ * the surrounding row validator.
+ */
+export function validateStackPatternForRedos(pattern: string): string | null {
+  if (pattern.length > 200) return 'stack_pattern is too long';
+  const stars = (pattern.match(/\*/g) ?? []).length;
+  if (stars > 8) return 'stack_pattern has too many wildcards (max 8)';
+  if (/\*{4,}/.test(pattern)) return 'stack_pattern must not contain 4+ consecutive wildcards';
   return null;
 }
 
@@ -61,6 +85,24 @@ function validateCveSuppressionRow(row: unknown): string | null {
   if (typeof r.pkg_name === 'string' && r.pkg_name.length > 200) return 'pkg_name is too long';
   if (r.image_pattern !== null && typeof r.image_pattern !== 'string') return 'image_pattern must be a string or null';
   if (typeof r.image_pattern === 'string' && r.image_pattern.length > 300) return 'image_pattern is too long';
+  if (typeof r.reason !== 'string') return 'reason must be a string';
+  if (r.reason.length > 2000) return 'reason is too long';
+  if (typeof r.created_by !== 'string' || r.created_by.length > 200) return 'created_by must be a string';
+  if (typeof r.created_at !== 'number') return 'created_at must be a number';
+  if (r.expires_at !== null && typeof r.expires_at !== 'number') return 'expires_at must be a number or null';
+  return null;
+}
+
+function validateMisconfigAcknowledgementRow(row: unknown): string | null {
+  if (!row || typeof row !== 'object') return 'row must be an object';
+  const r = row as Record<string, unknown>;
+  if (typeof r.rule_id !== 'string' || r.rule_id.length === 0 || r.rule_id.length > 200) return 'rule_id must be a non-empty string up to 200 chars';
+  if (r.stack_pattern !== null && typeof r.stack_pattern !== 'string') return 'stack_pattern must be a string or null';
+  if (typeof r.stack_pattern === 'string') {
+    if (r.stack_pattern.length > 300) return 'stack_pattern is too long';
+    const patternError = validateStackPatternForRedos(r.stack_pattern);
+    if (patternError) return patternError;
+  }
   if (typeof r.reason !== 'string') return 'reason must be a string';
   if (r.reason.length > 2000) return 'reason is too long';
   if (typeof r.created_by !== 'string' || r.created_by.length > 200) return 'created_by must be a string';
@@ -91,6 +133,9 @@ interface FleetNodeOverview {
   latency_ms?: number;
   last_successful_contact?: number | null;
   pilot_last_seen?: number | null;
+  cordoned: boolean;
+  cordoned_at: number | null;
+  cordoned_reason: string | null;
 }
 
 /** Resolve the version to compare nodes against (latest from GitHub, or gateway fallback). */
@@ -159,6 +204,9 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       },
       stacks,
       last_successful_contact: node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   } catch (error) {
     console.error(`[Fleet] Local node ${node.name} error:`, error);
@@ -166,6 +214,9 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       id: node.id, name: node.name, type: node.type, status: 'offline',
       stats: null, systemStats: null, stacks: null,
       last_successful_contact: node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   }
 }
@@ -184,6 +235,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       stacks: null,
       last_successful_contact: node.pilot_last_seen ? Math.floor(node.pilot_last_seen / 1000) : null,
       pilot_last_seen: node.pilot_last_seen ? Math.floor(node.pilot_last_seen / 1000) : null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   }
 
@@ -192,6 +246,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       id: node.id, name: node.name, type: node.type, status: 'offline',
       stats: null, systemStats: null, stacks: null,
       last_successful_contact: node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   }
 
@@ -251,6 +308,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       last_successful_contact: isOnline
         ? Math.floor(completedAt / 1000)
         : node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   } catch (error) {
     console.error(`[Fleet] Remote node ${node.name} error:`, error);
@@ -258,6 +318,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       id: node.id, name: node.name, type: node.type, mode: node.mode, status: 'offline',
       stats: null, systemStats: null, stacks: null,
       last_successful_contact: node.last_successful_contact ?? null,
+      cordoned: node.cordoned,
+      cordoned_at: node.cordoned_at,
+      cordoned_reason: node.cordoned_reason,
     };
   }
 }
@@ -274,16 +337,36 @@ fleetRouter.get('/role', authMiddleware, (req: Request, res: Response): void => 
 
 // Receive a full replacement of a replicated resource from the control.
 // Restricted to node_proxy Bearer tokens so only a sibling Sencho can push.
+//
+// No requirePaid here: the control instance has already enforced its tier
+// before issuing the push. The replica trusts a valid node_proxy bearer
+// signed against THIS instance's secret and applies the payload regardless
+// of the replica's own tier.
 fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response): void => {
   if (!requireNodeProxy(req, res)) return;
   const resource = req.params.resource;
-  if (resource !== 'scan_policies' && resource !== 'cve_suppressions') {
+  if (
+    resource !== 'scan_policies'
+    && resource !== 'cve_suppressions'
+    && resource !== 'misconfig_acknowledgements'
+  ) {
     res.status(400).json({ error: `Unsupported sync resource: ${resource}` });
     return;
   }
   const body = req.body ?? {};
   const rows = Array.isArray(body.rows) ? body.rows : null;
   const targetIdentity = typeof body.targetIdentity === 'string' ? body.targetIdentity : '';
+  // pushedAt is optional for back-compat with older controls that predate the
+  // versioning protocol. When present and strictly older than the most recent
+  // applied push for this resource, reject with 409 STALE_SYNC_PUSH so the
+  // control's retry logic can fall back to the next write. Negative or zero
+  // values are treated as absent: the sender always uses Date.now().
+  const pushedAt = typeof body.pushedAt === 'number' && Number.isFinite(body.pushedAt) && body.pushedAt > 0
+    ? body.pushedAt
+    : null;
+  // controlIdentity is optional for back-compat. The receiver anchors to the
+  // first non-empty fingerprint it sees and rejects mismatches afterward.
+  const controlIdentity = typeof body.controlIdentity === 'string' ? body.controlIdentity : '';
   if (!rows) {
     res.status(400).json({ error: 'rows array is required' });
     return;
@@ -292,7 +375,12 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
     res.status(413).json({ error: `Too many rows (max ${MAX_SYNC_ROWS})` });
     return;
   }
-  const validator = resource === 'scan_policies' ? validateScanPolicyRow : validateCveSuppressionRow;
+  const validator =
+    resource === 'scan_policies'
+      ? validateScanPolicyRow
+      : resource === 'cve_suppressions'
+        ? validateCveSuppressionRow
+        : validateMisconfigAcknowledgementRow;
   for (let i = 0; i < rows.length; i++) {
     const err = validator(rows[i]);
     if (err) {
@@ -301,11 +389,86 @@ fleetRouter.post('/sync/:resource', authMiddleware, (req: Request, res: Response
     }
   }
   try {
-    FleetSyncService.getInstance().applyIncomingSync(resource, rows, targetIdentity);
+    FleetSyncService.getInstance().applyIncomingSync(
+      resource,
+      rows,
+      targetIdentity,
+      pushedAt ?? undefined,
+      controlIdentity || undefined,
+    );
     res.json({ success: true, applied: rows.length });
   } catch (error) {
+    if (error instanceof StaleSyncPushError) {
+      res.status(409).json({
+        error: error.message,
+        code: SYNC_ERROR_CODES.staleSyncPush,
+      });
+      return;
+    }
+    if (error instanceof ControlIdentityMismatchError) {
+      res.status(409).json({
+        error: error.message,
+        code: SYNC_ERROR_CODES.controlIdentityMismatch,
+        expected: error.expected,
+        got: error.got,
+      });
+      return;
+    }
     console.error('[FleetSync] Failed to apply incoming sync:', error);
     res.status(500).json({ error: 'Failed to apply sync' });
+  }
+});
+
+// Demote this replica back to a standalone control. Wipes all replicated
+// security rules and the cached fingerprint, then flips `fleet_role` to
+// 'control'. The local UI's write controls become available again.
+// `{confirm: true}` body is required so a misclick cannot destroy mirrored
+// state.
+fleetRouter.post('/role/demote', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body ?? {};
+  if (body.confirm !== true) {
+    res.status(400).json({
+      error: 'Demote requires explicit confirmation. Send { "confirm": true } to proceed.',
+    });
+    return;
+  }
+  try {
+    const demoted = FleetSyncService.getInstance().demote();
+    if (!demoted) {
+      res.status(409).json({
+        error: 'This instance is already a control; nothing to demote.',
+        code: 'ALREADY_CONTROL',
+      });
+      return;
+    }
+    res.json({ success: true, role: 'control' });
+  } catch (error) {
+    console.error('[FleetSync] Demote failed:', error);
+    res.status(500).json({ error: 'Failed to demote replica' });
+  }
+});
+
+// Reset the control anchor on this replica. An admin must opt in explicitly
+// with `{override: true}` because reanchor wipes all replicated rows; the
+// next push from a different control will re-populate them. Used when a
+// control is permanently rebuilt or replaced and must be re-bound to its
+// existing replicas.
+fleetRouter.post('/role/reanchor', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body ?? {};
+  if (body.override !== true) {
+    res.status(400).json({
+      error: 'Reanchor requires explicit override. Send { "override": true } to confirm.',
+    });
+    return;
+  }
+  try {
+    FleetSyncService.getInstance().reanchor();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[FleetSync] Reanchor failed:', error);
+    res.status(500).json({ error: 'Failed to reset control anchor' });
   }
 });
 
@@ -342,6 +505,9 @@ fleetRouter.get('/overview', authMiddleware, async (_req: Request, res: Response
         stats: null,
         systemStats: null,
         stacks: null,
+        cordoned: nodes[i].cordoned,
+        cordoned_at: nodes[i].cordoned_at,
+        cordoned_reason: nodes[i].cordoned_reason,
       };
     });
 
@@ -842,6 +1008,110 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
     }
   }
   res.status(204).send();
+});
+
+// ─── Fleet Actions: gateway-orchestrated endpoints (multi-node) ───
+//
+// Per-node fleet-action endpoints (run on the target node via the proxy) live
+// in `routes/fleetActions.ts`. The endpoint below is gateway-orchestrated and
+// lives here so it sits behind the `/api/fleet/` proxy-exempt prefix.
+
+// Fleet-wide stop by label name. Matches each node's labels by name and runs
+// container stops on each matching stack.
+// Tier: requirePaid + requireAdmin.
+fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePaid(req, res)) return;
+  if (!requireAdmin(req, res)) return;
+  const body = req.body as { labelName?: unknown } | undefined;
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Request body is required' });
+    return;
+  }
+  const { labelName } = body;
+  if (typeof labelName !== 'string' || labelName.trim().length === 0) {
+    res.status(400).json({ error: 'labelName is required' });
+    return;
+  }
+  const trimmed = labelName.trim();
+  try {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+    const results = await Promise.all(nodes.map(async (node) => {
+      const label = db.getLabels(node.id).find(l => l.name === trimmed);
+      if (!label) {
+        return { nodeId: node.id, nodeName: node.name, matched: false, stackResults: [] };
+      }
+      const stackNames = db.getStacksForLabel(label.id, node.id);
+      if (stackNames.length === 0) {
+        return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: [] };
+      }
+
+      if (node.type === 'local') {
+        // Share the per-node bulk lock with `POST /api/labels/:id/action` so
+        // a fleet-stop and a per-label action cannot double-stop the same
+        // containers concurrently on the same local node.
+        const lockKey = `bulk:${node.id}`;
+        if (activeBulkActions.has(lockKey)) {
+          return {
+            nodeId: node.id, nodeName: node.name, matched: true,
+            stackResults: stackNames.map(stackName => ({ stackName, success: false, error: 'A bulk action is already running on this node' })),
+          };
+        }
+        activeBulkActions.add(lockKey);
+        try {
+          const fsStacks = await FileSystemService.getInstance(node.id).getStacks();
+          const fsStackSet = new Set(fsStacks);
+          const validStacks = stackNames.filter(name => fsStackSet.has(name));
+          const stackResults: { stackName: string; success: boolean; error?: string }[] = [];
+          for (const stackName of validStacks) {
+            const outcome = await containerActionForStack(node.id, stackName, 'stop');
+            if (outcome.kind === 'ok') stackResults.push({ stackName, success: true });
+            else if (outcome.kind === 'no-containers') stackResults.push({ stackName, success: false, error: 'No containers found for this stack' });
+            else stackResults.push({ stackName, success: false, error: outcome.message });
+          }
+          if (stackResults.some(r => r.success)) invalidateNodeCaches(node.id);
+          return { nodeId: node.id, nodeName: node.name, matched: true, stackResults };
+        } finally {
+          activeBulkActions.delete(lockKey);
+        }
+      }
+
+      if (!node.api_url || !node.api_token) {
+        return {
+          nodeId: node.id, nodeName: node.name, matched: true,
+          stackResults: stackNames.map(stackName => ({ stackName, success: false, error: 'Remote node not configured' })),
+        };
+      }
+      try {
+        const response = await fetch(`${node.api_url.replace(/\/$/, '')}/api/labels/${label.id}/action`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'stop' }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!response.ok) {
+          const err = (await response.json().catch(() => ({}))) as { error?: string };
+          const message = err.error || `Remote returned ${response.status}`;
+          return {
+            nodeId: node.id, nodeName: node.name, matched: true,
+            stackResults: stackNames.map(stackName => ({ stackName, success: false, error: message })),
+          };
+        }
+        const remote = (await response.json()) as { results?: { stackName: string; success: boolean; error?: string }[] };
+        return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: remote.results ?? [] };
+      } catch (err) {
+        const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
+        return {
+          nodeId: node.id, nodeName: node.name, matched: true,
+          stackResults: stackNames.map(stackName => ({ stackName, success: false, error: errorMsg })),
+        };
+      }
+    }));
+    res.json({ results });
+  } catch (error) {
+    console.error('[Fleet] fleet-stop error:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to run fleet stop') });
+  }
 });
 
 // ─── Fleet Snapshots (manual: Community; scheduled: Skipper+) ───

@@ -5,7 +5,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Combobox } from '@/components/ui/combobox';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
+import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { AdmiralGate } from './AdmiralGate';
@@ -95,6 +95,7 @@ export function RegistriesSection() {
     const [editingId, setEditingId] = useState<number | null>(null);
     const [testingId, setTestingId] = useState<number | null>(null);
     const [testingForm, setTestingForm] = useState(false);
+    const [deleteRegistry, setDeleteRegistry] = useState<RegistryItem | null>(null);
 
     const [formName, setFormName] = useState('');
     const [formUrl, setFormUrl] = useState('');
@@ -422,32 +423,15 @@ export function RegistriesSection() {
                                 <Button variant="ghost" size="sm" onClick={() => startEdit(reg)} title="Edit">
                                     <Pencil className="w-4 h-4" strokeWidth={1.5} />
                                 </Button>
-                                <AlertDialog>
-                                    <AlertDialogTrigger asChild>
-                                        <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
-                                            title="Delete"
-                                        >
-                                            <Trash2 className="w-4 h-4" strokeWidth={1.5} />
-                                        </Button>
-                                    </AlertDialogTrigger>
-                                    <AlertDialogContent>
-                                        <AlertDialogHeader>
-                                            <AlertDialogTitle>Delete registry?</AlertDialogTitle>
-                                            <AlertDialogDescription>
-                                                Deleting <strong>{reg.name}</strong> will remove its stored credentials. Stacks using images from this registry will fail to pull until credentials are re-added.
-                                            </AlertDialogDescription>
-                                        </AlertDialogHeader>
-                                        <AlertDialogFooter>
-                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                            <AlertDialogAction onClick={() => handleDelete(reg.id)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                                                Delete
-                                            </AlertDialogAction>
-                                        </AlertDialogFooter>
-                                    </AlertDialogContent>
-                                </AlertDialog>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                                    title="Delete"
+                                    onClick={() => setDeleteRegistry(reg)}
+                                >
+                                    <Trash2 className="w-4 h-4" strokeWidth={1.5} />
+                                </Button>
                             </div>
                         </div>
                         <div className="flex items-center gap-4 text-xs text-stat-subtitle">
@@ -468,6 +452,26 @@ export function RegistriesSection() {
                         </div>
                     </div>
                 ))}
+
+                <ConfirmModal
+                    open={deleteRegistry !== null}
+                    onOpenChange={(open) => { if (!open) setDeleteRegistry(null); }}
+                    variant="destructive"
+                    kicker="REGISTRY · DELETE · IRREVERSIBLE"
+                    title="Delete registry"
+                    confirmLabel="Delete"
+                    onConfirm={() => {
+                        if (deleteRegistry) {
+                            const id = deleteRegistry.id;
+                            setDeleteRegistry(null);
+                            handleDelete(id);
+                        }
+                    }}
+                >
+                    <p className="text-sm text-stat-subtitle">
+                        Removes <span className="font-medium text-stat-value">{deleteRegistry?.name}</span> and its stored credentials. Stacks using images from this registry will fail to pull until credentials are re-added.
+                    </p>
+                </ConfirmModal>
             </div>
           </CapabilityGate>
         </AdmiralGate>

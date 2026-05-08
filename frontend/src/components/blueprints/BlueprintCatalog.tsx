@@ -61,17 +61,6 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate }: BlueprintCa
         }
     }, [blueprints, filter]);
 
-    const featured = useMemo(() => {
-        if (blueprints.length === 0) return null;
-        const sorted = [...blueprints].sort((a, b) => {
-            const aActive = a.deploymentCounts.active ?? 0;
-            const bActive = b.deploymentCounts.active ?? 0;
-            if (aActive !== bActive) return bActive - aActive;
-            return b.updated_at - a.updated_at;
-        });
-        return sorted[0];
-    }, [blueprints]);
-
     return (
         <div className="space-y-5">
             <div className="flex items-center justify-between flex-wrap gap-3">
@@ -85,34 +74,6 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate }: BlueprintCa
                     New Blueprint
                 </Button>
             </div>
-
-            {featured && (
-                <div className="rounded-xl border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
-                    <div className="flex flex-col md:flex-row gap-4 p-5 border-l-2 border-brand">
-                        <div className="flex-1 space-y-2 min-w-0">
-                            <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-brand">
-                                ★ Featured · most-deployed
-                            </div>
-                            <h3 className="font-serif italic text-xl tracking-[-0.01em] text-stat-value truncate">
-                                {featured.name}
-                            </h3>
-                            {featured.description && (
-                                <p className="text-xs text-stat-subtitle leading-relaxed line-clamp-2">{featured.description}</p>
-                            )}
-                            <div className="flex items-center gap-3 text-[10px] uppercase tracking-[0.18em] font-mono text-stat-icon">
-                                <ClassificationChip classification={featured.classification} />
-                                <span>·</span>
-                                <span>{featured.deploymentCounts.active ?? 0}/{featured.deploymentTotal} active</span>
-                                <span>·</span>
-                                <span>drift {featured.drift_mode}</span>
-                            </div>
-                        </div>
-                        <div className="self-end md:self-center">
-                            <Button variant="outline" size="sm" onClick={() => onSelect(featured.id)}>Open</Button>
-                        </div>
-                    </div>
-                </div>
-            )}
 
             <div className="flex items-center gap-1 flex-wrap">
                 <FilterChip active={filter === 'all'} count={counts.all} label="All" onClick={() => setFilter('all')} />

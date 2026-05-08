@@ -5,7 +5,6 @@ import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
 import { DeleteStackDialog } from './DeleteStackDialog';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import { StackAlertSheet } from '../StackAlertSheet';
-import { StackAutoHealSheet } from '@/components/StackAutoHealSheet';
 import { GitSourcePanel } from '../stack/GitSourcePanel';
 import { LogViewer } from '../LogViewer';
 import { VulnerabilityScanSheet } from '../VulnerabilityScanSheet';
@@ -54,9 +53,8 @@ export function ShellOverlays({
     pendingUnsavedLoad,
     bashModalOpen, selectedContainer,
     logViewerOpen, logContainer,
-    alertSheetOpen, closeAlertSheet, alertSheetStack,
+    stackMonitor, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing,
-    autoHealStackName, setAutoHealStackName,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
@@ -96,11 +94,12 @@ export function ShellOverlays({
         />
       )}
 
-      {/* Stack Alert Sheet */}
+      {/* Stack monitor (alerts + auto-heal as tabs) */}
       <StackAlertSheet
-        isOpen={alertSheetOpen}
-        onClose={closeAlertSheet}
-        stackName={alertSheetStack}
+        open={stackMonitor !== null}
+        onOpenChange={(open) => { if (!open) closeStackMonitor(); }}
+        stackName={stackMonitor?.stackName ?? ''}
+        initialTab={stackMonitor?.tab ?? 'alerts'}
       />
 
       {/* Pre-deploy policy block */}
@@ -112,13 +111,6 @@ export function ShellOverlays({
         bypassing={policyBypassing}
         onClose={() => setPolicyBlock(null)}
         onBypass={stackActions.bypassPolicyAndDeploy}
-      />
-
-      {/* Stack Auto-Heal Sheet */}
-      <StackAutoHealSheet
-        stackName={autoHealStackName ?? ''}
-        open={autoHealStackName !== null}
-        onOpenChange={(open) => { if (!open) setAutoHealStackName(null); }}
       />
 
       {/* Git Source Panel */}

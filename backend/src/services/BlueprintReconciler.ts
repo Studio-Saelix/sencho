@@ -154,8 +154,25 @@ export class BlueprintReconciler {
     }
 
     private computeDecision(blueprint: Blueprint, allNodes: Node[]): ReconcileDecision {
-        const labelSvc = NodeLabelService.getInstance();
-        const desiredNodes = labelSvc.matchSelector(blueprint.selector, allNodes);
+        // Pin override: a pinned blueprint deploys only on its pinned node,
+        // regardless of the selector. The pinned node also wins over a
+        // cordon flag (pin is an explicit operator decision; cordon governs
+        // automatic placement only).
+        let desiredNodes: Node[];
+        if (blueprint.pinned_node_id !== null) {
+            const pinned = allNodes.find(n => n.id === blueprint.pinned_node_id);
+            if (!pinned) {
+                console.warn(
+                    `[BlueprintReconciler] blueprint "${blueprint.name}" pinned to node ${blueprint.pinned_node_id} which no longer exists; treating desired set as empty`,
+                );
+                desiredNodes = [];
+            } else {
+                desiredNodes = [pinned];
+            }
+        } else {
+            const labelSvc = NodeLabelService.getInstance();
+            desiredNodes = labelSvc.matchSelector(blueprint.selector, allNodes);
+        }
         const desiredIds = new Set(desiredNodes.map(n => n.id));
 
         const existingDeployments = DatabaseService.getInstance().listDeployments(blueprint.id);
@@ -174,6 +191,12 @@ export class BlueprintReconciler {
         for (const node of desiredNodes) {
             const dep = deploymentByNode.get(node.id);
             if (!dep) {
+                // Cordon filter: skip new placements onto cordoned nodes.
+                // Pin always wins, so the pinned node is exempt. Existing
+                // deployments below are untouched: cordon does not evict.
+                if (node.cordoned && blueprint.pinned_node_id !== node.id) {
+                    continue;
+                }
                 if (blueprint.classification === 'stateful' || blueprint.classification === 'unknown') {
                     decision.stateReview.push(node);
                 } else {

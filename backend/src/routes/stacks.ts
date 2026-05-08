@@ -37,7 +37,7 @@ function notifyActionSuccess(category: NotificationCategory, message: string, st
     .catch(err => console.error('[Stacks] Failed to dispatch activity for %s:', sanitizeForLog(stackName), err));
 }
 
-async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
+export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
   const fsService = FileSystemService.getInstance(nodeId);
   const stackDir = path.join(fsService.getBaseDir(), stackName);
   const defaultEnvPath = path.join(stackDir, '.env');
@@ -624,13 +624,38 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   }
 });
 
-type StackContainerAction = 'restart' | 'stop' | 'start';
+export type StackContainerAction = 'restart' | 'stop' | 'start';
 
 const CONTAINER_ACTION_META: Record<StackContainerAction, { category: NotificationCategory; pastTense: string }> = {
   restart: { category: 'stack_restarted', pastTense: 'restarted' },
   stop:    { category: 'stack_stopped',   pastTense: 'stopped'   },
   start:   { category: 'stack_started',   pastTense: 'started'   },
 };
+
+export type ContainerActionOutcome =
+  | { kind: 'ok'; count: number }
+  | { kind: 'no-containers' }
+  | { kind: 'error'; message: string };
+
+export async function containerActionForStack(
+  nodeId: number,
+  stackName: string,
+  action: StackContainerAction,
+): Promise<ContainerActionOutcome> {
+  try {
+    const dockerController = DockerController.getInstance(nodeId);
+    const containers = await dockerController.getContainersByStack(stackName);
+    if (!containers || containers.length === 0) return { kind: 'no-containers' };
+    const op =
+      action === 'restart' ? (id: string) => dockerController.restartContainer(id)
+        : action === 'stop' ? (id: string) => dockerController.stopContainer(id)
+          : (id: string) => dockerController.startContainer(id);
+    await Promise.all(containers.map(c => op(c.Id)));
+    return { kind: 'ok', count: containers.length };
+  } catch (error: unknown) {
+    return { kind: 'error', message: getErrorMessage(error, `Failed to ${action} containers`) };
+  }
+}
 
 async function bulkContainerOp(
   req: Request,
@@ -640,34 +665,24 @@ async function bulkContainerOp(
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   const titleCase = action.charAt(0).toUpperCase() + action.slice(1);
-  try {
-    const dockerController = DockerController.getInstance(req.nodeId);
-    const containers = await dockerController.getContainersByStack(stackName);
+  const outcome = await containerActionForStack(req.nodeId, stackName, action);
 
-    if (!containers || containers.length === 0) {
-      res.status(404).json({ error: 'No containers found for this stack.' });
-      return;
-    }
-
-    const op =
-      action === 'restart' ? (id: string) => dockerController.restartContainer(id)
-        : action === 'stop' ? (id: string) => dockerController.stopContainer(id)
-          : (id: string) => dockerController.startContainer(id);
-
-    await Promise.all(containers.map(c => op(c.Id)));
-    invalidateNodeCaches(req.nodeId);
-    console.log(`[Stacks] ${titleCase} completed: ${sanitizeForLog(stackName)} (${containers.length} containers)`);
-    res.json({ success: true, message: `${titleCase} completed via Engine API.` });
-    const { category, pastTense } = CONTAINER_ACTION_META[action];
-    notifyActionSuccess(category, `${stackName} ${pastTense}`, stackName, req.user?.username ?? 'system');
-  } catch (error: unknown) {
-    console.error('[Stacks] %s failed: %s', sanitizeForLog(titleCase), sanitizeForLog(stackName), error);
-    const message = getErrorMessage(error, `Failed to ${action} containers`);
-    if (action !== 'start') {
-      notifyActionFailure(action, stackName, error);
-    }
-    res.status(500).json({ error: message });
+  if (outcome.kind === 'no-containers') {
+    res.status(404).json({ error: 'No containers found for this stack.' });
+    return;
   }
+  if (outcome.kind === 'error') {
+    console.error('[Stacks] %s failed: %s %s', sanitizeForLog(titleCase), sanitizeForLog(stackName), sanitizeForLog(outcome.message));
+    if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message));
+    res.status(500).json({ error: outcome.message });
+    return;
+  }
+
+  invalidateNodeCaches(req.nodeId);
+  console.log(`[Stacks] ${titleCase} completed: ${sanitizeForLog(stackName)} (${outcome.count} containers)`);
+  res.json({ success: true, message: `${titleCase} completed via Engine API.` });
+  const { category, pastTense } = CONTAINER_ACTION_META[action];
+  notifyActionSuccess(category, `${stackName} ${pastTense}`, stackName, req.user?.username ?? 'system');
 }
 
 stacksRouter.post('/:stackName/restart', (req, res) => bulkContainerOp(req, res, 'restart'));

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { SystemSheet } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
 import { Loader2 } from 'lucide-react';
+import { formatTimeAgo } from '@/lib/relativeTime';
 import type { MeshActivityEvent } from '@/types/mesh';
 
 interface Props {
@@ -42,45 +43,55 @@ export function MeshActivitySheet({ open, onOpenChange }: Props) {
         );
     });
 
+    const mostRecentTs = events.length > 0 ? Math.max(...events.map((e) => e.ts)) : null;
+    const meta = events.length === 0
+        ? '0 events'
+        : filter
+            ? `${visible.length} of ${events.length} events`
+            : `${events.length} events`;
+    const footerContext = mostRecentTs ? `Last event ${formatTimeAgo(mostRecentTs)}` : 'No events yet';
+
     return (
-        <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent side="right" className="w-[600px] sm:max-w-[600px]">
-                <SheetHeader>
-                    <SheetTitle>Mesh activity</SheetTitle>
-                </SheetHeader>
+        <SystemSheet
+            open={open}
+            onOpenChange={onOpenChange}
+            crumb={['Fleet', 'Mesh', 'Activity']}
+            name="Mesh activity"
+            meta={meta}
+            footerContext={footerContext}
+            size="lg"
+        >
+            <div className="space-y-4">
+                <Input
+                    placeholder="Filter by alias, type, or message"
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    className="text-xs font-mono"
+                />
 
-                <div className="mt-4 space-y-3">
-                    <Input
-                        placeholder="Filter by alias, type, or message"
-                        value={filter}
-                        onChange={(e) => setFilter(e.target.value)}
-                        className="text-xs font-mono"
-                    />
-
-                    <div className="max-h-[70vh] overflow-auto space-y-1">
-                        {loading && (
-                            <div className="flex items-center gap-2 text-stat-subtitle text-sm">
-                                <Loader2 className="w-4 h-4 animate-spin" /> Loading…
-                            </div>
-                        )}
-                        {!loading && visible.length === 0 && (
-                            <div className="text-xs text-stat-subtitle">No events.</div>
-                        )}
-                        {visible.slice().reverse().map((e, i) => (
-                            <div key={i} className="grid grid-cols-[80px_70px_120px_1fr] gap-2 text-[11px] font-mono py-1 border-b border-card-border/50">
-                                <span className="text-stat-subtitle tabular-nums">{new Date(e.ts).toLocaleTimeString()}</span>
-                                <span className={
-                                    e.level === 'error' ? 'text-destructive uppercase tracking-[0.18em]' :
+                <div className="space-y-1">
+                    {loading && (
+                        <div className="flex items-center gap-2 text-stat-subtitle text-sm">
+                            <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+                        </div>
+                    )}
+                    {!loading && visible.length === 0 && (
+                        <div className="text-xs text-stat-subtitle">No events.</div>
+                    )}
+                    {visible.slice().reverse().map((e, i) => (
+                        <div key={i} className="grid grid-cols-[80px_70px_120px_1fr] gap-2 text-[11px] font-mono py-1 border-b border-card-border/50">
+                            <span className="text-stat-subtitle tabular-nums">{new Date(e.ts).toLocaleTimeString()}</span>
+                            <span className={
+                                e.level === 'error' ? 'text-destructive uppercase tracking-[0.18em]' :
                                     e.level === 'warn' ? 'text-warning uppercase tracking-[0.18em]' :
-                                    'text-stat-subtitle uppercase tracking-[0.18em]'
-                                }>{e.source}</span>
-                                <span className="text-stat-value">{e.type}</span>
-                                <span className="text-stat-value truncate" title={e.message}>{e.alias ? `[${e.alias}] ` : ''}{e.message}</span>
-                            </div>
-                        ))}
-                    </div>
+                                        'text-stat-subtitle uppercase tracking-[0.18em]'
+                            }>{e.source}</span>
+                            <span className="text-stat-value">{e.type}</span>
+                            <span className="text-stat-value truncate" title={e.message}>{e.alias ? `[${e.alias}] ` : ''}{e.message}</span>
+                        </div>
+                    ))}
                 </div>
-            </SheetContent>
-        </Sheet>
+            </div>
+        </SystemSheet>
     );
 }

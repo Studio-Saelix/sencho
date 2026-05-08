@@ -6,9 +6,7 @@ import { springs } from '@/lib/motion';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from "@/components/ui/modal";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Combobox } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
@@ -16,9 +14,8 @@ import { Label } from "@/components/ui/label";
 import { TogglePill } from "@/components/ui/toggle-pill";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { apiFetch } from '@/lib/api';
-import { copyToClipboard } from '@/lib/clipboard';
 import { toast } from '@/components/ui/toast-store';
-import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Copy, Container, Loader2, History, FolderOpen } from 'lucide-react';
+import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen } from 'lucide-react';
 import { CursorProvider, CursorContainer, Cursor, CursorFollow } from '@/components/animate-ui/primitives/animate/cursor';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
@@ -39,6 +36,7 @@ import { ReclaimHero } from './resources/ReclaimHero';
 import { FootprintTreemap } from './resources/FootprintTreemap';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
+import { NetworkDetailSheet, type NetworkInspectData } from './resources/NetworkDetailSheet';
 import { TabLanding, type TabLandingEntry } from './resources/TabLanding';
 
 const NetworkTopologyView = lazy(() => import('./NetworkTopologyView'));
@@ -109,28 +107,7 @@ interface UnmanagedContainer {
     Image: string;
 }
 
-interface NetworkInspectData {
-    Id: string;
-    Name: string;
-    Created: string;
-    Scope: string;
-    Driver: string;
-    Internal: boolean;
-    Attachable: boolean;
-    Labels: Record<string, string>;
-    IPAM: {
-        Driver: string;
-        Config: Array<{ Subnet?: string; Gateway?: string; IPRange?: string }>;
-    };
-    Containers: Record<string, {
-        Name: string;
-        EndpointID: string;
-        MacAddress: string;
-        IPv4Address: string;
-        IPv6Address: string;
-    }>;
-    Options: Record<string, string>;
-}
+// NetworkInspectData is re-exported from ./resources/NetworkDetailSheet
 
 type ResourceFilter = 'all' | 'managed' | 'unmanaged';
 type PruneTarget = 'containers' | 'images' | 'networks' | 'volumes';
@@ -515,7 +492,6 @@ export default function ResourcesView() {
                 throw new Error(data?.error || 'Failed to purge selected containers');
             }
             toast.success(`Purged ${selectedOrphans.length} unmanaged container(s)`);
-            setBulkPurgeConfirm(false);
             await fetchAllData();
         } catch (error) {
             const err = error as Record<string, unknown>;
@@ -523,6 +499,7 @@ export default function ResourcesView() {
         } finally {
             toast.dismiss(loadingId);
             setIsActioning(false);
+            setBulkPurgeConfirm(false);
         }
     };
 
@@ -1208,158 +1185,156 @@ export default function ResourcesView() {
             {/* ── Dialogs ── */}
 
             {/* Prune Confirm */}
-            <AlertDialog open={!!confirmPrune} onOpenChange={(open) => !open && setConfirmPrune(null)}>
-                <AlertDialogContent className="animate-in fade-in-0 zoom-in-95 duration-200">
-                    <AlertDialogHeader>
-                        {confirmPrune?.scope === 'all' ? (
-                            <>
-                                <AlertDialogTitle className="flex items-center gap-2 text-destructive">
-                                    <AlertTriangle className="w-4 h-4" />
-                                    Prune All Docker {confirmPrune?.target}
-                                </AlertDialogTitle>
-                                <AlertDialogDescription>
-                                    This will prune <span className="font-medium text-foreground">all</span> unused {confirmPrune?.target} from the Docker daemon -
-                                    including those from <span className="font-medium text-foreground">external projects not managed by Sencho</span>. This cannot be undone.
-                                </AlertDialogDescription>
-                            </>
-                        ) : (
-                            <>
-                                <AlertDialogTitle>Prune Sencho-Managed {confirmPrune?.target}</AlertDialogTitle>
-                                <AlertDialogDescription>
-                                    Only unused {confirmPrune?.target} belonging to your Sencho stacks will be removed.
-                                    External Docker resources are <span className="font-medium text-foreground">not affected</span>.
-                                </AlertDialogDescription>
-                            </>
-                        )}
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel disabled={isActioning}>Cancel</AlertDialogCancel>
-                        <AlertDialogAction
-                            disabled={isActioning}
-                            className={confirmPrune?.scope === 'all' ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90' : ''}
-                            onClick={handlePrune}
-                        >
-                            {isActioning ? 'Pruning...' : confirmPrune?.scope === 'all' ? 'Prune All' : 'Prune'}
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+            <ConfirmModal
+                open={!!confirmPrune}
+                onOpenChange={(open) => !open && setConfirmPrune(null)}
+                variant="destructive"
+                kicker="RESOURCES · PRUNE · IRREVERSIBLE"
+                title={
+                    confirmPrune?.scope === 'all'
+                        ? `Prune all Docker ${confirmPrune?.target}`
+                        : `Prune Sencho-managed ${confirmPrune?.target}`
+                }
+                hint={confirmPrune?.scope === 'all' ? 'AFFECTS external Docker resources' : 'KEEPS external resources'}
+                confirmLabel={isActioning ? 'Pruning...' : (confirmPrune?.scope === 'all' ? 'Prune all' : 'Prune')}
+                confirming={isActioning}
+                onConfirm={handlePrune}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    {confirmPrune?.scope === 'all' ? (
+                        <>
+                            Prunes <span className="font-medium text-stat-value">all</span> unused {confirmPrune?.target} from the Docker daemon, including those from{' '}
+                            <span className="font-medium text-stat-value">external projects not managed by Sencho</span>.
+                        </>
+                    ) : (
+                        <>
+                            Removes only unused {confirmPrune?.target} belonging to your Sencho stacks. External Docker resources are{' '}
+                            <span className="font-medium text-stat-value">not affected</span>.
+                        </>
+                    )}
+                </p>
+            </ConfirmModal>
 
             {/* Delete Confirm */}
-            <AlertDialog open={!!confirmDelete} onOpenChange={(open) => !open && setConfirmDelete(null)}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>Delete {confirmDelete?.type.slice(0, -1)}</AlertDialogTitle>
-                        <AlertDialogDescription>
-                            Permanently delete <span className="font-mono font-medium text-foreground">{confirmDelete?.name || confirmDelete?.id.substring(0, 12)}</span>? This cannot be undone.
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel disabled={isActioning}>Cancel</AlertDialogCancel>
-                        <AlertDialogAction disabled={isActioning} className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={handleDelete}>
-                            {isActioning ? 'Deleting...' : 'Delete'}
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+            <ConfirmModal
+                open={!!confirmDelete}
+                onOpenChange={(open) => !open && setConfirmDelete(null)}
+                variant="destructive"
+                kicker="RESOURCES · DELETE · IRREVERSIBLE"
+                title={`Delete ${confirmDelete?.type.slice(0, -1) ?? ''}`}
+                confirmLabel={isActioning ? 'Deleting...' : 'Delete'}
+                confirming={isActioning}
+                onConfirm={handleDelete}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Permanently deletes{' '}
+                    <span className="font-mono font-medium text-stat-value">
+                        {confirmDelete?.name || confirmDelete?.id.substring(0, 12)}
+                    </span>.
+                </p>
+            </ConfirmModal>
 
             {/* Unmanaged Container Purge Confirm */}
-            <AlertDialog open={bulkPurgeConfirm} onOpenChange={setBulkPurgeConfirm}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>Purge Selected Unmanaged Containers</AlertDialogTitle>
-                        <AlertDialogDescription>
-                            Permanently remove {selectedOrphans.length} container{selectedOrphans.length !== 1 ? 's' : ''} from external projects?
-                            This will force-stop and remove them. This cannot be undone.
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel disabled={isActioning}>Cancel</AlertDialogCancel>
-                        <AlertDialogAction disabled={isActioning} className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={handlePurgeOrphans}>
-                            {isActioning ? 'Purging...' : 'Purge'}
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+            <ConfirmModal
+                open={bulkPurgeConfirm}
+                onOpenChange={setBulkPurgeConfirm}
+                variant="destructive"
+                kicker="RESOURCES · PURGE · IRREVERSIBLE"
+                title="Purge selected unmanaged containers"
+                hint={`AFFECTS ${selectedOrphans.length} container${selectedOrphans.length !== 1 ? 's' : ''}`}
+                confirmLabel={isActioning ? 'Purging...' : 'Purge'}
+                confirming={isActioning}
+                onConfirm={handlePurgeOrphans}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Force-stops and removes {selectedOrphans.length} container{selectedOrphans.length !== 1 ? 's' : ''} from external projects not managed by Sencho.
+                </p>
+            </ConfirmModal>
 
-            {/* Create Network Dialog */}
-            <Dialog open={showCreateNetwork} onOpenChange={setShowCreateNetwork}>
-                <DialogContent>
-                    <DialogHeader>
-                        <DialogTitle>Create Network</DialogTitle>
-                        <DialogDescription className="sr-only">Create a new Docker network for inter-container communication.</DialogDescription>
-                    </DialogHeader>
-                    <div className="space-y-4 py-2">
+            {/* Create Network Modal */}
+            <Modal open={showCreateNetwork} onOpenChange={setShowCreateNetwork} size="md">
+                <ModalHeader
+                    kicker="NETWORKS · NEW"
+                    title="Create network"
+                    description="Create a new Docker network for inter-container communication."
+                />
+                <ModalBody>
+                    <div className="space-y-2">
+                        <Label htmlFor="net-name" className="text-xs font-medium">Name</Label>
+                        <Input
+                            id="net-name"
+                            placeholder="my-network"
+                            className="font-mono text-sm"
+                            value={createNetworkForm.name}
+                            onChange={e => setCreateNetworkForm(f => ({ ...f, name: e.target.value }))}
+                        />
+                    </div>
+                    <div className="space-y-2">
+                        <Label htmlFor="net-driver" className="text-xs font-medium">Driver</Label>
+                        <Combobox
+                            options={NETWORK_DRIVERS.map(d => ({ value: d, label: d }))}
+                            value={createNetworkForm.driver}
+                            onValueChange={v => setCreateNetworkForm(f => ({ ...f, driver: (v || 'bridge') as NetworkDriver }))}
+                            placeholder="Select driver..."
+                            searchPlaceholder="Search drivers..."
+                            emptyText="No matching driver."
+                        />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-2">
-                            <Label htmlFor="net-name" className="text-xs font-medium">Name</Label>
+                            <Label htmlFor="net-subnet" className="text-xs font-medium">Subnet <span className="text-muted-foreground">(optional)</span></Label>
                             <Input
-                                id="net-name"
-                                placeholder="my-network"
+                                id="net-subnet"
+                                placeholder="172.20.0.0/16"
                                 className="font-mono text-sm"
-                                value={createNetworkForm.name}
-                                onChange={e => setCreateNetworkForm(f => ({ ...f, name: e.target.value }))}
+                                value={createNetworkForm.subnet}
+                                onChange={e => setCreateNetworkForm(f => ({ ...f, subnet: e.target.value }))}
                             />
                         </div>
                         <div className="space-y-2">
-                            <Label htmlFor="net-driver" className="text-xs font-medium">Driver</Label>
-                            <Combobox
-                                options={NETWORK_DRIVERS.map(d => ({ value: d, label: d }))}
-                                value={createNetworkForm.driver}
-                                onValueChange={v => setCreateNetworkForm(f => ({ ...f, driver: (v || 'bridge') as NetworkDriver }))}
-                                placeholder="Select driver..."
-                                searchPlaceholder="Search drivers..."
-                                emptyText="No matching driver."
+                            <Label htmlFor="net-gateway" className="text-xs font-medium">Gateway <span className="text-muted-foreground">(optional)</span></Label>
+                            <Input
+                                id="net-gateway"
+                                placeholder="172.20.0.1"
+                                className="font-mono text-sm"
+                                value={createNetworkForm.gateway}
+                                onChange={e => setCreateNetworkForm(f => ({ ...f, gateway: e.target.value }))}
                             />
-                        </div>
-                        <div className="grid grid-cols-2 gap-3">
-                            <div className="space-y-2">
-                                <Label htmlFor="net-subnet" className="text-xs font-medium">Subnet <span className="text-muted-foreground">(optional)</span></Label>
-                                <Input
-                                    id="net-subnet"
-                                    placeholder="172.20.0.0/16"
-                                    className="font-mono text-sm"
-                                    value={createNetworkForm.subnet}
-                                    onChange={e => setCreateNetworkForm(f => ({ ...f, subnet: e.target.value }))}
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <Label htmlFor="net-gateway" className="text-xs font-medium">Gateway <span className="text-muted-foreground">(optional)</span></Label>
-                                <Input
-                                    id="net-gateway"
-                                    placeholder="172.20.0.1"
-                                    className="font-mono text-sm"
-                                    value={createNetworkForm.gateway}
-                                    onChange={e => setCreateNetworkForm(f => ({ ...f, gateway: e.target.value }))}
-                                />
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-6 pt-1">
-                            <div className="flex items-center gap-2">
-                                <TogglePill
-                                    id="net-internal"
-                                    checked={createNetworkForm.internal}
-                                    onChange={v => setCreateNetworkForm(f => ({ ...f, internal: v }))}
-                                />
-                                <Label htmlFor="net-internal" className="text-xs cursor-pointer">Internal <span className="text-muted-foreground">(no external access)</span></Label>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <TogglePill
-                                    id="net-attachable"
-                                    checked={createNetworkForm.attachable}
-                                    onChange={v => setCreateNetworkForm(f => ({ ...f, attachable: v }))}
-                                />
-                                <Label htmlFor="net-attachable" className="text-xs cursor-pointer">Attachable</Label>
-                            </div>
                         </div>
                     </div>
-                    <DialogFooter>
-                        <Button variant="outline" size="sm" onClick={() => setShowCreateNetwork(false)} disabled={isCreatingNetwork}>Cancel</Button>
-                        <Button size="sm" onClick={handleCreateNetwork} disabled={!createNetworkForm.name.trim() || isCreatingNetwork}>
-                            {isCreatingNetwork ? 'Creating...' : 'Create Network'}
+                    <div className="flex items-center gap-6 pt-1">
+                        <div className="flex items-center gap-2">
+                            <TogglePill
+                                id="net-internal"
+                                checked={createNetworkForm.internal}
+                                onChange={v => setCreateNetworkForm(f => ({ ...f, internal: v }))}
+                            />
+                            <Label htmlFor="net-internal" className="text-xs cursor-pointer">Internal <span className="text-muted-foreground">(no external access)</span></Label>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <TogglePill
+                                id="net-attachable"
+                                checked={createNetworkForm.attachable}
+                                onChange={v => setCreateNetworkForm(f => ({ ...f, attachable: v }))}
+                            />
+                            <Label htmlFor="net-attachable" className="text-xs cursor-pointer">Attachable</Label>
+                        </div>
+                    </div>
+                </ModalBody>
+                <ModalFooter
+                    hint={`DRIVER ${createNetworkForm.driver}`}
+                    secondary={
+                        <Button variant="outline" size="sm" onClick={() => setShowCreateNetwork(false)} disabled={isCreatingNetwork}>
+                            Cancel
                         </Button>
-                    </DialogFooter>
-                </DialogContent>
-            </Dialog>
+                    }
+                    primary={
+                        <Button size="sm" onClick={handleCreateNetwork} disabled={!createNetworkForm.name.trim() || isCreatingNetwork}>
+                            {isCreatingNetwork ? 'Creating...' : 'Create network'}
+                        </Button>
+                    }
+                />
+            </Modal>
 
             {/* Image Details Sheet */}
             <ImageDetailsSheet imageId={inspectImageId} onClose={() => setInspectImageId(null)} />
@@ -1368,161 +1343,11 @@ export default function ResourcesView() {
             <VolumeBrowserSheet volumeName={browseVolume} onClose={() => setBrowseVolume(null)} />
 
 
-            {/* Network Inspect Sheet */}
-            <Sheet open={!!inspectNetwork} onOpenChange={open => !open && setInspectNetwork(null)}>
-                <SheetContent className="sm:max-w-lg">
-                  <ScrollArea className="h-full">
-                    <SheetHeader>
-                        <SheetTitle className="flex items-center gap-2">
-                            <Network className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                            {inspectNetwork?.Name}
-                        </SheetTitle>
-                    </SheetHeader>
-                    {inspectNetwork && (
-                        <div className="space-y-6 mt-6 pb-6">
-                            {/* Overview */}
-                            <div className="space-y-3">
-                                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Overview</h4>
-                                <div className="grid grid-cols-2 gap-3 text-sm">
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">ID</span>
-                                        <p className="font-mono text-xs mt-0.5 flex items-center gap-1.5">
-                                            {inspectNetwork.Id.substring(0, 12)}
-                                            <button
-                                                className="text-muted-foreground hover:text-foreground transition-colors"
-                                                onClick={async () => { try { await copyToClipboard(inspectNetwork.Id); toast.success('ID copied'); } catch { toast.error('Copy failed.'); } }}
-                                            >
-                                                <Copy className="w-3 h-3" strokeWidth={1.5} />
-                                            </button>
-                                        </p>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Driver</span>
-                                        <span className="text-xs mt-0.5 block"><Badge variant="outline" className="text-[10px] h-5">{inspectNetwork.Driver}</Badge></span>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Scope</span>
-                                        <span className="text-xs mt-0.5 block"><Badge variant="outline" className="text-[10px] h-5">{inspectNetwork.Scope}</Badge></span>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Created</span>
-                                        <p className="text-xs mt-0.5">{new Date(inspectNetwork.Created).toLocaleString()}</p>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Internal</span>
-                                        <p className="text-xs mt-0.5">{inspectNetwork.Internal ? 'Yes' : 'No'}</p>
-                                    </div>
-                                    <div>
-                                        <span className="text-xs text-muted-foreground">Attachable</span>
-                                        <p className="text-xs mt-0.5">{inspectNetwork.Attachable ? 'Yes' : 'No'}</p>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* IPAM Config */}
-                            {inspectNetwork.IPAM?.Config?.length > 0 && (
-                                <div className="space-y-3">
-                                    <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">IPAM Configuration</h4>
-                                    <div className="space-y-2">
-                                        {inspectNetwork.IPAM.Config.map((cfg, i) => (
-                                            <div key={i} className="rounded-lg border border-card-border bg-card p-3 shadow-card-bevel space-y-1.5">
-                                                {cfg.Subnet && (
-                                                    <div className="flex justify-between items-center">
-                                                        <span className="text-xs text-muted-foreground">Subnet</span>
-                                                        <span className="font-mono text-xs tabular-nums">{cfg.Subnet}</span>
-                                                    </div>
-                                                )}
-                                                {cfg.Gateway && (
-                                                    <div className="flex justify-between items-center">
-                                                        <span className="text-xs text-muted-foreground">Gateway</span>
-                                                        <span className="font-mono text-xs tabular-nums">{cfg.Gateway}</span>
-                                                    </div>
-                                                )}
-                                                {cfg.IPRange && (
-                                                    <div className="flex justify-between items-center">
-                                                        <span className="text-xs text-muted-foreground">IP Range</span>
-                                                        <span className="font-mono text-xs tabular-nums">{cfg.IPRange}</span>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Options */}
-                            {inspectNetwork.Options && Object.keys(inspectNetwork.Options).length > 0 && (
-                                <div className="space-y-3">
-                                    <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Options</h4>
-                                    <div className="rounded-lg border border-card-border bg-card shadow-card-bevel overflow-hidden">
-                                        <Table>
-                                            <TableBody>
-                                                {Object.entries(inspectNetwork.Options).map(([key, val]) => (
-                                                    <TableRow key={key} className="hover:bg-muted/30">
-                                                        <TableCell className="font-mono text-xs py-1.5 text-muted-foreground">{key}</TableCell>
-                                                        <TableCell className="font-mono text-xs py-1.5 text-right">{val}</TableCell>
-                                                    </TableRow>
-                                                ))}
-                                            </TableBody>
-                                        </Table>
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Connected Containers */}
-                            <div className="space-y-3">
-                                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                                    Connected Containers ({Object.keys(inspectNetwork.Containers || {}).length})
-                                </h4>
-                                {Object.keys(inspectNetwork.Containers || {}).length === 0 ? (
-                                    <p className="text-xs text-muted-foreground py-4 text-center">No containers connected to this network.</p>
-                                ) : (
-                                    <div className="space-y-2">
-                                        {Object.entries(inspectNetwork.Containers).map(([id, container]) => (
-                                            <div key={id} className="rounded-lg border border-card-border border-t-card-border-top bg-card p-3 shadow-card-bevel space-y-1.5">
-                                                <div className="flex items-center gap-2">
-                                                    <Container className="w-3.5 h-3.5 text-muted-foreground" strokeWidth={1.5} />
-                                                    <span className="text-sm font-medium truncate">{container.Name}</span>
-                                                </div>
-                                                <div className="grid grid-cols-2 gap-2 pl-5.5">
-                                                    <div>
-                                                        <span className="text-[10px] text-muted-foreground">IPv4</span>
-                                                        <p className="font-mono text-xs tabular-nums">{container.IPv4Address || 'N/A'}</p>
-                                                    </div>
-                                                    <div>
-                                                        <span className="text-[10px] text-muted-foreground">MAC</span>
-                                                        <p className="font-mono text-xs tabular-nums">{container.MacAddress || 'N/A'}</p>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Labels */}
-                            {inspectNetwork.Labels && Object.keys(inspectNetwork.Labels).length > 0 && (
-                                <div className="space-y-3">
-                                    <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Labels</h4>
-                                    <div className="rounded-lg border border-card-border bg-card shadow-card-bevel overflow-hidden">
-                                        <Table>
-                                            <TableBody>
-                                                {Object.entries(inspectNetwork.Labels).map(([key, val]) => (
-                                                    <TableRow key={key} className="hover:bg-muted/30">
-                                                        <TableCell className="font-mono text-xs py-1.5 text-muted-foreground">{key}</TableCell>
-                                                        <TableCell className="font-mono text-xs py-1.5 text-right">{val}</TableCell>
-                                                    </TableRow>
-                                                ))}
-                                            </TableBody>
-                                        </Table>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    )}
-                  </ScrollArea>
-                </SheetContent>
-            </Sheet>
+            {/* Network detail sheet */}
+            <NetworkDetailSheet
+                network={inspectNetwork}
+                onClose={() => setInspectNetwork(null)}
+            />
 
             <VulnerabilityScanSheet
                 scanId={inspectScanId}

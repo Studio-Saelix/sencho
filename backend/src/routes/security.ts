@@ -9,14 +9,91 @@ import { FleetSyncService } from '../services/FleetSyncService';
 import { LicenseService } from '../services/LicenseService';
 import { validateImageRef } from '../utils/image-ref';
 import { applySuppressions } from '../utils/suppression-filter';
+import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
+import { validateStackPatternForRedos } from './fleet';
 import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
+// Trivy emits misconfig rule ids in two shapes that Sencho persists verbatim:
+// short alpha-numeric codes (e.g. "DS002") and the AVD-prefixed long form
+// (e.g. "AVD-DS-0002"). Allow either, plus underscores for forward-compat.
+const MISCONFIG_RULE_RE = /^[A-Z0-9][A-Z0-9_-]{0,199}$/i;
+
+// Strip control characters and cap length so an operator-supplied pkg or image
+// pattern cannot inject a fake audit row by smuggling a newline plus a forged
+// `cve_suppression.delete:` prefix. Validators on the route reject overlength
+// pkg/image strings but do not constrain the charset.
+function sanitiseScopeFragment(value: string, max: number): string {
+  // eslint-disable-next-line no-control-regex
+  const stripped = value.replace(/[\x00-\x1f\x7f]/g, '?');
+  return stripped.length > max ? stripped.slice(0, max) + '…' : stripped;
+}
+
+// Summarise a suppression for the audit log without leaking the reason text.
+// Reason is free-form and could carry incident-tracker IDs or vendor secrets;
+// scope (CVE id, pkg, image) is non-sensitive. The fields list emitted on
+// update operations does name `reason` when it changed, which lets an audit
+// reader see *when* a reason was rotated even though the contents stay private.
+function describeSuppressionScope(s: { cve_id: string; pkg_name: string | null; image_pattern: string | null }): string {
+  const pinned: string[] = [];
+  if (s.pkg_name) pinned.push(`pkg=${sanitiseScopeFragment(s.pkg_name, 200)}`);
+  if (s.image_pattern) pinned.push(`image=${sanitiseScopeFragment(s.image_pattern, 300)}`);
+  return pinned.length > 0 ? `${s.cve_id} (${pinned.join(', ')})` : s.cve_id;
+}
+
+// Misconfig ack scope summary mirrors the suppression variant. Reason is
+// elided on purpose; rule_id and stack_pattern are non-sensitive.
+function describeAckScope(a: { rule_id: string; stack_pattern: string | null }): string {
+  const pinned: string[] = [];
+  if (a.stack_pattern) pinned.push(`stack=${sanitiseScopeFragment(a.stack_pattern, 300)}`);
+  return pinned.length > 0 ? `${a.rule_id} (${pinned.join(', ')})` : a.rule_id;
+}
+
+function recordSecurityAudit(
+  req: Request,
+  res: Response,
+  prefix: 'cve_suppression' | 'misconfig_ack',
+  action: 'create' | 'update' | 'delete',
+  summary: string,
+): void {
+  try {
+    DatabaseService.getInstance().insertAuditLog({
+      timestamp: Date.now(),
+      username: req.user?.username ?? 'unknown',
+      method: req.method,
+      path: req.originalUrl,
+      status_code: res.statusCode,
+      node_id: null,
+      ip_address: req.ip || 'unknown',
+      summary: `${prefix}.${action}: ${summary}`,
+    });
+  } catch (err) {
+    console.warn('[Security] Audit log write failed:', getErrorMessage(err, 'unknown'));
+  }
+}
+
+function recordSuppressionAudit(
+  req: Request,
+  res: Response,
+  action: 'create' | 'update' | 'delete',
+  summary: string,
+): void {
+  recordSecurityAudit(req, res, 'cve_suppression', action, summary);
+}
+
+function recordAckAudit(
+  req: Request,
+  res: Response,
+  action: 'create' | 'update' | 'delete',
+  summary: string,
+): void {
+  recordSecurityAudit(req, res, 'misconfig_ack', action, summary);
+}
 
 function parseScannersInput(raw: unknown): readonly ('vuln' | 'secret')[] | undefined | null {
   if (raw === undefined || raw === null) return undefined;
@@ -34,21 +111,6 @@ function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 
 } {
   const { policy_evaluation, ...rest } = scan;
   return { ...rest, policy_evaluation: parsePolicyEvaluation(policy_evaluation) };
-}
-
-function fetchAllPages<T>(
-  q: (opts: { limit?: number; offset?: number }) => { items: T[]; total: number },
-): T[] {
-  const pageSize = 1000;
-  const collected: T[] = [];
-  let offset = 0;
-  while (true) {
-    const page = q({ limit: pageSize, offset });
-    collected.push(...page.items);
-    if (collected.length >= page.total || page.items.length === 0) break;
-    offset += page.items.length;
-  }
-  return collected;
 }
 
 export const securityRouter = Router();
@@ -200,6 +262,9 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
   if (!stackName || !/^[a-zA-Z0-9_-]+$/.test(stackName)) {
     res.status(400).json({ error: 'Invalid stack name' }); return;
   }
+  if (svc.isScanningStack(req.nodeId, stackName)) {
+    res.status(409).json({ error: 'Already scanning this stack' }); return;
+  }
   try {
     const scan = await svc.scanComposeStack(req.nodeId, stackName, 'manual');
     res.status(201).json(scan);
@@ -207,6 +272,9 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
     const message = (error as Error).message || '';
     if (message === 'Invalid stack path' || message.startsWith('No compose file found')) {
       res.status(404).json({ error: message }); return;
+    }
+    if (message === 'Already scanning this stack') {
+      res.status(409).json({ error: message }); return;
     }
     console.error('[Security] Stack config scan failed:', error);
     res.status(500).json({ error: message || 'Failed to scan stack' });
@@ -327,7 +395,10 @@ securityRouter.get(
     }
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
     const offset = req.query.offset ? Number(req.query.offset) : undefined;
-    res.json(db.getMisconfigFindings(scanId, { severity, limit, offset }));
+    const result = db.getMisconfigFindings(scanId, { severity, limit, offset });
+    const acks = db.getMisconfigAcknowledgements();
+    const enriched = applyMisconfigAcknowledgements(result.items, scan.stack_context, acks);
+    res.json({ ...result, items: enriched });
   },
 );
 
@@ -391,11 +462,42 @@ securityRouter.get(
       res.status(409).json({ error: 'Scan not complete' }); return;
     }
     try {
-      const details = fetchAllPages((opts) => db.getVulnerabilityDetails(scanId, opts));
-      const secrets = fetchAllPages((opts) => db.getSecretFindings(scanId, opts));
-      const misconfigs = fetchAllPages((opts) => db.getMisconfigFindings(scanId, opts));
-      const suppressed = applySuppressions(details, scan.image_ref, db.getCveSuppressions());
-      const sarif = generateSarif(scan, suppressed, secrets, misconfigs);
+      // Hard cap to bound memory and serialization on pathological scans.
+      // 5000 findings per type comfortably covers realistic scans; if any
+      // type trips the cap we surface `truncated` in the SARIF metadata so
+      // tooling can flag the export as partial.
+      const SARIF_ROW_LIMIT = 5000;
+      const detailsPage = db.getVulnerabilityDetails(scanId, { limit: SARIF_ROW_LIMIT });
+      const secretsPage = db.getSecretFindings(scanId, { limit: SARIF_ROW_LIMIT });
+      const misconfigsPage = db.getMisconfigFindings(scanId, { limit: SARIF_ROW_LIMIT });
+      const truncated =
+        detailsPage.total > SARIF_ROW_LIMIT
+        || secretsPage.total > SARIF_ROW_LIMIT
+        || misconfigsPage.total > SARIF_ROW_LIMIT;
+      if (truncated) {
+        console.warn(
+          `[Security] SARIF export truncated for scanId=${scanId}: `
+          + `vulns=${detailsPage.total}, secrets=${secretsPage.total}, misconfigs=${misconfigsPage.total}, cap=${SARIF_ROW_LIMIT}`,
+        );
+      }
+      const suppressed = applySuppressions(detailsPage.items, scan.image_ref, db.getCveSuppressions());
+      const acknowledged = applyMisconfigAcknowledgements(
+        misconfigsPage.items,
+        scan.stack_context,
+        db.getMisconfigAcknowledgements(),
+      );
+      const sarif = generateSarif(scan, suppressed, secretsPage.items, acknowledged);
+      if (truncated) {
+        sarif.runs[0].properties = {
+          truncated: true,
+          row_limit: SARIF_ROW_LIMIT,
+          totals: {
+            vulnerabilities: detailsPage.total,
+            secrets: secretsPage.total,
+            misconfigs: misconfigsPage.total,
+          },
+        };
+      }
       const safeName = scan.image_ref.replace(/[^a-zA-Z0-9._-]/g, '_') || `scan-${scanId}`;
       res.setHeader('Content-Type', 'application/sarif+json');
       res.setHeader('Content-Disposition', `attachment; filename="${safeName}.sarif.json"`);
@@ -409,7 +511,12 @@ securityRouter.get(
 
 securityRouter.get('/policies', authMiddleware, (req: Request, res: Response): void => {
   if (!requirePaid(req, res)) return;
-  res.json(DatabaseService.getInstance().getScanPolicies());
+  // Replicas see only policies that apply to themselves: local-only rows plus
+  // fleet-wide and self-identity-matched replicated rows. Identity-scoped
+  // rows targeting other replicas are filtered out at the SQL boundary.
+  const policies = DatabaseService.getInstance()
+    .getScanPoliciesForUi(FleetSyncService.getRole(), FleetSyncService.getSelfIdentity());
+  res.json(policies);
 });
 
 securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): void => {
@@ -423,13 +530,20 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
   if (!POLICY_SEVERITIES.has(max_severity)) {
     res.status(400).json({ error: 'max_severity must be CRITICAL, HIGH, MEDIUM, or LOW' }); return;
   }
+  const normalizedPattern = stack_pattern ? String(stack_pattern) : null;
+  if (normalizedPattern !== null) {
+    const patternError = validateStackPatternForRedos(normalizedPattern);
+    if (patternError) {
+      res.status(400).json({ error: patternError }); return;
+    }
+  }
   try {
     const resolvedNodeId = node_id != null ? Number(node_id) : null;
     const policy = DatabaseService.getInstance().createScanPolicy({
       name: name.trim(),
       node_id: resolvedNodeId,
       node_identity: FleetSyncService.resolveIdentityForNodeId(resolvedNodeId),
-      stack_pattern: stack_pattern ? String(stack_pattern) : null,
+      stack_pattern: normalizedPattern,
       max_severity,
       block_on_deploy: block_on_deploy ? 1 : 0,
       enabled: enabled === false ? 0 : 1,
@@ -459,7 +573,16 @@ securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response
     updates.node_id = resolvedNodeId;
     updates.node_identity = FleetSyncService.resolveIdentityForNodeId(resolvedNodeId);
   }
-  if (body.stack_pattern !== undefined) updates.stack_pattern = body.stack_pattern ? String(body.stack_pattern) : null;
+  if (body.stack_pattern !== undefined) {
+    const normalizedPattern = body.stack_pattern ? String(body.stack_pattern) : null;
+    if (normalizedPattern !== null) {
+      const patternError = validateStackPatternForRedos(normalizedPattern);
+      if (patternError) {
+        res.status(400).json({ error: patternError }); return;
+      }
+    }
+    updates.stack_pattern = normalizedPattern;
+  }
   if (body.max_severity !== undefined) {
     if (!POLICY_SEVERITIES.has(body.max_severity)) {
       res.status(400).json({ error: 'max_severity must be CRITICAL, HIGH, MEDIUM, or LOW' }); return;
@@ -539,6 +662,7 @@ securityRouter.post('/suppressions', authMiddleware, (req: Request, res: Respons
     });
     FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
     res.status(201).json(suppression);
+    recordSuppressionAudit(req, res, 'create', describeSuppressionScope(suppression));
   } catch (error) {
     const message = (error as Error).message || '';
     if (message.includes('UNIQUE')) {
@@ -585,6 +709,13 @@ securityRouter.put('/suppressions/:id', authMiddleware, (req: Request, res: Resp
   }
   FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
   res.json(suppression);
+  const changed = Object.keys(updates);
+  recordSuppressionAudit(
+    req,
+    res,
+    'update',
+    `id=${id} ${describeSuppressionScope(suppression)} fields=[${changed.join(',')}]`,
+  );
 });
 
 securityRouter.delete('/suppressions/:id', authMiddleware, (req: Request, res: Response): void => {
@@ -594,9 +725,158 @@ securityRouter.delete('/suppressions/:id', authMiddleware, (req: Request, res: R
   if (!Number.isFinite(id)) {
     res.status(400).json({ error: 'Invalid suppression id' }); return;
   }
-  DatabaseService.getInstance().deleteCveSuppression(id);
+  const db = DatabaseService.getInstance();
+  // Snapshot before delete so the audit summary names the CVE rather than the bare id.
+  const existing = db.getCveSuppression(id);
+  db.deleteCveSuppression(id);
   FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
   res.json({ success: true });
+  recordSuppressionAudit(
+    req,
+    res,
+    'delete',
+    existing ? `id=${id} ${describeSuppressionScope(existing)}` : `id=${id} (not found)`,
+  );
+});
+
+// --- Misconfig Acknowledgements ---
+
+securityRouter.get('/misconfig-acks', authMiddleware, (req: Request, res: Response): void => {
+  const now = Date.now();
+  const rows = DatabaseService.getInstance().getMisconfigAcknowledgements().map((a) => ({
+    ...a,
+    active: a.expires_at === null || a.expires_at > now,
+  }));
+  res.json(rows);
+});
+
+securityRouter.post('/misconfig-acks', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  if (blockIfReplica(res, 'misconfig acknowledgements')) return;
+  const body = req.body ?? {};
+  const ruleId = typeof body.rule_id === 'string' ? body.rule_id.trim() : '';
+  if (!MISCONFIG_RULE_RE.test(ruleId)) {
+    res.status(400).json({ error: 'rule_id must be a non-empty alpha-numeric identifier (e.g. "DS002" or "AVD-DS-0002")' });
+    return;
+  }
+  const stackPatternRaw = body.stack_pattern == null || body.stack_pattern === ''
+    ? null
+    : String(body.stack_pattern).trim();
+  if (stackPatternRaw !== null) {
+    if (stackPatternRaw.length > 300) {
+      res.status(400).json({ error: 'stack_pattern is too long' }); return;
+    }
+    const patternError = validateStackPatternForRedos(stackPatternRaw);
+    if (patternError) {
+      res.status(400).json({ error: patternError }); return;
+    }
+  }
+  const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+  if (!reason) {
+    res.status(400).json({ error: 'reason is required' }); return;
+  }
+  if (reason.length > 2000) {
+    res.status(400).json({ error: 'reason is too long' }); return;
+  }
+  const expiresAt = body.expires_at == null ? null : Number(body.expires_at);
+  if (expiresAt !== null && !Number.isFinite(expiresAt)) {
+    res.status(400).json({ error: 'expires_at must be a timestamp or null' }); return;
+  }
+  try {
+    const ack = DatabaseService.getInstance().createMisconfigAcknowledgement({
+      rule_id: ruleId,
+      stack_pattern: stackPatternRaw,
+      reason,
+      created_by: req.user?.username || 'unknown',
+      created_at: Date.now(),
+      expires_at: expiresAt,
+      replicated_from_control: 0,
+    });
+    FleetSyncService.getInstance().pushResourceAsync('misconfig_acknowledgements');
+    res.status(201).json(ack);
+    recordAckAudit(req, res, 'create', describeAckScope(ack));
+  } catch (error) {
+    const message = (error as Error).message || '';
+    if (message.includes('UNIQUE')) {
+      res.status(409).json({ error: 'An acknowledgement already exists for this rule and stack pattern.' });
+      return;
+    }
+    console.error('[Security] Failed to create misconfig acknowledgement:', error);
+    res.status(500).json({ error: 'Failed to create acknowledgement' });
+  }
+});
+
+securityRouter.put('/misconfig-acks/:id', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  if (blockIfReplica(res, 'misconfig acknowledgements')) return;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid acknowledgement id' }); return;
+  }
+  const body = req.body ?? {};
+  const updates: Partial<{ reason: string; stack_pattern: string | null; expires_at: number | null }> = {};
+  if (body.reason !== undefined) {
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (!reason) { res.status(400).json({ error: 'reason is required' }); return; }
+    if (reason.length > 2000) { res.status(400).json({ error: 'reason is too long' }); return; }
+    updates.reason = reason;
+  }
+  if (body.stack_pattern !== undefined) {
+    const pattern = body.stack_pattern == null || body.stack_pattern === ''
+      ? null
+      : String(body.stack_pattern).trim();
+    if (pattern !== null) {
+      if (pattern.length > 300) {
+        res.status(400).json({ error: 'stack_pattern is too long' }); return;
+      }
+      const patternError = validateStackPatternForRedos(pattern);
+      if (patternError) {
+        res.status(400).json({ error: patternError }); return;
+      }
+    }
+    updates.stack_pattern = pattern;
+  }
+  if (body.expires_at !== undefined) {
+    const expiresAt = body.expires_at == null ? null : Number(body.expires_at);
+    if (expiresAt !== null && !Number.isFinite(expiresAt)) {
+      res.status(400).json({ error: 'expires_at must be a timestamp or null' }); return;
+    }
+    updates.expires_at = expiresAt;
+  }
+  const ack = DatabaseService.getInstance().updateMisconfigAcknowledgement(id, updates);
+  if (!ack) {
+    res.status(404).json({ error: 'Acknowledgement not found' }); return;
+  }
+  FleetSyncService.getInstance().pushResourceAsync('misconfig_acknowledgements');
+  res.json(ack);
+  const changed = Object.keys(updates);
+  recordAckAudit(
+    req,
+    res,
+    'update',
+    `id=${id} ${describeAckScope(ack)} fields=[${changed.join(',')}]`,
+  );
+});
+
+securityRouter.delete('/misconfig-acks/:id', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  if (blockIfReplica(res, 'misconfig acknowledgements')) return;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid acknowledgement id' }); return;
+  }
+  const db = DatabaseService.getInstance();
+  // Snapshot before delete so the audit summary names the rule rather than the bare id.
+  const existing = db.getMisconfigAcknowledgement(id);
+  db.deleteMisconfigAcknowledgement(id);
+  FleetSyncService.getInstance().pushResourceAsync('misconfig_acknowledgements');
+  res.json({ success: true });
+  recordAckAudit(
+    req,
+    res,
+    'delete',
+    existing ? `id=${id} ${describeAckScope(existing)}` : `id=${id} (not found)`,
+  );
 });
 
 securityRouter.get('/compare', authMiddleware, (req: Request, res: Response): void => {

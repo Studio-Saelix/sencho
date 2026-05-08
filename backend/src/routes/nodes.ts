@@ -4,6 +4,8 @@ import crypto from 'crypto';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
+import { requireAdmiral } from '../middleware/tierGates';
+import { enrollmentLimiter } from '../middleware/rateLimiters';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
@@ -11,6 +13,7 @@ import { CAPABILITIES, getSenchoVersion, fetchRemoteMeta, type RemoteMeta } from
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotCloseCode } from '../pilot/protocol';
 import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
+import { FleetSyncService } from '../services/FleetSyncService';
 import { isValidRemoteUrl } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 
@@ -118,7 +121,7 @@ nodesRouter.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-nodesRouter.post('/', async (req: Request, res: Response) => {
+nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   if (!requirePermission(req, res, 'node:manage')) return;
   try {
@@ -155,6 +158,15 @@ nodesRouter.post('/', async (req: Request, res: Response) => {
 
     NodeRegistry.getInstance().notifyNodeAdded(id);
 
+    // Backfill replicated security state on the new remote so an operator who
+    // adds a node mid-life does not have to wait for the next policy edit
+    // before scan_policies and cve_suppressions land. No-op for local nodes
+    // and pilot-agent nodes (FleetSyncService.pushResource filters them out).
+    if (type === 'remote' && resolvedMode === 'proxy') {
+      FleetSyncService.getInstance().pushResourceAsync('scan_policies');
+      FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
+    }
+
     let enrollment: ReturnType<typeof mintPilotEnrollment> | null = null;
     if (resolvedMode === 'pilot_agent') {
       enrollment = mintPilotEnrollment(id, req);
@@ -179,7 +191,7 @@ nodesRouter.post('/', async (req: Request, res: Response) => {
   }
 });
 
-nodesRouter.post('/:id/pilot/enroll', async (req: Request, res: Response) => {
+nodesRouter.post('/:id/pilot/enroll', enrollmentLimiter, async (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   const nodeIdStr = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdStr)) return;
@@ -252,6 +264,68 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('Failed to delete node:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to delete node' });
+  }
+});
+
+nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  const nodeIdParam = req.params.id as string;
+  if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
+  if (!requireAdmiral(req, res)) return;
+  const id = parseInt(nodeIdParam, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'Invalid node id' });
+    return;
+  }
+  const rawReason = (req.body && typeof req.body === 'object') ? (req.body as { reason?: unknown }).reason : undefined;
+  let reason: string | null = null;
+  if (rawReason !== undefined && rawReason !== null) {
+    if (typeof rawReason !== 'string') {
+      res.status(400).json({ error: 'reason must be a string' });
+      return;
+    }
+    const trimmed = rawReason.trim();
+    if (trimmed.length > 256) {
+      res.status(400).json({ error: 'reason must be 256 characters or fewer' });
+      return;
+    }
+    reason = trimmed.length > 0 ? trimmed : null;
+  }
+  try {
+    const existing = DatabaseService.getInstance().getNode(id);
+    if (!existing) {
+      res.status(404).json({ error: 'Node not found' });
+      return;
+    }
+    const updated = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+    res.set('cache-control', 'no-store').json(updated);
+  } catch (error: unknown) {
+    console.error('Failed to cordon node:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to cordon node' });
+  }
+});
+
+nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  const nodeIdParam = req.params.id as string;
+  if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
+  if (!requireAdmiral(req, res)) return;
+  const id = parseInt(nodeIdParam, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'Invalid node id' });
+    return;
+  }
+  try {
+    const existing = DatabaseService.getInstance().getNode(id);
+    if (!existing) {
+      res.status(404).json({ error: 'Node not found' });
+      return;
+    }
+    const updated = DatabaseService.getInstance().setNodeCordoned(id, false, null);
+    res.set('cache-control', 'no-store').json(updated);
+  } catch (error: unknown) {
+    console.error('Failed to uncordon node:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to uncordon node' });
   }
 });
 

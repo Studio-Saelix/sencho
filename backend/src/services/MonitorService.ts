@@ -13,8 +13,8 @@ const getMetricDetails = (metric: string): { name: string, unit: string } => {
         case 'cpu_percent': return { name: 'CPU usage', unit: '%' };
         case 'memory_percent': return { name: 'Memory usage', unit: '%' };
         case 'memory_mb': return { name: 'Memory allocation', unit: ' MB' };
-        case 'net_rx': return { name: 'Inbound network traffic', unit: ' MB' };
-        case 'net_tx': return { name: 'Outbound network traffic', unit: ' MB' };
+        case 'net_rx': return { name: 'Inbound network traffic', unit: ' MB/s' };
+        case 'net_tx': return { name: 'Outbound network traffic', unit: ' MB/s' };
         case 'restart_count': return { name: 'Restart count', unit: ' restarts' };
         default: return { name: metric, unit: '' };
     }
@@ -57,6 +57,29 @@ const HOST_ALERT_KEYS = {
     janitor: 'last_janitor_alert_timestamp',
 } as const;
 
+const STATS_TIMEOUT_MS = 10_000;
+const FLOAT_EQ_EPSILON = 0.01;
+
+class TimeoutError extends Error {
+    constructor(label: string, ms: number) {
+        super(`Timeout: ${label} after ${ms}ms`);
+        this.name = 'TimeoutError';
+    }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    // Note: JavaScript Promise.race does not cancel the losing promise.
+    // A timed-out Docker API or systeminformation call continues in the
+    // background until it resolves or the process exits. True cancellation
+    // requires AbortController plumbing through DockerController and
+    // systeminformation, which is a structural limitation of the codebase.
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new TimeoutError(label, ms)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 export class MonitorService {
     private static instance: MonitorService;
     private intervalId: NodeJS.Timeout | null = null;
@@ -65,6 +88,10 @@ export class MonitorService {
     // Track the duration a specific stack alert rule has been in breach state
     // key: rule_id, value: AlertState
     private activeBreaches = new Map<number, AlertState>();
+
+    // Track previous network counters per container for rate calculation.
+    // key: container_id, value: { rx bytes, tx bytes, sample timestamp }
+    private previousNetworkStats = new Map<string, { rx: number; tx: number; ts: number }>();
 
     // Crash and healthcheck detection live in DockerEventService (event-driven,
     // causal classification). MonitorService no longer polls for container
@@ -109,12 +136,21 @@ export class MonitorService {
         if (this.isProcessing) return; // Prevent overlap if slow
         this.isProcessing = true;
 
+        const cycleStart = Date.now();
         try {
             const db = DatabaseService.getInstance();
             const settings = db.getGlobalSettings();
 
             await this.evaluateGlobalSettings(settings);
             await this.evaluateStackAlerts(db);
+
+            const elapsed = Date.now() - cycleStart;
+            if (elapsed > 25_000) {
+                console.warn(`MonitorService evaluation cycle took ${elapsed}ms (threshold: 25s)`);
+            }
+            if (isDebugEnabled()) {
+                console.log(`[Monitor:diag] Cycle completed in ${elapsed}ms, ${this.activeBreaches.size} active breach(es)`);
+            }
         } catch (error) {
             console.error('MonitorService Evaluation Error:', error);
         } finally {
@@ -125,9 +161,14 @@ export class MonitorService {
     private async evaluateGlobalSettings(settings: Record<string, string>) {
         const HOST_ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between repeat alerts
 
-        // 1. Host Limits
+        // 1. Host Limits — fetch CPU, RAM, disk concurrently
         try {
-            const currentLoad = await si.currentLoad();
+            const [currentLoad, mem, fsSize] = await Promise.all([
+                withTimeout(si.currentLoad(), STATS_TIMEOUT_MS, 'host CPU stats'),
+                withTimeout(si.mem(), STATS_TIMEOUT_MS, 'host RAM stats'),
+                withTimeout(si.fsSize(), STATS_TIMEOUT_MS, 'host disk stats'),
+            ]);
+
             const cpuUsage = currentLoad.currentLoad;
             const cpuLimit = parseFloat(settings['host_cpu_limit']);
             if (!isNaN(cpuLimit) && cpuLimit > 0 && cpuUsage > cpuLimit) {
@@ -135,7 +176,6 @@ export class MonitorService {
                     `Host CPU utilization is critically high: ${cpuUsage.toFixed(1)}% (Threshold: ${cpuLimit}%)`);
             }
 
-            const mem = await si.mem();
             const ramUsage = (mem.used / mem.total) * 100;
             const ramLimit = parseFloat(settings['host_ram_limit']);
             if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
@@ -143,7 +183,6 @@ export class MonitorService {
                     `Host Memory utilization is critically high: ${ramUsage.toFixed(1)}% (Threshold: ${ramLimit}%)`);
             }
 
-            const fsSize = await si.fsSize();
             const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
             if (mainDisk) {
                 const diskLimit = parseFloat(settings['host_disk_limit']);
@@ -169,7 +208,11 @@ export class MonitorService {
                 // walked the human-readable "1.196GB" Reclaimable strings with
                 // a regex; the API returns raw byte counts and saves a fork
                 // every monitor tick (default 30 s).
-                const usage = await DockerController.getInstance().getDiskUsage();
+                const usage = await withTimeout(
+                    DockerController.getInstance().getDiskUsage(),
+                    STATS_TIMEOUT_MS,
+                    'docker disk usage',
+                );
                 const totalReclaimableBytes =
                     usage.reclaimableImages +
                     usage.reclaimableContainers +
@@ -298,7 +341,11 @@ export class MonitorService {
                     const stackName = container.Labels?.['com.docker.compose.project'] || 'system';
 
                     try {
-                        const rawStats = await docker.getContainerStatsStream(container.Id);
+                        const rawStats = await withTimeout(
+                            docker.getContainerStatsStream(container.Id),
+                            STATS_TIMEOUT_MS,
+                            `stats for ${container.Id}`,
+                        );
                         const stats: DockerContainerStats = JSON.parse(rawStats);
 
                         const usedMemory = (stats.memory_stats?.usage || 0) - (stats.memory_stats?.stats?.cache || 0);
@@ -310,12 +357,29 @@ export class MonitorService {
                             ? await docker.getContainerRestartCount(container.Id)
                             : 0;
 
+                        // Network rate calculation: compute delta from previous sample
+                        // to produce MB/s instead of meaningless cumulative totals.
+                        const rawRxMb = this.calculateNetwork(stats, 'rx');
+                        const rawTxMb = this.calculateNetwork(stats, 'tx');
+                        const now = Date.now();
+                        const prevNet = this.previousNetworkStats.get(container.Id);
+                        let netRxRate = 0;
+                        let netTxRate = 0;
+                        if (prevNet) {
+                            const elapsedSec = (now - prevNet.ts) / 1000;
+                            if (elapsedSec > 0) {
+                                netRxRate = Math.max(0, (rawRxMb - prevNet.rx) / elapsedSec);
+                                netTxRate = Math.max(0, (rawTxMb - prevNet.tx) / elapsedSec);
+                            }
+                        }
+                        this.previousNetworkStats.set(container.Id, { rx: rawRxMb, tx: rawTxMb, ts: now });
+
                         const metrics = {
                             cpu_percent: this.calculateCpuPercent(stats),
                             memory_percent: this.calculateMemoryPercent(stats),
                             memory_mb: Math.max(0, usedMemory) / (1024 * 1024),
-                            net_rx: this.calculateNetwork(stats, 'rx'),
-                            net_tx: this.calculateNetwork(stats, 'tx'),
+                            net_rx: netRxRate,
+                            net_tx: netTxRate,
                             restart_count: restartCount,
                         };
 
@@ -324,9 +388,9 @@ export class MonitorService {
                             stack_name: stackName,
                             cpu_percent: metrics.cpu_percent || 0,
                             memory_mb: metrics.memory_mb || 0,
-                            net_rx_mb: metrics.net_rx || 0,
-                            net_tx_mb: metrics.net_tx || 0,
-                            timestamp: Date.now()
+                            net_rx_mb: netRxRate || 0,
+                            net_tx_mb: netTxRate || 0,
+                            timestamp: now,
                         });
 
                         for (const rule of stackAlerts) {
@@ -362,7 +426,7 @@ export class MonitorService {
 
                                         const message = `[Node: ${node.name}] The **${metricName}** for **${rule.stack_name}** ${operatorPhrase} **${safeThreshold}${unit}** (Currently: ${safeCurrent}${unit}).`;
 
-                                        if (isDebugEnabled()) console.log(`[Monitor:diag] Duration met for rule ${ruleId}, dispatching alert`);
+                                        console.log(`[MonitorService] Alert fired: rule ${ruleId} on stack "${rule.stack_name}" — ${metricName} ${operatorPhrase} ${safeThreshold}${unit}`);
                                         await NotificationService.getInstance().dispatchAlert(
                                             'warning',
                                             'monitor_alert',
@@ -393,11 +457,31 @@ export class MonitorService {
                         if (err?.statusCode === 404 || err?.reason === 'no such container') {
                             continue;
                         }
+                        if (e instanceof TimeoutError) {
+                            console.warn(`Stats timeout for container ${container.Id} on node ${node.name}`);
+                            continue;
+                        }
                         console.error(`Error parsing stats for container ${container.Id} on node ${node.name}`, e);
+                    }
+                }
+
+                // Clean up stale network stats for containers on this node that no longer run
+                if (this.previousNetworkStats.size > containers.length * 2) {
+                    const currentIds = new Set(containers.map(c => c.Id));
+                    for (const key of this.previousNetworkStats.keys()) {
+                        if (!currentIds.has(key)) this.previousNetworkStats.delete(key);
                     }
                 }
             } catch (err) {
                 console.error(`Error fetching containers for node ${node.name}`, err);
+            }
+        }
+
+        // Clean up stale breach trackers for rules that have been deleted
+        const activeRuleIds = new Set(alerts.map(a => a.id!));
+        for (const key of this.activeBreaches.keys()) {
+            if (!activeRuleIds.has(key)) {
+                this.activeBreaches.delete(key);
             }
         }
 
@@ -421,7 +505,7 @@ export class MonitorService {
             case '<': return actual < threshold;
             case '>=': return actual >= threshold;
             case '<=': return actual <= threshold;
-            case '==': return actual === threshold;
+            case '==': return Math.abs(actual - threshold) < FLOAT_EQ_EPSILON;
             default: return false;
         }
     }

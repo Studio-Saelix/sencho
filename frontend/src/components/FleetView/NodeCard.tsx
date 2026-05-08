@@ -2,14 +2,24 @@ import { useState } from 'react';
 import {
     Server, Cpu, MemoryStick, HardDrive, ChevronDown, ChevronRight,
     Layers, Wifi, WifiOff, AlertTriangle, Download, Loader2,
+    MoreVertical, Ban,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ConfirmModal } from '@/components/ui/modal';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { formatBytes } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
+import { useLicense } from '@/context/LicenseContext';
+import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import { StackSection } from './NodeCardStackList';
 import type { Label as StackLabel } from '../label-types';
@@ -27,6 +37,7 @@ export interface NodeCardProps {
     updatingNodeId?: number | null;
     onRetryUpdate?: (nodeId: number) => void;
     onDismissUpdate?: (nodeId: number) => void;
+    onCordonChange?: () => void;
 }
 
 // --- Sub-Components ---
@@ -44,10 +55,16 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
+    const [cordonModalOpen, setCordonModalOpen] = useState(false);
+    const [cordonReason, setCordonReason] = useState('');
+    const [cordonSubmitting, setCordonSubmitting] = useState(false);
+
+    const { isPaid, license } = useLicense();
+    const isAdmiral = isPaid && license?.variant === 'admiral';
 
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
@@ -56,6 +73,31 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
     const cpuPercent = getNodeCpu(node);
     const memPercent = getNodeMem(node);
     const diskPercent = getNodeDisk(node);
+
+    const openCordonModal = () => {
+        setCordonReason('');
+        setCordonModalOpen(true);
+    };
+
+    const handleCordonConfirm = async () => {
+        setCordonSubmitting(true);
+        try {
+            if (node.cordoned) {
+                await uncordonNode(node.id);
+                toast.success(`Uncordoned ${node.name}`);
+            } else {
+                await cordonNode(node.id, cordonReason.trim() || null);
+                toast.success(`Cordoned ${node.name}`);
+            }
+            setCordonModalOpen(false);
+            onCordonChange?.();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update cordon state';
+            toast.error(message);
+        } finally {
+            setCordonSubmitting(false);
+        }
+    };
 
     const handleExpand = async () => {
         const next = !expanded;
@@ -89,9 +131,30 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
             {/* Card Header */}
             <div className="relative p-4 pb-3">
                 {isLocal && (
-                    <span className="absolute top-3 right-3 font-mono text-[9px] uppercase tracking-[0.22em] text-brand">
+                    <span className={`absolute top-3 font-mono text-[9px] uppercase tracking-[0.22em] text-brand ${isAdmiral ? 'right-9' : 'right-3'}`}>
                         ★ Local
                     </span>
+                )}
+                {isAdmiral && (
+                    <div className="absolute top-2 right-2">
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <button
+                                    type="button"
+                                    aria-label="Node actions"
+                                    className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                                >
+                                    <MoreVertical className="w-4 h-4" />
+                                </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-48">
+                                <DropdownMenuItem onSelect={openCordonModal}>
+                                    <Ban className="w-3.5 h-3.5 mr-2" />
+                                    {node.cordoned ? 'Uncordon node' : 'Cordon node'}
+                                </DropdownMenuItem>
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    </div>
                 )}
                 <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2.5 min-w-0">
@@ -132,6 +195,15 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                 {isOnline && isCritical(node) && (
                                     <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
                                         <AlertTriangle className="w-2.5 h-2.5 mr-0.5" /> Critical
+                                    </Badge>
+                                )}
+                                {node.cordoned && (
+                                    <Badge
+                                        variant="outline"
+                                        className="text-[10px] px-1.5 py-0 h-4 shrink-0 bg-warning/15 text-warning border-warning/30"
+                                        title={node.cordoned_reason ?? 'Unschedulable: new blueprint deployments skip this node'}
+                                    >
+                                        <Ban className="w-2.5 h-2.5 mr-0.5" /> Cordoned
                                     </Badge>
                                 )}
                             </div>
@@ -218,6 +290,39 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                     </div>
                 )}
             </div>
+
+            <ConfirmModal
+                open={cordonModalOpen}
+                onOpenChange={(open) => {
+                    if (!cordonSubmitting) setCordonModalOpen(open);
+                }}
+                kicker="Federation"
+                title={node.cordoned ? `Uncordon ${node.name}` : `Cordon ${node.name}`}
+                description={node.cordoned
+                    ? 'Re-enable this node for new blueprint placements. Existing deployments are unchanged.'
+                    : 'Mark this node as unschedulable. New blueprint deployments will skip it. Existing deployments remain in place.'}
+                confirmLabel={node.cordoned ? 'Uncordon node' : 'Cordon node'}
+                confirming={cordonSubmitting}
+                onConfirm={handleCordonConfirm}
+            >
+                {!node.cordoned && (
+                    <div className="space-y-1.5">
+                        <label htmlFor={`cordon-reason-${node.id}`} className="text-xs font-medium text-muted-foreground">
+                            Reason (optional)
+                        </label>
+                        <input
+                            id={`cordon-reason-${node.id}`}
+                            type="text"
+                            maxLength={256}
+                            value={cordonReason}
+                            onChange={(e) => setCordonReason(e.target.value)}
+                            placeholder="e.g. draining for maintenance"
+                            className="w-full h-8 px-2 text-sm rounded-md border border-input bg-background"
+                            disabled={cordonSubmitting}
+                        />
+                    </div>
+                )}
+            </ConfirmModal>
 
             {/* Expandable Stack List with Container Drill-Down */}
             {isOnline && (

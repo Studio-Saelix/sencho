@@ -5,24 +5,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { ChevronLeft, ChevronRight, Plus, ShieldOff, Trash2 } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
@@ -273,94 +256,89 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
         </ScrollArea>
       )}
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>New Suppression</DialogTitle>
-            <DialogDescription className="sr-only">
-              Accept a CVE as known-benign so it stops triggering alerts across the fleet.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-2">
-              <Label htmlFor="s-cve">CVE or advisory ID</Label>
-              <Input
-                id="s-cve"
-                placeholder="CVE-2024-12345 or GHSA-xxxx-xxxx-xxxx"
-                value={form.cveId}
-                onChange={(e) => setForm({ ...form, cveId: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="s-pkg">Package (optional)</Label>
-              <Input
-                id="s-pkg"
-                placeholder="e.g. openssl (leave blank to match every package)"
-                value={form.pkgName}
-                onChange={(e) => setForm({ ...form, pkgName: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="s-image">Image pattern (optional)</Label>
-              <Input
-                id="s-image"
-                placeholder="e.g. registry.internal/* (leave blank for all images)"
-                value={form.imagePattern}
-                onChange={(e) => setForm({ ...form, imagePattern: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="s-reason">Reason</Label>
-              <textarea
-                id="s-reason"
-                className="flex min-h-[72px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                placeholder="Why is this CVE safe to accept?"
-                value={form.reason}
-                onChange={(e) => setForm({ ...form, reason: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="s-expiry">Expires in (days, optional)</Label>
-              <Input
-                id="s-expiry"
-                type="number"
-                min="1"
-                placeholder="Leave blank for no expiry"
-                value={form.expiresInDays}
-                onChange={(e) => setForm({ ...form, expiresInDays: e.target.value })}
-              />
-            </div>
+      <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
+        <ModalHeader
+          kicker="SUPPRESSIONS · NEW"
+          title="New suppression"
+          description="Accept a CVE as known-benign so it stops triggering alerts across the fleet."
+        />
+        <ModalBody>
+          <div className="space-y-2">
+            <Label htmlFor="s-cve">CVE or advisory ID</Label>
+            <Input
+              id="s-cve"
+              placeholder="CVE-2024-12345 or GHSA-xxxx-xxxx-xxxx"
+              value={form.cveId}
+              onChange={(e) => setForm({ ...form, cveId: e.target.value })}
+            />
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>
+          <div className="space-y-2">
+            <Label htmlFor="s-pkg">Package (optional)</Label>
+            <Input
+              id="s-pkg"
+              placeholder="e.g. openssl (leave blank to match every package)"
+              value={form.pkgName}
+              onChange={(e) => setForm({ ...form, pkgName: e.target.value })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="s-image">Image pattern (optional)</Label>
+            <Input
+              id="s-image"
+              placeholder="e.g. registry.internal/* (leave blank for all images)"
+              value={form.imagePattern}
+              onChange={(e) => setForm({ ...form, imagePattern: e.target.value })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="s-reason">Reason</Label>
+            <textarea
+              id="s-reason"
+              className="flex min-h-[72px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              placeholder="Why is this CVE safe to accept?"
+              value={form.reason}
+              onChange={(e) => setForm({ ...form, reason: e.target.value })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="s-expiry">Expires in (days, optional)</Label>
+            <Input
+              id="s-expiry"
+              type="number"
+              min="1"
+              placeholder="Leave blank for no expiry"
+              value={form.expiresInDays}
+              onChange={(e) => setForm({ ...form, expiresInDays: e.target.value })}
+            />
+          </div>
+        </ModalBody>
+        <ModalFooter
+          secondary={
+            <Button variant="outline" size="sm" onClick={() => setDialogOpen(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={saving}>
+          }
+          primary={
+            <Button size="sm" onClick={handleSave} disabled={saving}>
               {saving ? 'Saving...' : 'Create'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          }
+        />
+      </Modal>
 
-      <AlertDialog open={deleteRow !== null} onOpenChange={(open) => !open && setDeleteRow(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove suppression?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Future scan results will surface {deleteRow?.cve_id} again wherever it applies.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleDelete}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Remove
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmModal
+        open={deleteRow !== null}
+        onOpenChange={(open) => !open && setDeleteRow(null)}
+        variant="destructive"
+        kicker="SUPPRESSIONS · REMOVE · IRREVERSIBLE"
+        title="Remove suppression"
+        confirmLabel="Remove"
+        onConfirm={handleDelete}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Future scan results will surface <span className="font-mono font-medium text-stat-value">{deleteRow?.cve_id}</span> again wherever it applies.
+        </p>
+      </ConfirmModal>
     </div>
   );
 }

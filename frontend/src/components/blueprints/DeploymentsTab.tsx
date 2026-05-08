@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import {
-    Dialog, DialogContent, DialogHeader, DialogTitle,
-} from '@/components/ui/dialog';
+import { Modal, ModalHeader, ModalBody } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import {
     type BlueprintListItem,
@@ -117,16 +115,13 @@ export function DeploymentsTab() {
                 />
             )}
 
-            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-                <DialogContent className="sm:max-w-3xl max-h-[85vh] overflow-y-auto">
-                    <DialogHeader>
-                        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">
-                            New Blueprint
-                        </span>
-                        <DialogTitle className="font-serif italic text-xl tracking-[-0.01em]">
-                            Declare a fleet-wide compose template
-                        </DialogTitle>
-                    </DialogHeader>
+            <Modal open={createOpen} onOpenChange={setCreateOpen} className="max-w-3xl max-h-[85vh] overflow-y-auto">
+                <ModalHeader
+                    kicker="BLUEPRINTS · NEW"
+                    title="Declare a fleet-wide compose template"
+                    description="Create a blueprint that can be deployed across the fleet."
+                />
+                <ModalBody>
                     <BlueprintEditor
                         mode="create"
                         distinctLabels={distinctLabels}
@@ -134,8 +129,8 @@ export function DeploymentsTab() {
                         onSubmit={handleCreate}
                         submitting={submitting}
                     />
-                </DialogContent>
-            </Dialog>
+                </ModalBody>
+            </Modal>
         </div>
     );
 }

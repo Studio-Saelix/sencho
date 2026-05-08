@@ -33,6 +33,7 @@ export interface Blueprint {
     created_at: number;
     updated_at: number;
     created_by: string | null;
+    pinned_node_id: number | null;
 }
 
 export interface BlueprintListItem extends Blueprint {
@@ -172,11 +173,20 @@ export async function applyBlueprint(id: number): Promise<{ message: string }> {
     return expectJson(res, 'Failed to apply blueprint');
 }
 
+export async function pinBlueprint(id: number, nodeId: number | null): Promise<Blueprint> {
+    const res = await apiFetch(`/blueprints/${id}/pin`, {
+        method: 'PUT',
+        body: JSON.stringify({ nodeId }),
+        localOnly: true,
+    });
+    return expectJson<Blueprint>(res, 'Failed to update blueprint pin');
+}
+
 export async function withdrawDeployment(
     blueprintId: number,
     nodeId: number,
     confirm: WithdrawConfirm,
-): Promise<{ status: BlueprintDeploymentStatus; error: string | null; snapshotPolicy: WithdrawConfirm }> {
+): Promise<{ status: BlueprintDeploymentStatus; error: string | null; snapshotPolicy: WithdrawConfirm; snapshotId: number | null }> {
     const res = await apiFetch(`/blueprints/${blueprintId}/withdraw/${nodeId}`, {
         method: 'POST',
         body: JSON.stringify({ confirm }),

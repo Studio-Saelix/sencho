@@ -1,11 +1,5 @@
 import { useState, useEffect } from 'react';
-import {
-    Sheet,
-    SheetContent,
-    SheetDescription,
-    SheetHeader,
-    SheetTitle,
-} from '@/components/ui/sheet';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import {
     AlertDialog,
     AlertDialogAction,
@@ -20,13 +14,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Combobox } from '@/components/ui/combobox';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { TogglePill } from '@/components/ui/toggle-pill';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Trash2, HelpCircle, AlertTriangle, Info, CheckCircle2, Loader2 } from 'lucide-react';
+import { Trash2, HelpCircle, AlertTriangle, Info, CheckCircle2, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
+import { useLicense } from '@/context/LicenseContext';
 
 interface StackAlert {
     id?: number;
@@ -38,10 +33,42 @@ interface StackAlert {
     cooldown_mins: number;
 }
 
+interface AutoHealPolicy {
+    id?: number;
+    stack_name: string;
+    service_name: string | null;
+    unhealthy_duration_mins: number;
+    cooldown_mins: number;
+    max_restarts_per_hour: number;
+    auto_disable_after_failures: number;
+    enabled: number;
+    consecutive_failures: number;
+    last_fired_at: number;
+    created_at: number;
+    updated_at: number;
+}
+
+interface AutoHealHistoryEntry {
+    id?: number;
+    policy_id: number;
+    stack_name: string;
+    service_name: string | null;
+    container_name: string;
+    container_id: string;
+    action: 'restarted' | 'skipped_user_action' | 'skipped_cooldown' | 'skipped_rate_limit' | 'failed' | 'policy_auto_disabled';
+    reason: string;
+    success: number;
+    error: string | null;
+    timestamp: number;
+}
+
+type MonitorTab = 'alerts' | 'auto-heal';
+
 interface StackAlertSheetProps {
-    isOpen: boolean;
-    onClose: () => void;
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
     stackName: string;
+    initialTab?: MonitorTab;
 }
 
 interface AgentStatus {
@@ -54,8 +81,8 @@ const metricOptions = [
     { value: 'cpu_percent', label: 'CPU Usage (%)' },
     { value: 'memory_percent', label: 'Memory Usage (%)' },
     { value: 'memory_mb', label: 'Memory Usage (MB)' },
-    { value: 'net_rx', label: 'Network In (MB)' },
-    { value: 'net_tx', label: 'Network Out (MB)' },
+    { value: 'net_rx', label: 'Network In (MB/s)' },
+    { value: 'net_tx', label: 'Network Out (MB/s)' },
     { value: 'restart_count', label: 'Restart Count' },
 ];
 
@@ -81,7 +108,60 @@ const clampNonNegative = (setter: (v: string) => void) => (e: React.ChangeEvent<
     setter(val);
 };
 
-export function StackAlertSheet({ isOpen, onClose, stackName }: StackAlertSheetProps) {
+function actionColorClass(action: AutoHealHistoryEntry['action']): string {
+    if (action === 'restarted') return 'text-success';
+    if (action === 'failed' || action === 'policy_auto_disabled') return 'text-destructive';
+    return 'text-muted-foreground';
+}
+
+function actionLabel(action: AutoHealHistoryEntry['action']): string {
+    switch (action) {
+        case 'restarted': return 'Restarted';
+        case 'skipped_user_action': return 'Skipped (user action)';
+        case 'skipped_cooldown': return 'Skipped (cooldown)';
+        case 'skipped_rate_limit': return 'Skipped (rate limit)';
+        case 'failed': return 'Failed';
+        case 'policy_auto_disabled': return 'Auto-disabled';
+    }
+}
+
+export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'alerts' }: StackAlertSheetProps) {
+    const { isPaid } = useLicense();
+    // Per Sencho convention: paid features hide their trigger entirely. Community users
+    // never see the Auto-heal tab, and a stray initialTab='auto-heal' falls back to alerts.
+    const effectiveInitialTab: MonitorTab = !isPaid && initialTab === 'auto-heal' ? 'alerts' : initialTab;
+    const [activeTab, setActiveTab] = useState<MonitorTab>(effectiveInitialTab);
+
+    useEffect(() => {
+        if (open) setActiveTab(effectiveInitialTab);
+    }, [open, effectiveInitialTab, stackName]);
+
+    const tabs = isPaid
+        ? [
+            { id: 'alerts', label: 'Alerts' },
+            { id: 'auto-heal', label: 'Auto-heal' },
+        ]
+        : [{ id: 'alerts', label: 'Alerts' }];
+
+    return (
+        <SystemSheet
+            open={open}
+            onOpenChange={onOpenChange}
+            crumb={['Stack', stackName || '—', 'Monitor']}
+            name={stackName || 'Stack monitor'}
+            meta={activeTab === 'alerts' ? 'Alert rules' : 'Auto-heal policies'}
+            tabs={tabs}
+            activeTab={activeTab}
+            onTabChange={(id) => setActiveTab(id as MonitorTab)}
+            size="md"
+        >
+            {activeTab === 'alerts' && <AlertsTab stackName={stackName} />}
+            {activeTab === 'auto-heal' && isPaid && <AutoHealTab stackName={stackName} open={open} />}
+        </SystemSheet>
+    );
+}
+
+function AlertsTab({ stackName }: { stackName: string }) {
     const { isAdmin } = useAuth();
     const { activeNode } = useNodes();
     const isRemote = activeNode?.type === 'remote';
@@ -95,7 +175,6 @@ export function StackAlertSheet({ isOpen, onClose, stackName }: StackAlertSheetP
         enabledTypes: [],
     });
 
-    // New Alert Form State
     const [metric, setMetric] = useState('cpu_percent');
     const [operator, setOperator] = useState('>');
     const [threshold, setThreshold] = useState('');
@@ -103,11 +182,10 @@ export function StackAlertSheet({ isOpen, onClose, stackName }: StackAlertSheetP
     const [cooldown, setCooldown] = useState('60');
 
     useEffect(() => {
-        if (isOpen && stackName) {
-            fetchAlerts();
-            fetchAgentStatus();
-        }
-    }, [isOpen, stackName]); // eslint-disable-line react-hooks/exhaustive-deps
+        if (!stackName) return;
+        fetchAlerts();
+        fetchAgentStatus();
+    }, [stackName]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const fetchAlerts = async () => {
         try {
@@ -124,7 +202,6 @@ export function StackAlertSheet({ isOpen, onClose, stackName }: StackAlertSheetP
     const fetchAgentStatus = async () => {
         setAgentStatus(prev => ({ ...prev, loading: true }));
         try {
-            // Always fetch agents from the active node (proxied via x-node-id for remote)
             const res = await apiFetch('/agents');
             if (res.ok) {
                 const agents: Array<{ type: string; enabled: boolean }> = await res.json();
@@ -148,7 +225,6 @@ export function StackAlertSheet({ isOpen, onClose, stackName }: StackAlertSheetP
             toast.error('Please enter a threshold.');
             return;
         }
-
         setIsLoading(true);
         const newAlert = {
             stack_name: stackName,
@@ -158,7 +234,6 @@ export function StackAlertSheet({ isOpen, onClose, stackName }: StackAlertSheetP
             duration_mins: parseInt(duration, 10),
             cooldown_mins: parseInt(cooldown, 10),
         };
-
         try {
             const res = await apiFetch('/alerts', {
                 method: 'POST',
@@ -263,179 +338,122 @@ export function StackAlertSheet({ isOpen, onClose, stackName }: StackAlertSheetP
     };
 
     return (
-        <>
-            <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
-                <SheetContent className="sm:max-w-[420px] flex flex-col">
-                    <SheetHeader>
-                        <SheetTitle>Stack Alerts: {stackName}</SheetTitle>
-                        <SheetDescription>
-                            Configure metric thresholds to trigger notifications for this stack.
-                        </SheetDescription>
-                    </SheetHeader>
+        <TooltipProvider>
+            <SheetSection title="Notification channels">
+                {renderAgentStatusBanner()}
+            </SheetSection>
 
-                    <ScrollArea className="flex-1">
-                        <TooltipProvider>
-                            <div className="mt-4 space-y-5 pr-2">
-                                {/* Notification agent status banner */}
-                                {renderAgentStatusBanner()}
-
-                                {/* List Existing Alerts */}
-                                <div className="space-y-3">
-                                    <h4 className="text-sm font-medium">Existing Rules</h4>
-                                    {alerts.length === 0 ? (
-                                        <div className="text-sm text-muted-foreground p-4 bg-muted/50 rounded-lg text-center">
-                                            No active alert rules for this stack.
-                                        </div>
-                                    ) : (
-                                        alerts.map(alert => (
-                                            <div key={alert.id} className="flex flex-col gap-2 p-3 bg-muted/50 rounded-lg border text-sm">
-                                                <div className="flex justify-between items-start">
-                                                    <div>
-                                                        <span className="font-medium text-foreground">
-                                                            {metricLabels[alert.metric] || alert.metric} {alert.operator} {alert.threshold}
-                                                        </span>
-                                                        <div className="text-muted-foreground mt-1">
-                                                            Trigger after {alert.duration_mins}m &bull; Cooldown: {alert.cooldown_mins}m
-                                                        </div>
-                                                    </div>
-                                                    {isAdmin && <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
-                                                        onClick={() => alert.id && setConfirmDeleteId(alert.id)}
-                                                        disabled={isLoading}
-                                                    >
-                                                        <Trash2 className="h-4 w-4" strokeWidth={1.5} />
-                                                    </Button>}
-                                                </div>
-                                            </div>
-                                        ))
-                                    )}
+            <SheetSection title="Active rules">
+                {alerts.length === 0 ? (
+                    <div className="text-sm text-muted-foreground text-center py-4">
+                        No active alert rules for this stack.
+                    </div>
+                ) : (
+                    <div className="space-y-2">
+                        {alerts.map(alert => (
+                            <div key={alert.id} className="flex justify-between items-start gap-2 py-2 border-b border-card-border/40 last:border-b-0 text-sm">
+                                <div>
+                                    <span className="font-medium text-foreground">
+                                        {metricLabels[alert.metric] || alert.metric} {alert.operator} {alert.threshold}
+                                    </span>
+                                    <div className="text-muted-foreground text-xs mt-0.5">
+                                        Trigger after {alert.duration_mins}m &bull; Cooldown {alert.cooldown_mins}m
+                                    </div>
                                 </div>
-
-                                <hr />
-
-                                {/* Add New Alert Form */}
-                                {isAdmin && <div className="space-y-4">
-                                    <h4 className="text-sm font-medium">Add New Rule</h4>
-
-                                    <div className="space-y-2">
-                                        <div className="flex items-center gap-2">
-                                            <Label>Metric</Label>
-                                            <Tooltip>
-                                                <TooltipTrigger asChild>
-                                                    <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" strokeWidth={1.5} />
-                                                </TooltipTrigger>
-                                                <TooltipContent>
-                                                    <p className="max-w-[200px] text-sm">The system resource or metric to monitor. Select from CPU, Memory, Network I/O, or Restarts.</p>
-                                                </TooltipContent>
-                                            </Tooltip>
-                                        </div>
-                                        <Combobox
-                                            options={metricOptions}
-                                            value={metric}
-                                            onValueChange={setMetric}
-                                            placeholder="Select metric..."
-                                            searchPlaceholder="Search metrics..."
-                                        />
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-2">
-                                            <div className="flex items-center gap-2">
-                                                <Label>Operator</Label>
-                                                <Tooltip>
-                                                    <TooltipTrigger asChild>
-                                                        <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" strokeWidth={1.5} />
-                                                    </TooltipTrigger>
-                                                    <TooltipContent>
-                                                        <p className="max-w-[200px] text-sm">The comparison condition to trigger the alert against the threshold.</p>
-                                                    </TooltipContent>
-                                                </Tooltip>
-                                            </div>
-                                            <Combobox
-                                                options={operatorOptions}
-                                                value={operator}
-                                                onValueChange={setOperator}
-                                                placeholder="Select operator..."
-                                            />
-                                        </div>
-                                        <div className="space-y-2">
-                                            <div className="flex items-center gap-2">
-                                                <Label>Threshold</Label>
-                                                <Tooltip>
-                                                    <TooltipTrigger asChild>
-                                                        <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" strokeWidth={1.5} />
-                                                    </TooltipTrigger>
-                                                    <TooltipContent>
-                                                        <p className="max-w-[200px] text-sm">The numerical value the metric needs to breach to trigger the conditions.</p>
-                                                    </TooltipContent>
-                                                </Tooltip>
-                                            </div>
-                                            <Input
-                                                type="number"
-                                                min={0}
-                                                value={threshold}
-                                                onChange={clampNonNegative(setThreshold)}
-                                                placeholder="e.g. 90"
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-2">
-                                            <div className="flex items-center gap-2">
-                                                <Label>Duration (mins)</Label>
-                                                <Tooltip>
-                                                    <TooltipTrigger asChild>
-                                                        <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" strokeWidth={1.5} />
-                                                    </TooltipTrigger>
-                                                    <TooltipContent>
-                                                        <p className="max-w-[200px] text-sm">How long the metric must stay in breach of the threshold before sending an alert.</p>
-                                                    </TooltipContent>
-                                                </Tooltip>
-                                            </div>
-                                            <Input
-                                                type="number"
-                                                min={0}
-                                                value={duration}
-                                                onChange={clampNonNegative(setDuration)}
-                                            />
-                                        </div>
-                                        <div className="space-y-2">
-                                            <div className="flex items-center gap-2">
-                                                <Label>Cooldown (mins)</Label>
-                                                <Tooltip>
-                                                    <TooltipTrigger asChild>
-                                                        <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" strokeWidth={1.5} />
-                                                    </TooltipTrigger>
-                                                    <TooltipContent>
-                                                        <p className="max-w-[200px] text-sm">How long to wait before sending another alert if the stack continues to breach.</p>
-                                                    </TooltipContent>
-                                                </Tooltip>
-                                            </div>
-                                            <Input
-                                                type="number"
-                                                min={0}
-                                                value={cooldown}
-                                                onChange={clampNonNegative(setCooldown)}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <Button className="w-full mt-2" onClick={addAlert} disabled={isLoading}>
-                                        {isLoading ? (
-                                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</>
-                                        ) : (
-                                            'Add Rule'
-                                        )}
+                                {isAdmin && (
+                                    <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
+                                        onClick={() => alert.id && setConfirmDeleteId(alert.id)}
+                                        disabled={isLoading}
+                                    >
+                                        <Trash2 className="h-4 w-4" strokeWidth={1.5} />
                                     </Button>
-                                </div>}
+                                )}
                             </div>
-                        </TooltipProvider>
-                    </ScrollArea>
-                </SheetContent>
-            </Sheet>
+                        ))}
+                    </div>
+                )}
+            </SheetSection>
+
+            {isAdmin && (
+                <SheetSection title="Add new rule">
+                    <div className="space-y-3">
+                        <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                                <Label>Metric</Label>
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" strokeWidth={1.5} />
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                        <p className="max-w-[200px] text-sm">The system resource or metric to monitor. Select from CPU, Memory, Network I/O, or Restarts.</p>
+                                    </TooltipContent>
+                                </Tooltip>
+                            </div>
+                            <Combobox
+                                options={metricOptions}
+                                value={metric}
+                                onValueChange={setMetric}
+                                placeholder="Select metric..."
+                                searchPlaceholder="Search metrics..."
+                            />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-2">
+                                <Label>Operator</Label>
+                                <Combobox
+                                    options={operatorOptions}
+                                    value={operator}
+                                    onValueChange={setOperator}
+                                    placeholder="Select operator..."
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <Label>Threshold</Label>
+                                <Input
+                                    type="number"
+                                    min={0}
+                                    value={threshold}
+                                    onChange={clampNonNegative(setThreshold)}
+                                    placeholder="e.g. 90"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-2">
+                                <Label>Duration (mins)</Label>
+                                <Input
+                                    type="number"
+                                    min={0}
+                                    value={duration}
+                                    onChange={clampNonNegative(setDuration)}
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <Label>Cooldown (mins)</Label>
+                                <Input
+                                    type="number"
+                                    min={0}
+                                    value={cooldown}
+                                    onChange={clampNonNegative(setCooldown)}
+                                />
+                            </div>
+                        </div>
+
+                        <Button className="w-full mt-2" onClick={addAlert} disabled={isLoading}>
+                            {isLoading ? (
+                                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</>
+                            ) : (
+                                'Add Rule'
+                            )}
+                        </Button>
+                    </div>
+                </SheetSection>
+            )}
 
             <AlertDialog open={!!confirmDeleteId} onOpenChange={(open) => !open && setConfirmDeleteId(null)}>
                 <AlertDialogContent>
@@ -456,6 +474,349 @@ export function StackAlertSheet({ isOpen, onClose, stackName }: StackAlertSheetP
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
+        </TooltipProvider>
+    );
+}
+
+function AutoHealTab({ stackName, open }: { stackName: string; open: boolean }) {
+    const [policies, setPolicies] = useState<AutoHealPolicy[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [deleting, setDeleting] = useState(false);
+    const [serviceOptions, setServiceOptions] = useState<{ value: string; label: string }[]>([]);
+
+    const [service, setService] = useState('');
+    const [unhealthyFor, setUnhealthyFor] = useState('5');
+    const [cooldown, setCooldown] = useState('5');
+    const [maxRestarts, setMaxRestarts] = useState('3');
+    const [autoDisableAfter, setAutoDisableAfter] = useState('5');
+
+    useEffect(() => {
+        if (!open || !stackName) return;
+        setLoading(true);
+        apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`)
+            .then(res => res.json() as Promise<AutoHealPolicy[]>)
+            .then(data => setPolicies(data))
+            .catch(() => toast.error('Failed to load auto-heal policies.'))
+            .finally(() => setLoading(false));
+
+        apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`)
+            .then(res => res.json() as Promise<string[]>)
+            .then(names => setServiceOptions(names.map(n => ({ value: n, label: n }))))
+            .catch(() => { /* services list is optional, silently skip */ });
+    }, [open, stackName]);
+
+    const handleToggle = async (id: number, enabled: boolean) => {
+        setSaving(true);
+        try {
+            const res = await apiFetch(`/auto-heal/policies/${id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ enabled: enabled ? 1 : 0 }),
+            });
+            if (res.ok) {
+                setPolicies(prev =>
+                    prev.map(p => p.id === id ? { ...p, enabled: enabled ? 1 : 0 } : p)
+                );
+            } else {
+                const err = await res.json().catch(() => ({})) as Record<string, unknown>;
+                toast.error((err?.message as string) || (err?.error as string) || 'Failed to update policy.');
+            }
+        } catch (e) {
+            console.error('[StackAlertSheet] Failed to toggle policy:', e);
+            toast.error('Network error. Could not reach the node.');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleDelete = async (id: number) => {
+        setDeleting(true);
+        try {
+            const res = await apiFetch(`/auto-heal/policies/${id}`, { method: 'DELETE' });
+            if (res.ok) {
+                toast.success('Policy deleted.');
+                setPolicies(prev => prev.filter(p => p.id !== id));
+            } else {
+                const err = await res.json().catch(() => ({})) as Record<string, unknown>;
+                toast.error((err?.message as string) || (err?.error as string) || 'Failed to delete policy.');
+            }
+        } catch (e) {
+            console.error('[StackAlertSheet] Failed to delete policy:', e);
+            toast.error('Network error. Could not reach the node.');
+        } finally {
+            setDeleting(false);
+        }
+    };
+
+    const handleAddPolicy = async () => {
+        setSaving(true);
+        const body = {
+            stack_name: stackName,
+            service_name: service === '' ? null : service,
+            unhealthy_duration_mins: parseInt(unhealthyFor, 10) || 5,
+            cooldown_mins: parseInt(cooldown, 10) || 5,
+            max_restarts_per_hour: parseInt(maxRestarts, 10) || 3,
+            auto_disable_after_failures: parseInt(autoDisableAfter, 10) || 5,
+        };
+        try {
+            const res = await apiFetch('/auto-heal/policies', {
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
+            if (res.ok) {
+                toast.success('Policy added.');
+                setService('');
+                setUnhealthyFor('5');
+                setCooldown('5');
+                setMaxRestarts('3');
+                setAutoDisableAfter('5');
+                apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`)
+                    .then(res => res.json() as Promise<AutoHealPolicy[]>)
+                    .then(data => setPolicies(data))
+                    .catch(() => toast.error('Failed to reload policies.'));
+            } else {
+                const err = await res.json().catch(() => ({})) as Record<string, unknown>;
+                toast.error((err?.message as string) || (err?.error as string) || 'Failed to add policy.');
+                console.error('[StackAlertSheet] addPolicy failed:', err);
+            }
+        } catch (e) {
+            console.error('[StackAlertSheet] addPolicy threw:', e);
+            toast.error('Network error. Could not reach the node.');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const serviceComboOptions = [
+        { value: '', label: 'All services' },
+        ...serviceOptions,
+    ];
+
+    return (
+        <>
+            <SheetSection title="Active policies">
+                {loading ? (
+                    <div className="flex items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
+                        <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.5} />
+                        <span>Loading policies...</span>
+                    </div>
+                ) : policies.length === 0 ? (
+                    <div className="text-sm text-muted-foreground text-center py-4">
+                        No auto-heal policies configured for this stack.
+                    </div>
+                ) : (
+                    <div className="space-y-2">
+                        {policies.map(policy => (
+                            <PolicyRow
+                                key={policy.id}
+                                policy={policy}
+                                onDelete={handleDelete}
+                                onToggle={handleToggle}
+                                deleting={deleting}
+                                saving={saving}
+                            />
+                        ))}
+                    </div>
+                )}
+            </SheetSection>
+
+            <SheetSection title="Add new policy">
+                <div className="space-y-3">
+                    <div className="space-y-2">
+                        <Label>Service</Label>
+                        <Combobox
+                            options={serviceComboOptions}
+                            value={service}
+                            onValueChange={setService}
+                            placeholder="All services"
+                            searchPlaceholder="Search services..."
+                            emptyText="No services found."
+                        />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-2">
+                            <Label htmlFor="unhealthy-duration">Unhealthy for (minutes)</Label>
+                            <Input
+                                id="unhealthy-duration"
+                                type="text"
+                                inputMode="numeric"
+                                value={unhealthyFor}
+                                onChange={clampNonNegative(setUnhealthyFor)}
+                                placeholder="5"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="cooldown">Cooldown (minutes)</Label>
+                            <Input
+                                id="cooldown"
+                                type="text"
+                                inputMode="numeric"
+                                value={cooldown}
+                                onChange={clampNonNegative(setCooldown)}
+                                placeholder="5"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-2">
+                            <Label htmlFor="max-restarts">Max restarts / hr</Label>
+                            <Input
+                                id="max-restarts"
+                                type="text"
+                                inputMode="numeric"
+                                value={maxRestarts}
+                                onChange={clampNonNegative(setMaxRestarts)}
+                                placeholder="3"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="auto-disable">Auto-disable after (failures)</Label>
+                            <Input
+                                id="auto-disable"
+                                type="text"
+                                inputMode="numeric"
+                                value={autoDisableAfter}
+                                onChange={clampNonNegative(setAutoDisableAfter)}
+                                placeholder="5"
+                            />
+                        </div>
+                    </div>
+
+                    <Button
+                        className="w-full mt-2"
+                        onClick={handleAddPolicy}
+                        disabled={saving}
+                    >
+                        {saving ? (
+                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" strokeWidth={1.5} />Saving...</>
+                        ) : (
+                            'Add Policy'
+                        )}
+                    </Button>
+                </div>
+            </SheetSection>
         </>
+    );
+}
+
+interface PolicyRowProps {
+    policy: AutoHealPolicy;
+    onDelete: (id: number) => void;
+    onToggle: (id: number, enabled: boolean) => void;
+    deleting: boolean;
+    saving: boolean;
+}
+
+function PolicyRow({ policy, onDelete, onToggle, deleting, saving }: PolicyRowProps) {
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [history, setHistory] = useState<AutoHealHistoryEntry[]>([]);
+    const [loadingHistory, setLoadingHistory] = useState(false);
+
+    const toggleHistory = async () => {
+        if (!historyOpen && history.length === 0 && policy.id != null) {
+            setLoadingHistory(true);
+            try {
+                const res = await apiFetch(`/auto-heal/policies/${policy.id}/history`);
+                if (res.ok) {
+                    const data: AutoHealHistoryEntry[] = await res.json();
+                    setHistory(data);
+                } else {
+                    const err = await res.json().catch(() => ({})) as Record<string, unknown>;
+                    toast.error((err?.message as string) || (err?.error as string) || 'Failed to load history.');
+                }
+            } catch (e) {
+                console.error('[StackAlertSheet] Failed to fetch history:', e);
+                toast.error('Network error. Could not reach the node.');
+            } finally {
+                setLoadingHistory(false);
+            }
+        }
+        setHistoryOpen(prev => !prev);
+    };
+
+    return (
+        <div className="flex flex-col gap-0 border-b border-card-border/40 last:border-b-0 text-sm py-2">
+            <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-col gap-0.5 min-w-0">
+                    <span className="font-mono text-foreground truncate">
+                        {policy.service_name ?? <span className="text-muted-foreground font-sans">All services</span>}
+                    </span>
+                    <span className="text-muted-foreground text-xs">
+                        Unhealthy for {policy.unhealthy_duration_mins} min
+                        &bull; Cooldown: {policy.cooldown_mins} min
+                        &bull; Max {policy.max_restarts_per_hour}/hr
+                    </span>
+                    {policy.consecutive_failures > 0 && (
+                        <span className="inline-flex items-center gap-1 mt-0.5">
+                            <span className="px-1.5 py-0.5 rounded text-xs font-mono tabular-nums text-destructive bg-destructive/10 border border-destructive/20">
+                                {policy.consecutive_failures} failure{policy.consecutive_failures !== 1 ? 's' : ''}
+                            </span>
+                        </span>
+                    )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                    <TogglePill
+                        checked={policy.enabled === 1}
+                        onChange={(checked) => policy.id != null && onToggle(policy.id, checked)}
+                        disabled={saving}
+                        aria-label={`Toggle policy for ${policy.service_name ?? 'all services'}`}
+                    />
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        onClick={toggleHistory}
+                        aria-label="Toggle history"
+                        disabled={loadingHistory}
+                    >
+                        {loadingHistory ? (
+                            <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.5} />
+                        ) : historyOpen ? (
+                            <ChevronUp className="h-4 w-4" strokeWidth={1.5} />
+                        ) : (
+                            <ChevronDown className="h-4 w-4" strokeWidth={1.5} />
+                        )}
+                    </Button>
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                        onClick={() => policy.id != null && onDelete(policy.id)}
+                        disabled={deleting}
+                        aria-label="Delete policy"
+                    >
+                        <Trash2 className="h-4 w-4" strokeWidth={1.5} />
+                    </Button>
+                </div>
+            </div>
+
+            {historyOpen && (
+                <div className="border-t border-card-border/40 mt-2 pt-2 space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Recent activity</p>
+                    {history.length === 0 ? (
+                        <p className="text-xs text-muted-foreground text-center py-2">No history yet.</p>
+                    ) : (
+                        history.map((entry) => (
+                            <div key={entry.id} className="flex items-start gap-2 text-xs">
+                                <span className="text-muted-foreground shrink-0 tabular-nums font-mono">
+                                    {new Date(entry.timestamp).toLocaleString()}
+                                </span>
+                                <span className="font-mono text-foreground shrink-0 truncate max-w-[100px]">
+                                    {entry.container_name}
+                                </span>
+                                <span className={`shrink-0 font-medium ${actionColorClass(entry.action)}`}>
+                                    {actionLabel(entry.action)}
+                                </span>
+                                <span className="text-muted-foreground truncate">
+                                    {entry.reason}
+                                </span>
+                            </div>
+                        ))
+                    )}
+                </div>
+            )}
+        </div>
     );
 }

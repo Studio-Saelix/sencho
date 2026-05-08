@@ -1,13 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
-import { Image as ImageIcon, Copy } from 'lucide-react';
+import { Copy } from 'lucide-react';
 
 interface ImageInspect {
   Id: string;
@@ -105,150 +104,147 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
   const history = data?.history ?? [];
   const totalLayers = history.length;
 
+  const name = inspect?.RepoTags?.[0] || (inspect ? shortDigest(inspect.Id) : 'Image details');
+  const meta = inspect
+    ? `${formatBytes(inspect.Size)} · ${inspect.Architecture ?? '?'}/${inspect.Os ?? '?'} · ${totalLayers} layers`
+    : (loading ? 'Loading…' : '');
+
+  const footerContext = inspect?.Created
+    ? `Created ${formatRelativeAge(new Date(inspect.Created).getTime() / 1000)}`
+    : undefined;
+
   return (
-    <Sheet open={!!imageId} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent className="sm:max-w-lg">
-        <ScrollArea className="h-full">
-          <SheetHeader>
-            <SheetTitle className="flex items-center gap-2">
-              <ImageIcon className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-              {inspect?.RepoTags?.[0] || (inspect ? shortDigest(inspect.Id) : 'Image details')}
-            </SheetTitle>
-          </SheetHeader>
+    <SystemSheet
+      open={!!imageId}
+      onOpenChange={(open) => !open && onClose()}
+      crumb={['Resources', 'Images', name]}
+      name={name}
+      meta={meta}
+      footerContext={footerContext}
+      size="md"
+    >
+      {loading && (
+        <div className="space-y-3">
+          <Skeleton className="h-5 w-1/2" />
+          <Skeleton className="h-5 w-full" />
+          <Skeleton className="h-5 w-full" />
+          <Skeleton className="h-5 w-3/4" />
+        </div>
+      )}
 
-          {loading && (
-            <div className="space-y-3 mt-6">
-              <Skeleton className="h-5 w-1/2" />
-              <Skeleton className="h-5 w-full" />
-              <Skeleton className="h-5 w-full" />
-              <Skeleton className="h-5 w-3/4" />
-            </div>
-          )}
-
-          {!loading && inspect && (
-            <div className="space-y-6 mt-6 pb-6">
-              <Section title="Overview">
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <Field label="ID">
-                    <p className="font-mono text-xs mt-0.5 flex items-center gap-1.5">
-                      {shortDigest(inspect.Id)}
-                      <button
-                        className="text-muted-foreground hover:text-foreground transition-colors"
-                        onClick={async () => {
-                          try { await copyToClipboard(inspect.Id); toast.success('ID copied'); }
-                          catch { toast.error('Copy failed.'); }
-                        }}
-                        aria-label="Copy image ID"
-                      >
-                        <Copy className="w-3 h-3" strokeWidth={1.5} />
-                      </button>
-                    </p>
-                  </Field>
-                  <Field label="Size">
-                    <p className="font-mono text-xs mt-0.5 tabular-nums">{formatBytes(inspect.Size)}</p>
-                  </Field>
-                  <Field label="Created">
-                    <p className="text-xs mt-0.5" title={new Date(inspect.Created).toLocaleString()}>
-                      {new Date(inspect.Created).toLocaleDateString()}
-                    </p>
-                  </Field>
-                  <Field label="Arch / OS">
-                    <p className="text-xs mt-0.5">
-                      <Badge variant="outline" className="text-[10px] h-5">{inspect.Architecture ?? 'unknown'} / {inspect.Os ?? 'unknown'}</Badge>
-                    </p>
-                  </Field>
-                  {inspect.Author && (
-                    <Field label="Author" span={2}>
-                      <p className="text-xs mt-0.5">{inspect.Author}</p>
-                    </Field>
-                  )}
-                  {inspect.RepoTags && inspect.RepoTags.length > 0 && (
-                    <Field label="Tags" span={2}>
-                      <div className="flex flex-wrap gap-1 mt-1">
-                        {inspect.RepoTags.map((t) => (
-                          <Badge key={t} variant="outline" className="text-[10px] h-5 font-mono">{t}</Badge>
-                        ))}
-                      </div>
-                    </Field>
-                  )}
-                </div>
-              </Section>
-
-              {inspect.Config && (
-                <Section title="Config">
-                  <div className="space-y-2 text-sm">
-                    <ConfigRow label="Cmd" value={inspect.Config.Cmd?.join(' ')} />
-                    <ConfigRow label="Entrypoint" value={inspect.Config.Entrypoint?.join(' ')} />
-                    <ConfigRow label="WorkingDir" value={inspect.Config.WorkingDir} />
-                    <ConfigRow label="User" value={inspect.Config.User} />
-                    <ConfigRow
-                      label="Ports"
-                      value={
-                        inspect.Config.ExposedPorts
-                          ? Object.keys(inspect.Config.ExposedPorts).join(', ')
-                          : undefined
-                      }
-                    />
-                    {inspect.Config.Env && inspect.Config.Env.length > 0 && (
-                      <CollapsibleList label="Env" count={inspect.Config.Env.length} items={inspect.Config.Env} />
-                    )}
-                    {inspect.Config.Labels && Object.keys(inspect.Config.Labels).length > 0 && (
-                      <CollapsibleList
-                        label="Labels"
-                        count={Object.keys(inspect.Config.Labels).length}
-                        items={Object.entries(inspect.Config.Labels).map(([k, v]) => `${k}=${v}`)}
-                      />
-                    )}
-                  </div>
-                </Section>
+      {!loading && inspect && (
+        <>
+          <SheetSection title="Overview">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+              <Field label="ID">
+                <p className="font-mono text-xs mt-0.5 flex items-center gap-1.5">
+                  {shortDigest(inspect.Id)}
+                  <button
+                    className="text-muted-foreground hover:text-foreground transition-colors"
+                    onClick={async () => {
+                      try { await copyToClipboard(inspect.Id); toast.success('ID copied'); }
+                      catch { toast.error('Copy failed.'); }
+                    }}
+                    aria-label="Copy image ID"
+                  >
+                    <Copy className="w-3 h-3" strokeWidth={1.5} />
+                  </button>
+                </p>
+              </Field>
+              <Field label="Size">
+                <p className="font-mono text-xs mt-0.5 tabular-nums">{formatBytes(inspect.Size)}</p>
+              </Field>
+              <Field label="Created">
+                <p className="text-xs mt-0.5" title={new Date(inspect.Created).toLocaleString()}>
+                  {new Date(inspect.Created).toLocaleDateString()}
+                </p>
+              </Field>
+              <Field label="Arch / OS">
+                <p className="text-xs mt-0.5">
+                  <Badge variant="outline" className="text-[10px] h-5">{inspect.Architecture ?? 'unknown'} / {inspect.Os ?? 'unknown'}</Badge>
+                </p>
+              </Field>
+              {inspect.Author && (
+                <Field label="Author" span={2}>
+                  <p className="text-xs mt-0.5">{inspect.Author}</p>
+                </Field>
               )}
-
-              <Section title={`Layers (${totalLayers})`}>
-                {totalLayers === 0 ? (
-                  <p className="text-xs text-muted-foreground italic">No layer history available.</p>
-                ) : (
-                  <ol className="space-y-1.5">
-                    {history.map((h, idx) => {
-                      const empty = h.Size === 0;
-                      return (
-                        <li
-                          key={`${h.Id}-${idx}`}
-                          className={`rounded-md border border-card-border bg-card px-3 py-2 shadow-card-bevel ${empty ? 'opacity-60' : ''}`}
-                        >
-                          <div className="flex items-baseline justify-between gap-3 text-[11px] text-muted-foreground tabular-nums">
-                            <span>#{totalLayers - idx}</span>
-                            <span className="font-mono">{formatBytes(h.Size)}</span>
-                            <span>{formatRelativeAge(h.Created)}</span>
-                          </div>
-                          <p
-                            className="font-mono text-[11px] mt-1 break-all"
-                            title={h.CreatedBy}
-                          >
-                            {h.CreatedBy || '(no command)'}
-                          </p>
-                          {h.Comment && (
-                            <p className="text-[11px] text-muted-foreground italic mt-0.5">{h.Comment}</p>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ol>
-                )}
-              </Section>
+              {inspect.RepoTags && inspect.RepoTags.length > 0 && (
+                <Field label="Tags" span={2}>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {inspect.RepoTags.map((t) => (
+                      <Badge key={t} variant="outline" className="text-[10px] h-5 font-mono">{t}</Badge>
+                    ))}
+                  </div>
+                </Field>
+              )}
             </div>
-          )}
-        </ScrollArea>
-      </SheetContent>
-    </Sheet>
-  );
-}
+          </SheetSection>
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-3">
-      <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{title}</h4>
-      {children}
-    </div>
+          {inspect.Config && (
+            <SheetSection title="Config">
+              <div className="space-y-2 text-sm">
+                <ConfigRow label="Cmd" value={inspect.Config.Cmd?.join(' ')} />
+                <ConfigRow label="Entrypoint" value={inspect.Config.Entrypoint?.join(' ')} />
+                <ConfigRow label="WorkingDir" value={inspect.Config.WorkingDir} />
+                <ConfigRow label="User" value={inspect.Config.User} />
+                <ConfigRow
+                  label="Ports"
+                  value={
+                    inspect.Config.ExposedPorts
+                      ? Object.keys(inspect.Config.ExposedPorts).join(', ')
+                      : undefined
+                  }
+                />
+                {inspect.Config.Env && inspect.Config.Env.length > 0 && (
+                  <CollapsibleList label="Env" count={inspect.Config.Env.length} items={inspect.Config.Env} />
+                )}
+                {inspect.Config.Labels && Object.keys(inspect.Config.Labels).length > 0 && (
+                  <CollapsibleList
+                    label="Labels"
+                    count={Object.keys(inspect.Config.Labels).length}
+                    items={Object.entries(inspect.Config.Labels).map(([k, v]) => `${k}=${v}`)}
+                  />
+                )}
+              </div>
+            </SheetSection>
+          )}
+
+          <SheetSection title={`Layers · ${totalLayers}`}>
+            {totalLayers === 0 ? (
+              <p className="text-xs text-muted-foreground italic">No layer history available.</p>
+            ) : (
+              <ol className="divide-y divide-card-border/40">
+                {history.map((h, idx) => {
+                  const empty = h.Size === 0;
+                  return (
+                    <li
+                      key={`${h.Id}-${idx}`}
+                      className={`py-2 ${empty ? 'opacity-60' : ''}`}
+                    >
+                      <div className="flex items-baseline justify-between gap-3 text-[11px] text-muted-foreground tabular-nums">
+                        <span>#{totalLayers - idx}</span>
+                        <span className="font-mono">{formatBytes(h.Size)}</span>
+                        <span>{formatRelativeAge(h.Created)}</span>
+                      </div>
+                      <p
+                        className="font-mono text-[11px] mt-1 break-all"
+                        title={h.CreatedBy}
+                      >
+                        {h.CreatedBy || '(no command)'}
+                      </p>
+                      {h.Comment && (
+                        <p className="text-[11px] text-muted-foreground italic mt-0.5">{h.Comment}</p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </SheetSection>
+        </>
+      )}
+    </SystemSheet>
   );
 }
 

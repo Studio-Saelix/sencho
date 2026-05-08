@@ -1,13 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
-import { ChevronLeft, MoreHorizontal, Pencil, Play, Trash2 } from 'lucide-react';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { Pencil, Pin, Play, Power, Trash2 } from 'lucide-react';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
+import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import {
-    DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
-} from '@/components/ui/dropdown-menu';
 import { toast } from '@/components/ui/toast-store';
 import {
     type BlueprintSummary,
@@ -146,7 +143,10 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         try {
             const result = await withdrawDeployment(blueprint.id, nodeId, confirm);
             if (result.error) toast.error(result.error);
-            else toast.success(confirm === 'evict_and_destroy' ? 'Evicted and data removed' : 'Deployment withdrawn');
+            else if (confirm === 'evict_and_destroy') toast.success('Evicted and data removed');
+            else if (confirm === 'snapshot_then_evict' && result.snapshotId !== null) {
+                toast.success(`Compose snapshot #${result.snapshotId} captured. Deployment withdrawn.`);
+            } else toast.success('Deployment withdrawn');
             await refresh();
             onChanged();
         } catch (err) {
@@ -196,70 +196,63 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         setStateReviewTarget({ nodeId, nodeName: node.name });
     }
 
-    return (
-        <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent side="right" className="w-full sm:max-w-2xl flex flex-col gap-0 overflow-y-auto p-0">
-                <SheetHeader className="sticky top-0 z-10 bg-popover/95 backdrop-blur-md border-b border-border px-6 py-4">
-                    <div className="flex items-center justify-between gap-3">
-                        <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="gap-1.5 -ml-2">
-                            <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
-                            Back
-                        </Button>
-                        {blueprint && (
-                            <div className="flex items-center gap-1.5">
-                                <Button size="sm" onClick={handleApply} disabled={submitting || !blueprint.enabled} className="gap-1.5">
-                                    <Play className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                    Apply now
-                                </Button>
-                                {canEdit && !editMode && (
-                                    <Button size="sm" variant="outline" onClick={() => setEditMode(true)} className="gap-1.5">
-                                        <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                        Edit
-                                    </Button>
-                                )}
-                                {canEdit && (
-                                    <DropdownMenu>
-                                        <DropdownMenuTrigger asChild>
-                                            <Button size="icon" variant="ghost" className="h-8 w-8" disabled={submitting}>
-                                                <MoreHorizontal className="h-4 w-4" strokeWidth={1.5} />
-                                            </Button>
-                                        </DropdownMenuTrigger>
-                                        <DropdownMenuContent align="end">
-                                            <DropdownMenuItem onClick={handleToggleEnabled} disabled={submitting}>
-                                                {blueprint.enabled ? 'Disable reconciler' : 'Enable reconciler'}
-                                            </DropdownMenuItem>
-                                            <DropdownMenuSeparator />
-                                            <DropdownMenuItem onClick={() => setDeleteOpen(true)} className="text-destructive">
-                                                <Trash2 className="h-3.5 w-3.5 mr-2" strokeWidth={1.5} />
-                                                Delete blueprint
-                                            </DropdownMenuItem>
-                                        </DropdownMenuContent>
-                                    </DropdownMenu>
-                                )}
-                            </div>
-                        )}
-                    </div>
-                    <div className="space-y-1.5">
-                        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">
-                            Blueprint
-                        </span>
-                        <SheetTitle className="font-serif italic text-2xl tracking-[-0.01em] text-stat-value">
-                            {blueprint?.name ?? <Skeleton className="h-7 w-40" />}
-                        </SheetTitle>
-                        {blueprint?.description && (
-                            <p className="text-xs text-stat-subtitle">{blueprint.description}</p>
-                        )}
-                    </div>
-                </SheetHeader>
+    const meta = blueprint
+        ? `${describeSelector(blueprint.selector)} · ${blueprint.drift_mode} · rev ${blueprint.revision}`
+        : (loading ? 'Loading…' : '');
 
-                <div className="px-6 py-5 space-y-5">
-                    {loading || !blueprint || !summary ? (
-                        <div className="space-y-3">
-                            <Skeleton className="h-12 w-full" />
-                            <Skeleton className="h-32 w-full" />
-                            <Skeleton className="h-40 w-full" />
-                        </div>
-                    ) : editMode ? (
+    const footerContext = blueprint
+        ? `Updated ${formatTimeAgo(blueprint.updated_at)}${blueprint.enabled ? '' : ' · reconciler disabled'}`
+        : undefined;
+
+    const secondaryActions = blueprint && canEdit
+        ? [
+            ...(!editMode ? [{
+                label: 'Edit',
+                icon: Pencil,
+                onClick: () => setEditMode(true),
+                disabled: submitting,
+            }] : []),
+            {
+                label: blueprint.enabled ? 'Disable' : 'Enable',
+                icon: Power,
+                onClick: handleToggleEnabled,
+                disabled: submitting,
+            },
+        ]
+        : undefined;
+
+    return (
+        <>
+            <SystemSheet
+                open={open}
+                onOpenChange={onOpenChange}
+                crumb={['Blueprints', blueprint?.name ?? '…']}
+                name={blueprint?.name ?? <Skeleton className="h-7 w-40 inline-block" />}
+                meta={meta}
+                primaryAction={blueprint ? {
+                    label: 'Apply now',
+                    icon: Play,
+                    onClick: handleApply,
+                    disabled: submitting || !blueprint.enabled || editMode,
+                } : undefined}
+                secondaryActions={secondaryActions}
+                destructiveAction={blueprint && canEdit ? {
+                    label: 'Delete',
+                    icon: Trash2,
+                    onClick: () => setDeleteOpen(true),
+                    disabled: submitting || editMode,
+                } : undefined}
+                footerContext={footerContext}
+                size="lg"
+            >
+                {loading || !blueprint || !summary ? (
+                    <div className="space-y-3">
+                        <Skeleton className="h-12 w-full" />
+                        <Skeleton className="h-32 w-full" />
+                        <Skeleton className="h-40 w-full" />
+                    </div>
+                ) : editMode ? (
+                    <SheetSection title="Edit blueprint" hideHeader>
                         <BlueprintEditor
                             mode="edit"
                             initial={blueprint}
@@ -268,15 +261,28 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                             onSubmit={handleSaveEdit}
                             submitting={submitting}
                         />
-                    ) : (
-                        <>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                                <Stat label="Selector" value={describeSelector(blueprint.selector)} />
-                                <Stat label="Drift" value={blueprint.drift_mode} />
-                                <Stat label="Revision" value={String(blueprint.revision)} />
-                                <Stat label="Last updated" value={formatTimeAgo(blueprint.updated_at)} />
-                            </div>
+                    </SheetSection>
+                ) : (
+                    <>
+                        {blueprint.pinned_node_id !== null && (
+                            <SheetSection title="Pin" hideHeader>
+                                <div className="flex items-start gap-2 rounded-md border border-card-border bg-glass-highlight px-3 py-2">
+                                    <Pin className="w-3.5 h-3.5 mt-0.5 text-foreground shrink-0" />
+                                    <div className="text-xs text-stat-value">
+                                        <span className="font-medium">Pinned to {nodes.find(n => n.id === blueprint.pinned_node_id)?.name ?? `node ${blueprint.pinned_node_id}`}.</span>{' '}
+                                        <span className="text-stat-subtitle">Selector is overridden. Manage in the Federation tab.</span>
+                                    </div>
+                                </div>
+                            </SheetSection>
+                        )}
 
+                        {blueprint.description && (
+                            <SheetSection title="Description" hideHeader>
+                                <p className="text-xs text-stat-subtitle">{blueprint.description}</p>
+                            </SheetSection>
+                        )}
+
+                        <SheetSection title="Deployments">
                             <BlueprintDeploymentTable
                                 deployments={summary.deployments}
                                 classification={blueprint.classification}
@@ -285,21 +291,25 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                 onWithdraw={openWithdraw}
                                 onAcceptStateReview={openAcceptStateReview}
                                 onRetry={handleRetryRow}
+                                pinnedNodeId={blueprint.pinned_node_id}
                             />
+                        </SheetSection>
 
-                            <details className="rounded-lg border border-card-border bg-card">
-                                <summary className="cursor-pointer px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon hover:text-stat-value">
-                                    Compose
+                        <SheetSection title="Compose">
+                            <details>
+                                <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle hover:text-stat-value">
+                                    Show compose source
                                 </summary>
-                                <pre className="px-3 pb-3 font-mono text-[11px] text-stat-value overflow-x-auto whitespace-pre-wrap">
+                                <pre className="mt-2 font-mono text-[11px] text-stat-value overflow-x-auto whitespace-pre-wrap">
                                     {blueprint.compose_content}
                                 </pre>
                             </details>
-                        </>
-                    )}
-                </div>
+                        </SheetSection>
+                    </>
+                )}
+            </SystemSheet>
 
-                {evictTarget && blueprint && (
+            {evictTarget && blueprint && (
                     <EvictionDialog
                         open={!!evictTarget}
                         onOpenChange={(o) => { if (!o) setEvictTarget(null); }}
@@ -321,20 +331,16 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                     />
                 )}
                 {blueprint && (
-                    <Dialog open={deleteOpen} onOpenChange={(o) => { if (!o) { setDeleteOpen(false); setDeleteConfirmText(''); } }}>
-                        <DialogContent className="sm:max-w-md">
-                            <DialogHeader>
-                                <div className="flex items-center gap-2 text-brand font-mono text-[10px] uppercase tracking-[0.2em]">
-                                    <span className="inline-block w-1 h-3 bg-destructive" />
-                                    Delete blueprint
-                                </div>
-                                <DialogTitle className="font-serif italic text-xl tracking-[-0.01em]">
-                                    Permanently delete {blueprint.name}?
-                                </DialogTitle>
-                                <DialogDescription>
-                                    Stateless deployments will be withdrawn first. Stateful deployments must be withdrawn explicitly through the deployment table before delete; the API will refuse otherwise.
-                                </DialogDescription>
-                            </DialogHeader>
+                    <Modal open={deleteOpen} onOpenChange={(o) => { if (!o) { setDeleteOpen(false); setDeleteConfirmText(''); } }} size="md">
+                        <ModalDestructiveHeader
+                            kicker="BLUEPRINT · DELETE · IRREVERSIBLE"
+                            title={`Delete ${blueprint.name}`}
+                            description="Stateless deployments will be withdrawn first. Stateful deployments must be withdrawn explicitly through the deployment table before delete; the API will refuse otherwise."
+                        />
+                        <ModalBody>
+                            <p className="text-sm text-stat-subtitle">
+                                Stateless deployments will be withdrawn first. Stateful deployments must be withdrawn explicitly through the deployment table before delete.
+                            </p>
                             <div className="space-y-2">
                                 <p className="text-xs text-stat-subtitle leading-relaxed">
                                     Type <span className="font-mono text-stat-value">{blueprint.name}</span> to confirm.
@@ -347,32 +353,26 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                     disabled={submitting}
                                 />
                             </div>
-                            <DialogFooter>
-                                <Button variant="outline" onClick={() => { setDeleteOpen(false); setDeleteConfirmText(''); }} disabled={submitting}>
+                        </ModalBody>
+                        <ModalFooter
+                            secondary={
+                                <Button variant="outline" size="sm" onClick={() => { setDeleteOpen(false); setDeleteConfirmText(''); }} disabled={submitting}>
                                     Cancel
                                 </Button>
+                            }
+                            primary={
                                 <Button
-                                    variant="outline"
-                                    className="text-destructive border-destructive/40 hover:bg-destructive/10"
+                                    variant="destructive"
+                                    size="sm"
                                     disabled={!deleteTypedOk || submitting}
                                     onClick={performDelete}
                                 >
                                     Delete blueprint
                                 </Button>
-                            </DialogFooter>
-                        </DialogContent>
-                    </Dialog>
+                            }
+                        />
+                    </Modal>
                 )}
-            </SheetContent>
-        </Sheet>
-    );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-    return (
-        <div className="space-y-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">{label}</span>
-            <p className="font-mono text-sm tabular-nums tracking-tight text-stat-value truncate">{value}</p>
-        </div>
+        </>
     );
 }

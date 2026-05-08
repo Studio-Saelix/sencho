@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { Button } from '@/components/ui/button';
-import { Loader2, RefreshCw, ServerCog } from 'lucide-react';
+import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
+import { RefreshCw, ServerCog } from 'lucide-react';
+import { formatTimeAgo } from '@/lib/relativeTime';
 import type { MeshNodeDiagnostic } from '@/types/mesh';
 
 interface Props {
@@ -29,13 +29,17 @@ export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: P
     const [diag, setDiag] = useState<MeshNodeDiagnostic | null>(null);
     const [loading, setLoading] = useState(false);
     const [restarting, setRestarting] = useState(false);
+    const [updatedAt, setUpdatedAt] = useState<number | null>(null);
 
     const refresh = async () => {
         if (nodeId == null) return;
         setLoading(true);
         try {
             const res = await apiFetch(`/mesh/nodes/${nodeId}/diagnostic`, { localOnly: true });
-            if (res.ok) setDiag(await res.json());
+            if (res.ok) {
+                setDiag(await res.json());
+                setUpdatedAt(Date.now());
+            }
         } finally {
             setLoading(false);
         }
@@ -64,69 +68,78 @@ export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: P
         }
     };
 
+    const sidecarLabel = diag ? (diag.sidecar.running ? 'sidecar running' : 'sidecar off') : 'sidecar ?';
+    const pilotLabel = diag ? (diag.pilot.connected ? 'pilot connected' : 'pilot disconnected') : 'pilot ?';
+    const streamsLabel = `${diag?.activeStreams.length ?? 0} streams`;
+    const aliasesLabel = `${diag?.aliasCache.length ?? 0} aliases`;
+    const meta = `${sidecarLabel} · ${pilotLabel} · ${streamsLabel} · ${aliasesLabel}`;
+
+    const footerContext = updatedAt ? `Updated ${formatTimeAgo(updatedAt)}` : (loading ? 'Loading…' : 'Never updated');
+
     return (
-        <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent side="right" className="w-[520px] sm:max-w-[520px]">
-                <SheetHeader>
-                    <SheetTitle className="flex items-center gap-2">
-                        <ServerCog className="w-4 h-4" /> Diagnostics{nodeName ? ` · ${nodeName}` : ''}
-                    </SheetTitle>
-                </SheetHeader>
-
-                <div className="mt-4 space-y-4">
-                    <div className="flex items-center gap-2">
-                        <Button variant="outline" size="sm" onClick={() => { void refresh(); }} disabled={loading}>
-                            {loading ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <RefreshCw className="w-3 h-3 mr-1" />}
-                            Refresh
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={() => { void restart(); }} disabled={restarting}>
-                            {restarting ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
-                            Restart sidecar
-                        </Button>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 rounded border border-card-border bg-card p-3 text-xs">
-                        <div className="text-stat-subtitle">Sidecar</div>
-                        <div className="font-mono text-stat-value">{diag?.sidecar.running ? 'running' : 'off'}</div>
-                        <div className="text-stat-subtitle">Pilot tunnel</div>
-                        <div className="font-mono text-stat-value">{diag?.pilot.connected ? 'connected' : 'disconnected'}</div>
-                        <div className="text-stat-subtitle">Buffered</div>
-                        <div className="font-mono text-stat-value">{diag ? bytesFmt(diag.pilot.bufferedAmount) : '-'}</div>
-                        <div className="text-stat-subtitle">Last seen</div>
-                        <div className="font-mono text-stat-value">{diag?.pilot.lastSeen ? new Date(diag.pilot.lastSeen).toLocaleTimeString() : '-'}</div>
-                    </div>
-
-                    <div>
-                        <div className="text-[10px] tracking-[0.18em] uppercase text-stat-subtitle font-mono mb-2">Active streams</div>
-                        {(!diag || diag.activeStreams.length === 0) && (
-                            <div className="text-xs text-stat-subtitle">No active streams.</div>
-                        )}
-                        <div className="space-y-1">
-                            {diag?.activeStreams.map((s) => (
-                                <div key={s.streamId} className="flex justify-between rounded border border-card-border bg-card px-2 py-1 text-[11px] font-mono">
-                                    <span>#{s.streamId} {s.alias ?? '<no-alias>'}</span>
-                                    <span className="text-stat-subtitle">in {bytesFmt(s.bytesIn)} / out {bytesFmt(s.bytesOut)} · {ageFmt(s.ageMs)}</span>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-
-                    <div>
-                        <div className="text-[10px] tracking-[0.18em] uppercase text-stat-subtitle font-mono mb-2">Resolver cache</div>
-                        {(!diag || diag.aliasCache.length === 0) && (
-                            <div className="text-xs text-stat-subtitle">No aliases registered.</div>
-                        )}
-                        <div className="space-y-1">
-                            {diag?.aliasCache.map((a) => (
-                                <div key={a.host} className="flex justify-between rounded border border-card-border bg-card px-2 py-1 text-[11px] font-mono">
-                                    <span>{a.host}</span>
-                                    <span className="text-stat-subtitle">node #{a.targetNodeId}:{a.port}</span>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
+        <SystemSheet
+            open={open}
+            onOpenChange={onOpenChange}
+            crumb={['Fleet', 'Mesh', 'Diagnostics']}
+            name={nodeName ?? 'Diagnostics'}
+            meta={meta}
+            primaryAction={{
+                label: 'Refresh',
+                icon: RefreshCw,
+                onClick: () => { void refresh(); },
+                disabled: loading,
+            }}
+            secondaryActions={[
+                {
+                    label: 'Restart sidecar',
+                    icon: ServerCog,
+                    onClick: () => { void restart(); },
+                    disabled: restarting,
+                },
+            ]}
+            footerContext={footerContext}
+            size="md"
+        >
+            <SheetSection title="Pilot · sidecar · transport">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                    <div className="text-stat-subtitle">Sidecar</div>
+                    <div className="font-mono text-stat-value">{diag?.sidecar.running ? 'running' : 'off'}</div>
+                    <div className="text-stat-subtitle">Pilot tunnel</div>
+                    <div className="font-mono text-stat-value">{diag?.pilot.connected ? 'connected' : 'disconnected'}</div>
+                    <div className="text-stat-subtitle">Buffered</div>
+                    <div className="font-mono text-stat-value">{diag ? bytesFmt(diag.pilot.bufferedAmount) : '-'}</div>
+                    <div className="text-stat-subtitle">Last seen</div>
+                    <div className="font-mono text-stat-value">{diag?.pilot.lastSeen ? new Date(diag.pilot.lastSeen).toLocaleTimeString() : '-'}</div>
                 </div>
-            </SheetContent>
-        </Sheet>
+            </SheetSection>
+
+            <SheetSection title="Active streams">
+                {(!diag || diag.activeStreams.length === 0) && (
+                    <div className="text-xs text-stat-subtitle">No active streams.</div>
+                )}
+                <div className="divide-y divide-card-border/40">
+                    {diag?.activeStreams.map((s) => (
+                        <div key={s.streamId} className="flex justify-between py-1.5 text-[11px] font-mono">
+                            <span>#{s.streamId} {s.alias ?? '<no-alias>'}</span>
+                            <span className="text-stat-subtitle">in {bytesFmt(s.bytesIn)} / out {bytesFmt(s.bytesOut)} · {ageFmt(s.ageMs)}</span>
+                        </div>
+                    ))}
+                </div>
+            </SheetSection>
+
+            <SheetSection title="Resolver cache">
+                {(!diag || diag.aliasCache.length === 0) && (
+                    <div className="text-xs text-stat-subtitle">No aliases registered.</div>
+                )}
+                <div className="divide-y divide-card-border/40">
+                    {diag?.aliasCache.map((a) => (
+                        <div key={a.host} className="flex justify-between py-1.5 text-[11px] font-mono">
+                            <span>{a.host}</span>
+                            <span className="text-stat-subtitle">node #{a.targetNodeId}:{a.port}</span>
+                        </div>
+                    ))}
+                </div>
+            </SheetSection>
+        </SystemSheet>
     );
 }

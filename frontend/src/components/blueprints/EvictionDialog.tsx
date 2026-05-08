@@ -65,7 +65,7 @@ export function EvictionDialog({
                                 Snapshot, then evict (recommended)
                             </div>
                             <p className="text-xs text-stat-subtitle mt-1.5 leading-relaxed">
-                                Captures the compose definition into the existing fleet-snapshot store, then runs the eviction. Note: volume bytes are not shipped; that ships in a future Volume Migration feature.
+                                Captures this stack's compose definition to Fleet → Snapshots, then runs the eviction. Volume bytes stay on this node and are removed by docker compose down. Relocate them by hand if you need them on another node.
                             </p>
                         </button>
                         <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">

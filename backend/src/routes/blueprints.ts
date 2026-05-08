@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
+import { requirePaid, requireAdmiral, requireAdmin, requireBody } from '../middleware/tierGates';
 import {
     DatabaseService,
     type BlueprintSelector,
@@ -328,10 +328,53 @@ blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Respons
             });
             return;
         }
-        // snapshot_then_evict: a v1 placeholder. The fleet-snapshot wiring is a separate feature;
-        // we record intent and proceed with a normal withdraw. v2 will perform the actual snapshot.
+        let snapshotId: number | null = null;
+        if (confirm === 'snapshot_then_evict') {
+            const compose = blueprint.compose_content;
+            if (!compose || compose.trim().length === 0) {
+                res.status(500).json({
+                    error: 'Blueprint has no compose content to snapshot',
+                    code: 'snapshot_failed',
+                });
+                return;
+            }
+            try {
+                const db = DatabaseService.getInstance();
+                const username = req.user?.username ?? 'admin';
+                snapshotId = db.createSnapshot(
+                    `Pre-eviction: blueprint=${blueprint.name} node=${node.name}`,
+                    username,
+                    1,
+                    1,
+                    '[]',
+                );
+                db.insertSnapshotFiles(snapshotId, [{
+                    nodeId: node.id,
+                    nodeName: node.name,
+                    stackName: blueprint.name,
+                    filename: 'docker-compose.yml',
+                    content: compose,
+                }]);
+            } catch (snapErr) {
+                console.error('[Blueprints] Pre-eviction snapshot failed:', snapErr);
+                if (snapshotId !== null) {
+                    try { DatabaseService.getInstance().deleteSnapshot(snapshotId); }
+                    catch (cleanupErr) { console.error('[Blueprints] Failed to clean up orphan snapshot row:', cleanupErr); }
+                }
+                res.status(500).json({
+                    error: 'Failed to capture compose snapshot before eviction',
+                    code: 'snapshot_failed',
+                });
+                return;
+            }
+        }
         const result = await BlueprintService.getInstance().withdrawFromNode(blueprint, node);
-        res.json({ status: result.status, error: result.error ?? null, snapshotPolicy: confirm });
+        res.json({
+            status: result.status,
+            error: result.error ?? null,
+            snapshotPolicy: confirm,
+            snapshotId,
+        });
     } catch (error) {
         console.error('[Blueprints] Withdraw error:', error);
         res.status(500).json({ error: getErrorMessage(error, 'Failed to withdraw blueprint') });
@@ -395,6 +438,46 @@ blueprintsRouter.get('/:id/preview', (req: Request, res: Response): void => {
     } catch (error) {
         console.error('[Blueprints] Preview error:', error);
         res.status(500).json({ error: 'Failed to preview blueprint' });
+    }
+});
+
+blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!requireBody(req, res)) return;
+    const id = parseIntParam(req, res, 'id');
+    if (id === null) return;
+    const rawNodeId = (req.body as { nodeId?: unknown }).nodeId;
+    let nodeId: number | null;
+    if (rawNodeId === null) {
+        nodeId = null;
+    } else if (typeof rawNodeId === 'number' && Number.isInteger(rawNodeId) && rawNodeId > 0) {
+        nodeId = rawNodeId;
+    } else {
+        res.status(400).json({ error: 'nodeId must be a positive integer or null' });
+        return;
+    }
+    try {
+        const blueprint = DatabaseService.getInstance().getBlueprint(id);
+        if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (nodeId !== null) {
+            const node = DatabaseService.getInstance().getNode(nodeId);
+            if (!node) { res.status(404).json({ error: 'Node not found' }); return; }
+        }
+        const updated = DatabaseService.getInstance().setBlueprintPinnedNode(id, nodeId);
+        if (!updated) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        // Trigger immediate reconciliation so the pin takes effect without
+        // waiting for the next 60s tick. Errors here are logged but do not
+        // fail the request: the pin is already persisted.
+        if (updated.enabled) {
+            BlueprintReconciler.getInstance().reconcileOne(id).catch(err => {
+                console.warn('[Blueprints] post-pin reconcileOne failed:', err);
+            });
+        }
+        res.json(updated);
+    } catch (error) {
+        console.error('[Blueprints] Pin error:', error);
+        res.status(500).json({ error: 'Failed to update blueprint pin' });
     }
 });
 

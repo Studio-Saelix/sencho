@@ -49,7 +49,7 @@ export function useSidebarContextMenu({
       menuVisibility: stackActions.getStackMenuVisibility(file),
       autoUpdateEnabled: stackListState.autoUpdateSettings[sName] ?? true,
       openAlertSheet: () => overlayState.openAlertSheet(file),
-      openAutoHeal: () => overlayState.setAutoHealStackName(file),
+      openAutoHeal: () => overlayState.openAutoHeal(file),
       checkUpdates: () => stackActions.checkUpdatesForStack(),
       openStackApp: () => stackActions.openStackApp(file),
       deploy: () => stackActions.executeStackActionByFile(file, 'deploy', 'deploy'),

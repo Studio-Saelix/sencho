@@ -6,24 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Combobox } from '@/components/ui/combobox';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { ShieldCheck, Plus, Trash2, Pencil, Download, RefreshCw, Loader2, Info } from 'lucide-react';
@@ -35,6 +18,7 @@ import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { SuppressionsPanel } from './SuppressionsPanel';
+import { MisconfigAckPanel } from './MisconfigAckPanel';
 
 const SEVERITY_OPTIONS: Array<{ value: VulnSeverity; label: string }> = [
   { value: 'CRITICAL', label: 'Critical' },
@@ -94,6 +78,9 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
   const [trivyBusy, setTrivyBusy] = useState<null | 'install' | 'update' | 'uninstall' | 'auto-update'>(null);
   const [uninstallConfirm, setUninstallConfirm] = useState(false);
   const [fleetRole, setFleetRole] = useState<FleetRole>('control');
+  const [fleetRoleProbeFailed, setFleetRoleProbeFailed] = useState(false);
+  const [demoteConfirm, setDemoteConfirm] = useState(false);
+  const [demoteBusy, setDemoteBusy] = useState(false);
   const isReplica = fleetRole === 'replica';
 
   const runTrivyOp = async (
@@ -177,17 +164,47 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
     (async () => {
       try {
         const res = await apiFetch('/fleet/role', { localOnly: true });
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (!cancelled) setFleetRoleProbeFailed(true);
+          return;
+        }
         const data = await res.json();
-        if (!cancelled && (data?.role === 'control' || data?.role === 'replica')) {
+        if (cancelled) return;
+        if (data?.role === 'control' || data?.role === 'replica') {
           setFleetRole(data.role);
+          setFleetRoleProbeFailed(false);
+        } else {
+          setFleetRoleProbeFailed(true);
         }
       } catch {
-        /* fallback: treat as control if the check fails */
+        if (!cancelled) setFleetRoleProbeFailed(true);
       }
     })();
     return () => { cancelled = true; };
   }, [isRemote]);
+
+  const handleDemote = async () => {
+    setDemoteBusy(true);
+    try {
+      const res = await apiFetch('/fleet/role/demote', {
+        method: 'POST',
+        localOnly: true,
+        body: JSON.stringify({ confirm: true }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Demote failed');
+      }
+      toast.success('Replica demoted to control');
+      setFleetRole('control');
+      setDemoteConfirm(false);
+      fetchPolicies();
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Demote failed');
+    } finally {
+      setDemoteBusy(false);
+    }
+  };
 
   const openCreate = () => {
     setEditingId(null);
@@ -290,13 +307,40 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
         <div
           role="status"
           aria-live="polite"
+          className="flex items-start justify-between gap-3 rounded-lg border border-card-border bg-muted/30 px-4 py-3"
+        >
+          <div className="flex items-start gap-2">
+            <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} aria-hidden="true" />
+            <div className="text-sm">
+              <div className="font-medium">Managed by control node</div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Security policies replicate from the control Sencho instance. View them here for audit; edit them on the control.
+              </p>
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() => setDemoteConfirm(true)}
+            disabled={demoteBusy}
+          >
+            Demote to control
+          </Button>
+        </div>
+      )}
+
+      {!isRemote && fleetRoleProbeFailed && !isReplica && (
+        <div
+          role="status"
+          aria-live="polite"
           className="flex items-start gap-2 rounded-lg border border-card-border bg-muted/30 px-4 py-3"
         >
           <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} aria-hidden="true" />
           <div className="text-sm">
-            <div className="font-medium">Managed by control node</div>
+            <div className="font-medium">Fleet role could not be determined</div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Security policies replicate from the control Sencho instance. View them here for audit; edit them on the control.
+              Treating this instance as a control. Refresh the page to retry.
             </p>
           </div>
         </div>
@@ -460,122 +504,126 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
 
       {!isRemote && <SuppressionsPanel isReplica={isReplica} />}
 
+      {!isRemote && <MisconfigAckPanel isReplica={isReplica} />}
+
       {isPaid && (
         <>
-          <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{editingId ? 'Edit Policy' : 'New Policy'}</DialogTitle>
-            <DialogDescription className="sr-only">
-              Configure the severity threshold and scope for this scan policy.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-2">
-              <Label htmlFor="policy-name">Name</Label>
-              <Input
-                id="policy-name"
-                placeholder="Production block on critical"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="policy-pattern">Stack pattern (optional)</Label>
-              <Input
-                id="policy-pattern"
-                placeholder="e.g. prod-* or leave blank for all"
-                value={form.stack_pattern}
-                onChange={(e) => setForm({ ...form, stack_pattern: e.target.value })}
-              />
-              <p className="text-xs text-muted-foreground">
-                Glob-style pattern matched against stack names. Leave blank to apply to all stacks.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label>Max severity</Label>
-              <Combobox
-                options={SEVERITY_OPTIONS}
-                value={form.max_severity}
-                onValueChange={(v) => setForm({ ...form, max_severity: v as VulnSeverity })}
-              />
-            </div>
-            <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
-              <div>
-                <Label className="text-sm">Block on deploy</Label>
+          <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
+            <ModalHeader
+              kicker={editingId ? 'SECURITY · EDIT POLICY' : 'SECURITY · NEW POLICY'}
+              title={editingId ? 'Edit policy' : 'New policy'}
+              description="Configure the severity threshold and scope for this scan policy."
+            />
+            <ModalBody>
+              <div className="space-y-2">
+                <Label htmlFor="policy-name">Name</Label>
+                <Input
+                  id="policy-name"
+                  placeholder="Production block on critical"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="policy-pattern">Stack pattern (optional)</Label>
+                <Input
+                  id="policy-pattern"
+                  placeholder="e.g. prod-* or leave blank for all"
+                  value={form.stack_pattern}
+                  onChange={(e) => setForm({ ...form, stack_pattern: e.target.value })}
+                />
                 <p className="text-xs text-muted-foreground">
-                  Emit a critical alert when this policy is violated after a deploy.
+                  Glob-style pattern matched against stack names. Leave blank to apply to all stacks.
                 </p>
               </div>
-              <TogglePill
-                checked={form.block_on_deploy}
-                onChange={(c) => setForm({ ...form, block_on_deploy: c })}
-              />
-            </div>
-            <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
-              <div>
-                <Label className="text-sm">Enabled</Label>
-                <p className="text-xs text-muted-foreground">Disabled policies are skipped during evaluation.</p>
+              <div className="space-y-2">
+                <Label>Max severity</Label>
+                <Combobox
+                  options={SEVERITY_OPTIONS}
+                  value={form.max_severity}
+                  onValueChange={(v) => setForm({ ...form, max_severity: v as VulnSeverity })}
+                />
               </div>
-              <TogglePill
-                checked={form.enabled}
-                onChange={(c) => setForm({ ...form, enabled: c })}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
-              Cancel
-            </Button>
-            <SettingsPrimaryButton onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving...' : editingId ? 'Update' : 'Create'}
-            </SettingsPrimaryButton>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
+                <div>
+                  <Label className="text-sm">Block on deploy</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Emit a critical alert when this policy is violated after a deploy.
+                  </p>
+                </div>
+                <TogglePill
+                  checked={form.block_on_deploy}
+                  onChange={(c) => setForm({ ...form, block_on_deploy: c })}
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
+                <div>
+                  <Label className="text-sm">Enabled</Label>
+                  <p className="text-xs text-muted-foreground">Disabled policies are skipped during evaluation.</p>
+                </div>
+                <TogglePill
+                  checked={form.enabled}
+                  onChange={(c) => setForm({ ...form, enabled: c })}
+                />
+              </div>
+            </ModalBody>
+            <ModalFooter
+              secondary={
+                <Button variant="outline" size="sm" onClick={() => setDialogOpen(false)}>
+                  Cancel
+                </Button>
+              }
+              primary={
+                <SettingsPrimaryButton size="sm" onClick={handleSave} disabled={saving}>
+                  {saving ? 'Saving...' : editingId ? 'Update' : 'Create'}
+                </SettingsPrimaryButton>
+              }
+            />
+          </Modal>
 
-          <AlertDialog open={deleteId != null} onOpenChange={(open) => !open && setDeleteId(null)}>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete scan policy?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This removes the policy immediately. Existing scans are not affected.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={handleDelete}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
-                  Delete
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <ConfirmModal
+            open={deleteId != null}
+            onOpenChange={(open) => !open && setDeleteId(null)}
+            variant="destructive"
+            kicker="SECURITY · DELETE · IRREVERSIBLE"
+            title="Delete scan policy"
+            confirmLabel="Delete"
+            onConfirm={handleDelete}
+          >
+            <p className="text-sm text-stat-subtitle">
+              Removes the policy immediately. Existing scans are not affected.
+            </p>
+          </ConfirmModal>
         </>
       )}
 
-      <AlertDialog open={uninstallConfirm} onOpenChange={setUninstallConfirm}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove Trivy?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This removes the managed Trivy binary. Vulnerability scanning will stop working until
-              Trivy is reinstalled or a host binary is provided.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleUninstallTrivy}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Remove
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmModal
+        open={uninstallConfirm}
+        onOpenChange={setUninstallConfirm}
+        variant="destructive"
+        kicker="TRIVY · REMOVE · IRREVERSIBLE"
+        title="Remove Trivy"
+        confirmLabel="Remove"
+        onConfirm={handleUninstallTrivy}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Removes the managed Trivy binary. Vulnerability scanning stops working until Trivy is reinstalled or a host binary is provided.
+        </p>
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={demoteConfirm}
+        onOpenChange={setDemoteConfirm}
+        variant="destructive"
+        kicker="FLEET · DEMOTE · IRREVERSIBLE"
+        title="Demote replica to control"
+        confirmLabel={demoteBusy ? 'Demoting...' : 'Demote'}
+        onConfirm={handleDemote}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Removes every replicated scan policy and CVE suppression mirrored from the control. Local edits to security policies on this instance become available again.
+        </p>
+      </ConfirmModal>
     </div>
   );
 }

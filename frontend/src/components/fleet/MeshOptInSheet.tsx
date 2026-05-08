@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
-import { Button } from '@/components/ui/button';
+import { SystemSheet } from '@/components/ui/system-sheet';
 import { Checkbox } from '@/components/ui/checkbox';
 import type { MeshStackEntry } from '@/types/mesh';
 import { Loader2 } from 'lucide-react';
@@ -67,30 +66,39 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
         }
     };
 
+    const inMeshCount = stacks.filter((s) => s.optedIn).length;
+    const meta = `${inMeshCount} of ${stacks.length} in mesh`;
+
     return (
-        <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent side="right" className="w-[420px] sm:max-w-[420px]">
-                <SheetHeader>
-                    <SheetTitle>Mesh stacks on {nodeName}</SheetTitle>
-                    <SheetDescription>
-                        Adding a stack lets its services be reached from other meshed stacks by hostname.
-                        Toggling a stack redeploys it to refresh hostnames.
-                    </SheetDescription>
-                </SheetHeader>
-                <div className="mt-4 space-y-2">
-                    {loading && (
-                        <div className="flex items-center gap-2 text-stat-subtitle text-sm">
-                            <Loader2 className="w-4 h-4 animate-spin" /> Loading stacks…
-                        </div>
-                    )}
-                    {error && (
-                        <div className="rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
-                            {error}
-                        </div>
-                    )}
-                    {!loading && stacks.length === 0 && (
-                        <div className="text-sm text-stat-subtitle">No stacks deployed on this node yet.</div>
-                    )}
+        <SystemSheet
+            open={open}
+            onOpenChange={onOpenChange}
+            crumb={['Fleet', 'Mesh', nodeName]}
+            name={nodeName}
+            meta={meta}
+            size="sm"
+        >
+            <div className="space-y-4">
+                <p className="text-sm text-stat-subtitle leading-snug">
+                    Adding a stack lets its services be reached from other meshed stacks by hostname.
+                    Toggling a stack redeploys it to refresh hostnames.
+                </p>
+
+                {loading && (
+                    <div className="flex items-center gap-2 text-stat-subtitle text-sm">
+                        <Loader2 className="w-4 h-4 animate-spin" /> Loading stacks…
+                    </div>
+                )}
+                {error && (
+                    <div className="rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
+                        {error}
+                    </div>
+                )}
+                {!loading && stacks.length === 0 && (
+                    <div className="text-sm text-stat-subtitle">No stacks deployed on this node yet.</div>
+                )}
+
+                <div className="space-y-2">
                     {stacks.map((stack) => (
                         <div key={stack.name} className="flex items-center justify-between rounded border border-card-border bg-card px-3 py-2">
                             <div className="flex items-center gap-3">
@@ -109,10 +117,7 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                         </div>
                     ))}
                 </div>
-                <div className="mt-6 flex justify-end">
-                    <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
-                </div>
-            </SheetContent>
-        </Sheet>
+            </div>
+        </SystemSheet>
     );
 }

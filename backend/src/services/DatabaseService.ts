@@ -72,6 +72,9 @@ export interface Node {
     pilot_last_seen?: number | null;
     pilot_agent_version?: string | null;
     last_successful_contact?: number | null;
+    cordoned: boolean;
+    cordoned_at: number | null;
+    cordoned_reason: string | null;
 }
 
 export interface StackRestartSummary {
@@ -275,6 +278,7 @@ export interface Blueprint {
     created_at: number;
     updated_at: number;
     created_by: string | null;
+    pinned_node_id: number | null;
 }
 
 export interface BlueprintDeployment {
@@ -300,6 +304,46 @@ export interface AuditLogEntry {
     node_id: number | null;
     ip_address: string;
     summary: string;
+}
+
+export interface SecretRow {
+    id: number;
+    name: string;
+    description: string;
+    current_version: number;
+    created_at: number;
+    created_by: string;
+    updated_at: number;
+}
+
+export interface SecretVersionRow {
+    id: number;
+    secret_id: number;
+    version: number;
+    encrypted_payload: string;
+    key_count: number;
+    created_at: number;
+    created_by: string;
+    note: string;
+}
+
+export type SecretPushStatus = 'ok' | 'failed' | 'skipped';
+
+export interface SecretPushRow {
+    id: number;
+    secret_id: number;
+    version: number;
+    push_id: string;
+    node_id: number;
+    stack_name: string;
+    env_file_basename: string;
+    status: SecretPushStatus;
+    error: string;
+    added_count: number;
+    changed_count: number;
+    unchanged_count: number;
+    pushed_by: string;
+    pushed_at: number;
 }
 
 export type ApiTokenScope = 'read-only' | 'deploy-only' | 'full-admin';
@@ -518,6 +562,22 @@ export interface CveSuppression {
     replicated_from_control: number;
 }
 
+/**
+ * Operator-acknowledged misconfiguration finding. Acknowledgements match by
+ * rule_id and an optional stack_pattern glob, are applied at read time, and
+ * never modify the persisted finding row. Mirrors `cve_suppressions` shape.
+ */
+export interface MisconfigAcknowledgement {
+    id: number;
+    rule_id: string;
+    stack_pattern: string | null;
+    reason: string;
+    created_by: string;
+    created_at: number;
+    expires_at: number | null;
+    replicated_from_control: number;
+}
+
 export interface ScanSummary {
     image_ref: string;
     highest_severity: VulnSeverity | null;
@@ -587,6 +647,8 @@ export class DatabaseService {
         this.migrateNodeLabels();
         this.migrateBlueprints();
         this.migrateAddNodeLastContact();
+        this.migrateAddNodeCordonFields();
+        this.migrateAddBlueprintPinnedNode();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -930,6 +992,21 @@ export class DatabaseService {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_cve_suppressions_unique
         ON cve_suppressions(cve_id, COALESCE(pkg_name, ''), COALESCE(image_pattern, ''));
 
+      CREATE TABLE IF NOT EXISTS misconfig_acknowledgements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_id TEXT NOT NULL,
+        stack_pattern TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        replicated_from_control INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_misconfig_ack_rule ON misconfig_acknowledgements(rule_id);
+      CREATE INDEX IF NOT EXISTS idx_misconfig_ack_expires ON misconfig_acknowledgements(expires_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_misconfig_ack_unique
+        ON misconfig_acknowledgements(rule_id, COALESCE(stack_pattern, ''));
+
       CREATE TABLE IF NOT EXISTS stack_labels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         node_id INTEGER NOT NULL DEFAULT 0,
@@ -1024,6 +1101,52 @@ export class DatabaseService {
 
       CREATE INDEX IF NOT EXISTS idx_auto_heal_history_policy_ts
         ON auto_heal_history(policy_id, timestamp DESC);
+
+      CREATE TABLE IF NOT EXISTS secrets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        current_version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        created_by TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_secrets_name ON secrets(name);
+
+      CREATE TABLE IF NOT EXISTS secret_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        secret_id INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        encrypted_payload TEXT NOT NULL,
+        key_count INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        created_by TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        UNIQUE(secret_id, version),
+        FOREIGN KEY(secret_id) REFERENCES secrets(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_secret_versions_secret ON secret_versions(secret_id);
+
+      CREATE TABLE IF NOT EXISTS secret_pushes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        secret_id INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        push_id TEXT NOT NULL,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        env_file_basename TEXT NOT NULL DEFAULT '.env',
+        status TEXT NOT NULL,
+        error TEXT NOT NULL DEFAULT '',
+        added_count INTEGER NOT NULL DEFAULT 0,
+        changed_count INTEGER NOT NULL DEFAULT 0,
+        unchanged_count INTEGER NOT NULL DEFAULT 0,
+        pushed_by TEXT NOT NULL,
+        pushed_at INTEGER NOT NULL,
+        FOREIGN KEY(secret_id) REFERENCES secrets(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_secret_pushes_push ON secret_pushes(push_id);
+      CREATE INDEX IF NOT EXISTS idx_secret_pushes_secret_version ON secret_pushes(secret_id, version);
+      CREATE INDEX IF NOT EXISTS idx_secret_pushes_node ON secret_pushes(node_id, stack_name);
     `);
 
         // Apply migrations safely (ignore if columns already exist)
@@ -1411,6 +1534,16 @@ export class DatabaseService {
         this.tryAddColumn('nodes', 'last_successful_contact', 'INTEGER');
     }
 
+    private migrateAddNodeCordonFields(): void {
+        this.tryAddColumn('nodes', 'cordoned', 'INTEGER NOT NULL DEFAULT 0');
+        this.tryAddColumn('nodes', 'cordoned_at', 'INTEGER');
+        this.tryAddColumn('nodes', 'cordoned_reason', 'TEXT');
+    }
+
+    private migrateAddBlueprintPinnedNode(): void {
+        this.tryAddColumn('blueprints', 'pinned_node_id', 'INTEGER');
+    }
+
     // --- Sencho Mesh ---
 
     public listMeshStacks(nodeId?: number): Array<{ id: number; node_id: number; stack_name: string; created_at: number; created_by: string | null }> {
@@ -1589,6 +1722,19 @@ export class DatabaseService {
 
     public setSystemState(key: string, value: string): void {
         this.db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)').run(key, value);
+    }
+
+    /**
+     * Run `fn` inside a single SQLite transaction. better-sqlite3 promotes a
+     * nested call to a SAVEPOINT, so callers can compose this with methods
+     * that already wrap their own writes in `this.db.transaction(...)`.
+     *
+     * Used by FleetSync receive to keep the row replacement and the
+     * received_pushed_at watermark write atomic. If either step fails, both
+     * roll back.
+     */
+    public transaction<T>(fn: () => T): T {
+        return this.db.transaction(fn)();
     }
 
     // --- Stack Alerts ---
@@ -1888,11 +2034,14 @@ export class DatabaseService {
             pilot_last_seen: row.pilot_last_seen ?? null,
             pilot_agent_version: row.pilot_agent_version ?? null,
             last_successful_contact: row.last_successful_contact ?? null,
+            cordoned: row.cordoned === 1,
+            cordoned_at: row.cordoned_at ?? null,
+            cordoned_reason: row.cordoned_reason ?? null,
         };
     }
 
     private static readonly NODE_COLUMNS =
-        'id, name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode, pilot_last_seen, pilot_agent_version, last_successful_contact';
+        'id, name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode, pilot_last_seen, pilot_agent_version, last_successful_contact, cordoned, cordoned_at, cordoned_reason';
 
     public getNodes(): Node[] {
         const stmt = this.db.prepare(`SELECT ${DatabaseService.NODE_COLUMNS} FROM nodes ORDER BY is_default DESC, name ASC`);
@@ -1913,7 +2062,7 @@ export class DatabaseService {
         return this.decryptNodeRow(row);
     }
 
-    public addNode(node: Omit<Node, 'id' | 'status' | 'created_at' | 'mode'> & { mode?: NodeMode }): number {
+    public addNode(node: Omit<Node, 'id' | 'status' | 'created_at' | 'mode' | 'cordoned' | 'cordoned_at' | 'cordoned_reason'> & { mode?: NodeMode }): number {
         if (node.is_default) {
             this.db.prepare('UPDATE nodes SET is_default = 0').run();
         }
@@ -1977,13 +2126,34 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_label_assignments WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
+            this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
+            this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
         })();
     }
 
     public updateNodeStatus(id: number, status: 'online' | 'offline' | 'unknown'): void {
         this.db.prepare('UPDATE nodes SET status = ? WHERE id = ?').run(status, id);
+    }
+
+    public setNodeCordoned(id: number, cordoned: boolean, reason: string | null): Node | undefined {
+        if (cordoned) {
+            this.db.prepare(
+                'UPDATE nodes SET cordoned = 1, cordoned_at = ?, cordoned_reason = ? WHERE id = ?'
+            ).run(Date.now(), reason, id);
+        } else {
+            this.db.prepare(
+                'UPDATE nodes SET cordoned = 0, cordoned_at = NULL, cordoned_reason = NULL WHERE id = ?'
+            ).run(id);
+        }
+        return this.getNode(id);
+    }
+
+    public setBlueprintPinnedNode(blueprintId: number, nodeId: number | null): Blueprint | undefined {
+        this.db.prepare('UPDATE blueprints SET pinned_node_id = ?, updated_at = ? WHERE id = ?')
+            .run(nodeId, Date.now(), blueprintId);
+        return this.getBlueprint(blueprintId);
     }
 
     public updateNodeLastContact(nodeId: number): void {
@@ -3376,6 +3546,44 @@ export class DatabaseService {
             .all() as ScanPolicy[];
     }
 
+    /**
+     * Local-only scan policies (created on this instance, not replicated from a
+     * control). Used by the fleet sync sender so it never re-replicates rows
+     * that came from a control in the first place.
+     */
+    public getLocalScanPolicies(): ScanPolicy[] {
+        return this.db
+            .prepare('SELECT * FROM scan_policies WHERE replicated_from_control = 0 ORDER BY created_at DESC')
+            .all() as ScanPolicy[];
+    }
+
+    /**
+     * Variant of `getScanPolicies` for the security-settings UI.
+     *
+     * On a control instance: returns the full set, identical to
+     * `getScanPolicies`.
+     *
+     * On a replica: returns only the policies that apply to THIS replica.
+     * Replicated rows scoped to a different replica's identity (the
+     * `node_identity` of a sibling node in the fleet) are filtered out so
+     * an operator on Replica A cannot enumerate the names of identity-scoped
+     * policies meant for Replica B. Internal evaluators
+     * (`getMatchingPolicy`, `evaluateScanAgainstPolicies`) keep using the
+     * unfiltered list because they already enforce identity matching at
+     * evaluation time.
+     */
+    public getScanPoliciesForUi(role: 'control' | 'replica', selfIdentity: string): ScanPolicy[] {
+        const all = this.getScanPolicies();
+        if (role === 'control') return all;
+        return all.filter((p) => {
+            if (p.replicated_from_control === 0) return true;
+            // Fleet-wide replicated rows have an empty node_identity and
+            // apply on every replica.
+            if (!p.node_identity) return true;
+            return p.node_identity === selfIdentity;
+        });
+    }
+
     public getScanPolicy(id: number): ScanPolicy | null {
         return (
             (this.db
@@ -3463,6 +3671,12 @@ export class DatabaseService {
      * Replace all policies that were replicated from a control node with the
      * provided rows in a single transaction. Local-only policies (created on
      * this instance directly) are left untouched.
+     *
+     * Replicated policies always insert with fresh ids on the replica, so any
+     * `vulnerability_scans.policy_evaluation` row pointing at a replicated
+     * policy from the previous push refers to a now-deleted id. Clear those
+     * orphaned cache entries inside the same transaction so a replica's UI
+     * stops showing violations from a policy that no longer exists.
      */
     public replaceReplicatedScanPolicies(rows: ScanPolicy[]): void {
         const now = Date.now();
@@ -3486,6 +3700,7 @@ export class DatabaseService {
                     p.updated_at ?? now,
                 );
             }
+            this.clearOrphanPolicyEvaluations();
         });
         txn(rows);
     }
@@ -3495,6 +3710,11 @@ export class DatabaseService {
         stackName: string | null,
         selfIdentity: string,
     ): ScanPolicy | null {
+        // Filter on node_id at SQL: rows are eligible when fleet-wide
+        // (node_id IS NULL) or when locally scoped to this node (node_id = ?).
+        // Replicated rows always insert node_id = NULL (see
+        // replaceReplicatedScanPolicies), so identity scoping for replicated
+        // rows is enforced in `matchesIdentity` below, not in SQL.
         const policies = this.db
             .prepare(
                 'SELECT * FROM scan_policies WHERE enabled = 1 AND (node_id IS NULL OR node_id = ?)',
@@ -3526,7 +3746,11 @@ export class DatabaseService {
             if (!aNode && bNode) return 1;
             if (a.stack_pattern && !b.stack_pattern) return -1;
             if (!a.stack_pattern && b.stack_pattern) return 1;
-            return 0;
+            // Deterministic tiebreaker: lowest id wins. Two rows in the same
+            // scope class (e.g. both fleet-wide stack-wildcard) must resolve
+            // to the same policy on every replica, regardless of SQLite row
+            // iteration order.
+            return a.id - b.id;
         });
         return scoped[0];
     }
@@ -3624,6 +3848,13 @@ export class DatabaseService {
             .all() as CveSuppression[];
     }
 
+    /** Local-only CVE suppressions; mirrors `getLocalScanPolicies`. */
+    public getLocalCveSuppressions(): CveSuppression[] {
+        return this.db
+            .prepare('SELECT * FROM cve_suppressions WHERE replicated_from_control = 0 ORDER BY cve_id, pkg_name')
+            .all() as CveSuppression[];
+    }
+
     public getCveSuppression(id: number): CveSuppression | null {
         return (
             (this.db.prepare('SELECT * FROM cve_suppressions WHERE id = ?')
@@ -3705,6 +3936,137 @@ export class DatabaseService {
             }
         });
         txn(rows);
+    }
+
+    // --- Misconfig Acknowledgements ---
+
+    public getMisconfigAcknowledgements(): MisconfigAcknowledgement[] {
+        return this.db
+            .prepare('SELECT * FROM misconfig_acknowledgements ORDER BY rule_id, stack_pattern')
+            .all() as MisconfigAcknowledgement[];
+    }
+
+    /** Local-only acknowledgements; mirrors `getLocalCveSuppressions`. */
+    public getLocalMisconfigAcknowledgements(): MisconfigAcknowledgement[] {
+        return this.db
+            .prepare('SELECT * FROM misconfig_acknowledgements WHERE replicated_from_control = 0 ORDER BY rule_id, stack_pattern')
+            .all() as MisconfigAcknowledgement[];
+    }
+
+    public getMisconfigAcknowledgement(id: number): MisconfigAcknowledgement | null {
+        return (
+            (this.db.prepare('SELECT * FROM misconfig_acknowledgements WHERE id = ?')
+                .get(id) as MisconfigAcknowledgement | undefined) ?? null
+        );
+    }
+
+    public createMisconfigAcknowledgement(
+        ack: Omit<MisconfigAcknowledgement, 'id'>,
+    ): MisconfigAcknowledgement {
+        const result = this.db
+            .prepare(
+                `INSERT INTO misconfig_acknowledgements
+                    (rule_id, stack_pattern, reason, created_by, created_at, expires_at, replicated_from_control)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+                ack.rule_id,
+                ack.stack_pattern,
+                ack.reason,
+                ack.created_by,
+                ack.created_at,
+                ack.expires_at,
+                ack.replicated_from_control ?? 0,
+            );
+        return { ...ack, id: result.lastInsertRowid as number };
+    }
+
+    public updateMisconfigAcknowledgement(
+        id: number,
+        updates: Partial<Pick<MisconfigAcknowledgement, 'reason' | 'stack_pattern' | 'expires_at'>>,
+    ): MisconfigAcknowledgement | null {
+        const existing = this.getMisconfigAcknowledgement(id);
+        if (!existing) return null;
+        const ALLOWED = new Set(['reason', 'stack_pattern', 'expires_at']);
+        const fields: string[] = [];
+        const values: unknown[] = [];
+        for (const [key, value] of Object.entries(updates)) {
+            if (!ALLOWED.has(key)) continue;
+            fields.push(`${key} = ?`);
+            values.push(value);
+        }
+        if (fields.length === 0) return existing;
+        values.push(id);
+        this.db
+            .prepare(`UPDATE misconfig_acknowledgements SET ${fields.join(', ')} WHERE id = ?`)
+            .run(...(values as never[]));
+        return this.getMisconfigAcknowledgement(id);
+    }
+
+    public deleteMisconfigAcknowledgement(id: number): void {
+        this.db.prepare('DELETE FROM misconfig_acknowledgements WHERE id = ?').run(id);
+    }
+
+    /**
+     * Replace all replicated misconfig acknowledgements in a single transaction.
+     * Preserves rows flagged as locally created on this instance.
+     */
+    public replaceReplicatedMisconfigAcknowledgements(
+        rows: Array<Omit<MisconfigAcknowledgement, 'id'>>,
+    ): void {
+        const deleteStmt = this.db.prepare('DELETE FROM misconfig_acknowledgements WHERE replicated_from_control = 1');
+        const insertStmt = this.db.prepare(
+            `INSERT INTO misconfig_acknowledgements
+                (rule_id, stack_pattern, reason, created_by, created_at, expires_at, replicated_from_control)
+             VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        );
+        const txn = this.db.transaction((items: Array<Omit<MisconfigAcknowledgement, 'id'>>) => {
+            deleteStmt.run();
+            for (const a of items) {
+                insertStmt.run(
+                    a.rule_id,
+                    a.stack_pattern,
+                    a.reason,
+                    a.created_by,
+                    a.created_at,
+                    a.expires_at,
+                );
+            }
+        });
+        txn(rows);
+    }
+
+    /**
+     * Null out `vulnerability_scans.policy_evaluation` rows whose `$.policyId`
+     * no longer exists in `scan_policies`. Used after replicated rows are
+     * wiped (sync replace, demote) so cached scan banners do not reference
+     * deleted policies.
+     */
+    public clearOrphanPolicyEvaluations(): void {
+        this.db
+            .prepare(
+                `UPDATE vulnerability_scans
+                    SET policy_evaluation = NULL
+                  WHERE policy_evaluation IS NOT NULL
+                    AND CAST(json_extract(policy_evaluation, '$.policyId') AS INTEGER)
+                        NOT IN (SELECT id FROM scan_policies)`,
+            )
+            .run();
+    }
+
+    /**
+     * Atomically delete every replicated_from_control row from scan_policies,
+     * cve_suppressions, and misconfig_acknowledgements, then null out any
+     * orphaned policy_evaluation cache. Used by the demote endpoint and any
+     * future "drop replicated state" operation.
+     */
+    public clearReplicatedRows(): void {
+        this.transaction(() => {
+            this.db.prepare('DELETE FROM scan_policies WHERE replicated_from_control = 1').run();
+            this.db.prepare('DELETE FROM cve_suppressions WHERE replicated_from_control = 1').run();
+            this.db.prepare('DELETE FROM misconfig_acknowledgements WHERE replicated_from_control = 1').run();
+            this.clearOrphanPolicyEvaluations();
+        });
     }
 
     // --- Stack Labels ---
@@ -3862,6 +4224,7 @@ export class DatabaseService {
             created_at: row.created_at as number,
             updated_at: row.updated_at as number,
             created_by: (row.created_by as string | null) ?? null,
+            pinned_node_id: (row.pinned_node_id as number | null) ?? null,
         };
     }
 
@@ -4036,5 +4399,116 @@ export class DatabaseService {
 
     public deleteDeployment(blueprintId: number, nodeId: number): void {
         this.db.prepare('DELETE FROM blueprint_deployments WHERE blueprint_id = ? AND node_id = ?').run(blueprintId, nodeId);
+    }
+
+    // --- Secrets ---
+
+    public listSecrets(): SecretRow[] {
+        return this.db.prepare(
+            'SELECT id, name, description, current_version, created_at, created_by, updated_at FROM secrets ORDER BY name ASC'
+        ).all() as SecretRow[];
+    }
+
+    public getSecret(id: number): SecretRow | undefined {
+        return this.db.prepare(
+            'SELECT id, name, description, current_version, created_at, created_by, updated_at FROM secrets WHERE id = ?'
+        ).get(id) as SecretRow | undefined;
+    }
+
+    public listSecretVersions(secretId: number): SecretVersionRow[] {
+        return this.db.prepare(
+            'SELECT id, secret_id, version, encrypted_payload, key_count, created_at, created_by, note FROM secret_versions WHERE secret_id = ? ORDER BY version DESC'
+        ).all(secretId) as SecretVersionRow[];
+    }
+
+    public getCurrentSecretVersion(secretId: number): SecretVersionRow | undefined {
+        return this.db.prepare(
+            `SELECT v.id, v.secret_id, v.version, v.encrypted_payload, v.key_count, v.created_at, v.created_by, v.note
+             FROM secret_versions v
+             INNER JOIN secrets s ON s.id = v.secret_id AND s.current_version = v.version
+             WHERE v.secret_id = ?`
+        ).get(secretId) as SecretVersionRow | undefined;
+    }
+
+    public createSecretWithVersion(input: {
+        name: string;
+        description: string;
+        encryptedPayload: string;
+        keyCount: number;
+        createdBy: string;
+        note: string;
+    }): { id: number; version: number } {
+        const now = Date.now();
+        const txn = this.db.transaction(() => {
+            const insertSecret = this.db.prepare(
+                'INSERT INTO secrets (name, description, current_version, created_at, created_by, updated_at) VALUES (?, ?, 1, ?, ?, ?)'
+            );
+            const result = insertSecret.run(input.name, input.description, now, input.createdBy, now);
+            const secretId = Number(result.lastInsertRowid);
+            this.db.prepare(
+                'INSERT INTO secret_versions (secret_id, version, encrypted_payload, key_count, created_at, created_by, note) VALUES (?, 1, ?, ?, ?, ?, ?)'
+            ).run(secretId, input.encryptedPayload, input.keyCount, now, input.createdBy, input.note);
+            return { id: secretId, version: 1 };
+        });
+        return txn();
+    }
+
+    public updateSecretWithVersion(input: {
+        secretId: number;
+        description: string | null;
+        encryptedPayload: string;
+        keyCount: number;
+        createdBy: string;
+        note: string;
+    }): { version: number } {
+        const now = Date.now();
+        const txn = this.db.transaction(() => {
+            const current = this.db.prepare('SELECT current_version FROM secrets WHERE id = ?').get(input.secretId) as { current_version: number } | undefined;
+            if (!current) throw new Error('Secret not found');
+            const nextVersion = current.current_version + 1;
+            this.db.prepare(
+                'INSERT INTO secret_versions (secret_id, version, encrypted_payload, key_count, created_at, created_by, note) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            ).run(input.secretId, nextVersion, input.encryptedPayload, input.keyCount, now, input.createdBy, input.note);
+            if (input.description === null) {
+                this.db.prepare('UPDATE secrets SET current_version = ?, updated_at = ? WHERE id = ?').run(nextVersion, now, input.secretId);
+            } else {
+                this.db.prepare('UPDATE secrets SET current_version = ?, description = ?, updated_at = ? WHERE id = ?').run(nextVersion, input.description, now, input.secretId);
+            }
+            return { version: nextVersion };
+        });
+        return txn();
+    }
+
+    public deleteSecret(id: number): boolean {
+        const result = this.db.prepare('DELETE FROM secrets WHERE id = ?').run(id);
+        return result.changes > 0;
+    }
+
+    public insertSecretPushes(rows: Array<Omit<SecretPushRow, 'id'>>): void {
+        if (rows.length === 0) return;
+        const stmt = this.db.prepare(
+            `INSERT INTO secret_pushes (secret_id, version, push_id, node_id, stack_name, env_file_basename, status, error, added_count, changed_count, unchanged_count, pushed_by, pushed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        const txn = this.db.transaction((entries: Array<Omit<SecretPushRow, 'id'>>) => {
+            for (const r of entries) {
+                stmt.run(
+                    r.secret_id, r.version, r.push_id, r.node_id, r.stack_name, r.env_file_basename,
+                    r.status, r.error, r.added_count, r.changed_count, r.unchanged_count, r.pushed_by, r.pushed_at,
+                );
+            }
+        });
+        txn(rows);
+    }
+
+    public listSecretPushes(secretId: number, limit = 50): SecretPushRow[] {
+        return this.db.prepare(
+            `SELECT id, secret_id, version, push_id, node_id, stack_name, env_file_basename, status, error,
+                    added_count, changed_count, unchanged_count, pushed_by, pushed_at
+             FROM secret_pushes
+             WHERE secret_id = ?
+             ORDER BY pushed_at DESC
+             LIMIT ?`
+        ).all(secretId, limit) as SecretPushRow[];
     }
 }

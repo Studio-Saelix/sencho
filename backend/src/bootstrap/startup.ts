@@ -5,8 +5,9 @@ import { LicenseService } from '../services/LicenseService';
 import SelfUpdateService from '../services/SelfUpdateService';
 import { MonitorService } from '../services/MonitorService';
 import { AutoHealService } from '../services/AutoHealService';
+import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
-import TrivyService from '../services/TrivyService';
+import TrivyService, { sweepStaleTrivyTempDirs } from '../services/TrivyService';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { SchedulerService } from '../services/SchedulerService';
 import { MfaService } from '../services/MfaService';
@@ -39,6 +40,7 @@ export async function startServer(server: Server): Promise<void> {
   // safely run alongside the async initializers below.
   MonitorService.getInstance().start();
   AutoHealService.getInstance().start();
+  FleetSyncRetryService.getInstance().start();
   ImageUpdateService.getInstance().start();
   SchedulerService.getInstance().start();
   MfaService.getInstance().start();
@@ -58,6 +60,9 @@ export async function startServer(server: Server): Promise<void> {
   // Fire-and-forget housekeeping; logged but never awaited.
   sweepStaleGitTempDirs().catch((err) => {
     console.warn('[GitSource] Temp dir sweep failed:', (err as Error).message);
+  });
+  sweepStaleTrivyTempDirs().catch((err) => {
+    console.warn('[Trivy] Temp dir sweep failed:', (err as Error).message);
   });
 
   const isPilotAgent = process.env.SENCHO_MODE === 'pilot';
