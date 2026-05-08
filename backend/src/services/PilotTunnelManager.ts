@@ -3,6 +3,7 @@ import WebSocket from 'ws';
 import { PilotTunnelBridge } from './PilotTunnelBridge';
 import { DatabaseService } from './DatabaseService';
 import { PilotCloseCode } from '../pilot/protocol';
+import { isDebugEnabled } from '../utils/debug';
 
 /**
  * Soft warning threshold: a single instance handling more than this many
@@ -105,6 +106,9 @@ export class PilotTunnelManager extends EventEmitter {
             pilot_last_seen: Date.now(),
             pilot_agent_version: agentVersion ?? null,
         });
+        if (isDebugEnabled()) {
+            console.log('[PilotMgr:diag] Tunnel registered:', { nodeId, active: this.bridges.size });
+        }
         this.emit('tunnel-up', nodeId);
     }
 

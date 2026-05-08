@@ -19,6 +19,7 @@ import {
     wsDataToString,
 } from './protocol';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isDebugEnabled } from '../utils/debug';
 
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -239,7 +240,9 @@ class PilotAgent {
                 this.handleJsonFrame(frame);
             }
         } catch (err) {
-            console.warn('[Pilot] Malformed frame from primary:', sanitizeForLog((err as Error).message));
+            // Per-frame; diag-gated to avoid log floods from a misbehaving
+            // primary or a malformed frame arriving in a tight loop.
+            if (isDebugEnabled()) console.warn('[Pilot:diag] Malformed frame from primary:', sanitizeForLog((err as Error).message));
         }
     }
 

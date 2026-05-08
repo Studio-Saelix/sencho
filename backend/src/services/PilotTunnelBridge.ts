@@ -15,6 +15,8 @@ import {
     wsDataToBuffer,
     wsDataToString,
 } from '../pilot/protocol';
+import { isDebugEnabled } from '../utils/debug';
+import { sanitizeForLog } from '../utils/safeLog';
 
 const BUFFER_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const PING_INTERVAL_MS = 30_000;
@@ -383,8 +385,13 @@ export class PilotTunnelBridge extends EventEmitter {
                 const frame = decodeJsonFrame(text);
                 this.handleJsonFrame(frame);
             }
-        } catch {
-            // Malformed frame: kill the tunnel to force re-sync.
+        } catch (err) {
+            // Malformed frame: kill the tunnel to force re-sync. Diag-gated
+            // so a flood of malformed frames cannot drown the log; the
+            // tunnel close itself is the loud signal.
+            if (isDebugEnabled()) {
+                console.warn('[PilotBridge:diag] Malformed frame from agent:', sanitizeForLog((err as Error).message));
+            }
             this.close(1002, 'protocol error');
         }
     }
