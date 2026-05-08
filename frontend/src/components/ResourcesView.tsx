@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from "@/components/ui/tabs";
@@ -37,21 +37,8 @@ import { FootprintTreemap } from './resources/FootprintTreemap';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { NetworkDetailSheet, type NetworkInspectData } from './resources/NetworkDetailSheet';
-import { TabLanding, type TabLandingEntry } from './resources/TabLanding';
 
 const NetworkTopologyView = lazy(() => import('./NetworkTopologyView'));
-
-const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-function ageLabel(ms: number): string {
-    const minutes = Math.max(0, Math.round((Date.now() - ms) / 60000));
-    if (minutes < 1) return 'just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.round(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.round(hours / 24);
-    return `${days}d ago`;
-}
 
 // ── Interfaces ─────────────────────────────────────────────────────────────────
 
@@ -627,28 +614,6 @@ export default function ResourcesView() {
         setConfirmPrune({ target: 'images', scope: 'all' });
     };
 
-    const volumeLandings = useMemo(() => {
-        const largest: TabLandingEntry[] = [...volumes]
-            .sort((a, b) => b.Size - a.Size)
-            .slice(0, 5)
-            .map(vol => ({
-                key: vol.Name,
-                primary: vol.Name,
-                secondary: vol.Size > 0 ? formatBytes(vol.Size) : '-',
-            }));
-        const now = Date.now();
-        const recent: TabLandingEntry[] = volumes
-            .filter(v => !!v.CreatedAt && now - new Date(v.CreatedAt).getTime() <= RECENT_WINDOW_MS)
-            .sort((a, b) => new Date(b.CreatedAt ?? 0).getTime() - new Date(a.CreatedAt ?? 0).getTime())
-            .slice(0, 5)
-            .map(vol => ({
-                key: vol.Name,
-                primary: vol.Name,
-                secondary: vol.CreatedAt ? ageLabel(new Date(vol.CreatedAt).getTime()) : '-',
-            }));
-        return { largest, recent };
-    }, [volumes]);
-
     return (
         <div className="p-6 h-full overflow-auto text-foreground flex flex-col gap-6 animate-in fade-in-0 duration-300">
 
@@ -896,16 +861,6 @@ export default function ResourcesView() {
 
                     {/* Volumes */}
                     <TabsContent value="volumes" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        {!isLoading && volumes.length > 0 && (
-                            <TabLanding
-                                largestSubtitle={`by size · ${volumes.length} total`}
-                                largestEntries={volumeLandings.largest}
-                                largestEmpty="No volumes on disk."
-                                recentSubtitle="last 24h"
-                                recentEntries={volumeLandings.recent}
-                                recentEmpty="No volumes created in the last 24h."
-                            />
-                        )}
                         <FilterToggle
                             value={volumeFilter}
                             onChange={setVolumeFilter}
