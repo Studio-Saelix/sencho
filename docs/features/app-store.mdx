@@ -58,6 +58,8 @@ The **Essentials** tab is intentionally minimal: a single **Stack Name** field a
 
 The stack name pre-fills with the template slug (lowercased, hyphens, no spaces). You can change it; the same [naming rules](/features/stack-management#creating-a-stack) apply.
 
+If any of the template's default ports are already bound on the active node, the Essentials hint card is replaced by a **Port conflict** warning that lists each conflicting port and the application using it, with a pulsating amber accent. Switch to **Advanced** to remap the host port before deploying.
+
 For anything beyond the defaults, switch to **Advanced**.
 
 ### Advanced tab
@@ -72,10 +74,10 @@ The **Advanced** tab exposes every knob the template declares. Every field is pr
 
 Each declared port shows an editable **host port** on the left and the fixed **container port** on the right. Host ports must be integers between 1 and 65535; invalid values are highlighted and block deployment.
 
-When the host port you typed is already in use somewhere on the active node, a pulsing amber dot appears next to the container port. Hover the dot for a tooltip that names the offending stack (`Port {N} used by {stack}`) when Sencho manages it, or `Port {N} used by an external app` when the binding belongs to a process outside Sencho.
+When the host port you typed is already in use somewhere on the active node, an inline amber **`in use by {stack}`** message appears next to the container port, alongside a pulsating amber dot. The message names the offending stack when Sencho manages it, or reads `in use by an external app` when the binding belongs to a process outside Sencho.
 
 <Frame>
-  <img src="/images/app-store/app-store-port-conflict.png" alt="Port conflict tooltip on the radarr deploy sheet reading 'Port 7878 used by radarr', with an amber pulse next to the container port" />
+  <img src="/images/app-store/app-store-port-conflict.png" alt="Port conflict indicator on the radarr deploy sheet: an inline amber message names the stack already using port 7878, next to a pulsating warning dot" />
 </Frame>
 
 #### Volumes
@@ -143,8 +145,8 @@ The default registry display at the top of the page is informational only; you c
   <Accordion title="No tiles appear">
     Sencho fetches templates from the configured registry on demand. If the grid stays empty and the loading spinner is gone, the registry returned an empty list or the request failed before parsing. Open **Settings › Advanced › App Store** and confirm the **Registry URL** is reachable from the node (try the URL in a browser tab); a custom catalogue served from a private host will not load if the Sencho container cannot resolve or reach it. Click **Save & refresh** to invalidate the cache and try again. If you switched to a custom registry by mistake, click **Reset to default**.
   </Accordion>
-  <Accordion title="The port-conflict dot will not clear">
-    The conflict indicator is computed against a snapshot of the node's bound ports taken when you opened the deployment sheet. If you freed the port from another stack while the sheet was open, the dot does not refresh on its own. Close the sheet and reopen it to recompute, or pick a different host port. Tooltip text that reads `used by an external app` means a process outside Sencho holds the binding (often the host's reverse proxy or a system service); changing the host port is usually faster than tracking down the offender.
+  <Accordion title="The port-conflict warning will not clear">
+    The conflict indicator is computed against a snapshot of the node's bound ports taken when you opened the deployment sheet. If you freed the port from another stack while the sheet was open, the warning does not refresh on its own. Close the sheet and reopen it to recompute, or pick a different host port. The message `in use by an external app` means a process outside Sencho holds the binding (often the host's reverse proxy or a system service); changing the host port is usually faster than tracking down the offender.
   </Accordion>
   <Accordion title="Deploy failed but the stack directory remains">
     Sencho rolls back the directory only when the failure points cleanly at template generation, image pull, or first-time container creation. Failures that involve a container that did manage to start (for example, a crashloop after Compose returned success, or a healthcheck that flapped) leave the stack on disk so you can read the logs and decide whether to fix forward. The error toast tells you which path was taken; the response also carries a `rolledBack` flag and a `ruleId` you can search for in the [audit log](/features/audit-log). Use the editor to repair the compose, or delete the stack from the cockpit if you want to retry from scratch.
