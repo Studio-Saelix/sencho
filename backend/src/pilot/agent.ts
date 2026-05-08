@@ -99,6 +99,7 @@ class PilotAgent {
         if (this.shuttingDown) return;
 
         const wsUrl = this.options.primaryUrl.replace(/^http/, 'ws').replace(/\/$/, '') + '/api/pilot/tunnel';
+        const customCa = readPilotCaBundle();
         const ws = new WebSocket(wsUrl, {
             headers: {
                 Authorization: `Bearer ${this.token}`,
@@ -106,6 +107,11 @@ class PilotAgent {
             },
             handshakeTimeout: 15_000,
             maxPayload: MAX_FRAME_SIZE_BYTES,
+            // Self-signed deployments can supply an internal CA bundle via
+            // SENCHO_PILOT_CA_FILE; rejectUnauthorized stays true. There is
+            // intentionally no env var to disable TLS verification — that
+            // would defeat the entire trust model of the tunnel credential.
+            ...(customCa ? { ca: customCa } : {}),
         });
         this.ws = ws;
 
@@ -583,6 +589,24 @@ function readPersistedToken(): string | null {
         }
     } catch { /* ignore */ }
     return null;
+}
+
+/**
+ * Load the optional CA bundle pointed at by SENCHO_PILOT_CA_FILE so a pilot
+ * agent can verify a self-signed primary cert without disabling TLS
+ * verification globally. Returns the file contents or null if the var is
+ * unset; surfaces a clear error and exits if the file cannot be read so the
+ * operator does not silently fall back to the default trust store.
+ */
+function readPilotCaBundle(): Buffer | null {
+    const caFile = process.env.SENCHO_PILOT_CA_FILE;
+    if (!caFile) return null;
+    try {
+        return fs.readFileSync(caFile);
+    } catch (err) {
+        console.error('[Pilot] Failed to read SENCHO_PILOT_CA_FILE:', sanitizeForLog((err as Error).message));
+        process.exit(1);
+    }
 }
 
 function persistToken(token: string): void {
