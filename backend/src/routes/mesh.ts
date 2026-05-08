@@ -57,6 +57,55 @@ meshRouter.post('/nodes/:nodeId/disable', async (req: Request, res: Response): P
  * existing proxy chain (`NodeRegistry.getProxyTarget`) so it can build the
  * cross-fleet alias cache without violating the local-only Dockerode rule.
  */
+/**
+ * Sidecar lifecycle endpoints that always operate on the LOCAL Docker
+ * daemon. Central's MeshService HTTP-calls these against each remote node
+ * via the existing proxy chain so spawn/stop/inspect respect the
+ * "remote-Docker is not directly accessible" rule. Mirrors the
+ * `/local-services/:stackName` pattern from PR #992.
+ *
+ * `nodeId` in the request body is the FLEET-wide node id used to label and
+ * uniquely name the sidecar container. Each Sencho instance only ever sees
+ * its own assigned id, so there is no cross-node collision.
+ */
+meshRouter.post('/local-sidecar/spawn', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    try {
+        await MeshService.getInstance().spawnLocalSidecar(nodeId);
+        res.json({ ok: true });
+    } catch (err) {
+        console.warn('[mesh] /local-sidecar/spawn failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: (err as Error).message });
+    }
+});
+
+meshRouter.post('/local-sidecar/stop', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    try {
+        await MeshService.getInstance().stopLocalSidecar(nodeId);
+        res.json({ ok: true });
+    } catch (err) {
+        console.warn('[mesh] /local-sidecar/stop failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: (err as Error).message });
+    }
+});
+
+meshRouter.get('/local-sidecar/inspect', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    try {
+        const running = await MeshService.getInstance().isLocalSidecarRunning(nodeId);
+        res.json({ running });
+    } catch (err) {
+        console.warn('[mesh] /local-sidecar/inspect failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to inspect sidecar' });
+    }
+});
+
 meshRouter.get('/local-services/:stackName', async (req: Request, res: Response): Promise<void> => {
     if (!requireAdmiral(req, res)) return;
     const stackName = req.params.stackName as string;

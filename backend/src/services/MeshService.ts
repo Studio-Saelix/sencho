@@ -450,11 +450,7 @@ export class MeshService extends EventEmitter {
         }
         try {
             const url = `${target.apiUrl.replace(/\/$/, '')}/api/mesh/local-services/${encodeURIComponent(stackName)}`;
-            const headers: Record<string, string> = {};
-            if (target.apiToken) headers['Authorization'] = `Bearer ${target.apiToken}`;
-            const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-            headers[PROXY_TIER_HEADER] = proxyHeaders.tier;
-            headers[PROXY_VARIANT_HEADER] = proxyHeaders.variant || '';
+            const headers = this.buildProxyFetchHeaders(target);
             const res = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) });
             if (!res.ok) {
                 console.error(`[MeshService] inspectStackServices: HTTP ${res.status} from node ${nodeId} (${sanitizeForLog(node.name)})`);
@@ -466,6 +462,23 @@ export class MeshService extends EventEmitter {
             console.error('[MeshService] inspectStackServices remote unreachable:', sanitizeForLog((err as Error).message));
             return [];
         }
+    }
+
+    /**
+     * Header shape for central-to-remote HTTP fetches that go directly to a
+     * resolved proxy target (bypassing the central's own proxy chain).
+     * Bearer-attaches the persisted node_proxy token (proxy mode) or omits
+     * it (pilot-agent mode, where the bridge re-auths via the tunnel
+     * socket). Tier and variant headers are always set so the remote's
+     * `requireAdmiral` honors the central's license, not the remote's.
+     */
+    private buildProxyFetchHeaders(target: { apiUrl: string; apiToken: string }): Record<string, string> {
+        const headers: Record<string, string> = {};
+        if (target.apiToken) headers['Authorization'] = `Bearer ${target.apiToken}`;
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        headers[PROXY_TIER_HEADER] = proxyHeaders.tier;
+        headers[PROXY_VARIANT_HEADER] = proxyHeaders.variant || '';
+        return headers;
     }
 
     // --- Resolution + forwarding ---
@@ -755,26 +768,39 @@ export class MeshService extends EventEmitter {
     public async getStatus(): Promise<MeshNodeStatus[]> {
         const db = DatabaseService.getInstance();
         const nodes = db.getNodes();
-        const out: MeshNodeStatus[] = [];
-        for (const node of nodes) {
-            const optedInStacks = db.listMeshStacks(node.id).map((s) => s.stack_name);
-            out.push({
-                nodeId: node.id,
-                nodeName: node.name,
-                enabled: db.getNodeMeshEnabled(node.id),
-                sidecarRunning: await this.isSidecarRunning(node.id),
-                pilotConnected: this.isMeshReachable(node.id),
-                optedInStacks,
-                activeStreamCount: Array.from(this.activeStreams.values()).length,
-            });
-        }
-        return out;
+        // After C-4, sidecar inspection on remote nodes is an HTTP fetch
+        // with a 30 s budget. Sequentially awaiting per node would let one
+        // unreachable remote stall the whole status fetch; the UI polls
+        // this on every Routing-tab open and on every refresh.
+        const sidecarStates = await Promise.all(nodes.map((n) =>
+            this.isSidecarRunning(n.id).catch(() => false),
+        ));
+        const activeStreamCount = this.activeStreams.size;
+        return nodes.map((node, i) => ({
+            nodeId: node.id,
+            nodeName: node.name,
+            enabled: db.getNodeMeshEnabled(node.id),
+            sidecarRunning: sidecarStates[i],
+            pilotConnected: this.isMeshReachable(node.id),
+            optedInStacks: db.listMeshStacks(node.id).map((s) => s.stack_name),
+            activeStreamCount,
+        }));
     }
 
-    // --- Sidecar lifecycle (best-effort; real spawn happens on local node) ---
+    // --- Sidecar lifecycle ---
+    //
+    // Each node's sidecar must run on that node's local Docker daemon.
+    // `NodeRegistry.getDocker` throws for any remote node by design (its
+    // Docker daemon is not directly accessible; all requests are proxied
+    // via HTTP), so the central cannot spawn/stop/inspect a remote node's
+    // sidecar via Dockerode. Public methods dispatch to either the local
+    // Dockerode path or an HTTP call to the remote node's
+    // `/api/mesh/local-sidecar/*` endpoints, which run the same local
+    // Dockerode logic on the remote's own MeshService. Mirrors the
+    // dispatch shape introduced for `inspectStackServices` in PR #992.
 
-    public async spawnSidecar(nodeId: number): Promise<void> {
-        const docker = DockerController.getInstance(nodeId).getDocker();
+    public async spawnLocalSidecar(nodeId: number): Promise<void> {
+        const docker = DockerController.getInstance().getDocker();
         const name = `${SIDECAR_CONTAINER_PREFIX}${nodeId}`;
         try {
             const existing = docker.getContainer(name);
@@ -817,8 +843,8 @@ export class MeshService extends EventEmitter {
         }
     }
 
-    public async stopSidecar(nodeId: number): Promise<void> {
-        const docker = DockerController.getInstance(nodeId).getDocker();
+    public async stopLocalSidecar(nodeId: number): Promise<void> {
+        const docker = DockerController.getInstance().getDocker();
         const name = `${SIDECAR_CONTAINER_PREFIX}${nodeId}`;
         try {
             const c = docker.getContainer(name);
@@ -831,14 +857,65 @@ export class MeshService extends EventEmitter {
         } catch { /* ignore */ }
     }
 
-    private async isSidecarRunning(nodeId: number): Promise<boolean> {
+    public async isLocalSidecarRunning(nodeId: number): Promise<boolean> {
         try {
-            const docker = DockerController.getInstance(nodeId).getDocker();
+            const docker = DockerController.getInstance().getDocker();
             const info = await docker.getContainer(`${SIDECAR_CONTAINER_PREFIX}${nodeId}`).inspect();
             return !!info.State?.Running;
         } catch {
             return false;
         }
+    }
+
+    public async spawnSidecar(nodeId: number): Promise<void> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) throw new Error(`Node ${nodeId} not found`);
+        if (node.type !== 'remote') return this.spawnLocalSidecar(nodeId);
+        await this.callRemoteSidecarLifecycle(nodeId, 'spawn');
+    }
+
+    public async stopSidecar(nodeId: number): Promise<void> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) return;
+        if (node.type !== 'remote') return this.stopLocalSidecar(nodeId);
+        await this.callRemoteSidecarLifecycle(nodeId, 'stop');
+    }
+
+    private async isSidecarRunning(nodeId: number): Promise<boolean> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) return false;
+        if (node.type !== 'remote') return this.isLocalSidecarRunning(nodeId);
+        const result = await this.callRemoteSidecarLifecycle(nodeId, 'inspect');
+        return result?.running === true;
+    }
+
+    /**
+     * HTTP-call the remote node's own `/api/mesh/local-sidecar/{action}`
+     * endpoint. The remote's MeshService runs the lifecycle action against
+     * its own local Docker daemon (where the sidecar must actually run).
+     * For inspect, the remote returns `{ running: boolean }` so the central
+     * can fold the result back into `getStatus`. Spawn/stop return `{ ok: true }`.
+     */
+    private async callRemoteSidecarLifecycle(
+        nodeId: number,
+        action: 'spawn' | 'stop' | 'inspect',
+    ): Promise<{ ok?: boolean; running?: boolean } | null> {
+        const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!target) {
+            const node = DatabaseService.getInstance().getNode(nodeId);
+            const name = node ? sanitizeForLog(node.name) : String(nodeId);
+            throw new Error(`Cannot reach node ${name}: no active proxy target`);
+        }
+        const url = `${target.apiUrl.replace(/\/$/, '')}/api/mesh/local-sidecar/${action}`;
+        const method = action === 'inspect' ? 'GET' : 'POST';
+        const headers = this.buildProxyFetchHeaders(target);
+        const res = await fetch(url, { method, headers, signal: AbortSignal.timeout(30_000) });
+        if (!res.ok) {
+            if (action === 'inspect') return { running: false };
+            const body = await res.text().catch(() => '');
+            throw new Error(`remote sidecar ${action} failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+        }
+        return await res.json() as { ok?: boolean; running?: boolean };
     }
 
     public mintSidecarToken(nodeId: number): string {
