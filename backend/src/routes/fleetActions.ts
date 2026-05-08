@@ -20,7 +20,9 @@ const MAX_ASSIGNMENTS = 1000;
 // Bulk label assignment for many stacks on a single node. The single-stack
 // endpoint at `PUT /api/stacks/:stackName/labels` covers one stack at a time;
 // this wrapper applies the same operation to many stacks atomically per HTTP
-// request. Tier: requirePaid + requireAdmin (matches the per-stack endpoint).
+// request. Tier: requirePaid + requireAdmin. The per-stack endpoint is
+// Community-tier organization metadata; this multi-stack wrapper is an
+// automation surface exposed only inside the Skipper+ Fleet Actions tab.
 fleetActionsRouter.post(
   '/labels/bulk-assign',
   authMiddleware,

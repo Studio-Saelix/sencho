@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.74.4](https://github.com/Studio-Saelix/sencho/compare/v0.74.3...v0.74.4) (2026-05-08)
+
+
+### Fixed
+
+* **pilot:** generate auth_jwt_secret on pilot-agent boot ([#997](https://github.com/Studio-Saelix/sencho/issues/997)) ([3d1cf0f](https://github.com/Studio-Saelix/sencho/commit/3d1cf0f8f15f6d331f55bad88264ac5ab952f83c))
+
+## [0.74.3](https://github.com/Studio-Saelix/sencho/compare/v0.74.2...v0.74.3) (2026-05-08)
+
+
+### Fixed
+
+* **mesh:** treat local-node aliases as always reachable in diagnostics ([#994](https://github.com/Studio-Saelix/sencho/issues/994)) ([34581e5](https://github.com/Studio-Saelix/sencho/commit/34581e55e76b98152531909b46ffcb80529f54f0))
+
+## [0.74.2](https://github.com/Studio-Saelix/sencho/compare/v0.74.1...v0.74.2) (2026-05-08)
+
+
+### Fixed
+
+* **mesh:** inspect remote stacks via HTTP proxy not Dockerode ([#992](https://github.com/Studio-Saelix/sencho/issues/992)) ([e176ae9](https://github.com/Studio-Saelix/sencho/commit/e176ae9f178335dcf3eadda4d2780b2465115026))
+
+## [0.74.1](https://github.com/Studio-Saelix/sencho/compare/v0.74.0...v0.74.1) (2026-05-08)
+
+
+### Fixed
+
+* **pilot:** inject loopback auth on agent-side HTTP/WS forwarding ([#990](https://github.com/Studio-Saelix/sencho/issues/990)) ([a6d3e5d](https://github.com/Studio-Saelix/sencho/commit/a6d3e5d0521d0bf09f2f917ac3290e8eed2a39e0))
+
+## [0.74.0](https://github.com/Studio-Saelix/sencho/compare/v0.73.0...v0.74.0) (2026-05-08)
+
+
+### Added
+
+* **app-store:** show inline port-conflict message on deploy sheet ([#984](https://github.com/Studio-Saelix/sencho/issues/984)) ([86abd90](https://github.com/Studio-Saelix/sencho/commit/86abd901f6d663cdd456632921ccb1b2ad614fcd))
+
+
+### Fixed
+
+* **pilot:** harden outbound reverse-tunnel against resource exhaustion ([#979](https://github.com/Studio-Saelix/sencho/issues/979)) ([3d94896](https://github.com/Studio-Saelix/sencho/commit/3d9489648ec9d2b13051edd07f2f13982914a095))
+* **pilot:** stop silently swallowing fs errors in agent token helpers ([#985](https://github.com/Studio-Saelix/sencho/issues/985)) ([8f13a7f](https://github.com/Studio-Saelix/sencho/commit/8f13a7faf3ad51ead5c288475fbe437c2061a03a))
+* **proxy:** route pilot-agent HTTP via PilotTunnelBridge loopback ([#989](https://github.com/Studio-Saelix/sencho/issues/989)) ([94ce7c7](https://github.com/Studio-Saelix/sencho/commit/94ce7c71d24bc16656ca1bb8167f469b3ffd33b5))
+* **templates:** align App Store deploy gate with stack:create permission ([#986](https://github.com/Studio-Saelix/sencho/issues/986)) ([3112f58](https://github.com/Studio-Saelix/sencho/commit/3112f58a883e764e631b48d83cd538a9389463ab))
+
 ## [0.73.0](https://github.com/Studio-Saelix/sencho/compare/v0.72.0...v0.73.0) (2026-05-07)
 
 

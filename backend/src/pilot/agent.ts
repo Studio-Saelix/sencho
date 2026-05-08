@@ -2,8 +2,11 @@ import fs from 'fs';
 import net from 'net';
 import path from 'path';
 import http from 'http';
+import jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
 import { getSenchoVersion } from '../services/CapabilityRegistry';
+import { DatabaseService } from '../services/DatabaseService';
+import { NodeRegistry } from '../services/NodeRegistry';
 import {
     BinaryFrameType,
     MAX_FRAME_SIZE_BYTES,
@@ -23,6 +26,8 @@ import { isDebugEnabled } from '../utils/debug';
 
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
+const LOOPBACK_TOKEN_TTL_SECONDS = 300;
+const LOOPBACK_TOKEN_REFRESH_SECONDS = 240;
 const PING_INTERVAL_MS = 30_000;
 const TOKEN_PATH = path.join(process.env.DATA_DIR || '/app/data', 'pilot.jwt');
 
@@ -63,7 +68,7 @@ interface AgentOptions {
     enrolling: boolean;
 }
 
-class PilotAgent {
+export class PilotAgent {
     private readonly options: AgentOptions;
     private token: string;
     private backoff = RECONNECT_MIN_MS;
@@ -84,11 +89,52 @@ class PilotAgent {
      */
     private readonly customCa: Buffer | null;
 
+    /** Cached pilot_tunnel-scoped token signed by the LOCAL Sencho's `auth_jwt_secret`, used to authenticate forwarded HTTP and WS requests against the local loopback Sencho. */
+    private loopbackToken: string | null = null;
+    private loopbackTokenIssuedAt = 0;
+
     constructor(options: AgentOptions) {
         this.options = options;
         this.token = options.initialToken;
         this.agentVersion = getSenchoVersion() || '0.0.0';
         this.customCa = readPilotCaBundle();
+    }
+
+    /**
+     * Mint or reuse a `pilot_tunnel`-scoped JWT signed by the AGENT's local
+     * `auth_jwt_secret`. The central proxy strips browser cookies before it
+     * forwards a request through the tunnel; without an inline auth header on
+     * the loopback request, the agent's local `authMiddleware` would 401 every
+     * proxied call. The token's claim shape mirrors what the central mints at
+     * enrollment, so the loopback `authMiddleware` accepts it via the existing
+     * `pilot_tunnel` branch with no special-case bypass.
+     */
+    private getLoopbackAuthHeader(): string | null {
+        const now = Math.floor(Date.now() / 1000);
+        if (this.loopbackToken && now - this.loopbackTokenIssuedAt < LOOPBACK_TOKEN_REFRESH_SECONDS) {
+            return `Bearer ${this.loopbackToken}`;
+        }
+        try {
+            const secret = DatabaseService.getInstance().getGlobalSettings().auth_jwt_secret;
+            if (!secret) return null;
+            const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            this.loopbackToken = jwt.sign({ scope: 'pilot_tunnel', nodeId }, secret, { expiresIn: LOOPBACK_TOKEN_TTL_SECONDS });
+            this.loopbackTokenIssuedAt = now;
+            return `Bearer ${this.loopbackToken}`;
+        } catch (err) {
+            if (isDebugEnabled()) console.warn('[Pilot:diag] loopback token mint failed:', sanitizeForLog((err as Error).message));
+            return null;
+        }
+    }
+
+    private buildLoopbackHeaders(frameHeaders: Record<string, string>): Record<string, string> {
+        const auth = this.getLoopbackAuthHeader();
+        const headers: Record<string, string> = {
+            ...frameHeaders,
+            host: `127.0.0.1:${this.options.loopbackPort}`,
+        };
+        if (auth) headers.authorization = auth;
+        return headers;
     }
 
     public start(): void {
@@ -348,7 +394,7 @@ class PilotAgent {
             port: this.options.loopbackPort,
             method: frame.method,
             path: frame.path,
-            headers: { ...frame.headers, host: `127.0.0.1:${this.options.loopbackPort}` },
+            headers: this.buildLoopbackHeaders(frame.headers),
         }, (res) => {
             const outHeaders: Record<string, string> = {};
             for (const [k, v] of Object.entries(res.headers)) {
@@ -424,7 +470,7 @@ class PilotAgent {
 
         const target = `ws://127.0.0.1:${this.options.loopbackPort}${frame.path}`;
         const client = new WebSocket(target, {
-            headers: { ...frame.headers, host: `127.0.0.1:${this.options.loopbackPort}` },
+            headers: this.buildLoopbackHeaders(frame.headers),
             maxPayload: MAX_FRAME_SIZE_BYTES,
         });
 
@@ -603,13 +649,31 @@ type MeshResolveResult =
     | { ok: true; host: string; port: number }
     | { ok: false; err: MeshErrCode };
 
-function readPersistedToken(): string | null {
+/**
+ * Read the persisted long-lived tunnel token from disk if present. ENOENT is
+ * the normal first-boot case and stays silent. Any other error class
+ * (EACCES, EIO, EISDIR, etc.) almost certainly means the volume is
+ * misconfigured or corrupt; log at ERROR with the path and the errno so the
+ * operator has an actionable signal, then return null. Returning null here
+ * lets the caller fall back to SENCHO_ENROLL_TOKEN if one is set, or exit
+ * with a clear "no credentials" message if not.
+ *
+ * Calls readFileSync directly rather than racing existsSync + readFileSync
+ * to avoid TOCTOU and to surface the actual errno on real failures.
+ *
+ * Exposed for unit tests.
+ */
+export function readPersistedToken(): string | null {
     try {
-        if (fs.existsSync(TOKEN_PATH)) {
-            return fs.readFileSync(TOKEN_PATH, 'utf8').trim() || null;
-        }
-    } catch { /* ignore */ }
-    return null;
+        return fs.readFileSync(TOKEN_PATH, 'utf8').trim() || null;
+    } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return null;
+        console.error(
+            `[Pilot] Failed to read persisted tunnel token at ${sanitizeForLog(TOKEN_PATH)}: ${sanitizeForLog(code ?? 'unknown')} - ${sanitizeForLog((err as Error).message)}`,
+        );
+        return null;
+    }
 }
 
 /**
@@ -630,13 +694,28 @@ function readPilotCaBundle(): Buffer | null {
     }
 }
 
-function persistToken(token: string): void {
+/**
+ * Persist the long-lived tunnel token so the agent can reconnect after a
+ * container restart without re-enrolling. On failure we log at ERROR (not
+ * WARN) with an explicit "next agent restart will require re-enrollment"
+ * message: a silent warning here meant the operator saw the next-boot
+ * re-enrollment loop with no signal pointing at the disk. The current
+ * tunnel session continues with the in-memory token regardless.
+ *
+ * mkdirSync with recursive:true is idempotent on existing directories, so
+ * the prior existsSync guard was redundant and added a TOCTOU window.
+ *
+ * Exposed for unit tests.
+ */
+export function persistToken(token: string): void {
     try {
-        const dir = path.dirname(TOKEN_PATH);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(path.dirname(TOKEN_PATH), { recursive: true });
         fs.writeFileSync(TOKEN_PATH, token, { mode: 0o600 });
     } catch (err) {
-        console.warn('[Pilot] Failed to persist tunnel token:', (err as Error).message);
+        const code = (err as NodeJS.ErrnoException).code;
+        console.error(
+            `[Pilot] Failed to persist tunnel token at ${sanitizeForLog(TOKEN_PATH)} (${sanitizeForLog(code ?? 'unknown')}: ${sanitizeForLog((err as Error).message)}). Continuing with the in-memory token; the next agent restart will require re-enrollment until the volume is writable.`,
+        );
     }
 }
 

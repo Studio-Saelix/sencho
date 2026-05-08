@@ -126,7 +126,7 @@ Lists all Docker networks with ID, name, driver, scope (`local`, `global`, `swar
 
 **Filter chips:** `All`, `Managed`, `External`, each with its count.
 
-A **List | Topology** view-mode toggle sits on the right of the toolbar. **List** is the default tabular view; **Topology** is a paid-tier graph view of how containers connect to networks (covered below).
+A **List | Topology** view-mode toggle sits on the right of the toolbar. **List** is the default tabular view; **Topology** is a graph view of how containers connect to networks (covered below).
 
 #### Create Network
 
@@ -163,7 +163,7 @@ The sheet is grouped into sections:
 - **Connected** shows every container attached to the network, with its name, IPv4 address, and MAC address. The section header counts the containers.
 - **Labels** lists all Docker labels on the network (rendered only when present).
 
-#### Network topology <span style={{fontSize: '0.75em', color: 'var(--brand)'}}>Skipper</span>
+#### Network topology
 
 Switch to the **Topology** view to see an interactive graph of your Docker networks and the containers attached to them. The graph uses an automatic hierarchical layout (networks on top, containers below) that scales cleanly regardless of how many networks and containers you have.
 
@@ -186,10 +186,6 @@ By default, system networks (`bridge`, `host`, `none`) are hidden so the graph s
 <Frame>
   <img src="/images/networks/network-topology-toggle.png" alt="Topology with Show system networks toggled on; arr-net plus the bridge, none, and host system networks all visible at the top" />
 </Frame>
-
-<Note>
-  Network Topology requires a Skipper or Admiral license. On Community, the Topology toggle shows an upgrade prompt instead of the graph.
-</Note>
 
 ### Unmanaged
 

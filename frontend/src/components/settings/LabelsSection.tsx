@@ -6,7 +6,6 @@ import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/comp
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SENCHO_LABELS_CHANGED } from '@/lib/events';
-import { PaidGate } from '../PaidGate';
 import { CapabilityGate } from '../CapabilityGate';
 import { LabelDot } from '../LabelPill';
 import { LABEL_COLORS, MAX_LABELS_PER_NODE, type Label, type LabelColor } from '../label-types';
@@ -127,8 +126,7 @@ export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
     };
 
     return (
-        <PaidGate>
-          <CapabilityGate capability="labels" featureName="Stack Labels">
+        <CapabilityGate capability="labels" featureName="Stack Labels">
             <div className="space-y-4">
                 <div className="flex justify-end">
                     <SettingsPrimaryButton size="sm" onClick={openCreate} disabled={labels.length >= MAX_LABELS_PER_NODE}>
@@ -238,7 +236,6 @@ export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
                     Removes the label from every stack across the fleet.
                 </p>
             </ConfirmModal>
-          </CapabilityGate>
-        </PaidGate>
+        </CapabilityGate>
     );
 }

@@ -97,7 +97,7 @@ describe('MeshService activity log', () => {
         const svc = MeshService.getInstance();
         svc.logActivity({ source: 'mesh', level: 'info', type: 'opt_in', alias: 'a.b.c.sencho', message: 'a' });
         svc.logActivity({ source: 'pilot', level: 'error', type: 'tunnel.fail', alias: 'a.b.c.sencho', message: 'b' });
-        svc.logActivity({ source: 'sidecar', level: 'info', type: 'route.resolve.ok', alias: 'x.y.z.sencho', message: 'c' });
+        svc.logActivity({ source: 'mesh', level: 'info', type: 'route.resolve.ok', alias: 'x.y.z.sencho', message: 'c' });
 
         expect(svc.getActivity({ alias: 'a.b.c.sencho' }).length).toBe(2);
         expect(svc.getActivity({ source: 'pilot' }).length).toBe(1);
@@ -172,7 +172,7 @@ describe('MeshService.testUpstream tunnel-down path', () => {
 
         const result = await svc.testUpstream('nonexistent.sencho', localNodeId);
         expect(result.ok).toBe(false);
-        expect(result.where).toBe('sidecar');
+        expect(result.where).toBe('no_route');
         expect(result.code).toBe('no_route');
     });
 });

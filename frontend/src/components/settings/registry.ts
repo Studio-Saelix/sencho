@@ -171,7 +171,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         label: 'Labels',
         description: 'Per-node labels for stacks and containers.',
         keywords: ['labels', 'tags', 'palette', 'organisation'],
-        tier: 'skipper',
+        tier: null,
         scope: 'node',
     },
     {
