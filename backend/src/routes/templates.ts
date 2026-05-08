@@ -3,6 +3,7 @@ import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { templateService } from '../services/TemplateService';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
@@ -65,7 +66,7 @@ templatesRouter.post('/refresh-cache', authMiddleware, (req: Request, res: Respo
 });
 
 templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Response) => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:create')) return;
   try {
     const { stackName, template, envVars, skip_scan } = req.body;
 
