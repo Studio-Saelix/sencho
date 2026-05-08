@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.74.2](https://github.com/Studio-Saelix/sencho/compare/v0.74.1...v0.74.2) (2026-05-08)
+
+
+### Fixed
+
+* **mesh:** inspect remote stacks via HTTP proxy not Dockerode ([#992](https://github.com/Studio-Saelix/sencho/issues/992)) ([e176ae9](https://github.com/Studio-Saelix/sencho/commit/e176ae9f178335dcf3eadda4d2780b2465115026))
+
 ## [0.74.1](https://github.com/Studio-Saelix/sencho/compare/v0.74.0...v0.74.1) (2026-05-08)
 
 
