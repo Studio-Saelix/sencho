@@ -59,13 +59,6 @@ interface TcpStreamState extends StreamMeta {
 
 type StreamState = HttpStreamState | WsStreamState | TcpStreamState;
 
-export interface TcpStreamSummary {
-    streamId: number;
-    bytesIn: number;
-    bytesOut: number;
-    openedAt: number;
-}
-
 /**
  * Sencho Mesh TCP stream handle. EventEmitter-based duplex-like surface that
  * MeshService consumes to bridge a local socket to a Compose service on the
@@ -242,20 +235,6 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         if (!this.streams.has(streamId)) return;
         this.removeStream(streamId);
         this.sendJson({ t: 'tcp_close', s: streamId });
-    }
-
-    /**
-     * Snapshot of active TCP streams for the diagnostics sheet. Cheap; called
-     * on demand by MeshService.
-     */
-    public listTcpStreams(): TcpStreamSummary[] {
-        const out: TcpStreamSummary[] = [];
-        for (const [streamId, s] of this.streams) {
-            if (s.kind === 'tcp') {
-                out.push({ streamId, bytesIn: s.bytesIn, bytesOut: s.bytesOut, openedAt: s.openedAt });
-            }
-        }
-        return out;
     }
 
     public close(code = 1000, reason = 'closed by primary'): void {

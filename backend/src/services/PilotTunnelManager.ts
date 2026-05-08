@@ -178,22 +178,4 @@ export class PilotTunnelManager extends EventEmitter {
         this.bridges.delete(nodeId);
     }
 
-    /**
-     * Snapshot of currently active tunnels.
-     */
-    public listActive(): Array<{ nodeId: number; loopbackUrl: string; connectedAt: number }> {
-        return Array.from(this.bridges.entries()).map(([nodeId, bridge]) => ({
-            nodeId,
-            loopbackUrl: bridge.getLoopbackUrl(),
-            connectedAt: bridge.getConnectedAt(),
-        }));
-    }
-
-    /**
-     * Record an application-level heartbeat from the agent.
-     */
-    public touch(nodeId: number): void {
-        if (!this.bridges.has(nodeId)) return;
-        DatabaseService.getInstance().updateNode(nodeId, { pilot_last_seen: Date.now() });
-    }
 }
