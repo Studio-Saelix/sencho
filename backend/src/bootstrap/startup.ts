@@ -1,6 +1,8 @@
 import type { Server } from 'http';
+import crypto from 'crypto';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { DatabaseService } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import SelfUpdateService from '../services/SelfUpdateService';
 import { MonitorService } from '../services/MonitorService';
@@ -17,6 +19,29 @@ import { sweepStaleTempDirs as sweepStaleGitTempDirs } from '../services/GitSour
 import { PORT } from '../helpers/constants';
 
 /**
+ * Pilot-agent hosts never run the first-run setup wizard, so the wizard
+ * path that normally generates `auth_jwt_secret` (routes/auth.ts) never
+ * fires. Without that secret, the agent-side loopback auth helper
+ * (`pilot/agent.ts::getLoopbackAuthHeader`) cannot mint the
+ * `pilot_tunnel`-scoped JWT it injects on every forwarded HTTP/WS request,
+ * and the local Sencho's `authMiddleware` rejects every proxied call with
+ * 401 "Authentication required". Generate the secret here on first boot in
+ * pilot mode; subsequent boots reuse the persisted value. No-op outside
+ * pilot mode (the wizard owns the lifecycle there).
+ *
+ * Returns true when a fresh secret was written, false otherwise.
+ */
+export function ensurePilotJwtSecret(): boolean {
+  if (process.env.SENCHO_MODE !== 'pilot') return false;
+  const dbSvc = DatabaseService.getInstance();
+  if (dbSvc.getGlobalSettings().auth_jwt_secret) return false;
+  const generated = crypto.randomBytes(64).toString('hex');
+  dbSvc.updateGlobalSetting('auth_jwt_secret', generated);
+  console.log('[Startup] pilot-agent: generated local auth_jwt_secret');
+  return true;
+}
+
+/**
  * Run the startup sequence: stack-directory migration, service initialization,
  * background watchdogs, then bind the HTTP server. The caller passes the
  * already-constructed server so tests can import the module without binding a
@@ -31,6 +56,8 @@ export async function startServer(server: Server): Promise<void> {
   } catch (error) {
     console.error('Migration failed:', error);
   }
+
+  ensurePilotJwtSecret();
 
   // Initialize the license service before any tier-gated code can run.
   LicenseService.getInstance().initialize();
