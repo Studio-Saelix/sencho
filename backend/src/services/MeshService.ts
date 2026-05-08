@@ -669,6 +669,22 @@ export class MeshService extends EventEmitter {
 
     // --- Diagnostics ---
 
+    /**
+     * Whether mesh traffic to this node can flow. Local nodes are always
+     * reachable because mesh uses the same-node fast path on localhost.
+     * Remote nodes are reachable only when a pilot tunnel is registered. The
+     * literal `hasActiveTunnel(localNodeId)` would always be false (local
+     * nodes do not establish tunnels to themselves), so a direct call would
+     * render every local alias as `tunnel down` in the UI even on a working
+     * route.
+     */
+    private isMeshReachable(nodeId: number): boolean {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) return false;
+        if (node.type !== 'remote') return true;
+        return PilotTunnelManager.getInstance().hasActiveTunnel(nodeId);
+    }
+
     public async getRouteDiagnostic(alias: string): Promise<MeshRouteDiagnostic> {
         const target = this.lookupAliasGlobal(alias);
         const lastError = this.routeErrorMap.get(alias) || null;
@@ -678,8 +694,7 @@ export class MeshService extends EventEmitter {
             return { alias, target: null, pilot: { connected: false, lastSeen: null }, lastError, lastProbeMs, state: 'not authorized' };
         }
 
-        const ptm = PilotTunnelManager.getInstance();
-        const pilotConnected = ptm.hasActiveTunnel(target.nodeId);
+        const pilotConnected = this.isMeshReachable(target.nodeId);
         const node = DatabaseService.getInstance().getNode(target.nodeId);
         const lastSeen = node?.pilot_last_seen ?? null;
         const optedIn = DatabaseService.getInstance().isMeshStackEnabled(target.nodeId, target.stackName);
@@ -739,7 +754,6 @@ export class MeshService extends EventEmitter {
 
     public async getStatus(): Promise<MeshNodeStatus[]> {
         const db = DatabaseService.getInstance();
-        const ptm = PilotTunnelManager.getInstance();
         const nodes = db.getNodes();
         const out: MeshNodeStatus[] = [];
         for (const node of nodes) {
@@ -749,7 +763,7 @@ export class MeshService extends EventEmitter {
                 nodeName: node.name,
                 enabled: db.getNodeMeshEnabled(node.id),
                 sidecarRunning: await this.isSidecarRunning(node.id),
-                pilotConnected: node.type === 'remote' ? ptm.hasActiveTunnel(node.id) : true,
+                pilotConnected: this.isMeshReachable(node.id),
                 optedInStacks,
                 activeStreamCount: Array.from(this.activeStreams.values()).length,
             });
