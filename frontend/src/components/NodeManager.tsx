@@ -665,6 +665,7 @@ export function NodeManager() {
                             className="h-8 w-8"
                             onClick={() => testConnection(node)}
                             disabled={testing === node.id}
+                            aria-label="Test connection"
                           >
                             <Wifi className={`w-4 h-4 ${testing === node.id ? 'animate-pulse' : ''}`} />
                           </Button>
@@ -681,6 +682,7 @@ export function NodeManager() {
                             size="icon"
                             className="h-8 w-8"
                             onClick={() => openEditDialog(node)}
+                            aria-label="Edit node"
                           >
                             <Pencil className="w-4 h-4" />
                           </Button>
@@ -698,6 +700,7 @@ export function NodeManager() {
                               size="icon"
                               className="h-8 w-8 text-destructive hover:text-destructive"
                               onClick={() => { setDeletingNode(node); setDeleteOpen(true); }}
+                              aria-label="Delete node"
                             >
                               <Trash2 className="w-4 h-4" />
                             </Button>
