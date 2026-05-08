@@ -5,6 +5,8 @@ import { WebSocket, WebSocketServer } from 'ws';
 import {
     BinaryFrameType,
     DecodedBinaryFrame,
+    MAX_STREAMS_PER_TUNNEL,
+    STREAM_IDLE_TIMEOUT_MS,
     StreamIdAllocator,
     decodeBinaryFrame,
     decodeJsonFrame,
@@ -17,13 +19,17 @@ import {
 const BUFFER_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const PING_INTERVAL_MS = 30_000;
 
-interface HttpStreamState {
+interface StreamMeta {
+    idleTimer?: NodeJS.Timeout;
+}
+
+interface HttpStreamState extends StreamMeta {
     kind: 'http';
     res: ServerResponse;
     headersWritten: boolean;
 }
 
-interface WsStreamState {
+interface WsStreamState extends StreamMeta {
     kind: 'ws';
     rawSocket?: Socket;
     rawHead?: Buffer;
@@ -31,7 +37,7 @@ interface WsStreamState {
     clientWs?: WebSocket;
 }
 
-interface TcpStreamState {
+interface TcpStreamState extends StreamMeta {
     kind: 'tcp';
     handle: TcpStream;
     bytesIn: number;
@@ -166,16 +172,19 @@ export class PilotTunnelBridge extends EventEmitter {
      */
     public openTcpStream(target: { stack: string; service: string; port: number }): TcpStream | null {
         if (!this.isOpen()) return null;
+        if (this.streams.size >= MAX_STREAMS_PER_TUNNEL) return null;
         const streamId = this.streamIds.allocate();
         const handle = new TcpStream(streamId, this);
-        this.streams.set(streamId, {
+        const state: TcpStreamState = {
             kind: 'tcp',
             handle,
             bytesIn: 0,
             bytesOut: 0,
             openedAt: Date.now(),
             accepted: false,
-        });
+        };
+        this.streams.set(streamId, state);
+        this.refreshIdleTimer(streamId, state);
         this.sendJson({
             t: 'tcp_open',
             s: streamId,
@@ -197,12 +206,15 @@ export class PilotTunnelBridge extends EventEmitter {
         if (!this.isOpen()) return false;
         this.sendBinary(BinaryFrameType.TcpData, streamId, payload);
         s.bytesOut += payload.length;
+        this.refreshIdleTimer(streamId, s);
         return this.tunnelWs.bufferedAmount <= BUFFER_HIGH_WATER_MARK;
     }
 
     /** @internal Called only by TcpStream.end / .destroy. */
     public _closeTcpStream(streamId: number): void {
-        if (!this.streams.has(streamId)) return;
+        const s = this.streams.get(streamId);
+        if (!s) return;
+        this.clearIdleTimer(s);
         this.streams.delete(streamId);
         this.sendJson({ t: 'tcp_close', s: streamId });
     }
@@ -226,7 +238,10 @@ export class PilotTunnelBridge extends EventEmitter {
         this.closed = true;
         if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; }
 
-        for (const [, state] of this.streams) this.teardownStream(state);
+        for (const [, state] of this.streams) {
+            this.clearIdleTimer(state);
+            this.teardownStream(state);
+        }
         this.streams.clear();
 
         try { this.tunnelWs.close(code, reason); } catch { /* ignore */ }
@@ -243,9 +258,17 @@ export class PilotTunnelBridge extends EventEmitter {
             res.end('pilot tunnel not ready');
             return;
         }
+        if (this.streams.size >= MAX_STREAMS_PER_TUNNEL) {
+            res.statusCode = 503;
+            res.setHeader('content-type', 'text/plain');
+            res.end('pilot tunnel: stream cap reached');
+            return;
+        }
 
         const streamId = this.streamIds.allocate();
-        this.streams.set(streamId, { kind: 'http', res, headersWritten: false });
+        const state: HttpStreamState = { kind: 'http', res, headersWritten: false };
+        this.streams.set(streamId, state);
+        this.refreshIdleTimer(streamId, state);
 
         const headers: Record<string, string> = {};
         for (const [k, v] of Object.entries(req.headers)) {
@@ -262,8 +285,10 @@ export class PilotTunnelBridge extends EventEmitter {
         });
 
         req.on('data', (chunk: Buffer) => {
-            if (!this.streams.has(streamId)) return;
+            const s = this.streams.get(streamId);
+            if (!s) return;
             this.sendBinary(BinaryFrameType.HttpReqBody, streamId, chunk);
+            this.refreshIdleTimer(streamId, s);
             if (this.tunnelWs.bufferedAmount > BUFFER_HIGH_WATER_MARK) req.pause();
         });
         req.on('end', () => {
@@ -278,7 +303,9 @@ export class PilotTunnelBridge extends EventEmitter {
 
         res.on('close', () => {
             // Client disconnected before response finished.
-            if (this.streams.has(streamId)) {
+            const s = this.streams.get(streamId);
+            if (s) {
+                this.clearIdleTimer(s);
                 this.streams.delete(streamId);
                 this.sendJson({ t: 'http_err', s: streamId, code: 'tunnel_down', message: 'client aborted' });
             }
@@ -291,14 +318,21 @@ export class PilotTunnelBridge extends EventEmitter {
             socket.destroy();
             return;
         }
+        if (this.streams.size >= MAX_STREAMS_PER_TUNNEL) {
+            socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+            socket.destroy();
+            return;
+        }
 
         const streamId = this.streamIds.allocate();
-        this.streams.set(streamId, {
+        const state: WsStreamState = {
             kind: 'ws',
             rawSocket: socket,
             rawHead: head,
             upgradeRequest: req,
-        });
+        };
+        this.streams.set(streamId, state);
+        this.refreshIdleTimer(streamId, state);
 
         const headers: Record<string, string> = {};
         for (const [k, v] of Object.entries(req.headers)) {
@@ -319,7 +353,9 @@ export class PilotTunnelBridge extends EventEmitter {
             this.streams.delete(streamId);
         });
         socket.on('close', () => {
-            if (this.streams.has(streamId)) {
+            const s = this.streams.get(streamId);
+            if (s) {
+                this.clearIdleTimer(s);
                 this.sendJson({ t: 'ws_close', s: streamId, code: 1006, reason: 'client closed' });
                 this.streams.delete(streamId);
             }
@@ -358,13 +394,14 @@ export class PilotTunnelBridge extends EventEmitter {
                     } catch { /* headers already sent or invalid */ }
                     s.headersWritten = true;
                 }
+                this.refreshIdleTimer(frame.s, s);
                 break;
             }
             case 'http_res_end': {
                 const s = this.streams.get(frame.s);
                 if (!s || s.kind !== 'http') return;
                 try { s.res.end(); } catch { /* ignore */ }
-                this.streams.delete(frame.s);
+                this.removeStream(frame.s);
                 break;
             }
             case 'http_err': {
@@ -378,7 +415,7 @@ export class PilotTunnelBridge extends EventEmitter {
                 } else {
                     this.teardownStream(s);
                 }
-                this.streams.delete(frame.s);
+                this.removeStream(frame.s);
                 break;
             }
             case 'ws_accept': {
@@ -388,7 +425,10 @@ export class PilotTunnelBridge extends EventEmitter {
                     s.clientWs = ws;
                     s.rawSocket = undefined;
                     s.rawHead = undefined;
+                    this.refreshIdleTimer(frame.s, s);
                     ws.on('message', (msg, isBin) => {
+                        const cur = this.streams.get(frame.s);
+                        if (cur) this.refreshIdleTimer(frame.s, cur);
                         if (isBin) {
                             this.sendBinary(BinaryFrameType.WsMessageBinary, frame.s, wsDataToBuffer(msg) ?? Buffer.alloc(0));
                         } else {
@@ -398,11 +438,11 @@ export class PilotTunnelBridge extends EventEmitter {
                     ws.on('close', (code, reason) => {
                         if (this.streams.has(frame.s)) {
                             this.sendJson({ t: 'ws_close', s: frame.s, code, reason: reason?.toString?.() });
-                            this.streams.delete(frame.s);
+                            this.removeStream(frame.s);
                         }
                     });
                     ws.on('error', () => {
-                        if (this.streams.has(frame.s)) this.streams.delete(frame.s);
+                        if (this.streams.has(frame.s)) this.removeStream(frame.s);
                     });
                 });
                 break;
@@ -414,13 +454,14 @@ export class PilotTunnelBridge extends EventEmitter {
                     s.rawSocket.write(`HTTP/1.1 ${frame.status} ${frame.message}\r\n\r\n`);
                     s.rawSocket.destroy();
                 } catch { /* ignore */ }
-                this.streams.delete(frame.s);
+                this.removeStream(frame.s);
                 break;
             }
             case 'ws_msg_text': {
                 const s = this.streams.get(frame.s);
                 if (!s || s.kind !== 'ws' || !s.clientWs) return;
                 try { s.clientWs.send(frame.data); } catch { /* ignore */ }
+                this.refreshIdleTimer(frame.s, s);
                 break;
             }
             case 'ws_close': {
@@ -431,7 +472,7 @@ export class PilotTunnelBridge extends EventEmitter {
                 } else if (s.rawSocket) {
                     try { s.rawSocket.destroy(); } catch { /* ignore */ }
                 }
-                this.streams.delete(frame.s);
+                this.removeStream(frame.s);
                 break;
             }
             case 'ctrl': {
@@ -445,9 +486,10 @@ export class PilotTunnelBridge extends EventEmitter {
                 if (!s || s.kind !== 'tcp') return;
                 if (frame.ok) {
                     s.accepted = true;
+                    this.refreshIdleTimer(frame.s, s);
                     s.handle.emit('open');
                 } else {
-                    this.streams.delete(frame.s);
+                    this.removeStream(frame.s);
                     s.handle.emit('error', new Error(frame.err ?? 'tcp_open rejected'));
                     s.handle.emit('close');
                 }
@@ -456,7 +498,7 @@ export class PilotTunnelBridge extends EventEmitter {
             case 'tcp_close': {
                 const s = this.streams.get(frame.s);
                 if (!s || s.kind !== 'tcp') return;
-                this.streams.delete(frame.s);
+                this.removeStream(frame.s);
                 s.handle.emit('close');
                 break;
             }
@@ -478,11 +520,13 @@ export class PilotTunnelBridge extends EventEmitter {
                     s.headersWritten = true;
                 }
                 try { s.res.write(frame.payload); } catch { /* ignore */ }
+                this.refreshIdleTimer(frame.streamId, s);
                 break;
             }
             case BinaryFrameType.WsMessageBinary: {
                 if (s.kind !== 'ws' || !s.clientWs) return;
                 try { s.clientWs.send(frame.payload, { binary: true }); } catch { /* ignore */ }
+                this.refreshIdleTimer(frame.streamId, s);
                 break;
             }
             case BinaryFrameType.HttpReqBody:
@@ -491,6 +535,7 @@ export class PilotTunnelBridge extends EventEmitter {
             case BinaryFrameType.TcpData: {
                 if (s.kind !== 'tcp') return;
                 s.bytesIn += frame.payload.length;
+                this.refreshIdleTimer(frame.streamId, s);
                 s.handle.emit('data', frame.payload);
                 break;
             }
@@ -505,6 +550,40 @@ export class PilotTunnelBridge extends EventEmitter {
     }
 
     // --- Helpers ---
+
+    private refreshIdleTimer(streamId: number, state: StreamState): void {
+        if (state.idleTimer) clearTimeout(state.idleTimer);
+        state.idleTimer = setTimeout(() => this.onStreamIdle(streamId), STREAM_IDLE_TIMEOUT_MS);
+    }
+
+    private clearIdleTimer(state: StreamState): void {
+        if (state.idleTimer) {
+            clearTimeout(state.idleTimer);
+            state.idleTimer = undefined;
+        }
+    }
+
+    private removeStream(streamId: number): void {
+        const s = this.streams.get(streamId);
+        if (!s) return;
+        this.clearIdleTimer(s);
+        this.streams.delete(streamId);
+    }
+
+    private onStreamIdle(streamId: number): void {
+        const s = this.streams.get(streamId);
+        if (!s) return;
+        // Tear down the loopback side and tell the agent to release its half.
+        this.teardownStream(s);
+        this.streams.delete(streamId);
+        if (s.kind === 'tcp') {
+            this.sendJson({ t: 'tcp_close', s: streamId });
+        } else if (s.kind === 'ws') {
+            this.sendJson({ t: 'ws_close', s: streamId, code: 1001, reason: 'idle' });
+        } else {
+            this.sendJson({ t: 'http_err', s: streamId, code: 'timeout', message: 'stream idle timeout' });
+        }
+    }
 
     private sendJson(frame: Parameters<typeof encodeJsonFrame>[0]): void {
         if (this.tunnelWs.readyState !== WebSocket.OPEN) return;

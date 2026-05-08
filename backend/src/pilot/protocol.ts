@@ -17,6 +17,34 @@
 
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Hard ceiling on a single tunnel WebSocket frame, in bytes. Applied as
+ * `maxPayload` on both the gateway-side `WebSocketServer` and the agent-side
+ * `WebSocket` client, and re-checked at decode for defense-in-depth. 8 MB
+ * comfortably accommodates compose YAML, image-list responses, and exec
+ * stream chunks while bounding the decode buffer a buggy or malicious peer
+ * can force the other side to allocate.
+ */
+export const MAX_FRAME_SIZE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Maximum concurrent multiplexed streams on a single tunnel. Beyond this the
+ * bridge refuses new loopback requests with 503 and the agent rejects new
+ * incoming streams with the appropriate error frame. Sized for normal Sencho
+ * fanout (UI tabs polling stats, logs, stack lifecycle) with substantial
+ * headroom; the realistic ceiling under load is closer to single digits per
+ * tunnel.
+ */
+export const MAX_STREAMS_PER_TUNNEL = 1024;
+
+/**
+ * Per-stream idle timeout. A stream that sees no inbound or outbound activity
+ * for this long is closed and removed from the stream map. Protects against
+ * leaked streams (one side crashed, peer never noticed) leaking memory over
+ * long uptimes.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
 // --- Binary frame types (first byte of a binary WS frame) ---
 
 export enum BinaryFrameType {
@@ -157,6 +185,9 @@ export function encodeJsonFrame(frame: JsonFrame): string {
 }
 
 export function decodeJsonFrame(raw: string): JsonFrame {
+    if (raw.length > MAX_FRAME_SIZE_BYTES) {
+        throw new Error(`json frame too large: ${raw.length} bytes`);
+    }
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || typeof parsed.t !== 'string') {
         throw new Error('invalid frame: missing type discriminator');
@@ -188,6 +219,9 @@ export interface DecodedBinaryFrame {
 export function decodeBinaryFrame(buf: Buffer): DecodedBinaryFrame {
     if (buf.length < 5) {
         throw new Error(`binary frame too short: ${buf.length} bytes`);
+    }
+    if (buf.length > MAX_FRAME_SIZE_BYTES) {
+        throw new Error(`binary frame too large: ${buf.length} bytes`);
     }
     const type = buf.readUInt8(0) as BinaryFrameType;
     if (type !== BinaryFrameType.HttpReqBody &&
