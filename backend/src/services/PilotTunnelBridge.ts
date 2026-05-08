@@ -18,6 +18,14 @@ import {
 
 const BUFFER_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const PING_INTERVAL_MS = 30_000;
+/**
+ * Poll cadence for the backpressure drain check. The `ws` WebSocket does not
+ * surface a usable 'drain' event, so when at least one stream is paused we
+ * sample `bufferedAmount` at this rate and resume / fan out 'drain' as soon
+ * as the buffer drops below the high-water mark. Dormant when nothing is
+ * paused, so steady-state cost is zero.
+ */
+const DRAIN_CHECK_INTERVAL_MS = 100;
 
 interface StreamMeta {
     idleTimer?: NodeJS.Timeout;
@@ -110,8 +118,10 @@ export class PilotTunnelBridge extends EventEmitter {
     private readonly streamIds = new StreamIdAllocator();
     private readonly streams = new Map<number, StreamState>();
     private readonly connectedAt = Date.now();
+    private readonly pausedReqs = new Map<number, IncomingMessage>();
     private loopbackUrl = '';
     private pingTimer?: NodeJS.Timeout;
+    private drainTimer?: NodeJS.Timeout;
     private closed = false;
 
     constructor(_nodeId: number, tunnelWs: WebSocket) {
@@ -149,14 +159,6 @@ export class PilotTunnelBridge extends EventEmitter {
         this.pingTimer = setInterval(() => {
             if (this.tunnelWs.readyState !== WebSocket.OPEN) return;
             try { this.tunnelWs.ping(); } catch { /* surfaced via 'error' */ }
-            // Coarse drain fan-out for TCP streams: ws does not expose a
-            // socket-level 'drain' we can hook, so we let backpressure clear
-            // by the next ping cycle.
-            if (this.tunnelWs.bufferedAmount <= BUFFER_HIGH_WATER_MARK) {
-                for (const s of this.streams.values()) {
-                    if (s.kind === 'tcp' && s.accepted) s.handle.emit('drain');
-                }
-            }
         }, PING_INTERVAL_MS);
     }
 
@@ -237,6 +239,8 @@ export class PilotTunnelBridge extends EventEmitter {
         if (this.closed) return;
         this.closed = true;
         if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; }
+        this.stopDrainTimer();
+        this.pausedReqs.clear();
 
         for (const [, state] of this.streams) {
             this.clearIdleTimer(state);
@@ -289,7 +293,9 @@ export class PilotTunnelBridge extends EventEmitter {
             if (!s) return;
             this.sendBinary(BinaryFrameType.HttpReqBody, streamId, chunk);
             this.refreshIdleTimer(streamId, s);
-            if (this.tunnelWs.bufferedAmount > BUFFER_HIGH_WATER_MARK) req.pause();
+            if (this.tunnelWs.bufferedAmount > BUFFER_HIGH_WATER_MARK) {
+                this.pauseRequest(streamId, req);
+            }
         });
         req.on('end', () => {
             if (!this.streams.has(streamId)) return;
@@ -550,6 +556,39 @@ export class PilotTunnelBridge extends EventEmitter {
     }
 
     // --- Helpers ---
+
+    private pauseRequest(streamId: number, req: IncomingMessage): void {
+        if (this.pausedReqs.has(streamId)) return;
+        try { req.pause(); } catch { /* ignore */ }
+        this.pausedReqs.set(streamId, req);
+        if (!this.drainTimer) {
+            this.drainTimer = setInterval(() => this.checkDrain(), DRAIN_CHECK_INTERVAL_MS);
+        }
+    }
+
+    private checkDrain(): void {
+        if (this.closed) {
+            this.stopDrainTimer();
+            return;
+        }
+        if (this.tunnelWs.bufferedAmount > BUFFER_HIGH_WATER_MARK) return;
+        for (const [, req] of this.pausedReqs) {
+            try { req.resume(); } catch { /* ignore */ }
+        }
+        this.pausedReqs.clear();
+        // Also let any TCP-stream caller waiting on backpressure proceed.
+        for (const s of this.streams.values()) {
+            if (s.kind === 'tcp' && s.accepted) s.handle.emit('drain');
+        }
+        this.stopDrainTimer();
+    }
+
+    private stopDrainTimer(): void {
+        if (this.drainTimer) {
+            clearInterval(this.drainTimer);
+            this.drainTimer = undefined;
+        }
+    }
 
     private refreshIdleTimer(streamId: number, state: StreamState): void {
         if (state.idleTimer) clearTimeout(state.idleTimer);
