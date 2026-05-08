@@ -14,7 +14,6 @@ import {
     decodeBinaryFrame,
     decodeJsonFrame,
     encodeBinaryFrame,
-    encodeJsonFrame,
 } from '../pilot/protocol';
 
 let tmpDir: string;
