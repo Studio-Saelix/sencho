@@ -10,9 +10,8 @@
  *
  * This file spins up a real http.Server with attachUpgrade and a real
  * ws.WebSocket client, then exercises three disconnect scenarios plus a
- * reconnect-counter case. Same WS-pair pattern as
- * pilot-tunnel-integration.test.ts; deliberately self-contained so it
- * can land independently of any other in-flight pilot work.
+ * reconnect-counter case. Self-contained so it can land independently of
+ * any other in-flight pilot work.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import http from 'http';
@@ -254,6 +253,12 @@ describe('pilot tunnel mid-disconnect cleanup (in-process integration)', () => {
         // Wait for the handle's 'open' event to fire so write() will actually
         // serialize bytes through the bridge.
         await new Promise<void>((resolve) => streamHandle.once('open', () => resolve()));
+
+        // Defensive: 'error' fires from teardownStream only when the stream
+        // is not yet accepted, which is not the case here. Attach a no-op
+        // listener so a future refactor that delays accepted=true past 'open'
+        // does not crash the worker on an unhandled 'error' event.
+        streamHandle.on('error', () => { /* defensive */ });
 
         // Listen for the stream's 'close' event before yanking the tunnel.
         const closedEvent = new Promise<void>((resolve) => streamHandle.once('close', () => resolve()));
