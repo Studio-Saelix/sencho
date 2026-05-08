@@ -26,7 +26,6 @@ import {
     decodeJsonFrame,
     encodeJsonFrame,
     type JsonFrame,
-    PROTOCOL_VERSION,
 } from '../pilot/protocol';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 
