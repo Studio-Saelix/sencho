@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { DatabaseService } from '../services/DatabaseService';
 import { PilotTunnelCapacityError, PilotTunnelManager } from '../services/PilotTunnelManager';
+import { PilotMetrics } from '../services/PilotMetrics';
 import { encodeJsonFrame as encodePilotJsonFrame, PROTOCOL_VERSION as PILOT_PROTOCOL_VERSION } from '../pilot/protocol';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as rejectSocket } from './reject';
@@ -63,6 +64,7 @@ export async function handlePilotTunnel(
       jwtSecret,
       { expiresIn: '365d' },
     );
+    PilotMetrics.increment('enroll_acks');
   }
 
   const agentVersionHeader = req.headers['x-sencho-agent-version'];

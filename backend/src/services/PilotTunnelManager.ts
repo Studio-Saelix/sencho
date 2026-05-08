@@ -4,6 +4,7 @@ import { PilotTunnelBridge } from './PilotTunnelBridge';
 import { DatabaseService } from './DatabaseService';
 import { PilotCloseCode } from '../pilot/protocol';
 import { isDebugEnabled } from '../utils/debug';
+import { PilotMetrics } from './PilotMetrics';
 
 /**
  * Soft warning threshold: a single instance handling more than this many
@@ -74,12 +75,14 @@ export class PilotTunnelManager extends EventEmitter {
         if (existing) {
             existing.close(PilotCloseCode.Replaced, 'replaced by newer tunnel');
             this.bridges.delete(nodeId);
+            PilotMetrics.increment('tunnels_replaced');
         }
 
         // Hard cap: only counts tunnels for *other* nodes since we just
         // released the matching slot above. A reconnect by the same node
         // does not consume new capacity.
         if (this.bridges.size >= PILOT_TUNNEL_HARD_LIMIT) {
+            PilotMetrics.increment('tunnels_rejected_capacity');
             throw new PilotTunnelCapacityError(PILOT_TUNNEL_HARD_LIMIT);
         }
         if (this.bridges.size >= PILOT_TUNNEL_SOFT_LIMIT && !this.softWarned) {
@@ -106,10 +109,33 @@ export class PilotTunnelManager extends EventEmitter {
             pilot_last_seen: Date.now(),
             pilot_agent_version: agentVersion ?? null,
         });
+        PilotMetrics.increment('tunnels_total');
         if (isDebugEnabled()) {
             console.log('[PilotMgr:diag] Tunnel registered:', { nodeId, active: this.bridges.size });
         }
         this.emit('tunnel-up', nodeId);
+    }
+
+    /**
+     * Per-tunnel breakdown for the metrics endpoint. Includes the
+     * loopback-relative connectedAt and bufferedAmount so one-bad-node cases
+     * stay visible (an aggregate hides a single tunnel sitting on a stuck
+     * write buffer).
+     */
+    public getMetricsSnapshot(): {
+        counters: ReturnType<typeof PilotMetrics.snapshot>;
+        tunnels_open: number;
+        per_node: Array<{ nodeId: number; connectedAt: number; bufferedAmount: number }>;
+    } {
+        return {
+            counters: PilotMetrics.snapshot(),
+            tunnels_open: this.bridges.size,
+            per_node: Array.from(this.bridges.entries()).map(([nodeId, bridge]) => ({
+                nodeId,
+                connectedAt: bridge.getConnectedAt(),
+                bufferedAmount: bridge.getBufferedAmount(),
+            })),
+        };
     }
 
     /**

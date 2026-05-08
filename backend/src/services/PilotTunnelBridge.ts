@@ -17,6 +17,7 @@ import {
 } from '../pilot/protocol';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
+import { PilotMetrics } from './PilotMetrics';
 
 const BUFFER_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const PING_INTERVAL_MS = 30_000;
@@ -389,6 +390,7 @@ export class PilotTunnelBridge extends EventEmitter {
             // Malformed frame: kill the tunnel to force re-sync. Diag-gated
             // so a flood of malformed frames cannot drown the log; the
             // tunnel close itself is the loud signal.
+            PilotMetrics.increment('frame_decode_errors');
             if (isDebugEnabled()) {
                 console.warn('[PilotBridge:diag] Malformed frame from agent:', sanitizeForLog((err as Error).message));
             }

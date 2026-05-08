@@ -5,6 +5,7 @@ import DockerController, { globalDockerNetwork } from '../services/DockerControl
 import { DatabaseService } from '../services/DatabaseService';
 import { CacheService } from '../services/CacheService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { STATS_CACHE_TTL_MS, SYSTEM_STATS_CACHE_TTL_MS } from '../helpers/constants';
@@ -247,5 +248,21 @@ metricsRouter.get('/system/cache-stats', authMiddleware, async (req: Request, re
   } catch (error) {
     console.error('Failed to fetch cache stats:', error);
     res.status(500).json({ error: 'Failed to fetch cache stats' });
+  }
+});
+
+/**
+ * Admin-only pilot tunnel observability. Counters reset on process restart
+ * by design (see PilotMetrics.ts). The per_node array is the load-bearing
+ * field: aggregate counters can hide a single tunnel that is flapping or
+ * sitting on a stuck write buffer.
+ */
+metricsRouter.get('/system/pilot-tunnels', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    res.json(PilotTunnelManager.getInstance().getMetricsSnapshot());
+  } catch (error) {
+    console.error('Failed to fetch pilot tunnel metrics:', error);
+    res.status(500).json({ error: 'Failed to fetch pilot tunnel metrics' });
   }
 });
