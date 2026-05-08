@@ -615,7 +615,7 @@ type MeshResolveResult =
  * Calls readFileSync directly rather than racing existsSync + readFileSync
  * to avoid TOCTOU and to surface the actual errno on real failures.
  *
- * @internal exported for unit tests
+ * Exposed for unit tests.
  */
 export function readPersistedToken(): string | null {
     try {
@@ -656,12 +656,14 @@ function readPilotCaBundle(): Buffer | null {
  * re-enrollment loop with no signal pointing at the disk. The current
  * tunnel session continues with the in-memory token regardless.
  *
- * @internal exported for unit tests
+ * mkdirSync with recursive:true is idempotent on existing directories, so
+ * the prior existsSync guard was redundant and added a TOCTOU window.
+ *
+ * Exposed for unit tests.
  */
 export function persistToken(token: string): void {
     try {
-        const dir = path.dirname(TOKEN_PATH);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(path.dirname(TOKEN_PATH), { recursive: true });
         fs.writeFileSync(TOKEN_PATH, token, { mode: 0o600 });
     } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;

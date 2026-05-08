@@ -116,8 +116,6 @@ describe('readPersistedToken', () => {
 
 describe('persistToken', () => {
     it('writes the token with mode 0o600 on the happy path', () => {
-        mockExistsSync.mockReturnValueOnce(true); // dir exists
-        mockWriteFileSync.mockReturnValueOnce(undefined);
         persistToken('test-token');
         expect(mockWriteFileSync).toHaveBeenCalledWith(
             expect.stringContaining('pilot.jwt'),
@@ -128,17 +126,16 @@ describe('persistToken', () => {
         expect(warnSpy).not.toHaveBeenCalled();
     });
 
-    it('creates the data directory recursively when missing', () => {
-        mockExistsSync.mockReturnValueOnce(false); // dir does not exist
-        mockMkdirSync.mockReturnValueOnce(undefined);
-        mockWriteFileSync.mockReturnValueOnce(undefined);
+    it('creates the data directory recursively without an existsSync probe', () => {
         persistToken('test-token');
         expect(mockMkdirSync).toHaveBeenCalledWith(expect.any(String), { recursive: true });
         expect(mockWriteFileSync).toHaveBeenCalled();
+        // Lock the TOCTOU removal: an existsSync call here would re-introduce
+        // the race window between the probe and the mkdir/write.
+        expect(mockExistsSync).not.toHaveBeenCalled();
     });
 
     it('logs at ERROR (not WARN) on ENOSPC and includes the actionable message', () => {
-        mockExistsSync.mockReturnValueOnce(true);
         mockWriteFileSync.mockImplementationOnce(() => { throw fsError('ENOSPC', 'no space left'); });
         persistToken('test-token');
         expect(errorSpy).toHaveBeenCalledOnce();
@@ -152,7 +149,6 @@ describe('persistToken', () => {
     });
 
     it('logs at ERROR on EACCES (read-only volume mount)', () => {
-        mockExistsSync.mockReturnValueOnce(true);
         mockWriteFileSync.mockImplementationOnce(() => { throw fsError('EACCES', 'permission denied'); });
         persistToken('test-token');
         expect(errorSpy).toHaveBeenCalledOnce();
@@ -160,15 +156,13 @@ describe('persistToken', () => {
     });
 
     it('logs at ERROR on EROFS (read-only filesystem)', () => {
-        mockExistsSync.mockReturnValueOnce(true);
         mockWriteFileSync.mockImplementationOnce(() => { throw fsError('EROFS', 'read-only file system'); });
         persistToken('test-token');
         expect(errorSpy).toHaveBeenCalledOnce();
         expect(String(errorSpy.mock.calls[0][0])).toContain('EROFS');
     });
 
-    it('does not throw — the in-memory token must still be usable for the current session', () => {
-        mockExistsSync.mockReturnValueOnce(true);
+    it('does not throw, so the in-memory token stays usable for the current session', () => {
         mockWriteFileSync.mockImplementationOnce(() => { throw fsError('EIO', 'i/o error'); });
         expect(() => persistToken('test-token')).not.toThrow();
     });
