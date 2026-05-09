@@ -22,3 +22,28 @@ export function isProxyExemptPath(path: string): boolean {
   }
   return false;
 }
+
+// Path prefixes that are hub-only: they manage state owned by the local hub
+// (centralized audit, fleet schedules, notification routing rules). Routed
+// to the local hub when nodeId resolves to local, but rejected with 409 when
+// nodeId resolves to a remote node so a script/curl call cannot trick the
+// proxy into forwarding hub-only authority across a node boundary.
+//
+// Frontend nav surfaces are gated separately via `HUB_ONLY_VIEWS` in
+// useViewNavigationState.ts; this list is the backend defense-in-depth.
+//
+// Consumed by:
+//   - middleware/hubOnlyGuard.ts → 409 when nodeId is remote
+export const HUB_ONLY_PREFIXES: readonly string[] = [
+  '/api/scheduled-tasks/',
+  '/api/audit-log/',
+  '/api/notification-routes/',
+];
+
+/** Returns true when the path is hub-only and must not be proxied to a remote node. */
+export function isHubOnlyPath(path: string): boolean {
+  for (const prefix of HUB_ONLY_PREFIXES) {
+    if (path.startsWith(prefix)) return true;
+  }
+  return false;
+}

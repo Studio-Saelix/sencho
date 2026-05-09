@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import './types/express';
 import { authGate, auditLog } from './middleware/authGate';
 import { enforceApiTokenScope } from './middleware/apiTokenScope';
+import { hubOnlyGuard } from './middleware/hubOnlyGuard';
 import { errorHandler } from './middleware/errorHandler';
 import { createApp } from './app';
 import { createRemoteProxyMiddleware } from './proxy/remoteNodeProxy';
@@ -81,6 +82,14 @@ app.use('/api', authGate);
 app.use('/api', auditLog);
 
 app.use('/api', enforceApiTokenScope);
+
+// Hub-only guard: reject requests whose nodeId resolves to a remote node
+// when the path is hub-only (e.g. /api/scheduled-tasks, /api/audit-log,
+// /api/notification-routes). Without this, the proxy would forward the
+// request and process it on the remote as a local call, crossing a
+// node-authority boundary that the UI hides. See helpers/proxyExemptPaths.ts
+// for the prefix list and middleware/hubOnlyGuard.ts for the rationale.
+app.use('/api', hubOnlyGuard);
 
 // Remote Node HTTP Proxy (see proxy/remoteNodeProxy.ts). Mounted BEFORE the
 // per-group routers so a request targeting a remote node short-circuits into

@@ -2,6 +2,7 @@ import { Suspense, lazy, type ReactNode } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AdmiralGate } from '../AdmiralGate';
 import { CapabilityGate } from '../CapabilityGate';
+import { HubOnlyGate } from '../HubOnlyGate';
 import LazyBoundary from '../LazyBoundary';
 import { SettingsPage } from '../settings/SettingsPage';
 import type { SectionId } from '../settings/types';
@@ -10,6 +11,7 @@ import ResourcesView from '../ResourcesView';
 import HomeDashboard from '../HomeDashboard';
 import type { NotificationItem } from '../dashboard/types';
 import type { ScheduleTaskPrefill } from '../ScheduledOperationsView';
+import type { ActiveView } from './hooks/useViewNavigationState';
 
 // Paid-tier views and the security-history overlay are loaded on demand.
 // Their internal PaidGate / AdmiralGate / CapabilityGate wrappers render
@@ -59,18 +61,7 @@ function LazyView({ children }: { children: ReactNode }) {
     );
 }
 
-export type ActiveView =
-    | 'dashboard'
-    | 'editor'
-    | 'host-console'
-    | 'resources'
-    | 'templates'
-    | 'global-observability'
-    | 'fleet'
-    | 'audit-log'
-    | 'scheduled-ops'
-    | 'auto-updates'
-    | 'settings';
+export type { ActiveView };
 
 export interface ViewRouterProps {
     activeView: ActiveView;
@@ -148,50 +139,60 @@ export function ViewRouter({
     }
     if (activeView === 'global-observability') {
         return (
-            <LazyView>
-                <GlobalObservabilityView />
-            </LazyView>
+            <HubOnlyGate>
+                <LazyView>
+                    <GlobalObservabilityView />
+                </LazyView>
+            </HubOnlyGate>
         );
     }
     if (activeView === 'fleet') {
         return (
-            <CapabilityGate capability="fleet" featureName="Fleet Management">
-                <LazyView>
-                    <FleetView onNavigateToNode={onFleetNavigateToNode} />
-                </LazyView>
-            </CapabilityGate>
+            <HubOnlyGate>
+                <CapabilityGate capability="fleet" featureName="Fleet Management">
+                    <LazyView>
+                        <FleetView onNavigateToNode={onFleetNavigateToNode} />
+                    </LazyView>
+                </CapabilityGate>
+            </HubOnlyGate>
         );
     }
     if (activeView === 'audit-log') {
         return (
-            <CapabilityGate capability="audit-log" featureName="Audit Log">
-                <LazyView>
-                    <AuditLogView />
-                </LazyView>
-            </CapabilityGate>
+            <HubOnlyGate>
+                <CapabilityGate capability="audit-log" featureName="Audit Log">
+                    <LazyView>
+                        <AuditLogView />
+                    </LazyView>
+                </CapabilityGate>
+            </HubOnlyGate>
         );
     }
     if (activeView === 'auto-updates') {
         return (
-            <CapabilityGate capability="auto-updates" featureName="Auto-Update Readiness">
-                <LazyView>
-                    <AutoUpdateReadinessView />
-                </LazyView>
-            </CapabilityGate>
+            <HubOnlyGate>
+                <CapabilityGate capability="auto-updates" featureName="Auto-Update Readiness">
+                    <LazyView>
+                        <AutoUpdateReadinessView />
+                    </LazyView>
+                </CapabilityGate>
+            </HubOnlyGate>
         );
     }
     if (activeView === 'scheduled-ops') {
         return (
-            <CapabilityGate capability="scheduled-ops" featureName="Scheduled Operations">
-                <LazyView>
-                    <ScheduledOperationsView
-                        filterNodeId={filterNodeId}
-                        onClearFilter={onClearScheduledOpsFilter}
-                        prefill={schedulePrefill}
-                        onPrefillConsumed={onPrefillConsumed}
-                    />
-                </LazyView>
-            </CapabilityGate>
+            <HubOnlyGate>
+                <CapabilityGate capability="scheduled-ops" featureName="Scheduled Operations">
+                    <LazyView>
+                        <ScheduledOperationsView
+                            filterNodeId={filterNodeId}
+                            onClearFilter={onClearScheduledOpsFilter}
+                            prefill={schedulePrefill}
+                            onPrefillConsumed={onPrefillConsumed}
+                        />
+                    </LazyView>
+                </CapabilityGate>
+            </HubOnlyGate>
         );
     }
     return (

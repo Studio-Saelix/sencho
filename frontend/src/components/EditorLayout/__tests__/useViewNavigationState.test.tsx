@@ -2,11 +2,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as AuthContext from '@/context/AuthContext';
 import * as LicenseContext from '@/context/LicenseContext';
+import * as NodeContext from '@/context/NodeContext';
 import { SENCHO_NAVIGATE_EVENT } from '@/components/NodeManager';
 import { useViewNavigationState } from '../hooks/useViewNavigationState';
 
 vi.mock('@/context/AuthContext');
 vi.mock('@/context/LicenseContext');
+vi.mock('@/context/NodeContext');
+
+function mockActiveNode(type: 'local' | 'remote' | null) {
+  vi.mocked(NodeContext.useNodes).mockReturnValue({
+    activeNode: type === null ? null : { type, id: 1, name: 'n' },
+  } as unknown as ReturnType<typeof NodeContext.useNodes>);
+}
 
 function mockCommunityUser() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
@@ -44,6 +52,7 @@ function mockSkipperAdmin() {
 describe('useViewNavigationState', () => {
   beforeEach(() => {
     mockCommunityUser();
+    mockActiveNode('local');
   });
 
   // ── initial state ──────────────────────────────────────────────────────────
@@ -226,5 +235,86 @@ describe('useViewNavigationState', () => {
     expect(values).not.toContain('host-console');
     expect(values).not.toContain('audit-log');
     expect(values).not.toContain('scheduled-ops');
+  });
+
+  // ── navItems: hub-only gating on remote node ───────────────────────────────
+
+  it('hides hub-only views from the nav strip when active node is remote', () => {
+    mockAdmiralAdmin();
+    mockActiveNode('remote');
+    const { result } = renderHook(() => useViewNavigationState());
+    const values = result.current.navItems.map(i => i.value);
+    expect(values).not.toContain('fleet');
+    expect(values).not.toContain('scheduled-ops');
+    expect(values).not.toContain('audit-log');
+    expect(values).not.toContain('global-observability');
+    expect(values).not.toContain('auto-updates');
+    // Node-level views remain visible.
+    expect(values).toContain('dashboard');
+    expect(values).toContain('resources');
+    expect(values).toContain('templates');
+    expect(values).toContain('host-console');
+  });
+
+  it('shows hub-only views again when active node switches back to local', () => {
+    mockAdmiralAdmin();
+    mockActiveNode('remote');
+    const { result, rerender } = renderHook(() => useViewNavigationState());
+    expect(result.current.navItems.map(i => i.value)).not.toContain('fleet');
+
+    mockActiveNode('local');
+    rerender();
+    const values = result.current.navItems.map(i => i.value);
+    expect(values).toContain('fleet');
+    expect(values).toContain('scheduled-ops');
+    expect(values).toContain('audit-log');
+  });
+
+  // ── auto-redirect when on a hub-only view and node switches to remote ──────
+
+  it('auto-redirects to dashboard when active view is hub-only and node becomes remote', () => {
+    const onNavigateToDashboard = vi.fn();
+    mockAdmiralAdmin();
+    mockActiveNode('local');
+    const { result, rerender } = renderHook(() =>
+      useViewNavigationState({ onNavigateToDashboard }),
+    );
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'fleet', nodeId: 7 } }),
+      );
+    });
+    expect(result.current.activeView).toBe('fleet');
+    expect(result.current.filterNodeId).toBe(7);
+
+    mockActiveNode('remote');
+    rerender();
+
+    expect(result.current.activeView).toBe('dashboard');
+    expect(result.current.filterNodeId).toBeNull();
+    expect(onNavigateToDashboard).toHaveBeenCalledOnce();
+  });
+
+  it('does not redirect when a non-hub-only view is active and node becomes remote', () => {
+    const onNavigateToDashboard = vi.fn();
+    mockAdmiralAdmin();
+    mockActiveNode('local');
+    const { result, rerender } = renderHook(() =>
+      useViewNavigationState({ onNavigateToDashboard }),
+    );
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'resources' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('resources');
+
+    mockActiveNode('remote');
+    rerender();
+
+    expect(result.current.activeView).toBe('resources');
+    expect(onNavigateToDashboard).not.toHaveBeenCalled();
   });
 });
