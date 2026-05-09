@@ -1,275 +1,432 @@
 ---
 title: Alerts & Notifications
-description: Set threshold-based alerts on container metrics and route them to Discord, Slack, or any webhook.
+description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, or any webhook, with per-stack rules and Admiral routing.
 ---
 
-Sencho can watch your containers for resource anomalies and notify you when thresholds are breached. Alerts are defined per stack, and notifications are delivered through external channels you configure.
-
-## Setting up notification channels
-
-At least one channel must be enabled before alerts can be delivered externally. Go to **Settings > Notifications**.
+Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and one of three external channels you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with Admiral routing rules, and tuning retention.
 
 <Frame>
-  <img src="/images/alerts-notifications/notifications-settings.png" alt="Notifications & Alerts settings showing Discord, Slack, and Webhook tabs" />
+  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications panel showing the Discord, Slack, and Webhook tabs with the masthead breadcrumb, the CHANNELS 3/3 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
 </Frame>
 
-Three channel types are available, each configured with a webhook URL and an enable/disable toggle:
+## Notification channels
+
+Open **Settings · Notifications** to configure the three channel types. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the three slots are enabled.
+
+Each tab carries the same controls: an **Enabled** toggle (helper: `Send Sencho events to this <name> channel.`), a **Webhook URL** input (placeholder `https://...`, helper: `Sencho posts JSON payloads here. Use a private channel.`), and the **Test** and **Save** buttons. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
+
+<Note>
+  Webhook URLs must use HTTPS. Sencho rejects `http://` and any string that does not parse as a URL. The same rule applies to test sends and to routing-rule URLs.
+</Note>
 
 ### Discord
 
-1. In Discord, go to your server's **Settings > Integrations > Webhooks**
-2. Click **New Webhook**, choose a channel, and copy the webhook URL
-3. In Sencho, open **Settings > Notifications > Discord**, paste the URL, enable the toggle, and click **Save**
-4. Click **Test** to send a test message and verify the connection
+Paste an incoming webhook URL from your Discord channel's **Edit Channel · Integrations · Webhooks** view. Sencho posts a single embed per alert, with the title `Sencho Alert [<LEVEL>]`, the message in the description, and the embed color set by severity (info blue, warning yellow, error red).
 
 ### Slack
 
-1. In Slack, go to **api.slack.com/apps**, create an app, and add the **Incoming Webhooks** feature
-2. Activate it and copy the generated webhook URL for your chosen channel
-3. In Sencho, open **Settings > Notifications > Slack**, paste the URL, enable the toggle, and click **Save**
+Paste an incoming webhook URL from a Slack app installed in your workspace (URL shape `https://hooks.slack.com/services/...`). Sencho posts a single text message: `<emoji> *Sencho Alert [<LEVEL>]*` followed by the message body, with the emoji set per severity (`ℹ️` info, `⚠️` warning, `🚨` error).
 
-### Generic Webhook
+### Generic webhook
 
-Any HTTPS endpoint that accepts a POST with a JSON body can receive Sencho alerts. Go to **Settings > Notifications > Webhook**, enter the URL, enable the toggle, and click **Save**.
-
-<Note>
-  All webhook URLs (Discord, Slack, and generic) must use HTTPS. HTTP URLs are rejected.
-</Note>
-
-The payload format is:
+Use the Generic Webhook tab when you have your own receiver: a Mattermost or Teams adapter, a serverless function that fans out to email or SMS, or a logging endpoint. Sencho posts JSON of the shape:
 
 ```json
 {
   "level": "warning",
-  "message": "cpu_percent exceeded 90% for 5 minutes on stack my-app",
-  "timestamp": "2026-03-22T10:00:00.000Z"
+  "message": "[Node: Local] The cpu_percent for plex has exceeded your threshold of 80% (Currently: 91%).",
+  "timestamp": "2026-05-08T22:14:09.812Z",
+  "source": "sencho"
 }
 ```
 
-## Creating stack alerts
+`level` is one of `info`, `warning`, `error`. `source` is always the literal string `sencho`. `timestamp` is ISO-8601 with millisecond precision.
 
-Stack alerts are configured per stack. Right-click a stack in the sidebar (or click the three-dot menu) and select **Alerts**. A panel slides open showing existing rules and a form to create new ones.
+### Test sends and delivery semantics
+
+The **Test** button on each tab dispatches the literal message `🔌 Test Notification from Sencho!` at level `info` through the same path a real alert would take. Test sends require the admin role; the server returns 403 if an operator or viewer submits one.
+
+Each dispatch is a single-shot HTTP POST with a 10-second `AbortSignal.timeout`. There is no retry queue. If your endpoint is down at the moment of the dispatch, the alert is recorded in the bell with an internal `dispatch_error` field set and is not redelivered.
+
+## Notification Routing
+
+<Note>
+  Notification Routing requires a **Sencho Admiral** license. Admin role is required to create, edit, or delete routes.
+</Note>
+
+Routing lets you direct alerts that match specific criteria to dedicated channels. Production crashes can land in `#prod-incidents` on Slack while staging notifications go to a less urgent Discord channel, all without juggling per-channel webhook URLs across teams.
 
 <Frame>
-  <img src="/images/alerts-notifications/alert-panel.png" alt="Stack Alerts panel showing the notification status banner and alert rule form" />
+  <img src="/images/alerts-notifications/routing-list.png" alt="Settings · Routing card list showing two rules ('Critical to Slack' and 'Production alerts'), each with a Discord badge, an ON pill, the 'Matches all alerts' summary line, a truncated channel URL, a Priority chip, and lightning-test, edit, and delete icon actions on the right." />
 </Frame>
 
-The panel includes:
+### How routing fits into dispatch
 
-- **Notification status banner** at the top, showing whether channels are configured. If no channels are enabled, a warning explains that rules will be evaluated but no external notifications will be sent.
-- **Existing Rules** section listing all active rules for this stack, each showing the metric, condition, duration, and cooldown. Hover over a rule to reveal the delete button.
-- **Add New Rule** form with the fields described below.
+For every alert Sencho dispatches, the routing engine evaluates every enabled route. A route matches when **all of its non-empty matchers** match the alert: the **Node**, **Stacks**, **Labels**, and **Categories** filters compose with AND. An empty matcher is treated as match-anything.
+
+If at least one route matches, every matching route fires and the **global channels are skipped** for that alert. If zero routes match, the alert falls back to the global channels configured in the previous section.
+
+A route with all four matchers left empty matches every alert and intercepts global delivery entirely. Stack-less alerts (host CPU, RAM, disk, fleet-sync warnings, and scheduled-task results without a stack target) almost always miss any populated `Stacks` filter, so they fall back to global by default.
+
+### Creating a routing rule
+
+Open **Settings · Routing** and click **+ Add Route**.
+
+<Frame>
+  <img src="/images/alerts-notifications/routing-modal.png" alt="The 'New routing rule' modal with the 'ROUTING · NEW RULE' kicker, a Name input filled with 'Production alerts', a Node scope select reading 'Any node', empty Stacks, Labels, and Categories combobox pickers, the helper line 'Leave blank to match all categories. All non-empty filters must match (AND).', a Channel tab strip with Discord selected and a webhook URL filled in, and Priority and Enabled fields with Cancel and CREATE actions in the footer." />
+</Frame>
+
+| Field | Purpose |
+|-------|---------|
+| **Name** | A human label, up to 100 characters. Shown on the rule card. |
+| **Node scope** | Either `Any node` or a specific node. When set to a node, the rule only matches alerts originating from that node. |
+| **Stacks** *(optional)* | A combobox of stacks on the active node. Selected stacks appear as removable pills. Empty matches any stack. |
+| **Labels** *(optional)* | A combobox of stack labels on the active node. Empty matches any label. |
+| **Categories** *(optional)* | A combobox of notification categories. The helper line reads `Leave blank to match all categories. All non-empty filters must match (AND).` |
+| **Channel** | Tabs for Discord, Slack, and Webhook with a URL input below. URL must use HTTPS. |
+| **Priority** | A number used to sort the rule list. Lower numbers appear higher up. Priority does not gate dispatch: when multiple rules match the same alert, every matching rule fires concurrently. |
+| **Enabled** | Toggle the rule on or off without deleting it. |
+
+The modal kicker reads `ROUTING · NEW RULE` when adding and `ROUTING · EDIT RULE` when modifying.
+
+### Managing rules
+
+Each rule renders as a card on the Routing page with the rule name, channel-type badge, an `ON` / `OFF` pill, then a row of small badges naming each matcher: one mono badge per **Stack**, one outline badge per **Label**, one outline mono badge per **Category** label. When all matchers are empty, a single muted `Matches all alerts` line replaces the badge row. After the badges, a vertical bar separator is followed by the truncated channel URL, then a second separator and a `Priority: N` chip when priority is non-zero.
+
+Three icon actions appear on the right edge of each card:
+
+- **Lightning** sends a test message through the rule's channel using the same payload shape as the global Test button.
+- **Pencil** opens the edit modal pre-filled with the current values.
+- **Trash** deletes the rule after a confirmation dialog.
+
+The masthead carries `SCOPE` (`global`), `ROUTES` (total), and `ENABLED` (count).
+
+## Notification categories
+
+Every alert Sencho dispatches carries a category that you can filter on in the bell, target with a routing rule's **Categories** matcher, or reason about when reading audit history.
+
+| Category | Label in the bell | Trigger |
+|----------|-------------------|---------|
+| `deploy_success` | Deploy success | Stack deploy completed without error |
+| `deploy_failure` | Deploy failure | Stack deploy returned a non-zero exit |
+| `stack_started` | Stack started | Stack started via the dashboard or API |
+| `stack_stopped` | Stack stopped | Stack stopped via the dashboard or API |
+| `stack_restarted` | Stack restarted | Stack restarted via the dashboard or API |
+| `image_update_available` | Update available | Image-update poll found a newer digest |
+| `image_update_applied` | Update applied | Manual or scheduled auto-update applied new images |
+| `autoheal_triggered` | Auto-heal | Auto-heal restarted, failed to restart, or auto-disabled a policy |
+| `monitor_alert` | Monitor alert | Per-stack threshold breach, host CPU/RAM/disk warning, or healthcheck failure |
+| `scan_finding` | Scan finding | Vulnerability-scan completion, per-violation alert, post-deploy scan failure, or auto-update gate block |
+| `system` | System | Sencho version, Trivy auto-update, fleet sync, daemon connectivity, scheduled-task lifecycle, cloud-backup upload failure |
+| `blueprint_deployed` | `blueprint_deployed` | Blueprint provisioned a new deployment (Admiral) |
+| `blueprint_deployment_failed` | `blueprint_deployment_failed` | Blueprint deployment errored out (Admiral) |
+| `blueprint_drift_detected` | `blueprint_drift_detected` | Blueprint drift detected in `suggest` or `enforce` mode (Admiral) |
+| `blueprint_drift_correction_failed` | `blueprint_drift_correction_failed` | Blueprint enforce-mode redeploy failed (Admiral) |
+
+The four `blueprint_*` categories are accepted by routing rules but render as raw category strings in the bell because the frontend label map omits them.
+
+## Per-stack alert rules
+
+Each stack carries its own set of threshold rules that fire when a metric stays above (or below) a value for a configurable window. Rules live on the node where the stack runs and are evaluated locally on a 30-second tick.
+
+Open the rules editor by right-clicking a stack in the sidebar and choosing **Alerts**, or by pressing `A` while focused on a stack.
+
+<Frame>
+  <img src="/images/alerts-notifications/alert-panel.png" alt="The Stack › PLEX › MONITOR sheet with the Alerts tab active, a green 'Notifications active via Discord, Slack, Webhook' banner under the NOTIFICATION CHANNELS heading, an ACTIVE RULES section listing 'CPU Usage (%) > 80' with the secondary line 'Trigger after 5m • Cooldown 60m', and an ADD NEW RULE form with Metric, Operator, Threshold, Duration, Cooldown fields and an Add Rule submit button." />
+</Frame>
 
 ### Alert fields
 
-| Field | Description |
-|-------|-------------|
-| **Metric** | The container metric to watch (see table below) |
-| **Operator** | Comparison: Greater than, Greater or equal, Less than, Less or equal, Equals |
-| **Threshold** | The numerical value to compare against |
-| **Duration (mins)** | How long the condition must hold before firing (default: 5) |
-| **Cooldown (mins)** | Minimum time between repeated notifications for this rule (default: 60) |
+| Field | Purpose |
+|-------|---------|
+| **Metric** | The system resource or metric to monitor. |
+| **Operator** | Comparison: `Greater than`, `Greater or eq`, `Less than`, `Less or eq`, `Equals`. |
+| **Threshold** | A number ≥ 0. The unit follows the chosen metric. |
+| **Duration (mins)** | How long the breach must persist before firing. Default `5`, range 0 to 1440. |
+| **Cooldown (mins)** | Silence window between fires after a rule triggers. Default `60`, range 0 to 10080. |
+
+Sencho tracks the start of each breach in memory; the rule fires only after the breach has lasted for the full **Duration**, and only if the previous fire is older than **Cooldown**.
 
 ### Available metrics
 
-| Metric | Description |
-|--------|-------------|
-| CPU Usage (%) | CPU usage relative to total host cores |
-| Memory Usage (%) | Memory used as a fraction of the host total |
-| Memory Usage (MB) | RSS memory used by the container |
-| Network In (MB) | Cumulative inbound network bytes (in MB) |
-| Network Out (MB) | Cumulative outbound network bytes (in MB) |
-| Restart Count | Number of times the container has restarted |
+| Metric | UI label | Unit |
+|--------|----------|------|
+| `cpu_percent` | CPU Usage (%) | percent of all cores |
+| `memory_percent` | Memory Usage (%) | percent of container memory limit |
+| `memory_mb` | Memory Usage (MB) | MB of resident set size, minus cache |
+| `net_rx` | Network In (MB/s) | MB per second, computed as a delta between consecutive samples |
+| `net_tx` | Network Out (MB/s) | MB per second, computed as a delta between consecutive samples |
+| `restart_count` | Restart Count | integer count of Docker-reported restarts |
+
+### Channel banner states
+
+The **NOTIFICATION CHANNELS** banner above the rules list reflects what dispatch will look like for this stack:
+
+- **Loading** is a spinner with `Checking notification channels...` while Sencho asks the target node for its agent state.
+- **Remote node** is a blue banner reading `Remote node: <name>`, with the body `Alert rules are stored and evaluated on this remote instance. Notifications are dispatched using that node's configured channels.` A sub-line reports whether the remote has any channels configured.
+- **No channels** is an amber banner reading `No notification channels configured`, body `Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, or a webhook in Settings → Notifications.`
+- **Active** is a green banner reading `Notifications active via Discord, Slack, …` with the configured channels listed.
+
+<Frame>
+  <img src="/images/alerts-notifications/alert-panel-remote-banner.png" alt="The Stack › SAELIX-DB › MONITOR sheet on a remote node, with the blue 'Remote node: node-a' banner explaining that rules are stored and evaluated on the remote, plus a follow-up amber line noting that no notification channels are configured on that remote." />
+</Frame>
 
 ### Example: alert on high CPU
 
-To alert when any container in a stack uses more than 80% CPU for over 5 consecutive minutes, with a 60-minute cooldown:
+To page when CPU on a stack stays above 80% for at least five minutes, with no more than one alert per hour:
 
 | Field | Value |
 |-------|-------|
-| Metric | CPU Usage (%) |
-| Operator | Greater than |
-| Threshold | 80 |
-| Duration | 5 |
-| Cooldown | 60 |
+| **Metric** | CPU Usage (%) |
+| **Operator** | Greater than |
+| **Threshold** | `80` |
+| **Duration (mins)** | `5` |
+| **Cooldown (mins)** | `60` |
 
-## Notification history
+### Permissions and validation
 
-All dispatched notifications appear in the **notification bell** in the top-right corner of the navigation bar. A red dot pulses on the bell when unread notifications exist.
+Operators and viewers see existing rules read-only; only admins see the add and delete affordances. Submitting an empty threshold surfaces `Please enter a threshold.` Successful saves toast `Alert rule added.` and `Alert rule deleted.` A failed POST surfaces `Network error. Could not reach the node.`
+
+The delete confirmation dialog reads `Delete Alert Rule` / `This will permanently remove this alert rule. Notifications for this condition will no longer be sent.` with a destructive **Delete** button.
+
+## Notification history (the bell)
+
+The bell icon at the top of the shell is the live feed of every alert across the fleet. A pulsing red dot surfaces unread items.
 
 <Frame>
-  <img src="/images/alerts-notifications/notification-popover.png" alt="Notification popover showing recent alert entries with level badges and timestamps" />
+  <img src="/images/alerts-notifications/notification-popover.png" alt="The notification bell open, with a 'Notifications' italic title, '9 UNREAD' uppercase mono caption, an All / Unread / Alerts segmented control, the filter-toggle, mark-all-read, and clear-all icon actions, a 'TODAY' day-band header, and a stack of severity-tinted rows describing Sencho version updates and a recent stack stop, each with a node-name pill, a relative timestamp, and a per-row dismiss target." />
 </Frame>
 
-Click the bell to open the notification popover. Each entry shows:
+### Anatomy
 
-- **Level badge** (ERROR in red, WARNING in amber, INFO in default)
-- **Node name** badge for notifications from remote nodes
-- **Timestamp** of when the alert was triggered
-- **Alert message** describing what was breached
+A title bar with `Notifications` in the italic display face, the unread count to the right (`<n> UNREAD`), and a row of controls below.
 
-A toolbar above the list provides filtering and bulk actions:
+The segmented control switches between `All`, `Unread` (with badge), and `Alerts` (rows where level is `warning` or `error`). To the right, three icon buttons:
 
-| Control | What it does |
-|---------|--------------|
-| **All / Unread / Alerts** | Switches the list between every notification, unread only, or alert-level only |
-| **Filter toggle** | Reveals dropdowns to filter by node and by notification type; an accent dot on the icon indicates an active filter |
-| **Mark all as read** | Marks every notification as read (removes the red dot) |
-| **Clear all** | Deletes every notification from the list |
+- **SlidersHorizontal** toggles a hidden filter row. A small dot on the icon means at least one filter is active.
+- **CheckCheck** is `Mark all read`.
+- **Trash2** is `Clear all`. The action issues `DELETE /api/notifications` against every node that contributed a row.
 
-You can also dismiss individual notifications by hovering over them and clicking the dismiss button.
+The hidden filter row has two combobox dropdowns: **Filter by node** (only rendered with two or more nodes registered) and **Filter by category**, listing all the user-facing labels from the categories table above.
 
-<Note>
-  Notifications only reach external channels (Discord, Slack, Webhook) if at least one channel is enabled. Dashboard notifications appear regardless.
-</Note>
+<Frame>
+  <img src="/images/alerts-notifications/bell-filter-row.png" alt="The bell with its filter row expanded, the 'ALL TYPES' combobox open over a long popover listing every notification category from 'All types' through 'System', and the underlying notification rows visible beneath." />
+</Frame>
 
-## Alerts on remote nodes
+### Row anatomy
 
-Alerts work the same way on remote nodes as they do locally. When you switch to a remote node and open a stack's alerts panel, you are managing rules on that remote instance.
+Each row carries:
 
-Key details:
+- A **3 px left rail** colored by severity: brand cyan for `info`, amber for `warning`, destructive rose for `error`. Rail saturation drops to about 30% once the row is read.
+- A **severity icon** in the same hue: `Info`, `AlertTriangle`, or `AlertOctagon`.
+- The **message body**, slightly dimmer once read.
+- A **kicker line** below the message with an optional **node-name pill** (only rendered for multi-node fleets), a `·` separator, and a relative timestamp (`just now`, `Nm ago`, `Nh ago`, `yesterday`, then a short locale date).
+- A **dismiss** target on hover, top-right.
 
-- **Alert rules are stored on each node independently.** Rules created while a remote node is selected are saved on that remote instance, not your primary instance.
-- **Monitoring runs locally on each node.** Each Sencho instance evaluates its own alert rules against its own container metrics.
-- **Notifications are sent by the node that detects the breach.** Make sure notification channels are configured on each remote node where you want to receive alerts, since channel settings are per-instance.
+There is no level chip in the row; the rail color and icon do that work. Rows whose payload carries a `stack_name` become click targets that jump to the stack and, when a `container_name` is present, surface that container's logs.
 
-The alert panel shows a blue info banner when you are configuring alerts on a remote node, including which channels are active on that node.
+### Day groupings
 
-### Setup checklist for remote alerts
+Rows are grouped under uppercase day-band headers: `TODAY`, `YESTERDAY`, `THIS WEEK`, `EARLIER`.
 
-You can configure a remote node's notification channels directly from the control plane:
+### Empty states
 
-1. From your **primary** instance, switch to the remote node using the node picker
-2. Open **Settings > Notifications** and configure the remote's Discord, Slack, or Webhook channels. Values saved here apply only to the selected node.
-3. Right-click a stack and select **Alerts** to create rules
-4. The remote instance handles monitoring and notification delivery independently
+<Frame>
+  <img src="/images/alerts-notifications/bell-empty.png" alt="The bell open in its empty state with a strikethrough bell icon, the headline 'You're all caught up', and the mono caption 'New notifications appear here in real time.'" />
+</Frame>
 
-## Update availability notifications
+The popover renders three different empty states:
 
-Sencho can notify you when software updates are available, both for Sencho itself and for your stack images.
+- All filters, no rows ever: `You're all caught up` over `New notifications appear here in real time.`
+- Unread filter, all read: `No unread notifications` over `Everything in your feed has been read.`
+- Alerts filter, no warnings or errors: `No active alerts` over `Warnings and errors will surface here when they occur.`
 
-### Sencho version updates
+### What you won't see in the bell
 
-When a newer version of Sencho is published, an informational notification is dispatched through your configured channels. Each Sencho instance runs its own version check roughly once every 6 hours and notifies exactly once per new version, so remote nodes self-report their own availability alerts. After you update, the cycle resets and you will be notified when the next release becomes available.
+Sencho deliberately suppresses one class of notification from the popover: rows where the category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, or `image_update_applied`, AND the row carries an `actor_username` other than `system`. These are confirmations of an action you just clicked, surfaced as a toast at the moment of the action; replaying them in the bell would be noise. The rows are still persisted to `notification_history` and still dispatched to global channels and matching routes; only the bell render hides them.
 
-The notification message includes the version you are running and the version that was detected, for example:
+### Limits
 
-```
-Sencho 0.47.0 is available (currently running 0.46.16). Visit the Fleet dashboard to update.
-```
+The popover holds the latest 50 rows per node per fetch. The backend caps `notification_history` at 100 rows per node, regardless of the user-tunable retention setting; the cap evicts the oldest rows on every insert. There is no `Load more` affordance; older rows roll off the cap.
 
-### Stack image updates
+## Cross-node delivery
 
-When the periodic image check (every 6 hours) detects that a stack has new upstream images available, a notification is dispatched for each affected stack. Notifications are sent only on state transitions: you will be notified once when an update first appears, not on every check cycle. After you update the stack, the status resets so a future release can notify again.
+The bell aggregates across the entire fleet by hitting `/api/notifications` against every registered node and opening one WebSocket per node: `/ws/notifications` for the local instance and `/ws/notifications?nodeId=<id>` for every remote. A new alert on any remote arrives in the bell within about a second; a 60-second safety-net poll catches anything the WebSocket dropped.
 
-Both notification types use the same channel routing as alerts: if notification routes are configured for a stack, those channels receive the message; otherwise, global notification channels are used as a fallback.
+Per-stack alert rules and channel configuration are **stored on the node where the stack runs**. To configure a rule on a remote, switch the active node via the picker, open the stack's **Monitor** sheet, and the form's POST is forwarded to the remote.
 
-## Scheduled scan completion
+Crash detection runs only on local Docker; remote nodes run their own copy of `DockerEventService` and emit through the proxy. Each emitted message is prefixed with `[Node: <nodeName>]` so the source is unambiguous in the channel.
 
-Recurring [vulnerability scans](/features/vulnerability-scanning) dispatch a notification whenever a run finishes so you do not have to check the task history manually.
+Switching the active node only affects per-stack rule editing and the Settings panels. The bell aggregates every node regardless of which one is active.
 
-- **Info** when every image scanned successfully.
-- **Warning** when one or more images failed to scan during the run.
-- **Error** when the run itself could not start (for example, Trivy is not installed on the target node).
+## Alerts emitted by the system
 
-The message includes the scheduled task name, a summary of how many images were scanned, cached, and failed, and a breakdown of findings by severity. A typical clean-run message looks like:
+Sencho dispatches notifications from many code paths. The list below covers every emitter in current code, organized by source. Each message is prefixed with `[Node: <nodeName>]` when emitted by a node-scoped service.
 
-```
-Scheduled scan "nightly-scan" completed: Scanned 12 image(s); 3 skipped (cached). Found 2 critical, 5 high, 10 medium.
-```
+### Container crash and health
 
-If no critical, high, or medium findings are present, the message ends with `No critical, high, or medium findings.` so the outcome is still explicit. When the target node has nothing to scan, the message reads `No images to scan.`, and when every image was already covered by a recent cached scan it reads `All N image(s) already scanned recently (cache hit).` In both cases the notification still fires so you know the run executed.
+Real-time on the Docker event stream:
 
-<Note>
-  Severity counts reflect the current security posture of the node, aggregated across both freshly scanned images and cached scan results. They are not a delta of what changed on this run.
-</Note>
+- **Crash** at `error`/`monitor_alert`: `Container Crash Detected: <name> exited unexpectedly (Code: <N>).`
+- **OOM kill** at `error`/`monitor_alert`: `Container OOM Kill: <name> was killed by the OOM killer (out of memory).` When a `die` arrives with exit code 137 but no preceding `oom` event, Sencho inspects the container and reclassifies as OOM if the `OOMKilled` flag is set.
+- **Healthcheck failure** at `error`/`monitor_alert`: `Healthcheck failed: <name> is unhealthy.`
+- **Mass exit** kicks in when a daemon-disconnect gap is followed by 20% or more of containers exiting on reconnect, in which case a single `info`/`system` summary `Docker daemon interruption detected: N containers exited during connection gap.` is emitted instead of N crash alerts.
+- **Rate limit** caps crash dispatches at 20 per 60-second window per node, then a single `warning`/`monitor_alert` `N additional containers crashed in the last minute.`
+- **Dedup** is 60 minutes per container after a non-rate-suppressed dispatch.
 
-Failures are typically transient (registry timeouts, missing credentials) and do not stop the rest of the run from completing.
+### Daemon connectivity
 
-## Container crash detection
+- `warning`/`system`: `Lost connection to Docker daemon; monitoring paused.` (one-shot until reconnect)
+- `info`/`system`: `Reconnected to Docker daemon.`
+- `warning`/`system`: `Received malformed Docker event payloads. Monitoring continues but some events may be skipped.` (when more than 10 parse errors in a minute)
 
-Sencho watches every container on each of your nodes in real time and notifies you when something exits unexpectedly. Detection is causal: Sencho distinguishes crashes from intentional stops, so stopping a stack, restarting it, or running `docker compose down` will not produce a false crash alert.
+### Host thresholds
 
-### What triggers a crash alert
+`warning`/`monitor_alert` for host CPU, RAM, and disk when the configured threshold is exceeded. 5-minute cooldown per signal. Example: `Host CPU utilization is critically high: 92% (Threshold: 90%)`. Evaluated on the 30-second monitor tick.
 
-| Situation | Alert |
-|---|---|
-| Container exits with a non-zero exit code without being asked to stop | **Crash** alert (level: error) |
-| Container is killed by the kernel for exceeding its memory limit | **OOM Kill** alert (level: error) |
-| Healthcheck reports the container as unhealthy | **Healthcheck failed** alert (level: error) |
+### Docker janitor
 
-Alerts arrive within a couple of seconds of the event, not on a polling interval.
+`info`/`system`: `Node "<name>" has accumulated <N> GB of unused Docker data. Consider using the Janitor tool.` 24-hour cooldown.
 
-### What does not trigger a crash alert
+### Sencho version availability
 
-- Stopping, restarting, updating, or removing a stack from Sencho
-- Running `docker stop`, `docker restart`, or `docker compose down` from a terminal on the host
-- A container exiting cleanly with exit code `0`
-- A container being replaced during an image update
+`info`/`system`: `Sencho X.Y.Z is available (currently running A.B.C). Visit the Fleet dashboard to update.` Polled every 6 hours; one-shot dedup until the running version reaches or passes the notified version.
 
-### Global toggle
+### Image update availability
 
-Crash and unhealthy alerts are gated by the **Global Crash Detection** toggle in **Settings > System**. When disabled, Sencho stops dispatching crash and unhealthy notifications on all nodes. Stack metric alerts and update notifications are unaffected by this toggle.
+`info`/`image_update_available`: `Stack "<name>" has image updates available.` Polled every 6 hours, with a 2-minute startup delay and a 2-minute cooldown on manual refresh. Notifies on **state transition only**; pre-existing `has_update` rows are backfilled silently on first run.
 
-### Docker daemon interruptions
+### Auto-update execution
 
-If the Docker daemon becomes unreachable (daemon restart, socket lost, network issue on a remote node), Sencho sends a single **Lost connection to Docker daemon** warning and pauses crash detection on the affected node. When the connection is restored, Sencho reconciles container state against a pre-disconnect snapshot:
+`info`/`image_update_applied`: `Auto-update: stack "<name>" updated with new images`. If a block-on-deploy policy gates the auto-update: `warning`/`scan_finding` `Policy "<name>" blocked auto-update: N image(s) exceed <severity>`. See [Auto-update policies](/features/auto-update-policies).
 
-- If most of your containers are still running, individual gap exits are classified and alerts are sent as normal.
-- If a large share of containers exited during the outage (for example after a daemon restart), Sencho consolidates them into a single **Docker daemon interruption detected** informational notification instead of paging you for every container.
+### Auto-heal
 
-A matching **Reconnected to Docker daemon** info notification confirms monitoring has resumed.
+- `info`/`autoheal_triggered`: `Auto-Heal: Restarted <container> on stack <stack> after being unhealthy for <N> minute(s).`
+- `warning`/`autoheal_triggered`: `Auto-Heal: Failed to restart <container> on stack <stack>. Error: <err>`
+- `warning`/`autoheal_triggered`: `Auto-Heal: Policy for <stack>[/<svc>] has been auto-disabled after <N> consecutive failures.`
 
-### High-churn events
+See [Auto-heal policies](/features/auto-heal-policies).
 
-When many crashes land in a short window (for example, a large stack coming down unexpectedly), Sencho dispatches an initial batch and summarizes the remainder in a single **N additional containers crashed in the last minute** entry so your notification channels are not flooded.
+### Vulnerability scanning
+
+- **Per-violation, during a scheduled scan** is `warning`/`scan_finding`. One alert per violation: `Policy "<name>" violated by <imageRef>: <severity> exceeds <maxSeverity>`.
+- **Scan completion** is `info`/`scan_finding` (or `warning` if any image failed): `Scheduled scan "<task name>" completed: <output>` where `<output>` is one of `Scanned N image(s); X skipped (cached). Found A critical, B high, C medium.`, `No critical, high, or medium findings.`, `No images to scan`, or `All N image(s) already scanned recently (cache hit)`.
+- **Pre-deploy gate when Trivy is missing** is `warning`/`scan_finding`: `Pre-deploy scan for "<stack>" skipped: Trivy not installed on this node`.
+- **Post-deploy scan finding** is `error`/`scan_finding` if criticals are present, `warning` otherwise: `Vulnerability scan for <imageRef>: <N> critical, <M> high`.
+- **Post-deploy scan failure** is `warning`/`scan_finding`: `Post-deploy scan failed for <imageRef> (<stack>): <msg>`.
+- **Trivy auto-update** is `info`/`system`: `Trivy updated from vX to vY` or `Trivy update available: vX (currently vY)`.
+
+See [Vulnerability scanning](/features/vulnerability-scanning).
+
+### Scheduled tasks
+
+- `error`/`system`: `Scheduled task "<name>" (<action>) failed: <err>`
+- `info`/`system` recovery: `Scheduled task "<name>" (<action>) recovered successfully`
+
+### Cloud Backup upload failure
+
+`warning`/`system`: `Cloud backup failed for scheduled snapshot <id>: <message>`. See [Fleet backups](/features/fleet-backups).
+
+### Blueprints (Admiral)
+
+- `warning`/`blueprint_drift_detected`: `Blueprint "<n>" drifted on node "<n2>": <reason>` (suggest mode), with stateful-safeguard variants when enforce mode declines to redeploy.
+- `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on node "<n2>" failed: <err>`.
+
+See [Blueprints](/features/blueprint-model).
+
+### Fleet sync (Admiral)
+
+- `warning`/`system` identity drift: `Fleet self-identity changed from "X" to "Y". Identity-scoped policies are reapplied on the next sync.`
+- `warning`/`system` truncation: `Fleet sync truncated <resource> to <N> rows (<dropped> not replicated). Reduce the local set or contact support.`
+- `warning`/`system` stale: `Fleet sync to node "<n>" has been failing for over an hour for <resource>. Check the node's connectivity and API token.`
+
+## Retention and limits
+
+Three retention controls live under **Settings · Developer · Data retention**.
+
+<Frame>
+  <img src="/images/alerts-notifications/developer-retention.png" alt="Settings · Developer · Data retention card showing three rows: Container metrics with a 24 HRS field, Notification log with a 30 DAYS field, and Audit log (Admiral) with a 90 DAYS field, plus a SAVE SETTINGS button." />
+</Frame>
+
+| Control | Range | Default | What it prunes |
+|---------|-------|---------|----------------|
+| **Container metrics** | 1 to 8760 hours | 24 hours | Per-container CPU, RAM, and network history used by the dashboard sparklines |
+| **Notification log** | 1 to 365 days | 30 days | The bell's `notification_history` table |
+| **Audit log** *(Admiral)* | 1 to 365 days | 90 days | Audit trail entries |
+
+A hard 100-row per-node cap inside `notification_history` always applies on top of the user-tunable retention; new inserts evict the oldest rows beyond 100 even if your retention window is longer.
+
+A separate rate limit applies to crash and health alerts only: 20 emits per 60-second window per node, with a single `warning`/`monitor_alert` roll-up `N additional containers crashed in the last minute.` issued at the end of the window.
+
+## Crash detection toggle
+
+The global crash-capture switch lives under **Settings · System · Docker hygiene**.
+
+<Frame>
+  <img src="/images/alerts-notifications/system-crash-toggle.png" alt="Settings · System · System Limits panel showing a HOST THRESHOLDS section with CPU limit, RAM limit, and Disk limit at 100%, then a DOCKER HYGIENE section with a Janitor threshold of 5 GiB and a Global crash capture toggle in the ON state with the helper line 'Watch every managed container for unexpected exits.'" />
+</Frame>
+
+The **Global crash capture** toggle controls whether `DockerEventService` raises crash, OOM, and healthcheck alerts on the active node. Helper text: `Watch every managed container for unexpected exits.` Defaults to on; if the database read fails, Sencho falls back to default-deny so the system never leaks alerts you cannot turn off.
+
+The same panel carries the **Host thresholds** rows (CPU limit, RAM limit, Disk limit, all expressed as percent) that drive the host-level monitor warnings, and the **Janitor threshold** (in GiB) that drives the unused-Docker-data alert.
+
+## Refresh cadence
+
+| Surface | Cadence |
+|---------|---------|
+| Crash, OOM, and healthcheck events | Real-time over the Docker event stream |
+| Host CPU / RAM / disk threshold checks | 30 seconds |
+| Per-stack alert rule evaluation | 30 seconds |
+| Image update poll | 6 hours, with a 2-minute startup delay and a 2-minute cooldown on manual refresh |
+| Sencho version check | 6 hours |
+| Notification fanout to channels | Single shot per dispatch, 10-second timeout, no retries |
+| Bell live updates | Pushed live over the notifications WebSocket per node |
+| Bell safety-net reconcile | 60 seconds |
+| Crash dedup window per container | 60 minutes |
+| Crash rate-limit window | 20 alerts per 60 seconds per node, then a single roll-up |
+
+Switching the active node tears down per-stack rule editors and reloads channel state, but does not affect the bell, which keeps every node's WebSocket open in parallel.
 
 ## Troubleshooting
 
-### Notifications not being delivered
+<AccordionGroup>
+  <Accordion title="Notifications never arrive in Discord, Slack, or my webhook">
+    Check three things in order. First, the channel toggle in **Settings · Notifications** must be on; the kicker on each tab reads `enabled` or `off`. Second, the URL must use HTTPS; the form rejects plain `http://` outright. Third, an Admiral routing rule with empty `Stacks`, `Labels`, and `Categories` matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
+  </Accordion>
+  <Accordion title="An alert rule never fires even when the threshold is breached">
+    Three causes account for almost every case. First, the rule's **Duration** has not elapsed yet: the breach must persist for the full duration before the rule fires. Second, the rule is still in cooldown after a previous fire. Third, the panel's banner is not green: a remote-node banner means the rule was saved on a remote whose channels you may not have configured, and an amber `No notification channels configured` banner means the rule evaluates fine but Sencho has nowhere to send the alert. The evaluator runs on a 30-second tick, so expect up to 30 seconds of latency between the breach starting and the timer engaging.
+  </Accordion>
+  <Accordion title="I stopped a stack but got a crash alert anyway">
+    The Docker event service defers `die` classification by 500 ms to absorb out-of-order `kill` events from the daemon, then asks the lifecycle classifier whether the exit was intentional, clean (exit 0), a crash, or an OOM kill. If your stop happened far enough outside that window, or the daemon emitted the events without the kill marker the classifier looks for, the exit can be classified as a crash. The classifier favors avoiding silent crashes over avoiding noisy false positives. Compare the alert timestamp against your `docker compose down` time; entries within a second of each other are usually the same event seen from two angles.
+  </Accordion>
+  <Accordion title="After a Docker daemon restart, the bell only has one summary line">
+    When the daemon disconnects and reconnects, Sencho snapshots every container at the moment of reconnect. If at least 20% exited during the gap, the service emits a single `info`/`system` summary `Docker daemon interruption detected: N containers exited during connection gap.` instead of one crash alert per container. Below the threshold, every gap exit is classified individually.
+  </Accordion>
+  <Accordion title="Crash alerts stopped arriving and nothing else looks wrong">
+    Check **Settings · System · Docker hygiene · Global crash capture**. The toggle is the master switch for the Docker event service. The panel cache reads the database every 500 ms; if the database read errors, Sencho defaults the toggle to off so the failure mode is silent rather than spammy. Repair the toggle, save, and the next Docker event reaches the dispatcher.
+  </Accordion>
+  <Accordion title="A burst of crashes happened but I only see about twenty alerts">
+    Sencho rate-limits crash and health dispatches to 20 emits per rolling 60-second window per node, then emits a single `warning`/`monitor_alert` roll-up `N additional containers crashed in the last minute.` once the window closes. Every alert is still persisted to `notification_history` and visible in the bell up to the 100-row per-node cap; only the channel fanout is throttled.
+  </Accordion>
+  <Accordion title="My deploy success doesn't appear in the bell, only as a toast">
+    Sencho deliberately hides rows whose category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, or `image_update_applied` AND whose `actor_username` is set to a real user. The reasoning: those are confirmations of the action you just clicked and are already shown as a toast. The rows are still persisted to `notification_history` and still dispatched to global channels and matching routes; only the bell render hides them.
+  </Accordion>
+  <Accordion title="A routing rule is set up but the global channel still fires">
+    Routing matchers AND together: every non-empty matcher must match the alert. A rule with **Stacks** set to `prod-api` will not match a `monitor_alert` for a different stack, and a rule with a populated **Stacks** matcher will not match host-level alerts (which carry no stack target). When zero rules match, Sencho falls back to global channels. To intercept everything, leave all four matcher fields empty on the rule. Also confirm the rule's **Enabled** pill is `ON`.
+  </Accordion>
+  <Accordion title="Fleet shows an update button but I never received a Sencho version notification">
+    The version poll runs every 6 hours and dedups against the `last_sencho_update_notified_version` system-state key, so each newly-released version produces exactly one alert per node. If you upgraded Sencho between the release and the poll, the dedup self-heals; the alert simply does not fire because the running version already matches. To force a fresh check, restart the Sencho container; the version poll runs once on startup after a 2-minute delay.
+  </Accordion>
+  <Accordion title="A stack shows the blue update indicator but no notification was received">
+    The image-update service emits on **state transitions only**. The first run of the service backfills a flag against rows that already had `has_update: true` so they do not all re-fire on first install. Once the flag is set, only the false-to-true transition triggers an alert. If a stack was already showing the indicator before backfill ran, a notification will only appear the next time it goes from up-to-date back to behind.
+  </Accordion>
+</AccordionGroup>
 
-- Verify at least one notification channel is enabled in **Settings > Notifications**
-- Click **Test** on the channel to confirm the webhook URL is reachable
-- Check that the webhook URL uses HTTPS
-- If using notification routing (Admiral tier), verify the route pattern matches the stack name
+## What's not in scope
 
-### Alert not firing
+Sencho ships Discord, Slack, and Generic Webhook. There is no built-in Email, MS Teams, Pushover, Telegram, Mattermost, Gotify, or Ntfy delivery. Use a Generic Webhook plus a small adapter, or feed the webhook into your existing alerting infrastructure.
 
-- Confirm the alert rule exists by opening the stack's alert panel
-- Check that the **duration** has elapsed; the condition must hold continuously for the configured duration before an alert fires
-- Check the **cooldown** period; after an alert fires, it will not fire again until the cooldown expires
-- Verify the metric is being collected; container must be running for stats to be gathered
+There is no dispatch retry queue. If your endpoint is down at the moment Sencho tries to deliver, the row appears in the bell with `dispatch_error` set and is not redelivered.
 
-### I stopped a stack but got a crash alert
-
-This should not happen. Sencho distinguishes intentional stops from crashes by correlating each container exit with the action that triggered it. If you do see a crash alert for a stack you stopped, confirm Sencho can reach the Docker daemon on the affected node: the **Lost connection to Docker daemon** warning is dispatched when the socket is unreachable, and exits observed during an outage may be classified as crashes on reconnect.
-
-### After a Docker daemon restart I only got one summary notification
-
-Expected. When a large share of containers exits during a Docker daemon interruption, Sencho consolidates them into a single informational notification instead of paging per container. Individual crashes that happen after the reconnect are alerted on as normal.
-
-### Crash alerts stopped arriving and nothing else looks wrong
-
-Check, in order:
-
-1. Open **Settings > System** and confirm **Global Crash Detection** is on. When it is off, crash, OOM, and unhealthy notifications stop on all nodes while stack metric alerts and update notifications continue as normal.
-2. Look in the in-app notifications panel for a **Lost connection to Docker daemon** warning. If present, Sencho is not receiving events from the affected node and is retrying in the background; a **Reconnected to Docker daemon** info entry will appear when monitoring resumes.
-3. Confirm the affected node is reachable from the host running Sencho. For remote nodes, the remote Sencho instance is responsible for its own crash detection; check its status from that instance.
-
-### A burst of crashes happened but I only see about twenty alerts
-
-Expected, and by design. Sencho caps crash notifications at around 20 per minute per node so a runaway restart loop or a stack-wide failure cannot flood your notification channels. Any crashes beyond the cap in that window are rolled up into a single **N additional containers crashed in the last minute** warning. The complete, unredacted list of events is always visible in the in-app notifications panel; only external channel delivery (Discord, Slack, webhooks) is rate-limited.
-
-### Delete confirmation dialog
-
-Deleting an alert rule now requires confirmation. Click the trash icon next to a rule, then confirm in the dialog that appears.
-
-### Fleet shows an update button but I never received a Sencho version notification
-
-Fleet and the in-app bell share the same version lookup. Each Sencho instance checks for a new release roughly every 6 hours and notifies exactly once per version, so if a check already fired for the latest release the bell will not notify again for that same version.
-
-If the update button is visible but no notification is in the bell, a transient network failure during the last successful check can briefly delay delivery; the next evaluation cycle (about every 30 seconds) retries automatically. To confirm external channels (Discord, Slack, webhooks) are reachable, open **Settings > Notifications** and click **Test** on each. The in-app bell receives every notification regardless of external channel configuration.
-
-### A stack shows the blue update indicator but no notification was received
-
-Open the notification bell. Dispatch failures (for example, a misconfigured Discord or Slack webhook) are logged as error entries in the bell so they are visible without tailing logs. Confirm at least one channel is enabled in **Settings > Notifications**; the in-app bell receives all notifications regardless of external channel configuration.
+The `Stacks` matcher in routing rules is exact-match against names you select from a combobox; there is no glob, regex, or label-pattern syntax in that field. Use **Labels** to express a wildcard-like grouping.

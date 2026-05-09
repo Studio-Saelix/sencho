@@ -118,7 +118,6 @@
                   "features/global-search",
                   "features/global-observability",
                   "features/alerts-notifications",
-                  "features/notification-routing",
                   "features/audit-log"
                 ]
               },
