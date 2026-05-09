@@ -600,7 +600,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const dir = this.overrideDirFor(nodeId);
         await fs.mkdir(dir, { recursive: true });
-        const file = path.resolve(dir, `${stackName}.override.yml`);
+        // path.basename mirrors the applyLocalOverride pattern (and is
+        // the form CodeQL's path-injection model recognizes).
+        const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
         if (!isPathWithinBase(file, dir)) return null;
 
         // Defensive fallback: a deploy that runs `compose down` immediately
@@ -611,7 +613,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         // glitch, transient FS error, mid-write rename); in that case
         // keep any existing override rather than overwrite with `services: {}`.
         if (serviceNames.length === 0) {
-            const existing = await this.readExistingOverrideServiceNames(file);
+            const existing = await this.readExistingOverrideServiceNames(dir, stackName);
             if (existing.length > 0) {
                 this.logActivity({
                     source: 'mesh', level: 'warn', type: 'mesh.override.preserved',
@@ -666,7 +668,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         // its next regen tick, so a one-shot read failure should not
         // wipe out a working override.
         if (serviceNames.length === 0) {
-            const existing = await this.readExistingOverrideServiceNames(file);
+            const existing = await this.readExistingOverrideServiceNames(dir, stackName);
             if (existing.length > 0) {
                 this.logActivity({
                     source: 'mesh', level: 'warn', type: 'mesh.override.preserved',
@@ -853,8 +855,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             const fsSvc = FileSystemService.getInstance(targetNodeId);
             const filename = await fsSvc.getComposeFilename(stackName);
             const baseDir = fsSvc.getBaseDir();
-            const composePath = path.join(baseDir, stackName, filename);
-            // Defense-in-depth on top of isValidStackName + getComposeFilename.
+            // path.basename strips any directory component as defense-in-depth
+            // on top of isValidStackName + isPathWithinBase. Recognized by
+            // CodeQL's path-injection model.
+            const composePath = path.join(baseDir, path.basename(stackName), filename);
             if (!isPathWithinBase(composePath, baseDir)) return [];
             const content = await fs.readFile(composePath, 'utf8');
             const parsed = YAML.parse(content) as { services?: Record<string, unknown> } | null;
@@ -874,10 +878,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * Parse an existing mesh override file and extract the service names
      * it already lists. Used by the defensive fallback so a transient
      * empty compose-file read does not clobber a known-good override.
+     * Takes (dir, stackName) rather than a pre-built filePath so the
+     * path-injection sanitizer pattern (path.basename + isPathWithinBase)
+     * lives next to the read sink and stays recognizable to CodeQL.
      */
-    private async readExistingOverrideServiceNames(filePath: string): Promise<string[]> {
+    private async readExistingOverrideServiceNames(dir: string, stackName: string): Promise<string[]> {
+        const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
+        if (!isPathWithinBase(file, dir)) return [];
         try {
-            const content = await fs.readFile(filePath, 'utf8');
+            const content = await fs.readFile(file, 'utf8');
             const parsed = YAML.parse(content) as { services?: Record<string, unknown> } | null;
             const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
             if (!services) return [];
