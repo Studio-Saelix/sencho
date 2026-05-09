@@ -1888,7 +1888,7 @@ paths:
       operationId: getFleetNodeStacks
       tags: [Fleet]
       summary: List stacks on a fleet node
-      description: Returns stack names from a specific fleet node. Requires Skipper or Admiral license.
+      description: Returns stack names from a specific fleet node.
       parameters:
         - name: nodeId
           in: path
@@ -1928,7 +1928,7 @@ paths:
       operationId: getFleetNodeStackContainers
       tags: [Fleet]
       summary: List containers in a fleet node stack
-      description: Returns containers for a specific stack on a specific fleet node. Requires Skipper or Admiral license.
+      description: Returns containers for a specific stack on a specific fleet node.
       parameters:
         - name: nodeId
           in: path
