@@ -591,7 +591,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const dir = this.overrideDirFor(localNodeId);
         await fs.mkdir(dir, { recursive: true });
-        const file = path.resolve(dir, `${stackName}.override.yml`);
+        // path.basename strips any directory component as defense-in-depth
+        // on top of isValidStackName + isPathWithinBase. Recognized by
+        // CodeQL's path-injection model.
+        const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
         if (!isPathWithinBase(file, dir)) return null;
         await fs.writeFile(file, yaml, 'utf8');
         return file;
@@ -605,7 +608,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!isValidStackName(stackName)) return;
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const dir = this.overrideDirFor(localNodeId);
-        const file = path.resolve(dir, `${stackName}.override.yml`);
+        const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
         if (!isPathWithinBase(file, dir)) return;
         try { await fs.unlink(file); } catch { /* ignore not-exist */ }
     }
