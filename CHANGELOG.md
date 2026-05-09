@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.3](https://github.com/Studio-Saelix/sencho/compare/v0.76.2...v0.76.3) (2026-05-09)
+
+
+### Fixed
+
+* **mesh:** derive override services from compose file and surface cross-node dispatch ([#1017](https://github.com/Studio-Saelix/sencho/issues/1017)) ([2d9e4d0](https://github.com/Studio-Saelix/sencho/commit/2d9e4d0480328a18629a577542439d978ecd0484))
+
 ## [0.76.2](https://github.com/Studio-Saelix/sencho/compare/v0.76.1...v0.76.2) (2026-05-09)
 
 
