@@ -422,11 +422,3 @@ Switching the active node tears down per-stack rule editors and reloads channel 
     The image-update service emits on **state transitions only**. The first run of the service backfills a flag against rows that already had `has_update: true` so they do not all re-fire on first install. Once the flag is set, only the false-to-true transition triggers an alert. If a stack was already showing the indicator before backfill ran, a notification will only appear the next time it goes from up-to-date back to behind.
   </Accordion>
 </AccordionGroup>
-
-## What's not in scope
-
-Sencho ships Discord, Slack, and Generic Webhook. There is no built-in Email, MS Teams, Pushover, Telegram, Mattermost, Gotify, or Ntfy delivery. Use a Generic Webhook plus a small adapter, or feed the webhook into your existing alerting infrastructure.
-
-There is no dispatch retry queue. If your endpoint is down at the moment Sencho tries to deliver, the row appears in the bell with `dispatch_error` set and is not redelivered.
-
-The `Stacks` matcher in routing rules is exact-match against names you select from a combobox; there is no glob, regex, or label-pattern syntax in that field. Use **Labels** to express a wildcard-like grouping.
