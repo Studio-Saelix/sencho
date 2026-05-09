@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { MeshError, MeshService } from '../services/MeshService';
+import { MeshError, MeshService, type MeshRegenSummary } from '../services/MeshService';
 import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
@@ -21,6 +21,47 @@ meshRouter.get('/status', async (_req: Request, res: Response): Promise<void> =>
     } catch (err) {
         console.warn('[mesh] /status failed:', sanitizeForLog((err as Error).message));
         res.status(500).json({ error: 'Failed to load mesh status' });
+    }
+});
+
+/**
+ * Operator-triggered rerun of the boot-time override regeneration. Walks
+ * every `mesh_stacks` row across the fleet and re-pushes each override to
+ * its owning node. Useful when a remote node was offline at central boot
+ * and the override files there are stale; previously the only recovery
+ * path was opt-out + opt-in for every meshed stack on that node.
+ */
+meshRouter.post('/regen-overrides', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    const actor = actorFor(req);
+    let summary: MeshRegenSummary | null = null;
+    let outcome: 'success' | 'skipped' | 'partial' | 'error' = 'error';
+    try {
+        summary = await MeshService.getInstance().regenerateAllOverrides();
+        outcome = summary.skipped ? 'skipped' : (summary.failures.length === 0 ? 'success' : 'partial');
+        res.json(summary);
+    } catch (err) {
+        outcome = 'error';
+        console.warn('[mesh] /regen-overrides failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to regenerate mesh overrides' });
+    } finally {
+        try {
+            DatabaseService.getInstance().insertAuditLog({
+                timestamp: Date.now(),
+                username: actor,
+                method: 'POST',
+                path: req.path,
+                status_code: res.statusCode,
+                node_id: null,
+                ip_address: req.ip ?? 'unknown',
+                summary: summary
+                    ? `Mesh override regen ${outcome}: ${summary.regenerated} regenerated, ${summary.failures.length} failed`
+                    : `Mesh override regen ${outcome}`,
+            });
+        } catch (auditErr) {
+            console.error('[mesh] Audit log insert failed:', auditErr);
+        }
     }
 });
 

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { getSenchoIpFromSubnet } from '../services/MeshService';
+import { getSenchoIpFromSubnet, MeshError } from '../services/MeshService';
 
 let tmpDir: string;
 let MeshService: typeof import('../services/MeshService').MeshService;
@@ -347,7 +347,7 @@ describe('MeshService.optInStack guard rails (network setup)', () => {
 });
 
 describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
-    it('pushes every mesh_stacks row across the fleet', async () => {
+    it('pushes every mesh_stacks row across the fleet and returns a summary', async () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
@@ -362,22 +362,29 @@ describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
         const pushSpy = vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
 
         try {
-            await (svc as unknown as { regenerateAllOverrides: () => Promise<void> }).regenerateAllOverrides();
+            const summary = await svc.regenerateAllOverrides();
+
+            expect(summary.skipped).toBe(false);
+            expect(summary.regenerated).toBe(2);
+            expect(summary.failures).toEqual([]);
 
             expect(pushSpy).toHaveBeenCalledTimes(2);
             expect(pushSpy).toHaveBeenCalledWith(localNodeId, 'audit-mesh-prod');
             expect(pushSpy).toHaveBeenCalledWith(remoteNodeId, 'audit-mesh-pilot');
 
             const activity = svc.getActivity({ limit: 100 });
-            expect(activity.some((e) => e.message === 'boot regenerated 2 override(s)')).toBe(true);
+            expect(activity.some((e) =>
+                e.message === 'mesh override regen complete: 2 succeeded, 0 failed across 0 node(s)',
+            )).toBe(true);
         } finally {
             db.deleteNode(remoteNodeId);
         }
     });
 
-    it('skips entirely when senchoIp is null (network setup failed)', async () => {
+    it('skips entirely with a reason when senchoIp is null (network setup failed)', async () => {
         const svc = MeshService.getInstance();
         (svc as unknown as { senchoIp: string | null }).senchoIp = null;
+        (svc as unknown as { networkSetupError: string | null }).networkSetupError = 'sencho_mesh subnet mismatch';
 
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
@@ -385,12 +392,20 @@ describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
 
         const pushSpy = vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
 
-        await (svc as unknown as { regenerateAllOverrides: () => Promise<void> }).regenerateAllOverrides();
+        const summary = await svc.regenerateAllOverrides();
 
+        expect(summary.skipped).toBe(true);
+        expect(summary.reason).toBe('sencho_mesh subnet mismatch');
+        expect(summary.regenerated).toBe(0);
         expect(pushSpy).not.toHaveBeenCalled();
+
+        const activity = svc.getActivity({ limit: 100 });
+        expect(activity.some((e) =>
+            e.level === 'warn' && /data plane unavailable/.test(e.message),
+        )).toBe(true);
     });
 
-    it('logs a warning per stack when push fails but does not throw', async () => {
+    it('records per-stack failures in the summary and aggregates by node', async () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
@@ -399,13 +414,90 @@ describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
 
         vi.spyOn(svc, 'pushOverrideToNode').mockRejectedValue(new Error('remote node offline'));
 
-        await expect(
-            (svc as unknown as { regenerateAllOverrides: () => Promise<void> }).regenerateAllOverrides(),
-        ).resolves.toBeUndefined();
+        const summary = await svc.regenerateAllOverrides();
+
+        expect(summary.skipped).toBe(false);
+        expect(summary.regenerated).toBe(0);
+        expect(summary.failures).toEqual([{
+            nodeId: localNodeId,
+            stackName: 'audit-mesh-prod',
+            message: 'remote node offline',
+        }]);
 
         const activity = svc.getActivity({ limit: 100 });
         expect(activity.some((e) =>
-            e.level === 'warn' && /boot override regen failed for audit-mesh-prod/.test(e.message),
+            e.level === 'warn' && /mesh override regen failed for audit-mesh-prod/.test(e.message),
         )).toBe(true);
+        expect(activity.some((e) =>
+            /mesh override regen complete: 0 succeeded, 1 failed across 1 node\(s\)/.test(e.message),
+        )).toBe(true);
+    });
+
+    it('continues past version-skew 404 push failures and reports them in the summary', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-old-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+
+        db.insertMeshStack(localNodeId, 'audit-mesh-prod', 'tester');
+        db.insertMeshStack(remoteNodeId, 'audit-mesh-pilot', 'tester');
+
+        vi.spyOn(svc, 'pushOverrideToNode').mockImplementation(async (nodeId: number) => {
+            if (nodeId === remoteNodeId) {
+                throw new MeshError('push_failed', 'node remote-old-pilot does not support mesh override push (upgrade required)');
+            }
+        });
+
+        try {
+            const summary = await svc.regenerateAllOverrides();
+
+            expect(summary.regenerated).toBe(1);
+            expect(summary.failures).toHaveLength(1);
+            expect(summary.failures[0].nodeId).toBe(remoteNodeId);
+            expect(summary.failures[0].stackName).toBe('audit-mesh-pilot');
+            expect(summary.failures[0].message).toMatch(/upgrade required/);
+        } finally {
+            db.deleteNode(remoteNodeId);
+        }
+    });
+
+    it('completes both flows without throwing when regen and opt-in are scheduled concurrently', async () => {
+        // The race is benign by design: both writes target the same alias list
+        // with the same `senchoIp`, so even if regen reads `mesh_stacks` mid-
+        // opt-in and pushes a concurrent override for the new stack, the
+        // resulting on-disk file is identical. This test locks the no-throw
+        // contract; it does not attempt to force a specific interleave because
+        // `regenerateAllOverrides` snapshots the table synchronously before
+        // its first await, so under the JS event loop the two flows always
+        // resolve cleanly without a real read-after-write window.
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        db.insertMeshStack(localNodeId, 'existing-stack', 'tester');
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        const pushSpy = vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        vi.spyOn(svc as unknown as { triggerRedeploy: (n: number, s: string, a: string) => void }, 'triggerRedeploy')
+            .mockImplementation(() => { /* noop */ });
+        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number, skip?: string) => Promise<void> }, 'regenerateOverridesForNode')
+            .mockResolvedValue(undefined);
+
+        const [summary] = await Promise.all([
+            svc.regenerateAllOverrides(),
+            svc.optInStack(localNodeId, 'concurrent-stack', 'tester'),
+        ]);
+
+        expect(summary.regenerated).toBeGreaterThanOrEqual(1);
+        expect(db.isMeshStackEnabled(localNodeId, 'concurrent-stack')).toBe(true);
+
+        const existingCalls = pushSpy.mock.calls.filter((c) => c[1] === 'existing-stack');
+        expect(existingCalls.length).toBeGreaterThanOrEqual(1);
+        const concurrentCalls = pushSpy.mock.calls.filter((c) => c[1] === 'concurrent-stack');
+        expect(concurrentCalls.length).toBeGreaterThanOrEqual(1);
     });
 });

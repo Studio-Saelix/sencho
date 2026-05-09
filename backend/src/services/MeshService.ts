@@ -88,6 +88,19 @@ export interface MeshTarget {
     alias: string;
 }
 
+export interface MeshRegenFailure {
+    nodeId: number;
+    stackName: string;
+    message: string;
+}
+
+export interface MeshRegenSummary {
+    regenerated: number;
+    failures: MeshRegenFailure[];
+    skipped: boolean;
+    reason?: string;
+}
+
 export interface MeshNodeStatus {
     nodeId: number;
     nodeName: string;
@@ -192,8 +205,22 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }));
 
         await this.setupMeshNetwork();
-        await this.refreshAliasCache();
-        await this.syncForwarderListeners();
+        try {
+            await this.refreshAliasCache();
+        } catch (err) {
+            this.logActivity({
+                source: 'mesh', level: 'error', type: 'forwarder.error',
+                message: `boot refreshAliasCache failed: ${sanitizeForLog((err as Error).message)}`,
+            });
+        }
+        try {
+            await this.syncForwarderListeners();
+        } catch (err) {
+            this.logActivity({
+                source: 'mesh', level: 'error', type: 'forwarder.error',
+                message: `boot syncForwarderListeners failed: ${sanitizeForLog((err as Error).message)}`,
+            });
+        }
         await this.regenerateAllOverrides();
         this.aliasRefreshTimer = setInterval(() => {
             void (async () => {
@@ -206,9 +233,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             })();
         }, ALIAS_REFRESH_INTERVAL_MS);
 
+        const dataPlane = this.senchoIp ? 'ok' : `unavailable (${this.networkSetupError ?? 'unknown'})`;
         this.logActivity({
-            source: 'mesh', level: 'info', type: 'mesh.enable',
-            message: 'MeshService started',
+            source: 'mesh', level: this.senchoIp ? 'info' : 'warn', type: 'mesh.enable',
+            message: `MeshService started (data plane ${dataPlane})`,
         });
     }
 
@@ -651,32 +679,48 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * Walk every `mesh_stacks` row across the fleet and re-push each override
      * to its owning node. Called once at boot so on-disk override files
      * survive a Sencho restart even if they were lost (image rebuild, volume
-     * reset, manual cleanup). Best-effort: failures are logged per-stack and
-     * other nodes still get regenerated. An offline remote node leaves stale
-     * overrides until the next opt-in / opt-out on that node.
+     * reset, manual cleanup). Also exposed as `POST /api/mesh/regen-overrides`
+     * so an operator can rerun it after fixing a remote node that was offline
+     * at boot. Best-effort: failures are logged per-stack and other nodes
+     * still get regenerated. An offline remote node leaves stale overrides
+     * until the next opt-in / opt-out on that node, or the next manual rerun.
      */
-    private async regenerateAllOverrides(): Promise<void> {
-        if (!this.senchoIp) return;
+    public async regenerateAllOverrides(): Promise<MeshRegenSummary> {
+        if (!this.senchoIp) {
+            const reason = this.networkSetupError ?? 'mesh data plane unavailable';
+            this.logActivity({
+                source: 'mesh', level: 'warn', type: 'mesh.disable',
+                message: `mesh override regen skipped: data plane unavailable (${sanitizeForLog(reason)})`,
+            });
+            return { regenerated: 0, failures: [], skipped: true, reason };
+        }
         const db = DatabaseService.getInstance();
         const stacks = db.listMeshStacks();
+        const failures: MeshRegenFailure[] = [];
         await Promise.allSettled(
             stacks.map(async (s) => {
                 try {
                     await this.pushOverrideToNode(s.node_id, s.stack_name);
                 } catch (err) {
+                    const message = sanitizeForLog((err as Error).message);
+                    failures.push({ nodeId: s.node_id, stackName: s.stack_name, message });
                     this.logActivity({
                         source: 'mesh', level: 'warn', type: 'forwarder.error',
                         nodeId: s.node_id,
-                        message: `boot override regen failed for ${s.stack_name}: ${sanitizeForLog((err as Error).message)}`,
+                        message: `mesh override regen failed for ${s.stack_name}: ${message}`,
                         details: { stackName: s.stack_name },
                     });
                 }
             }),
         );
+        const succeeded = stacks.length - failures.length;
+        const failedNodeIds = Array.from(new Set(failures.map((f) => f.nodeId))).sort((a, b) => a - b);
         this.logActivity({
-            source: 'mesh', level: 'info', type: 'mesh.enable',
-            message: `boot regenerated ${stacks.length} override(s)`,
+            source: 'mesh', level: failures.length === 0 ? 'info' : 'warn', type: 'mesh.enable',
+            message: `mesh override regen complete: ${succeeded} succeeded, ${failures.length} failed across ${failedNodeIds.length} node(s)`,
+            details: { succeeded, failed: failures.length, failedNodeIds },
         });
+        return { regenerated: succeeded, failures, skipped: false };
     }
 
     // --- Alias aggregation ---
@@ -1167,7 +1211,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             this.logActivity({
                 source: 'pilot', level: 'error', type: 'tunnel.fail',
                 nodeId: target.nodeId, alias: target.alias, streamId: record.streamId,
-                message: err.message,
+                message: sanitizeForLog(err.message),
             });
             this.activeStreams.delete(record.streamId);
             try { src.destroy(); } catch { /* ignore */ }
@@ -1242,11 +1286,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 });
                 stream.once('error', (err: Error) => {
                     clearTimeout(timer);
+                    const sanitized = sanitizeForLog(err.message);
                     this.logActivity({
                         source: 'mesh', level: 'error', type: 'probe.fail',
-                        alias: target.host, message: err.message,
+                        alias: target.host, message: sanitized,
                     });
-                    resolve({ ok: false, where: 'agent_dial', code: 'unreachable', message: err.message });
+                    resolve({ ok: false, where: 'agent_dial', code: 'unreachable', message: sanitized });
                 });
             });
         }
@@ -1266,7 +1311,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 resolve({ ok: false, where: 'target_port', code: 'timeout', message: 'connect timeout' });
             });
             sock.once('error', (err) => {
-                resolve({ ok: false, where: 'target_port', code: 'unreachable', message: err.message });
+                resolve({ ok: false, where: 'target_port', code: 'unreachable', message: sanitizeForLog(err.message) });
             });
         });
     }
