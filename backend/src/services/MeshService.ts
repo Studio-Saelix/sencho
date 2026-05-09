@@ -2,6 +2,7 @@ import net from 'net';
 import path from 'path';
 import fs from 'fs/promises';
 import { EventEmitter } from 'events';
+import { ComposeService } from './ComposeService';
 import { DatabaseService } from './DatabaseService';
 import DockerController from './DockerController';
 import { LicenseService } from './LicenseService';
@@ -9,14 +10,43 @@ import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { MeshForwarder, type MeshForwarderHost } from './MeshForwarder';
 import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
-import { generateOverrideYaml, MeshAlias } from './MeshComposeOverride';
+import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
 
 const ACTIVITY_BUFFER_SIZE = 1000;
 const ALIAS_REFRESH_INTERVAL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const SLOW_PROBE_THRESHOLD_MS = 500;
+const DEFAULT_MESH_SUBNET = '172.30.0.0/24';
+
+/**
+ * Returns the static IPv4 address Sencho will pin itself to on the mesh
+ * Docker network: `<network address> + 2`. The Docker daemon assigns
+ * `<network> + 1` to the bridge gateway, so `+2` is the first usable host
+ * address. For the default `172.30.0.0/24` this is `172.30.0.2`. Throws
+ * on invalid CIDR or a prefix too narrow to host two addresses.
+ */
+export function getSenchoIpFromSubnet(subnet: string): string {
+    const cidr = subnet.trim().match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/);
+    if (!cidr) throw new Error(`Invalid mesh subnet CIDR: ${subnet}`);
+    const octets = [Number(cidr[1]), Number(cidr[2]), Number(cidr[3]), Number(cidr[4])];
+    const prefix = Number(cidr[5]);
+    if (octets.some((o) => o < 0 || o > 255) || prefix < 8 || prefix > 30) {
+        throw new Error(`Invalid mesh subnet CIDR: ${subnet}`);
+    }
+    const ipInt = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+    const network = (ipInt & mask) >>> 0;
+    const sencho = (network + 2) >>> 0;
+    return [
+        (sencho >>> 24) & 0xff,
+        (sencho >>> 16) & 0xff,
+        (sencho >>> 8) & 0xff,
+        sencho & 0xff,
+    ].join('.');
+}
 
 export type MeshActivitySource = 'pilot' | 'mesh';
 export type MeshActivityLevel = 'info' | 'warn' | 'error';
@@ -109,17 +139,17 @@ interface ActiveStreamRecord {
  *     container; one container per node now.
  *   - opt-in / opt-out persistence and cascading override regeneration
  *   - global alias aggregation (across the fleet via the existing HTTP
- *     proxy chain — see `inspectStackServices`)
+ *     proxy chain, see `inspectStackServices`)
  *   - cross-node TCP forwarding via `PilotTunnelManager` (central-side)
  *   - probe + diagnostics + activity ring buffer
  *
  * V1 limitations:
  *   - one cross-node alias per TCP port across the fleet (port-collision
  *     check at opt-in)
- *   - aliases resolve via `host-gateway` extra_hosts; Sencho's container
- *     must run with `network_mode: host` for the forwarder's listeners to
- *     bind on the host's network where meshed containers' `host-gateway`
- *     entries point
+ *   - aliases resolve to Sencho's static IP on the internal `sencho_mesh`
+ *     Docker bridge network. Meshed user services join `sencho_mesh` so
+ *     that IP is reachable from inside their containers without any
+ *     host-firewall coordination.
  *   - cross-node mesh routing is central → pilot in this phase. Pilot →
  *     central and pilot ↔ pilot via central relay land in Phase B.
  */
@@ -135,6 +165,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private routeLatencyMap = new Map<string, number>();
     private activityListeners = new Set<(e: MeshActivityEvent) => void>();
     private readonly forwarder: MeshForwarder;
+    private senchoIp: string | null = null;
+    private meshSubnet: string = DEFAULT_MESH_SUBNET;
+    private networkSetupError: string | null = null;
 
     private constructor() {
         super();
@@ -158,6 +191,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             nodeId, message: `pilot tunnel up for node ${nodeId}`,
         }));
 
+        await this.setupMeshNetwork();
         await this.refreshAliasCache();
         await this.syncForwarderListeners();
         this.aliasRefreshTimer = setInterval(() => {
@@ -187,6 +221,128 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         await this.forwarder.shutdown();
     }
 
+    public getSenchoIp(): string | null {
+        return this.senchoIp;
+    }
+
+    public getMeshSubnet(): string {
+        return this.meshSubnet;
+    }
+
+    public getNetworkSetupError(): string | null {
+        return this.networkSetupError;
+    }
+
+    /**
+     * Idempotent setup of the shared `sencho_mesh` Docker bridge network and
+     * Sencho's static attachment to it. Called once at boot before alias
+     * cache refresh. Failures here disable mesh routing for the lifetime of
+     * the process (forwarder still binds, but `ensureStackOverride` short-
+     * circuits because there is no IP to point user containers at).
+     *
+     * Skipped entirely when Sencho is not running inside Docker (dev mode,
+     * detected by an unset HOSTNAME env var or by the inspect lookup
+     * failing). The forwarder still runs locally for unit-test coverage.
+     */
+    private async setupMeshNetwork(): Promise<void> {
+        const subnet = (process.env.SENCHO_MESH_SUBNET || DEFAULT_MESH_SUBNET).trim();
+        try {
+            this.senchoIp = getSenchoIpFromSubnet(subnet);
+            this.meshSubnet = subnet;
+        } catch (err) {
+            this.networkSetupError = (err as Error).message;
+            console.warn('[Mesh]', this.networkSetupError);
+            this.senchoIp = null;
+            return;
+        }
+
+        try {
+            await this.ensureMeshNetwork(subnet);
+        } catch (err) {
+            this.networkSetupError = (err as Error).message;
+            console.warn('[Mesh] mesh network setup failed:', sanitizeForLog(this.networkSetupError));
+            this.senchoIp = null;
+            return;
+        }
+
+        try {
+            await this.ensureSelfAttached();
+        } catch (err) {
+            this.networkSetupError = (err as Error).message;
+            console.warn('[Mesh] self-attach failed:', sanitizeForLog(this.networkSetupError));
+            this.senchoIp = null;
+            return;
+        }
+
+        this.networkSetupError = null;
+    }
+
+    /**
+     * Create `sencho_mesh` if it does not exist. If it does, validate the
+     * subnet matches `expectedSubnet`; on mismatch, refuse to continue.
+     * Silently using the wrong subnet would route traffic to the wrong IP.
+     */
+    private async ensureMeshNetwork(expectedSubnet: string): Promise<void> {
+        const dc = DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
+        try {
+            await dc.createNetwork({
+                Name: SENCHO_MESH_NETWORK,
+                Driver: 'bridge',
+                Attachable: true,
+                IPAM: { Config: [{ Subnet: expectedSubnet }] },
+                Labels: { 'io.sencho.mesh': 'true' },
+            });
+            return;
+        } catch (err) {
+            const e = err as { statusCode?: number; message?: string };
+            if (e?.statusCode !== 409) throw err;
+        }
+
+        const info = await dc.inspectNetwork(SENCHO_MESH_NETWORK) as {
+            IPAM?: { Config?: Array<{ Subnet?: string }> };
+        };
+        const existingSubnet = info?.IPAM?.Config?.[0]?.Subnet;
+        if (existingSubnet && existingSubnet !== expectedSubnet) {
+            throw new Error(
+                `${SENCHO_MESH_NETWORK} exists with subnet ${existingSubnet}, ` +
+                `expected ${expectedSubnet}. Remove the network or set SENCHO_MESH_SUBNET to match.`,
+            );
+        }
+    }
+
+    /**
+     * Connect Sencho's own container to `sencho_mesh` at the static IP. Uses
+     * the `HOSTNAME` env var (which Docker sets to the container's short ID
+     * by default) to identify the container, mirroring the
+     * SelfUpdateService pattern. Skipped in dev mode where HOSTNAME is
+     * the laptop hostname and the inspect lookup would fail.
+     */
+    private async ensureSelfAttached(): Promise<void> {
+        if (!this.senchoIp) return;
+        const hostname = process.env.HOSTNAME;
+        if (!hostname) {
+            console.log('[Mesh] HOSTNAME not set, mesh routing disabled (not running in Docker?)');
+            this.senchoIp = null;
+            return;
+        }
+        const dc = DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
+        try {
+            await dc.connectContainerToNetwork(SENCHO_MESH_NETWORK, hostname, { ipv4Address: this.senchoIp });
+        } catch (err) {
+            const e = err as { statusCode?: number; message?: string };
+            if (e?.statusCode === 404) {
+                this.logActivity({
+                    source: 'mesh', level: 'warn', type: 'mesh.disable',
+                    message: 'self-container lookup failed; mesh routing disabled (not running in Docker?)',
+                });
+                console.warn('[Mesh] self-container lookup failed; mesh routing disabled (not running in Docker?)');
+                this.senchoIp = null;
+                return;
+            }
+            throw err;
+        }
+    }
+
     /**
      * Bind the forwarder's listeners to every alias port across the fleet
      * and release any listeners no longer in the alias set. Called from
@@ -194,11 +350,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * opt-in / opt-out / disable so the bound port set follows the DB
      * state.
      *
-     * Every meshed node binds every alias port — not just ports it owns —
-     * because meshed containers' `extra_hosts: <alias>:host-gateway`
-     * entries resolve to the SOURCE node's gateway, so the source node is
-     * where the inbound TCP connection lands. `handleAccept` then
-     * dispatches to the same-node fast path or the cross-node bridge based
+     * Every meshed node binds every alias port (not just ports it owns)
+     * because alias DNS entries resolve to the SOURCE node's Sencho IP, so
+     * the source node is where the inbound TCP connection lands.
+     * `handleAccept` then dispatches to the same-node fast path or the
+     * cross-node bridge based
      * on the resolved alias's owner. Fleet-wide port collisions are
      * blocked at opt-in time (`optInStack` checks `aliasByPort`), so
      * binding every alias port is unambiguous.
@@ -269,6 +425,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!isValidStackName(stackName)) {
             throw new MeshError('denied', `invalid stack name: ${stackName}`);
         }
+        if (!this.senchoIp) {
+            throw new MeshError(
+                'denied',
+                this.networkSetupError || 'mesh data plane unavailable (mesh network setup did not complete)',
+            );
+        }
         const db = DatabaseService.getInstance();
         if (db.isMeshStackEnabled(nodeId, stackName)) return;
 
@@ -279,6 +441,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const newPorts = new Set<number>();
         for (const svc of services) for (const p of svc.ports) newPorts.add(p);
+        if (newPorts.has(SENCHO_LISTEN_PORT)) {
+            throw new MeshError(
+                'port_collision',
+                `port ${SENCHO_LISTEN_PORT} is reserved for the Sencho API and cannot be used by a meshed service`,
+            );
+        }
         for (const port of newPorts) {
             const existing = this.aliasByPort.get(port);
             if (existing) {
@@ -292,7 +460,25 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         db.insertMeshStack(nodeId, stackName, actor);
         await this.refreshAliasCache();
         await this.syncForwarderListeners();
-        await this.regenerateOverridesForNode(nodeId);
+
+        // Push the just-opted-in stack's override loudly. If this fails the
+        // DB state is invalid (alias claimed but remote pilot has no
+        // override file) so roll back rather than leave a half-state that
+        // future opt-in calls would short-circuit on `isMeshStackEnabled`.
+        try {
+            await this.pushOverrideToNode(nodeId, stackName);
+        } catch (err) {
+            db.deleteMeshStack(nodeId, stackName);
+            await this.refreshAliasCache();
+            await this.syncForwarderListeners();
+            throw err;
+        }
+        // Regenerate OTHER meshed stacks' overrides on the same node so
+        // they pick up the new alias entry. The just-opted-in stack was
+        // already pushed above; skip it to avoid a duplicate round-trip.
+        // Best-effort; per-stack failures are logged inside the helper.
+        await this.regenerateOverridesForNode(nodeId, stackName);
+        this.triggerRedeploy(nodeId, stackName, actor);
 
         this.logActivity({
             source: 'mesh', level: 'info', type: 'opt_in',
@@ -313,10 +499,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const db = DatabaseService.getInstance();
         if (!db.isMeshStackEnabled(nodeId, stackName)) return;
         db.deleteMeshStack(nodeId, stackName);
-        await this.removeStackOverride(nodeId, stackName);
+        await this.removeOverrideFromNode(nodeId, stackName);
         await this.refreshAliasCache();
         await this.syncForwarderListeners();
         await this.regenerateOverridesForNode(nodeId);
+        this.triggerRedeploy(nodeId, stackName, actor);
 
         this.logActivity({
             source: 'mesh', level: 'info', type: 'opt_out',
@@ -359,12 +546,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!isValidStackName(stackName)) return null;
         const db = DatabaseService.getInstance();
         if (!db.isMeshStackEnabled(nodeId, stackName)) return null;
+        if (!this.senchoIp) return null;
 
         const aliases: MeshAlias[] = Array.from(this.aliasCache.values()).map((a) => ({ host: a.host }));
         const services = await this.inspectStackServices(nodeId, stackName);
         const yaml = generateOverrideYaml({
             services: services.map((s) => s.service),
             aliases,
+            senchoIp: this.senchoIp,
         });
 
         const dir = this.overrideDirFor(nodeId);
@@ -373,6 +562,52 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!isPathWithinBase(file, dir)) return null;
         await fs.writeFile(file, yaml, 'utf8');
         return file;
+    }
+
+    /**
+     * Render and write a mesh override on the LOCAL node's filesystem from
+     * a fleet-wide alias list supplied by central. The pilot looks up its
+     * own service names and uses its own static IP, so each node's
+     * override resolves alias hostnames to that node's local Sencho.
+     * This is critical because each node has its own `sencho_mesh`
+     * network with its own subnet. Returns the absolute path on success
+     * or null if path validation rejects the input.
+     */
+    public async applyLocalOverride(stackName: string, aliases: MeshAlias[]): Promise<string | null> {
+        if (!isValidStackName(stackName)) return null;
+        if (!this.senchoIp) {
+            throw new MeshError(
+                'push_failed',
+                this.networkSetupError || 'mesh data plane unavailable on this node',
+            );
+        }
+        const services = await this.inspectLocalStackServices(stackName);
+        const yaml = generateOverrideYaml({
+            services: services.map((s) => s.service),
+            aliases,
+            senchoIp: this.senchoIp,
+        });
+
+        const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const dir = this.overrideDirFor(localNodeId);
+        await fs.mkdir(dir, { recursive: true });
+        const file = path.resolve(dir, `${stackName}.override.yml`);
+        if (!isPathWithinBase(file, dir)) return null;
+        await fs.writeFile(file, yaml, 'utf8');
+        return file;
+    }
+
+    /**
+     * Delete a previously applied local override (mirror of
+     * `applyLocalOverride`). Used by central when a stack is opted out.
+     */
+    public async removeLocalOverride(stackName: string): Promise<void> {
+        if (!isValidStackName(stackName)) return;
+        const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const dir = this.overrideDirFor(localNodeId);
+        const file = path.resolve(dir, `${stackName}.override.yml`);
+        if (!isPathWithinBase(file, dir)) return;
+        try { await fs.unlink(file); } catch { /* ignore not-exist */ }
     }
 
     private async removeStackOverride(nodeId: number, stackName: string): Promise<void> {
@@ -388,16 +623,24 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         return path.join(dataDir, 'mesh', 'overrides', String(nodeId));
     }
 
-    private async regenerateOverridesForNode(nodeId: number): Promise<void> {
+    private async regenerateOverridesForNode(nodeId: number, skipStack?: string): Promise<void> {
         const db = DatabaseService.getInstance();
         const stacks = db.listMeshStacks(nodeId);
-        for (const s of stacks) {
-            try {
-                await this.ensureStackOverride(nodeId, s.stack_name);
-            } catch (err) {
-                console.warn('[MeshService] override regen failed:', sanitizeForLog((err as Error).message));
-            }
-        }
+        // Push all overrides in parallel: each remote-node call is its own
+        // HTTP round-trip, so awaiting sequentially turns N stacks into N
+        // serialised PUTs. `allSettled` so a single failure does not abort
+        // the others.
+        await Promise.allSettled(
+            stacks
+                .filter((s) => s.stack_name !== skipStack)
+                .map(async (s) => {
+                    try {
+                        await this.pushOverrideToNode(nodeId, s.stack_name);
+                    } catch (err) {
+                        console.warn('[MeshService] override push failed:', sanitizeForLog((err as Error).message));
+                    }
+                }),
+        );
     }
 
     // --- Alias aggregation ---
@@ -448,7 +691,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
     /**
      * Inspect a stack and return its running services with the ports they
-     * listen on. For the LOCAL Docker daemon only — callers targeting a
+     * listen on. For the LOCAL Docker daemon only; callers targeting a
      * remote node must use {@link inspectStackServices}, which dispatches
      * via the HTTP proxy to the remote's `/api/mesh/local-services/:stack`.
      */
@@ -511,6 +754,178 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         } catch (err) {
             console.error('[MeshService] inspectStackServices remote unreachable:', sanitizeForLog((err as Error).message));
             return [];
+        }
+    }
+
+    /**
+     * Build a `fetch` against a remote Sencho's API with the bearer token
+     * and the proxy tier/variant headers in place. Centralizes the header
+     * shape so a future addition (license header, audit context) only
+     * needs to land in one place.
+     *
+     * `x-node-id` is deliberately NOT set: callers target the remote
+     * Sencho's own routes, which operate against the remote's local node
+     * id. The bearer token alone authenticates.
+     */
+    private async proxyFetch(
+        nodeId: number,
+        method: 'GET' | 'PUT' | 'POST' | 'DELETE',
+        apiPath: string,
+        body: unknown,
+        timeoutMs: number,
+    ): Promise<Response> {
+        const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!target) throw new MeshError('push_failed', `no proxy target for node ${nodeId}`);
+        const url = `${target.apiUrl.replace(/\/$/, '')}${apiPath}`;
+        const headers: Record<string, string> = {};
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        if (target.apiToken) headers['Authorization'] = `Bearer ${target.apiToken}`;
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        headers[PROXY_TIER_HEADER] = proxyHeaders.tier;
+        headers[PROXY_VARIANT_HEADER] = proxyHeaders.variant || '';
+        return await fetch(url, {
+            method,
+            headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+            signal: AbortSignal.timeout(timeoutMs),
+        });
+    }
+
+    /**
+     * Place a mesh override for a stack on whichever node owns it:
+     *   - local node: regenerates via `ensureStackOverride`, which uses
+     *     central's own senchoIp (correct because central is the node
+     *     deploying that stack).
+     *   - remote node: sends the fleet-wide alias list to the remote's
+     *     `PUT /api/mesh/local-override/:stackName`; the remote renders
+     *     the YAML using its OWN local senchoIp and writes it under its
+     *     own DATA_DIR. This is essential because each node has its own
+     *     `sencho_mesh` network and may be configured with a different
+     *     SENCHO_MESH_SUBNET, so alias hostnames must always resolve to
+     *     the local Sencho IP on the deploying node.
+     *
+     * Throws on remote push failure so callers (opt-in / opt-out) can abort
+     * cleanly rather than silently leaving stale overrides.
+     */
+    public async pushOverrideToNode(nodeId: number, stackName: string): Promise<void> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) throw new MeshError('denied', `unknown node ${nodeId}`);
+
+        if (node.type !== 'remote') {
+            await this.ensureStackOverride(nodeId, stackName);
+            return;
+        }
+
+        const aliases: MeshAlias[] = Array.from(this.aliasCache.values()).map((a) => ({ host: a.host }));
+        const res = await this.proxyFetch(
+            nodeId,
+            'PUT',
+            `/api/mesh/local-override/${encodeURIComponent(stackName)}`,
+            { aliases },
+            5_000,
+        );
+        if (res.status === 404) {
+            throw new MeshError(
+                'push_failed',
+                `node ${node.name} does not support mesh override push (upgrade required)`,
+            );
+        }
+        if (!res.ok) {
+            throw new MeshError('push_failed', `HTTP ${res.status} from node ${node.name}`);
+        }
+    }
+
+    /**
+     * Fire-and-forget redeploy of a stack on whichever node owns it. Used
+     * by opt-in and opt-out so the new alias entries reach the user
+     * containers' /etc/hosts without an operator manually clicking deploy.
+     *
+     * For local stacks: invokes `ComposeService.deployStack` directly.
+     * For remote stacks: HTTP POSTs to `<apiUrl>/api/stacks/:name/deploy`
+     * via the same bearer-token pattern the rest of the proxy chain uses.
+     *
+     * Errors are logged to the mesh activity buffer rather than thrown so
+     * the opt-in or opt-out call site can return success quickly. The
+     * operator sees the redeploy progress through the existing deploy
+     * stream surfaces; if it fails, the activity log records why.
+     */
+    public triggerRedeploy(nodeId: number, stackName: string, actor: string): void {
+        void this.runRedeploy(nodeId, stackName, actor).catch((err) => {
+            const reason = sanitizeForLog((err as Error).message);
+            this.logActivity({
+                source: 'mesh', level: 'error', type: 'forwarder.error',
+                nodeId,
+                message: `mesh redeploy failed for ${stackName}: ${reason}`,
+                details: { actor, stackName },
+            });
+            // Also drop a durable audit row so an operator who walks away
+            // from the toast still has a trail. The activity ring buffer
+            // alone gets pruned at 1000 events.
+            DatabaseService.getInstance().insertAuditLog({
+                timestamp: Date.now(), username: actor, method: 'POST',
+                path: `/api/mesh/nodes/${nodeId}/stacks/${stackName}/redeploy`,
+                status_code: 500, node_id: nodeId, ip_address: '127.0.0.1',
+                summary: `Sencho Mesh: redeploy failed for ${stackName}: ${reason}`,
+            });
+        });
+    }
+
+    private async runRedeploy(nodeId: number, stackName: string, actor: string): Promise<void> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) throw new Error(`unknown node ${nodeId}`);
+
+        if (node.type !== 'remote') {
+            await ComposeService.getInstance(nodeId).deployStack(stackName);
+            this.logActivity({
+                source: 'mesh', level: 'info', type: 'mesh.enable',
+                nodeId,
+                message: `mesh redeploy ok for ${stackName}`,
+                details: { actor, stackName },
+            });
+            return;
+        }
+
+        // Mesh redeploys are bounded by docker compose's own runtime; pick a
+        // generous ceiling rather than the 5 s default used for control-plane
+        // calls so a slow image pull does not abort the redeploy.
+        const res = await this.proxyFetch(
+            nodeId,
+            'POST',
+            `/api/stacks/${encodeURIComponent(stackName)}/deploy`,
+            {},
+            10 * 60 * 1000,
+        );
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            throw new Error(`HTTP ${res.status} from node ${node.name}: ${body.slice(0, 256)}`);
+        }
+        this.logActivity({
+            source: 'mesh', level: 'info', type: 'mesh.enable',
+            nodeId,
+            message: `mesh redeploy ok for ${stackName}`,
+            details: { actor, stackName },
+        });
+    }
+
+    public async removeOverrideFromNode(nodeId: number, stackName: string): Promise<void> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) return;
+
+        if (node.type !== 'remote') {
+            await this.removeStackOverride(nodeId, stackName);
+            return;
+        }
+
+        try {
+            await this.proxyFetch(
+                nodeId,
+                'DELETE',
+                `/api/mesh/local-override/${encodeURIComponent(stackName)}`,
+                undefined,
+                5_000,
+            );
+        } catch (err) {
+            console.warn('[MeshService] removeOverrideFromNode failed:', sanitizeForLog((err as Error).message));
         }
     }
 
@@ -943,9 +1358,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     // WebSocket. See `docs/internal/architecture/mesh.md` for the new flow.
 }
 
+export type MeshErrorCode =
+    | 'no_target'
+    | 'port_collision'
+    | 'denied'
+    | 'agent_error'
+    | 'push_failed';
+
 export class MeshError extends Error {
-    public readonly code: 'no_target' | 'port_collision' | 'denied' | 'agent_error';
-    constructor(code: 'no_target' | 'port_collision' | 'denied' | 'agent_error', message: string) {
+    public readonly code: MeshErrorCode;
+    constructor(code: MeshErrorCode, message: string) {
         super(message);
         this.code = code;
     }

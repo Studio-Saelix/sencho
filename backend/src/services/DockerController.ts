@@ -463,6 +463,68 @@ class DockerController {
     return await this.docker.createNetwork(options);
   }
 
+  /**
+   * Attach a container to a Docker network. Idempotent: if the container is
+   * already attached the call resolves silently. Optionally pins the
+   * container's IPv4 address inside the network so other services can use
+   * static `extra_hosts` entries against it.
+   */
+  public async connectContainerToNetwork(
+    networkName: string,
+    containerId: string,
+    opts: { ipv4Address?: string } = {},
+  ): Promise<void> {
+    const network = this.docker.getNetwork(networkName);
+    const payload: { Container: string; EndpointConfig?: { IPAMConfig?: { IPv4Address: string } } } = {
+      Container: containerId,
+    };
+    if (opts.ipv4Address) {
+      payload.EndpointConfig = { IPAMConfig: { IPv4Address: opts.ipv4Address } };
+    }
+    try {
+      await network.connect(payload);
+    } catch (err) {
+      if (DockerController.isAlreadyConnectedError(err)) return;
+      throw err;
+    }
+  }
+
+  /**
+   * Detach a container from a Docker network. Idempotent: if the container
+   * is not attached the call resolves silently.
+   */
+  public async disconnectContainerFromNetwork(
+    networkName: string,
+    containerId: string,
+  ): Promise<void> {
+    const network = this.docker.getNetwork(networkName);
+    try {
+      await network.disconnect({ Container: containerId, Force: true });
+    } catch (err) {
+      if (DockerController.isNotConnectedError(err)) return;
+      throw err;
+    }
+  }
+
+  private static isAlreadyConnectedError(err: unknown): boolean {
+    const e = err as { statusCode?: number; message?: string };
+    const msg = (e?.message || '').toLowerCase();
+    // Docker daemon returns 403 for several distinct cases (already
+    // attached, host-network containers, permission denied), so match the
+    // message body too rather than treating any 403 as idempotent success.
+    if (e?.statusCode === 403 && (msg.includes('already exists') || msg.includes('already attached'))) {
+      return true;
+    }
+    return msg.includes('already exists') || msg.includes('already attached');
+  }
+
+  private static isNotConnectedError(err: unknown): boolean {
+    const e = err as { statusCode?: number; message?: string };
+    if (e?.statusCode === 404) return true;
+    const msg = (e?.message || '').toLowerCase();
+    return msg.includes('is not connected') || msg.includes('no such container');
+  }
+
   public async getRunningContainers() {
     const containers = await this.docker.listContainers({ all: false });
     return this.validateApiData<any[]>(containers);

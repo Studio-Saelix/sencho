@@ -70,6 +70,69 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
     }
 });
 
+const MAX_ALIASES_PER_PUSH = 1024;
+
+/**
+ * Accepts a fleet-wide alias list from central and writes a mesh override
+ * for the named stack onto THIS Sencho's local DATA_DIR. The pilot looks
+ * up its own service names and uses its own static IP on `sencho_mesh`,
+ * so alias hostnames in user containers always resolve to the LOCAL
+ * Sencho IP on the deploying node. Always writes against the LOCAL
+ * Sencho's default node id.
+ */
+meshRouter.put('/local-override/:stackName', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    const stackName = req.params.stackName as string;
+    if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    const body = req.body as { aliases?: unknown };
+    if (!Array.isArray(body?.aliases)) { res.status(400).json({ error: 'Missing aliases array in body' }); return; }
+    if (body.aliases.length > MAX_ALIASES_PER_PUSH) {
+        res.status(413).json({ error: `Alias list exceeds ${MAX_ALIASES_PER_PUSH} entries` });
+        return;
+    }
+    const aliases: { host: string }[] = [];
+    for (const entry of body.aliases) {
+        const host = (entry as { host?: unknown } | null | undefined)?.host;
+        if (typeof host !== 'string' || host.length === 0 || host.length > 253) {
+            // 253 octets is the DNS hostname ceiling. Defensive against a
+            // malicious or buggy central sending a multi-KB host string.
+            res.status(400).json({ error: 'Invalid alias entry' });
+            return;
+        }
+        aliases.push({ host });
+    }
+    try {
+        const written = await MeshService.getInstance().applyLocalOverride(stackName, aliases);
+        if (!written) { res.status(400).json({ error: 'Refused to write override (path validation failed)' }); return; }
+        res.json({ ok: true, path: written });
+    } catch (err) {
+        if (err instanceof MeshError && err.code === 'push_failed') {
+            res.status(503).json({ error: err.message, code: err.code });
+            return;
+        }
+        console.warn('[mesh] /local-override failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to write local override' });
+    }
+});
+
+/**
+ * Delete a previously written local override. Mirror of the PUT endpoint;
+ * called by central when a stack is opted out so stale overrides do not
+ * linger on the deploying node.
+ */
+meshRouter.delete('/local-override/:stackName', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    const stackName = req.params.stackName as string;
+    if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    try {
+        await MeshService.getInstance().removeLocalOverride(stackName);
+        res.json({ ok: true });
+    } catch (err) {
+        console.warn('[mesh] DELETE /local-override failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to remove local override' });
+    }
+});
+
 meshRouter.get('/nodes/:nodeId/stacks', async (req: Request, res: Response): Promise<void> => {
     if (!requireAdmiral(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
@@ -103,6 +166,10 @@ meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-in', async (req: Request, 
     } catch (err) {
         if (err instanceof MeshError && err.code === 'port_collision') {
             res.status(409).json({ error: err.message, code: err.code });
+            return;
+        }
+        if (err instanceof MeshError && err.code === 'push_failed') {
+            res.status(503).json({ error: err.message, code: err.code });
             return;
         }
         if (err instanceof MeshError) {
