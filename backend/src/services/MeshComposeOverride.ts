@@ -4,12 +4,18 @@ import * as YAML from 'yaml';
  * Sencho Mesh Compose override generator.
  *
  * Produces a YAML override applied with `docker compose -f compose.yml -f
- * mesh.override.yml up` that injects cross-node alias entries into each
- * opted-in service's /etc/hosts. The aliases resolve to the host gateway
- * (`host-gateway`), which is where the local Sencho Mesh sidecar listens
- * (host network mode). The user's source compose file is never mutated; the
- * override lives in Sencho's data dir.
+ * mesh.override.yml up` that:
+ *   - injects cross-node alias entries into each opted-in service's
+ *     `/etc/hosts`, resolving every alias to the Sencho container's
+ *     static IP on the internal `sencho_mesh` Docker network;
+ *   - attaches each service to `sencho_mesh` so that IP is reachable
+ *     from inside the user's container.
+ *
+ * The user's source compose file is never mutated; the override lives in
+ * Sencho's data dir and is regenerated whenever the alias set changes.
  */
+
+export const SENCHO_MESH_NETWORK = 'sencho_mesh';
 
 export interface MeshAlias {
     /** `<service>.<stack>.<nodeName>.sencho` */
@@ -21,6 +27,8 @@ export interface MeshOverrideInput {
     services: string[];
     /** Aliases this stack should be able to resolve. Order is normalized in output. */
     aliases: MeshAlias[];
+    /** Sencho's static IP on the `sencho_mesh` Docker network. */
+    senchoIp: string;
 }
 
 /**
@@ -31,20 +39,23 @@ export function generateOverrideYaml(input: MeshOverrideInput): string {
     const sortedServices = [...input.services].sort();
     const sortedAliases = [...input.aliases].sort((a, b) => a.host.localeCompare(b.host));
 
-    if (sortedAliases.length === 0) {
-        const services: Record<string, unknown> = {};
-        for (const svc of sortedServices) services[svc] = {};
-        return YAML.stringify({ services }, { lineWidth: 0 });
-    }
-
-    const extraHostsList = sortedAliases.map((a) => `${a.host}:host-gateway`);
-
     const services: Record<string, unknown> = {};
     for (const svc of sortedServices) {
-        services[svc] = { extra_hosts: extraHostsList };
+        const entry: Record<string, unknown> = {
+            networks: [SENCHO_MESH_NETWORK],
+        };
+        if (sortedAliases.length > 0) {
+            entry.extra_hosts = sortedAliases.map((a) => `${a.host}:${input.senchoIp}`);
+        }
+        services[svc] = entry;
     }
 
-    return YAML.stringify({ services }, { lineWidth: 0 });
+    const doc: Record<string, unknown> = {
+        services,
+        networks: { [SENCHO_MESH_NETWORK]: { external: true } },
+    };
+
+    return YAML.stringify(doc, { lineWidth: 0 });
 }
 
 /**

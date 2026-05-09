@@ -5,6 +5,10 @@ description: Add remote nodes behind NAT, residential networks, or corporate fir
 
 Pilot Agent mode connects a remote server to your primary Sencho instance through a single outbound WebSocket tunnel. Every request the primary sends to that node, HTTP or WebSocket, rides through this tunnel. The remote host never opens an inbound port and never needs a TLS certificate.
 
+<Card title="Sencho Mesh" icon="link" href="/features/sencho-mesh">
+  Once a node is enrolled, you can wire stacks across nodes by hostname using Sencho Mesh, which rides on this same tunnel.
+</Card>
+
 ## When to use Pilot Agent
 
 Pick Pilot Agent when the remote host:
@@ -95,7 +99,7 @@ The agent uses the bundle as the only trust anchor for the tunnel WebSocket. TLS
 Each tunnel has fixed protocol-level ceilings to keep one misbehaving agent from impacting the primary:
 
 - **Frame size:** individual WebSocket frames are capped at 8 MB. Single requests and responses larger than that are rejected and the tunnel reconnects.
-- **Concurrent streams:** at most 1024 multiplexed HTTP, WebSocket, or Mesh-TCP streams per tunnel. Above the cap the bridge returns 503 and the agent rejects new incoming streams with a typed error frame.
+- **Concurrent streams:** at most 1024 multiplexed HTTP and WebSocket streams per tunnel (mesh TCP streams share the same pool). Above the cap the bridge returns 503 and the agent rejects new incoming streams with a typed error frame.
 - **Stream idle:** any stream with no activity for 10 minutes is closed and removed.
 - **System-wide tunnels:** a single primary accepts up to 256 concurrent pilot tunnels. Past the soft warning at 128 the primary logs a WARN; past the hard cap of 256 new tunnels are refused with WebSocket close code 1013 (Try Again Later) so the agent backs off rather than tight-looping.
 

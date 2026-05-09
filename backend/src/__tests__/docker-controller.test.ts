@@ -663,3 +663,90 @@ describe('removeContainers', () => {
     expect(results).toEqual([]);
   });
 });
+
+// ── Network connect / disconnect helpers ───────────────────────────────
+
+describe('DockerController - connectContainerToNetwork', () => {
+  it('attaches a container to a network with no static IP', async () => {
+    const connect = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getNetwork.mockReturnValue({ connect });
+
+    const dc = DockerController.getInstance(1);
+    await dc.connectContainerToNetwork('sencho_mesh', 'sencho-host-1234');
+
+    expect(mockDocker.getNetwork).toHaveBeenCalledWith('sencho_mesh');
+    expect(connect).toHaveBeenCalledWith({ Container: 'sencho-host-1234' });
+  });
+
+  it('attaches with a static IPv4 address when provided', async () => {
+    const connect = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getNetwork.mockReturnValue({ connect });
+
+    const dc = DockerController.getInstance(1);
+    await dc.connectContainerToNetwork('sencho_mesh', 'sencho-host-1234', { ipv4Address: '172.30.0.2' });
+
+    expect(connect).toHaveBeenCalledWith({
+      Container: 'sencho-host-1234',
+      EndpointConfig: { IPAMConfig: { IPv4Address: '172.30.0.2' } },
+    });
+  });
+
+  it('treats 403 already-connected as success (idempotent)', async () => {
+    const connect = vi.fn().mockRejectedValue({ statusCode: 403, message: 'endpoint already exists' });
+    mockDocker.getNetwork.mockReturnValue({ connect });
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.connectContainerToNetwork('sencho_mesh', 'sencho-host-1234')).resolves.toBeUndefined();
+  });
+
+  it('rethrows non-idempotent errors', async () => {
+    const connect = vi.fn().mockRejectedValue({ statusCode: 500, message: 'server error' });
+    mockDocker.getNetwork.mockReturnValue({ connect });
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.connectContainerToNetwork('sencho_mesh', 'sencho-host-1234')).rejects.toMatchObject({
+      statusCode: 500,
+    });
+  });
+
+  it('rethrows a 403 whose message is unrelated to already-attached', async () => {
+    const connect = vi.fn().mockRejectedValue({ statusCode: 403, message: 'host-mode container cannot join network' });
+    mockDocker.getNetwork.mockReturnValue({ connect });
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.connectContainerToNetwork('sencho_mesh', 'sencho-host-1234')).rejects.toMatchObject({
+      statusCode: 403,
+    });
+  });
+});
+
+describe('DockerController - disconnectContainerFromNetwork', () => {
+  it('detaches a container from a network with force=true', async () => {
+    const disconnect = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getNetwork.mockReturnValue({ disconnect });
+
+    const dc = DockerController.getInstance(1);
+    await dc.disconnectContainerFromNetwork('sencho_mesh', 'sencho-host-1234');
+
+    expect(mockDocker.getNetwork).toHaveBeenCalledWith('sencho_mesh');
+    expect(disconnect).toHaveBeenCalledWith({ Container: 'sencho-host-1234', Force: true });
+  });
+
+  it('treats 404 not-connected as success (idempotent)', async () => {
+    const disconnect = vi.fn().mockRejectedValue({ statusCode: 404, message: 'no such network endpoint' });
+    mockDocker.getNetwork.mockReturnValue({ disconnect });
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.disconnectContainerFromNetwork('sencho_mesh', 'sencho-host-1234')).resolves.toBeUndefined();
+  });
+
+  it('rethrows non-idempotent errors', async () => {
+    const disconnect = vi.fn().mockRejectedValue({ statusCode: 500, message: 'server error' });
+    mockDocker.getNetwork.mockReturnValue({ disconnect });
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.disconnectContainerFromNetwork('sencho_mesh', 'sencho-host-1234')).rejects.toMatchObject({
+      statusCode: 500,
+    });
+  });
+});

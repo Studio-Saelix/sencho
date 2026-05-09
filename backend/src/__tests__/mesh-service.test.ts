@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { getSenchoIpFromSubnet } from '../services/MeshService';
 
 let tmpDir: string;
 let MeshService: typeof import('../services/MeshService').MeshService;
@@ -26,6 +27,9 @@ beforeEach(() => {
         activeStreams: Map<number, unknown>;
         routeErrorMap: Map<string, unknown>;
         routeLatencyMap: Map<string, unknown>;
+        senchoIp: string | null;
+        meshSubnet: string;
+        networkSetupError: string | null;
     };
     svc.aliasCache = new Map();
     svc.aliasByPort = new Map();
@@ -33,6 +37,9 @@ beforeEach(() => {
     svc.activeStreams = new Map();
     svc.routeErrorMap = new Map();
     svc.routeLatencyMap = new Map();
+    svc.senchoIp = '172.30.0.2';
+    svc.meshSubnet = '172.30.0.0/24';
+    svc.networkSetupError = null;
     vi.restoreAllMocks();
 });
 
@@ -225,5 +232,116 @@ describe('MeshService.testUpstream tunnel-down path', () => {
         expect(result.ok).toBe(false);
         expect(result.where).toBe('no_route');
         expect(result.code).toBe('no_route');
+    });
+});
+
+describe('getSenchoIpFromSubnet', () => {
+    it('returns network+2 for the default /24', () => {
+        expect(getSenchoIpFromSubnet('172.30.0.0/24')).toBe('172.30.0.2');
+    });
+
+    it('handles a custom /24 in a different range', () => {
+        expect(getSenchoIpFromSubnet('10.42.7.0/24')).toBe('10.42.7.2');
+    });
+
+    it('handles a /16', () => {
+        expect(getSenchoIpFromSubnet('172.30.0.0/16')).toBe('172.30.0.2');
+    });
+
+    it('masks the input IP to the network address before adding 2', () => {
+        // 172.30.0.50/24 → network 172.30.0.0 → +2 = 172.30.0.2
+        expect(getSenchoIpFromSubnet('172.30.0.50/24')).toBe('172.30.0.2');
+    });
+
+    it('rejects a malformed CIDR', () => {
+        expect(() => getSenchoIpFromSubnet('not-a-cidr')).toThrow(/Invalid mesh subnet/);
+        expect(() => getSenchoIpFromSubnet('172.30.0.0')).toThrow(/Invalid mesh subnet/);
+    });
+
+    it('rejects prefixes too narrow to host two addresses', () => {
+        expect(() => getSenchoIpFromSubnet('172.30.0.0/31')).toThrow(/Invalid mesh subnet/);
+    });
+
+    it('rejects out-of-range octets', () => {
+        expect(() => getSenchoIpFromSubnet('172.30.0.999/24')).toThrow(/Invalid mesh subnet/);
+    });
+});
+
+describe('MeshService.ensureMeshNetwork', () => {
+    it('refuses to continue when sencho_mesh exists with a different subnet', async () => {
+        const svc = MeshService.getInstance();
+        const dcModule = await import('../services/DockerController');
+        const fakeController = {
+            createNetwork: vi.fn().mockRejectedValue({ statusCode: 409, message: 'network already exists' }),
+            inspectNetwork: vi.fn().mockResolvedValue({ IPAM: { Config: [{ Subnet: '10.99.0.0/24' }] } }),
+        };
+        vi.spyOn(dcModule.default, 'getInstance').mockReturnValue(fakeController as unknown as ReturnType<typeof dcModule.default.getInstance>);
+
+        await expect(
+            (svc as unknown as { ensureMeshNetwork: (s: string) => Promise<void> }).ensureMeshNetwork('172.30.0.0/24'),
+        ).rejects.toThrow(/exists with subnet 10\.99\.0\.0\/24/);
+    });
+
+    it('treats 409 with matching subnet as idempotent success', async () => {
+        const svc = MeshService.getInstance();
+        const dcModule = await import('../services/DockerController');
+        const fakeController = {
+            createNetwork: vi.fn().mockRejectedValue({ statusCode: 409, message: 'network already exists' }),
+            inspectNetwork: vi.fn().mockResolvedValue({ IPAM: { Config: [{ Subnet: '172.30.0.0/24' }] } }),
+        };
+        vi.spyOn(dcModule.default, 'getInstance').mockReturnValue(fakeController as unknown as ReturnType<typeof dcModule.default.getInstance>);
+
+        await expect(
+            (svc as unknown as { ensureMeshNetwork: (s: string) => Promise<void> }).ensureMeshNetwork('172.30.0.0/24'),
+        ).resolves.toBeUndefined();
+    });
+});
+
+describe('MeshService.optInStack rollback', () => {
+    it('rolls back the DB row when the just-inserted stack fails to push its override', async () => {
+        const svc = MeshService.getInstance();
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'db', ports: [5432] }]);
+        vi.spyOn(svc, 'pushOverrideToNode')
+            .mockRejectedValue(new Error('simulated remote pilot offline'));
+        vi.spyOn(svc as unknown as { triggerRedeploy: (n: number, s: string, a: string) => void }, 'triggerRedeploy')
+            .mockImplementation(() => { /* noop */ });
+
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        await expect(svc.optInStack(localNodeId, 'api', 'tester'))
+            .rejects.toThrow(/simulated remote pilot offline/);
+        expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
+    });
+});
+
+describe('MeshService.optInStack guard rails (network setup)', () => {
+    it('rejects opt-in when senchoIp is null (mesh data plane unavailable)', async () => {
+        const svc = MeshService.getInstance();
+        (svc as unknown as { senchoIp: string | null }).senchoIp = null;
+        (svc as unknown as { networkSetupError: string | null }).networkSetupError = 'sencho_mesh subnet mismatch';
+
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        await expect(svc.optInStack(localNodeId, 'api', 'tester'))
+            .rejects.toThrow(/sencho_mesh subnet mismatch/);
+        expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
+    });
+
+    it('rejects opt-in when a service exposes the reserved Sencho API port', async () => {
+        const svc = MeshService.getInstance();
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [1852] }]);
+        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+            .mockResolvedValue(undefined);
+
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        await expect(svc.optInStack(localNodeId, 'api', 'tester'))
+            .rejects.toThrow(/port 1852 is reserved/);
+        expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
     });
 });
