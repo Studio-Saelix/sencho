@@ -345,3 +345,67 @@ describe('MeshService.optInStack guard rails (network setup)', () => {
         expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
     });
 });
+
+describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
+    it('pushes every mesh_stacks row across the fleet', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+
+        db.insertMeshStack(localNodeId, 'audit-mesh-prod', 'tester');
+        db.insertMeshStack(remoteNodeId, 'audit-mesh-pilot', 'tester');
+
+        const pushSpy = vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+
+        try {
+            await (svc as unknown as { regenerateAllOverrides: () => Promise<void> }).regenerateAllOverrides();
+
+            expect(pushSpy).toHaveBeenCalledTimes(2);
+            expect(pushSpy).toHaveBeenCalledWith(localNodeId, 'audit-mesh-prod');
+            expect(pushSpy).toHaveBeenCalledWith(remoteNodeId, 'audit-mesh-pilot');
+
+            const activity = svc.getActivity({ limit: 100 });
+            expect(activity.some((e) => e.message === 'boot regenerated 2 override(s)')).toBe(true);
+        } finally {
+            db.deleteNode(remoteNodeId);
+        }
+    });
+
+    it('skips entirely when senchoIp is null (network setup failed)', async () => {
+        const svc = MeshService.getInstance();
+        (svc as unknown as { senchoIp: string | null }).senchoIp = null;
+
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        db.insertMeshStack(localNodeId, 'audit-mesh-prod', 'tester');
+
+        const pushSpy = vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+
+        await (svc as unknown as { regenerateAllOverrides: () => Promise<void> }).regenerateAllOverrides();
+
+        expect(pushSpy).not.toHaveBeenCalled();
+    });
+
+    it('logs a warning per stack when push fails but does not throw', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        db.insertMeshStack(localNodeId, 'audit-mesh-prod', 'tester');
+
+        vi.spyOn(svc, 'pushOverrideToNode').mockRejectedValue(new Error('remote node offline'));
+
+        await expect(
+            (svc as unknown as { regenerateAllOverrides: () => Promise<void> }).regenerateAllOverrides(),
+        ).resolves.toBeUndefined();
+
+        const activity = svc.getActivity({ limit: 100 });
+        expect(activity.some((e) =>
+            e.level === 'warn' && /boot override regen failed for audit-mesh-prod/.test(e.message),
+        )).toBe(true);
+    });
+});

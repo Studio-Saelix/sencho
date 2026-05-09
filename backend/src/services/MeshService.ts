@@ -194,6 +194,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         await this.setupMeshNetwork();
         await this.refreshAliasCache();
         await this.syncForwarderListeners();
+        await this.regenerateAllOverrides();
         this.aliasRefreshTimer = setInterval(() => {
             void (async () => {
                 try {
@@ -644,6 +645,38 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     }
                 }),
         );
+    }
+
+    /**
+     * Walk every `mesh_stacks` row across the fleet and re-push each override
+     * to its owning node. Called once at boot so on-disk override files
+     * survive a Sencho restart even if they were lost (image rebuild, volume
+     * reset, manual cleanup). Best-effort: failures are logged per-stack and
+     * other nodes still get regenerated. An offline remote node leaves stale
+     * overrides until the next opt-in / opt-out on that node.
+     */
+    private async regenerateAllOverrides(): Promise<void> {
+        if (!this.senchoIp) return;
+        const db = DatabaseService.getInstance();
+        const stacks = db.listMeshStacks();
+        await Promise.allSettled(
+            stacks.map(async (s) => {
+                try {
+                    await this.pushOverrideToNode(s.node_id, s.stack_name);
+                } catch (err) {
+                    this.logActivity({
+                        source: 'mesh', level: 'warn', type: 'forwarder.error',
+                        nodeId: s.node_id,
+                        message: `boot override regen failed for ${s.stack_name}: ${sanitizeForLog((err as Error).message)}`,
+                        details: { stackName: s.stack_name },
+                    });
+                }
+            }),
+        );
+        this.logActivity({
+            source: 'mesh', level: 'info', type: 'mesh.enable',
+            message: `boot regenerated ${stacks.length} override(s)`,
+        });
     }
 
     // --- Alias aggregation ---
