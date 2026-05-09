@@ -562,9 +562,11 @@ export class PilotAgent {
 
     // --- Sencho Mesh TCP dispatch (tunnel -> Compose service container) ---
     //
-    // PR 1 rejects every tcp_open with mesh_not_enabled; the dial path is
-    // exercised by tests via setMeshResolver but never lit in production until
-    // PR 2 wires Dockerode resolution gated by the local mesh_stacks table.
+    // Central is the sole authority for mesh opt-in (state lives in central's
+    // SQLite mesh_stacks table). The pilot resolves a target by Compose
+    // container labels and dials directly. The tunnel JWT (scope
+    // 'pilot_tunnel') gates the WS upgrade itself, so any tcp_open frame on
+    // an open tunnel is trusted to originate from central.
 
     private async onTcpOpen(frame: Extract<ReturnType<typeof decodeJsonFrame>, { t: 'tcp_open' }>): Promise<void> {
         const ws = this.ws;
@@ -724,11 +726,11 @@ export class PilotAgent {
     }
 
     /**
-     * Resolves a mesh target by consulting the local mesh_stacks opt-in table
-     * and Compose container labels. Refuses if the target stack is not opted
-     * in on this node (defense-in-depth: the primary is trusted, but we also
-     * gate at the agent so a leaked tunnel token cannot reach unauthorized
-     * services).
+     * Resolves a mesh target by Compose container labels and returns the
+     * container's first usable IP. Central has already validated that the
+     * target stack is opted in before issuing the dial; the tunnel JWT
+     * (scope 'pilot_tunnel') authenticates the caller, so this handler
+     * does no per-stack gating of its own.
      */
     private async resolveMeshTarget(
         stack: string,
@@ -736,15 +738,8 @@ export class PilotAgent {
         port: number,
     ): Promise<MeshResolveResult> {
         try {
-            const { DatabaseService } = await import('../services/DatabaseService');
-            const { NodeRegistry } = await import('../services/NodeRegistry');
             const dockerodeMod = await import('dockerode');
             const Docker = (dockerodeMod as { default: new (opts?: unknown) => { listContainers: (opts?: unknown) => Promise<unknown[]> } }).default;
-            const db = DatabaseService.getInstance();
-            const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
-            if (!db.isMeshStackEnabled(localNodeId, stack)) {
-                return { ok: false, err: 'denied' };
-            }
             const docker = new Docker();
             const containers = (await docker.listContainers({
                 filters: { label: [`com.docker.compose.project=${stack}`, `com.docker.compose.service=${service}`] },
