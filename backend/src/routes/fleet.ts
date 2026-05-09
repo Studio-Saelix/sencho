@@ -595,8 +595,6 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
 });
 
 fleetRouter.get('/node/:nodeId/stacks', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
-
   try {
     const nodeId = parseIntParam(req, res, 'nodeId', 'node ID');
     if (nodeId === null) return;
@@ -635,8 +633,6 @@ fleetRouter.get('/node/:nodeId/stacks', authMiddleware, async (req: Request, res
 });
 
 fleetRouter.get('/node/:nodeId/stacks/:stackName/containers', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
-
   try {
     const nodeId = parseIntParam(req, res, 'nodeId', 'node ID');
     if (nodeId === null) return;
