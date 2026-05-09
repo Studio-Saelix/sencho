@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.1](https://github.com/Studio-Saelix/sencho/compare/v0.76.0...v0.76.1) (2026-05-09)
+
+
+### Fixed
+
+* **fleet:** drop tier gate from stack and container list endpoints ([#1012](https://github.com/Studio-Saelix/sencho/issues/1012)) ([693f9b4](https://github.com/Studio-Saelix/sencho/commit/693f9b4495bf7bffa805b6d2f0459aa4fdc70908))
+
 ## [0.76.0](https://github.com/Studio-Saelix/sencho/compare/v0.75.1...v0.76.0) (2026-05-09)
 
 
