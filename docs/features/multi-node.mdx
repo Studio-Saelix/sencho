@@ -1,138 +1,213 @@
 ---
 title: Multi-Node Management
-description: Connect multiple Sencho instances and manage all your servers from a single dashboard.
+description: Connect multiple Sencho instances and manage every server from one console with no central server, no SSH, and no shared Docker sockets.
 ---
 
-Sencho's multi-node feature lets you manage Docker Compose stacks on multiple servers, all from the same browser tab. Each server runs its own Sencho instance, and your primary instance acts as a transparent proxy to the others.
+Sencho's multi-node feature lets you operate Docker Compose stacks on every server you run from a single browser tab. Each server runs its own Sencho instance and the control instance acts as a transparent proxy to the others.
 
 <Frame>
-  <img src="/images/multi-node/node-manager.png" alt="Node Manager showing a local and a remote node, both Online" />
+  <img src="/images/multi-node/node-manager.png" alt="Settings · System · Nodes panel showing the masthead breadcrumb, SCOPE/NODES/REMOTE stat strip, Add node button, Generate Node Token card, and a populated table of one Local row plus seven remote rows with mixed Proxy and Pilot Agent modes." />
 </Frame>
 
 ## How it works
 
-There is no central server. Each Sencho instance manages its own host independently. When you select a remote node, your browser's API calls are proxied through your local Sencho instance to the remote one, authenticated by a long-lived Bearer token. No SSH. No shared Docker sockets.
+There is no central server. Each Sencho instance manages its own host independently. When you select a remote node from the switcher, your browser keeps talking to your control instance; the control instance forwards the call to the remote one, authenticated by a per-node bearer token in Distributed API Proxy mode or by the enrolled outbound tunnel session in Pilot Agent mode. No SSH. No shared Docker sockets. No remote Docker TCP exposure.
+
+Remote nodes connect in one of two modes. Pick the one that matches your network topology before you add the node, because the add-node flow branches on the choice.
 
 ## The local node
 
-Your primary Sencho installation is always listed as **Local**. It is the default node, marked with a star icon, and cannot be deleted. All operations on the local node run directly against the host's Docker socket.
+Your control Sencho instance is always listed as **Local**. It is the default node, marked with a star icon, and cannot be deleted. All operations on the local node run directly against the host's Docker socket.
 
-## Adding a remote node
+## Choose a remote mode
 
-### Step 1: Generate a token on the remote machine
+When you add a remote node, the Mode picker offers two options. The form tells you the difference inline:
 
-On the **remote** Sencho instance (the server you want to add), open **Settings → Nodes**. You will see a **Generate Node Token** section at the top of the page. Click **Generate Token**, then copy the token that appears. You will only see it once.
+> Pilot Agent requires only outbound HTTPS from the remote host. Distributed API Proxy requires the remote host to expose an inbound port.
 
-<Note>
-  The token is a long-lived credential that grants full control over that Sencho instance. Treat it like a password.
-</Note>
+| | Pilot Agent (default) | Distributed API Proxy |
+|---|---|---|
+| **Direction** | Remote dials the control plane (outbound only) | Control plane dials the remote (inbound to remote) |
+| **Network requirement** | Outbound HTTPS to the control instance | Inbound TCP port reachable from the control instance |
+| **What you run on the remote host** | One `docker run` command issued at enrollment | A full Sencho install reachable on a routable URL |
+| **Token model** | One-shot enrollment token, 15-minute expiry | Long-lived bearer token, rotates on regeneration |
+| **Best for** | Hosts behind NAT, dynamic IPs, restrictive ingress, edge boxes | Servers you already expose on a stable URL with TLS termination |
 
-### Step 2: Add the node on your primary instance
+If you are not sure, start with **Pilot Agent**. It is the default because it works in more network shapes and the enrollment is a single command.
 
-On your **primary** Sencho instance, open **Settings → Nodes** and click **+ Add Node**. Fill in:
+## Add a remote node: Pilot Agent
+
+### Step 1. Open the Add node form
+
+On the control instance, click your avatar in the top-right and choose **Settings**. In the sidebar pick **System → Nodes**, then click **Add node**.
 
 <Frame>
-  <img src="/images/multi-node/add-node-form.png" alt="Add Node form with Name, Type, API URL, Token, and Compose Directory fields" />
+  <img src="/images/multi-node/add-node-pilot.png" alt="Add remote node modal with Type set to Remote and Mode set to Pilot Agent. The form shows Name, Type, Mode, Mode helper text, and Compose Directory fields. URL and token fields are hidden because Pilot Agent does not need them." />
 </Frame>
 
-| Field | Description |
-|-------|-------------|
-| **Name** | A display name (e.g. `Production VPS`, `media-box`) |
-| **Type** | Select **Remote** (or **Local** for an additional local Docker socket) |
-| **Sencho API URL** | The full HTTP/HTTPS URL of the remote instance (e.g. `http://192.168.1.50:1852`) |
-| **API Token** | The token you generated in Step 1 |
-| **Compose Directory** | The root directory where compose stack folders live on the remote node (defaults to `/app/compose`) |
+| Field | Notes |
+|-------|-------|
+| **Name** | A display name (e.g. `staging-vps`, `media-box`). Visible in the switcher and across the UI. |
+| **Type** | Set to **Remote**. |
+| **Mode** | Set to **Pilot Agent**. |
+| **Compose Directory** | The root directory where compose stack folders live on the remote host. Defaults to `/app/compose`; change it if the remote uses a different volume mount. |
 
-Click **Add Node**. Sencho immediately tests the connection and shows the result.
+Click **Add node**.
 
-### Step 3: Verify connectivity
+### Step 2. Run the enrollment command on the remote host
 
-A successful connection shows the remote node as **Online** with a green badge. If it shows **Offline** or **Unknown**, check:
-- The remote Sencho instance is running and reachable from your primary host
-- The API URL is correct (include the port if non-standard)
-- The token was copied correctly without extra whitespace
+A modal opens with a single `docker run` command. Copy it and run it on the remote host as the user that owns Docker.
 
-Click the **wifi icon** (Test Connection) on any node row at any time to re-check status. A successful test shows a **Connection Details** panel below the table with information about the remote instance, including its OS, architecture, container count, and Sencho version.
+<Frame>
+  <img src="/images/multi-node/pilot-enroll.png" alt="Enroll the pilot agent modal showing a docker run command with SENCHO_MODE=pilot, SENCHO_PRIMARY_URL pointing to the control instance, and a SENCHO_ENROLL_TOKEN. The footer reads Expires 15m from now and offers a Copy command button." />
+</Frame>
+
+The command is one line. It pulls the `saelix/sencho:latest` image, mounts the host Docker socket, and starts a container named `sencho-agent` that opens an outbound tunnel back to the control plane.
+
+The enrollment token in the command is **valid for 15 minutes and can only be used once**. If you wait too long, follow the regeneration steps below.
+
+### Step 3. Verify the tunnel
+
+Back on the Nodes table, the new row shows **Status: Online** once the agent dials home, and the Endpoint column reads `tunnel (seen Xs ago)`. Until the agent connects for the first time, the Endpoint reads `tunnel (waiting)`.
+
+### Re-enrollment
+
+If the enrollment token expires, the container is removed, or the host is rebuilt, click the **Edit Node** icon on the pilot row. The Edit modal shows a **Regenerate enrollment token** card.
+
+<Frame>
+  <img src="/images/multi-node/edit-pilot-regenerate.png" alt="Edit node modal for a Pilot Agent node. Below the Compose Directory field a bordered card explains: 'Re-enroll the agent if the container was lost or the enrollment token expired. The previous tunnel is disconnected automatically.' A Regenerate enrollment token button sits below the explanation." />
+</Frame>
+
+Click the button to mint a fresh enrollment command. The previous tunnel is disconnected automatically; run the new command on the remote host to reconnect.
+
+## Add a remote node: Distributed API Proxy
+
+### Step 1. Generate a long-lived token on the remote
+
+On the **remote** Sencho instance (the server you want to add), open **Settings → System → Nodes**. Click **Generate Token** in the **Generate Node Token** card and copy the token that appears.
+
+<Frame>
+  <img src="/images/multi-node/generate-token.png" alt="Generate Node Token card showing the explanation text and a freshly issued JWT-style token displayed in a monospace block with a copy button." />
+</Frame>
+
+<Note>
+  The token is a long-lived credential that grants full control over that Sencho instance. Treat it like a password. Generating a new token invalidates the previous one.
+</Note>
+
+### Step 2. Add the node on your control instance
+
+Open **Settings → System → Nodes** on the control instance and click **Add node**. Set Type to **Remote** and Mode to **Distributed API Proxy** to reveal the URL and token fields.
+
+<Frame>
+  <img src="/images/multi-node/add-node-proxy.png" alt="Add remote node modal in Distributed API Proxy mode. The form shows Name, Type, Mode, Sencho API URL with a plain-HTTP warning banner underneath, API Token (masked), and Compose Directory. The HTTP warning recommends HTTPS or a VPN when the node is reachable over the public internet." />
+</Frame>
+
+| Field | Notes |
+|-------|-------|
+| **Name** | A display name shown in the switcher. |
+| **Type** | **Remote**. |
+| **Mode** | **Distributed API Proxy**. |
+| **Sencho API URL** | The full URL of the remote Sencho instance, including scheme and port (e.g. `https://sencho.example.com` or `http://10.0.1.20:1852`). |
+| **API Token** | The token you copied in Step 1. |
+| **Compose Directory** | The root directory where compose stack folders live on the remote host. |
+
+If the URL starts with plain `http://`, the form shows an inline warning. Plain HTTP is fine on a private network or VPN, but it leaks the bearer token over any path you do not control. See [Transport encryption](#transport-encryption) below.
+
+Click **Add node**. Sencho immediately tests the connection and shows the result.
+
+### Step 3. Verify connectivity
+
+Click the **Test Connection** icon on any row to re-check status. A successful test shows a Connection Details panel below the table with the remote's OS, architecture, container count, and Sencho version.
+
+If the row shows **Offline** or **Unknown**, see [Troubleshooting](#troubleshooting).
 
 ## Switching between nodes
 
-The **node switcher** sits at the top of the sidebar and acts as a persistent identity anchor. It shows the active node's status dot, type (`LOCAL`, `REMOTE`, or `AGENT`), and name, so you always know which node you are viewing.
+The **node switcher** sits at the top of the sidebar and acts as a persistent identity anchor. It shows the active node's status dot, a `Node · LOCAL`, `Node · REMOTE`, or `Node · AGENT` kicker, and the node name, so you always know which node you are operating on.
 
-When two or more nodes are registered, clicking the switcher opens a popover listing every connected node. Each row includes a status dot, name, and a metadata line with the node type, version, and (for pilot agents) the time since the agent last checked in. The active node is marked with a cyan accent rail, and a filled star calls out the default node.
-
-Click any row to switch. All views (dashboard stats, stack list, editor, resources, logs) immediately reflect the selected node. A **Manage nodes** link at the bottom of the popover opens the Nodes settings page to add, edit, or remove nodes.
+When two or more nodes are registered, clicking the switcher opens a popover listing every connected node. Each row shows a status dot, the name, and a metadata line that joins the type chip, the last-seen timestamp (pilot agents only), and the node version with middle-dot separators (for example, `AGENT · SEEN 13H AGO · v0.76.3`). The active node is marked with a brand-coloured rail, and a filled star calls out the default node.
 
 <Frame>
-  <img src="/images/multi-node/node-switcher-dropdown.png" alt="Node switcher popover listing connected nodes with type, version, and active-row accent" />
+  <img src="/images/multi-node/node-switcher-dropdown.png" alt="Node switcher popover with a Connected header above an 8 NODES count. The Local row shows LOCAL · v0.76.3 with a star icon. Three Remote rows show the REMOTE chip. The sencho-pilot-test row shows AGENT · SEEN 13H AGO. A Manage nodes link sits at the bottom." />
 </Frame>
 
-## Per-node scheduling and update indicators
+Click any row to switch. All views (dashboard, stack list, editor, resources, logs) immediately reflect the selected node. The **Manage nodes** link at the bottom of the popover opens the Settings → Nodes panel to add, edit, or remove nodes.
 
-The Nodes table surfaces scheduling and update status at a glance for each node:
+## The Nodes table
+
+The Nodes table surfaces routing, status, and per-node automation at a glance for every node:
 
 <Frame>
-  <img src="/images/per-node-scheduling/nodes-table-overview.png" alt="Nodes table showing Schedules and Updates columns for each node" />
+  <img src="/images/multi-node/nodes-table-overview.png" alt="Nodes table close-up showing the ten columns: a default-marker column with a star on the Local row, Name, Type, Mode, Endpoint, Status, Labels, Schedules, Updates, and Actions. The pilot-test row has Mode 'Pilot Agent' and Endpoint 'tunnel (seen 13h ago)'. Other remotes show Mode 'Proxy' and full URLs in the Endpoint column." />
 </Frame>
 
 | Column | What it shows |
 |--------|---------------|
-| **Schedules** | Number of active scheduled tasks targeting this node, plus a relative countdown to the next run (e.g. "next 2h") |
-| **Updates** | Whether auto-update policies are enabled ("Auto" badge), and how many stacks have pending image updates (fuchsia notification dot with expanding halo and a count) |
+| **Default** | A filled star marks the default (Local) node. The column has no header. |
+| **Name** | A globe or monitor icon followed by the display name. |
+| **Type** | `Local` or `Remote` badge. |
+| **Mode** | `-` for the local node; `Proxy` or `Pilot Agent` badge for remotes, with an icon matching the mode. |
+| **Endpoint** | `docker.sock` for local; the full Sencho API URL for proxy nodes; `tunnel (seen X ago)` or `tunnel (waiting)` for pilot agents. |
+| **Status** | `Online`, `Offline`, or `Unknown` badge. |
+| **Labels** | Per-node label palette. On Skipper and Admiral the cell shows the picker (an empty cell reads `No labels` with an Add label control); on Community the cell shows a single dash. |
+| **Schedules** | Number of active scheduled tasks targeting this node, plus a `next X` countdown to the next run. Click the count or the calendar icon in the Actions column to filter the Schedules view to that node. |
+| **Updates** | `Auto` if at least one auto-update policy is enabled on the node; `Off` otherwise. A pulsing dot and count appear when stacks have pending image updates. |
+| **Actions** | **View Schedules**, **Test Connection**, **Edit Node**, and **Delete Node** icon buttons. The local row hides Delete because the local node cannot be removed. |
 
-Click the **calendar icon** on any node row to jump directly to the Schedules view filtered to that node. From there you can create, edit, or manage scheduled tasks scoped to the selected node. The filter bar shows which node you are viewing, with a **Clear filter** button to return to the full list.
+Clicking the schedules-link icon opens the Schedules view filtered to the selected node. From there you can create, edit, or manage scheduled tasks scoped to that node. The filter bar shows which node you are viewing, with a Clear filter control to return to the full list.
 
-When a node is deleted, all scheduled tasks and update status data associated with it are automatically cleaned up.
+When a node is deleted, all scheduled tasks and update status data associated with it are cleaned up automatically.
 
 ## What Settings apply per node
 
-When you select a remote node in the node picker, the Settings hub filters to the panels that control that specific instance. Values saved here never cross over to other nodes.
+When you select a remote node in the switcher, the Settings hub filters to the panels that control that specific instance. Values saved here never cross over to other nodes.
 
 | Panel | Scope | Notes |
 |-------|:-----:|-------|
-| Appearance | Per browser | Density and theme preferences are stored in your browser, not on the node. |
+| Appearance | Per browser | Theme and density preferences are stored in your browser, not on the node. |
 | System Limits | Per node | Host CPU, RAM, disk, and crash-loop thresholds for the selected node. |
 | Notifications | Per node | Discord, Slack, and Webhook channels fire from the node that detects the event. |
 | Labels | Per node | Stack and container label palettes. |
-| Security | Per node | Trivy install, update, and scanner status. Scan policies and CVE suppressions are managed on the control node and apply fleet-wide. |
+| Security | Per node | Trivy install state and scanner readiness for the selected node. |
 | Developer | Per node | Retention windows for metrics and logs, plus Developer Mode. |
-| App Store | Per node | Template registry URL for the selected node's catalog. |
+| App Store | Per node | Template registry URL and featured-catalog source for the selected node's catalog. |
+| Support | Per browser | Diagnostics bundle, docs links, contact channels. |
+| About | Per browser | Build metadata for whichever instance the page is loaded from. |
 
-Panels that manage control-plane concerns (Account, License, Users, SSO, API Tokens, Registries, Nodes, Routing, Webhooks) are hidden when a remote node is active.
+Panels that manage control-plane concerns (Account, License, Users, SSO, API Tokens, Registries, Cloud Backup, Nodes, Routing, Webhooks) are hidden when a remote node is active.
 
 ## License enforcement across nodes
 
-When you have a paid license (Skipper or Admiral) on your primary instance, all remote nodes automatically inherit that license tier for proxied requests. You do not need to activate a license on each remote node separately.
+When the control instance has a paid license (Skipper or Admiral), all remote nodes inherit that license tier for proxied requests. You do not activate a license on each remote node separately.
 
 ### How it works
 
-Your primary Sencho instance asserts its license tier to remote nodes on every proxied request. Remote nodes trust this assertion because it arrives alongside the valid node token you configured when adding the node. No additional configuration is required.
+The control instance asserts its license tier on every proxied request. Remote nodes trust the assertion because it arrives alongside the valid bearer token you configured when adding the node.
 
 This means:
 
-- **Paid primary → remote nodes**: Skipper and Admiral features work on all remote nodes, governed by the primary instance's license.
-- **Community primary → remote nodes**: Paid features are blocked on remote nodes, even if a remote node has its own paid license. The primary's tier is authoritative for proxied requests.
-- **Direct access to a node**: If you access a remote Sencho instance directly (not through the primary), it uses its own local license tier as usual.
-
-### Why this matters
-
-Without this trust chain, remote nodes would default to the Community tier and block paid features, even though the primary instance has a valid license. Distributed license enforcement eliminates this gap so your fleet behaves consistently regardless of which node you are operating on.
+- **Paid control plane → remote nodes**: Skipper and Admiral features work on every remote node, governed by the control instance's license.
+- **Community control plane → remote nodes**: Paid features are blocked on remote nodes, even if a remote node has its own paid license. The control instance's tier is authoritative for proxied requests.
+- **Direct access to a node**: If you load a remote Sencho instance in your browser directly (not through the control plane), it uses its own local license tier.
 
 <Note>
-  Remote nodes do not need their own license keys. A single license on the primary instance covers all nodes managed through it.
+  Remote nodes do not need their own license keys. A single license on the control instance covers every node managed through it.
 </Note>
 
 ## Editing and deleting nodes
 
-Click the **pencil icon** on any node row to edit its name, URL, token, or compose directory. Click the **trash icon** to remove a remote node. The local (default) node cannot be deleted.
+Click the pencil icon on any row to edit its name, URL, token, or compose directory. For a Pilot Agent row, the Edit modal also surfaces the **Regenerate enrollment token** card described earlier.
+
+Click the trash icon to remove a remote node. The local row hides this icon because the default node cannot be deleted. Removing a node only deletes the routing entry on the control instance; the remote Sencho instance and its containers are not touched.
 
 ## Security
 
 ### Token security
 
-Node tokens grant full control over the remote Sencho instance. Treat them like passwords:
+Bearer tokens grant full control over the remote Sencho instance. Treat them like passwords:
 
-- **Rotate immediately** if a token is compromised: go to the remote instance's **Settings → Nodes** and click **Generate Token**. The old token is invalidated instantly.
-- Tokens are **encrypted at rest** in Sencho's database.
+- **Rotate immediately** if a token is compromised: open the remote instance's **Settings → System → Nodes** and click **Generate Token** to mint a new one. The previous token is invalidated instantly.
+- Tokens are **encrypted at rest** in the local SQLite database.
 - Tokens cannot be used to open interactive terminals (Host Console or container exec). Interactive shell access always requires a real browser session on that specific instance.
 
 ### Transport encryption
@@ -140,20 +215,14 @@ Node tokens grant full control over the remote Sencho instance. Treat them like 
 Sencho delegates transport encryption to your infrastructure rather than implementing TLS at the application layer. This is the same approach used by other self-hosted tools; it avoids certificate management burden while letting you use the encryption layer that best fits your environment.
 
 <Warning>
-  **Never send node tokens over plain HTTP across the public internet.** A token intercepted in transit grants full control of the remote instance. Always use one of the approaches below when nodes communicate over untrusted networks.
+  **Never send bearer tokens over plain HTTP across the public internet.** A token intercepted in transit grants full control of the remote instance. Use one of the approaches below when nodes communicate over untrusted networks.
 </Warning>
 
-Sencho shows an inline warning when you enter an HTTP URL in the Add Node form as a reminder:
-
-<Frame>
-  <img src="/images/multi-node/http-warning.png" alt="Add Node form showing an inline warning when an HTTP URL is entered" />
-</Frame>
-
-There are three recommended approaches depending on your deployment:
+There are three recommended approaches.
 
 #### Private network (LAN or VPC)
 
-If all your Sencho instances are on the same local network, VPC, or subnet, HTTP is perfectly fine. The token never leaves the private network, so there is no interception risk.
+If all your Sencho instances are on the same local network, VPC, or subnet, HTTP is fine. The token never leaves the private network, so there is no interception risk.
 
 ```
 http://192.168.1.50:1852   ← safe on a private LAN
@@ -213,6 +282,26 @@ https://sencho.example.com   ← TLS terminated by Caddy/Nginx
 
 ### Why Sencho doesn't implement application-layer TLS
 
-Some tools auto-generate self-signed TLS certificates between their server and agents. In practice, this provides minimal security benefit because the certificates are self-signed with no verification, meaning they do not protect against man-in-the-middle attacks.
+Some tools auto-generate self-signed TLS certificates between their server and agents. In practice that provides minimal security benefit because the certificates are self-signed with no verification, meaning they do not protect against man-in-the-middle attacks.
 
-Sencho takes a deliberate approach: infrastructure-level encryption (VPN, reverse proxy, or private networking) is more robust, easier to manage, and does not impose certificate rotation burden on the user. This is the same model used by other self-hosted orchestrators.
+Sencho takes the opposite approach: infrastructure-level encryption (VPN, reverse proxy, or private networking) is more robust, easier to manage, and does not impose certificate rotation burden on you. This is the same model used by other self-hosted orchestrators.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="A remote node shows Offline">
+    Click **Test connection** on the row to re-probe and read the toast. The most common causes are: a wrong URL (missing scheme, missing port, trailing slash typo), a token that was rotated on the remote (any new **Generate Token** invalidates the previous one, so re-issue and update the saved row), and a firewall or reverse proxy that is not forwarding to port 1852 on the remote. Distributed API Proxy mode requires the control instance to reach the remote on the URL you saved; Pilot Agent mode requires the remote to reach the control instance on outbound HTTPS.
+  </Accordion>
+  <Accordion title="A pilot agent stays on `tunnel (waiting)`">
+    The agent has not dialled home yet. Three things can cause this. First, the enrollment token expired (15 minutes from generation): open **Edit node**, click **Regenerate enrollment token**, copy the new command, and run it on the remote host. Second, the `sencho-agent` container exited or never started; `docker ps -a` on the remote will show the exit code. Third, outbound HTTPS to the control instance is blocked, so check the remote's egress firewall or proxy.
+  </Accordion>
+  <Accordion title="Test Connection fails with 401 Unauthorized">
+    The bearer token saved for the row no longer matches what the remote will accept. This usually means somebody clicked **Generate Token** on the remote (which invalidates the previous token) or the row was saved with a typo. Generate a fresh token on the remote, click the pencil icon on the row in the control instance, paste the new token into the API Token field, and save.
+  </Accordion>
+  <Accordion title="A paid feature is blocked when I switch to a remote node">
+    The control instance's license tier is authoritative for proxied requests, so a Community control plane gates Skipper and Admiral features on every remote, even if the remote itself has its own paid license. Activate a paid license on the control instance to lift the gate fleet-wide. The reverse case (paid control plane, Community remote) works automatically because the control plane's tier is what the remote trusts.
+  </Accordion>
+  <Accordion title="Settings panels disappear when I switch to a remote">
+    That is intentional. Account, License, Users, SSO, API Tokens, Registries, Cloud Backup, Nodes, Routing, and Webhooks are control-plane concerns and are hidden while a remote node is selected. Switch back to **Local** from the node switcher to manage them. The full list of which panels are per-node, per-browser, and control-plane-only lives in the [What Settings apply per node](#what-settings-apply-per-node) table above.
+  </Accordion>
+</AccordionGroup>
