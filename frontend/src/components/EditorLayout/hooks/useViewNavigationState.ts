@@ -6,6 +6,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
+import { useNodes } from '@/context/NodeContext';
 import { SENCHO_NAVIGATE_EVENT } from '@/components/NodeManager';
 import type { SenchoNavigateDetail } from '@/components/NodeManager';
 import type { SectionId } from '@/components/settings/types';
@@ -24,8 +25,22 @@ export type ActiveView =
   | 'auto-updates'
   | 'settings';
 
+// Views that operate on hub-owned state (node registry, fleet schedules,
+// centralized audit, fleet-wide log aggregation, fleet-wide update preview).
+// Hidden from the nav strip and force-redirect to dashboard when the active
+// node is remote, since proxying them would surface that remote's own
+// disconnected state instead of the hub's. Settings sub-sections use the
+// parallel `hiddenOnRemote` registry (see settings/registry.ts).
+export const HUB_ONLY_VIEWS: ReadonlySet<ActiveView> = new Set([
+  'fleet',
+  'scheduled-ops',
+  'audit-log',
+  'global-observability',
+  'auto-updates',
+]);
+
 export interface NavItem {
-  value: string;
+  value: ActiveView;
   label: string;
   icon: LucideIcon;
 }
@@ -38,6 +53,8 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   const { onNavigateToDashboard } = options ?? {};
   const { isAdmin, can } = useAuth();
   const { isPaid, license } = useLicense();
+  const { activeNode } = useNodes();
+  const isRemote = activeNode?.type === 'remote';
 
   const [activeView, setActiveView] = useState<ActiveView>('dashboard');
   const [settingsSection, setSettingsSection] = useState<SectionId>('appearance');
@@ -97,8 +114,18 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
       if (can('system:audit')) items.push({ value: 'audit-log', label: 'Audit', icon: ScrollText });
       if (isAdmin) items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
     }
-    return items;
-  }, [isAdmin, isPaid, license?.variant, can]);
+    return isRemote
+      ? items.filter(i => !HUB_ONLY_VIEWS.has(i.value))
+      : items;
+  }, [isAdmin, isPaid, license?.variant, can, isRemote]);
+
+  useEffect(() => {
+    if (isRemote && HUB_ONLY_VIEWS.has(activeView)) {
+      onNavigateToDashboard?.();
+      setActiveView('dashboard');
+      setFilterNodeId(null);
+    }
+  }, [isRemote, activeView, onNavigateToDashboard]);
 
   return {
     activeView, setActiveView,
