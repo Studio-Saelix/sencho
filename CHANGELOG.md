@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.0](https://github.com/Studio-Saelix/sencho/compare/v0.75.1...v0.76.0) (2026-05-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mesh:** the operator's `docker-compose.yml` no longer uses `network_mode: host`. After upgrading, redeploy any meshed stacks once so they pick up the new IP-based override and join `sencho_mesh`.
+
+### Added
+
+* **mesh:** replace host-mode with shared sencho_mesh Docker network ([#1009](https://github.com/Studio-Saelix/sencho/issues/1009)) ([23bbee4](https://github.com/Studio-Saelix/sencho/commit/23bbee4f45ea08d133b5249a537e978fb94ad1b4))
+* **nodes:** hide hub-only views when active node is remote ([#1007](https://github.com/Studio-Saelix/sencho/issues/1007)) ([ccad5c9](https://github.com/Studio-Saelix/sencho/commit/ccad5c925b419d1d3915fccb53bdd3fad580b657))
+
 ## [0.75.1](https://github.com/Studio-Saelix/sencho/compare/v0.75.0...v0.75.1) (2026-05-08)
 
 
