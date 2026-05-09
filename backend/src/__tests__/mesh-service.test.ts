@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'events';
+import fsSync from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { getSenchoIpFromSubnet, MeshError } from '../services/MeshService';
+import { getSenchoIpFromSubnet, MeshError, type MeshTarget, type MeshTcpStreamLike } from '../services/MeshService';
 
 let tmpDir: string;
 let MeshService: typeof import('../services/MeshService').MeshService;
@@ -499,5 +502,269 @@ describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
         expect(existingCalls.length).toBeGreaterThanOrEqual(1);
         const concurrentCalls = pushSpy.mock.calls.filter((c) => c[1] === 'concurrent-stack');
         expect(concurrentCalls.length).toBeGreaterThanOrEqual(1);
+    });
+});
+
+describe('MeshService.getDeclaredStackServiceNames (BUG-1)', () => {
+    function writeStackFile(stack: string, contents: string): void {
+        const composeDir = process.env.COMPOSE_DIR as string;
+        const dir = path.join(composeDir, stack);
+        fsSync.mkdirSync(dir, { recursive: true });
+        fsSync.writeFileSync(path.join(dir, 'compose.yaml'), contents, 'utf8');
+    }
+
+    it('returns the keys of the compose services map', async () => {
+        const svc = MeshService.getInstance();
+        writeStackFile('declared-stack', [
+            'services:',
+            '  echo:',
+            '    image: busybox:latest',
+            '    expose: ["9000"]',
+            '  prober:',
+            '    image: busybox:latest',
+        ].join('\n'));
+
+        const names = await svc.getDeclaredStackServiceNames('declared-stack');
+        expect(names.sort()).toEqual(['echo', 'prober']);
+    });
+
+    it('returns [] when the compose file is missing', async () => {
+        const svc = MeshService.getInstance();
+        const names = await svc.getDeclaredStackServiceNames('does-not-exist');
+        expect(names).toEqual([]);
+    });
+
+    it('returns [] for an invalid stack name (path traversal attempt)', async () => {
+        const svc = MeshService.getInstance();
+        const names = await svc.getDeclaredStackServiceNames('../etc/passwd');
+        expect(names).toEqual([]);
+    });
+
+    it('returns [] when YAML has no services key', async () => {
+        const svc = MeshService.getInstance();
+        writeStackFile('no-services', 'version: "3.9"\n');
+        const names = await svc.getDeclaredStackServiceNames('no-services');
+        expect(names).toEqual([]);
+    });
+});
+
+describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
+    function writeStackFile(stack: string, contents: string): void {
+        const composeDir = process.env.COMPOSE_DIR as string;
+        const dir = path.join(composeDir, stack);
+        fsSync.mkdirSync(dir, { recursive: true });
+        fsSync.writeFileSync(path.join(dir, 'compose.yaml'), contents, 'utf8');
+    }
+
+    it('writes a non-empty services map sourced from the compose file (BUG-1 case)', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        writeStackFile('audit-mesh-prod', [
+            'services:',
+            '  echo:',
+            '    image: busybox:latest',
+            '  prober:',
+            '    image: busybox:latest',
+        ].join('\n'));
+
+        // The override generator must derive services from the compose
+        // file, not from runtime containers. Spy on
+        // inspectLocalStackServices to assert it is NOT consulted by the
+        // override-write path (regression guard).
+        const inspectSpy = vi.spyOn(svc, 'inspectLocalStackServices').mockResolvedValue([]);
+        db.insertMeshStack(localNodeId, 'audit-mesh-prod', 'tester');
+
+        const overridePath = await svc.ensureStackOverride(localNodeId, 'audit-mesh-prod');
+        expect(overridePath).not.toBeNull();
+        const yaml = fsSync.readFileSync(overridePath as string, 'utf8');
+        expect(yaml).toContain('echo:');
+        expect(yaml).toContain('prober:');
+        expect(yaml).toContain('sencho_mesh');
+        expect(yaml).not.toMatch(/^services:\s*\{\}/m);
+        expect(inspectSpy).not.toHaveBeenCalled();
+    });
+
+    it('preserves an existing non-empty override when declared services come back empty', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        // No compose file on disk; getDeclaredStackServiceNames returns [].
+        // Pre-seed an existing override file with a populated services map.
+        const dataDir = process.env.DATA_DIR as string;
+        const overrideDir = path.join(dataDir, 'mesh', 'overrides', String(localNodeId));
+        fsSync.mkdirSync(overrideDir, { recursive: true });
+        const overrideFile = path.join(overrideDir, 'orphaned-stack.override.yml');
+        fsSync.writeFileSync(overrideFile, [
+            'services:',
+            '  webapp:',
+            '    networks:',
+            '      - sencho_mesh',
+            'networks:',
+            '  sencho_mesh:',
+            '    external: true',
+        ].join('\n'), 'utf8');
+        const originalContent = fsSync.readFileSync(overrideFile, 'utf8');
+
+        db.insertMeshStack(localNodeId, 'orphaned-stack', 'tester');
+
+        const result = await svc.ensureStackOverride(localNodeId, 'orphaned-stack');
+        expect(result).toBe(overrideFile);
+
+        const after = fsSync.readFileSync(overrideFile, 'utf8');
+        expect(after).toBe(originalContent);
+
+        const activity = svc.getActivity({ limit: 100 });
+        expect(activity.some((e) =>
+            e.type === 'mesh.override.preserved'
+            && /orphaned-stack/.test(e.message),
+        )).toBe(true);
+    });
+});
+
+describe('MeshService tunnel-up regen (BUG-2)', () => {
+    it('triggers regenerateOverridesForNode for the firing nodeId once tunnel comes up', async () => {
+        const svc = MeshService.getInstance();
+        const ptm = (await import('../services/PilotTunnelManager')).PilotTunnelManager.getInstance() as unknown as EventEmitter;
+
+        const regenSpy = vi.spyOn(
+            svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> },
+            'regenerateOverridesForNode',
+        ).mockResolvedValue(undefined);
+
+        // Drive start() while stubbing the heavy bits. setupMeshNetwork
+        // is what actually creates the bridge network; refreshAliasCache
+        // and syncForwarderListeners would touch real Dockerode and net
+        // state. regenerateAllOverrides we stub so the test only
+        // exercises the tunnel-up listener.
+        const internals = svc as unknown as {
+            started: boolean;
+            setupMeshNetwork: () => Promise<void>;
+            refreshAliasCache: () => Promise<void>;
+            syncForwarderListeners: () => Promise<void>;
+            regenerateAllOverrides: () => Promise<unknown>;
+            aliasRefreshTimer: NodeJS.Timeout | undefined;
+        };
+        internals.started = false;
+        const origNetwork = internals.setupMeshNetwork.bind(svc);
+        const origRefresh = internals.refreshAliasCache.bind(svc);
+        const origSync = internals.syncForwarderListeners.bind(svc);
+        const origRegenAll = internals.regenerateAllOverrides.bind(svc);
+        internals.setupMeshNetwork = vi.fn().mockResolvedValue(undefined);
+        internals.refreshAliasCache = vi.fn().mockResolvedValue(undefined);
+        internals.syncForwarderListeners = vi.fn().mockResolvedValue(undefined);
+        internals.regenerateAllOverrides = vi.fn().mockResolvedValue({ regenerated: 0, failures: [], skipped: false });
+
+        try {
+            await svc.start();
+            ptm.emit('tunnel-up', 14);
+            // Give the void-promise chain a tick to invoke the spy.
+            await new Promise((r) => setImmediate(r));
+
+            expect(regenSpy).toHaveBeenCalledWith(14);
+
+            const activity = svc.getActivity({ limit: 50 });
+            expect(activity.some((e) =>
+                e.type === 'tunnel.open' && e.nodeId === 14,
+            )).toBe(true);
+        } finally {
+            internals.setupMeshNetwork = origNetwork;
+            internals.refreshAliasCache = origRefresh;
+            internals.syncForwarderListeners = origSync;
+            internals.regenerateAllOverrides = origRegenAll;
+            internals.started = false;
+            if (internals.aliasRefreshTimer) {
+                clearInterval(internals.aliasRefreshTimer);
+                internals.aliasRefreshTimer = undefined;
+            }
+            // Drain any tunnel-up listeners we registered during start().
+            ptm.removeAllListeners('tunnel-up');
+            ptm.removeAllListeners('tunnel-down');
+        }
+    });
+});
+
+describe('MeshService.openCrossNode (BUG-4)', () => {
+    function makeFakeStream(streamId: number): MeshTcpStreamLike & EventEmitter {
+        const ee = new EventEmitter() as MeshTcpStreamLike & EventEmitter & { destroyed: boolean };
+        ee.destroyed = false;
+        Object.defineProperty(ee, 'streamId', { value: streamId, writable: false });
+        ee.write = vi.fn().mockReturnValue(true);
+        ee.end = vi.fn();
+        ee.destroy = vi.fn(() => { ee.destroyed = true; });
+        return ee;
+    }
+
+    function makeFakeSocket(): { destroy: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn>; write: ReturnType<typeof vi.fn> } {
+        return {
+            destroy: vi.fn(),
+            end: vi.fn(),
+            on: vi.fn(),
+            write: vi.fn(),
+        };
+    }
+
+    it('emits route.dispatch immediately on cross-node entry', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(42);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeFakeSocket();
+        // openCrossNode is private; cast to call it.
+        (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => void })
+            .openCrossNode(target, fakeSrc);
+
+        const dispatch = svc.getActivity({ limit: 50 }).find((e) => e.type === 'route.dispatch');
+        expect(dispatch).toBeDefined();
+        expect(dispatch?.alias).toBe(target.alias);
+        expect(dispatch?.nodeId).toBe(14);
+        // Clean up the open-timer so the test process exits cleanly.
+        fakeStream.emit('close');
+    });
+
+    it('emits tunnel.fail after PROBE_TIMEOUT_MS when tcp_open_ack never arrives', async () => {
+        vi.useFakeTimers();
+        try {
+            const svc = MeshService.getInstance();
+            const target: MeshTarget = {
+                nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+                port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+            };
+            const fakeStream = makeFakeStream(43);
+            vi.spyOn(
+                svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+                'dialMeshTcpStream',
+            ).mockReturnValue(fakeStream);
+
+            const fakeSrc = makeFakeSocket();
+            (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => void })
+                .openCrossNode(target, fakeSrc);
+
+            // Before the timeout, only route.dispatch should be present.
+            expect(svc.getActivity({ limit: 50 }).some((e) => e.type === 'route.resolve.ok')).toBe(false);
+
+            await vi.advanceTimersByTimeAsync(5_000);
+
+            const events = svc.getActivity({ limit: 50 });
+            const timeoutEvent = events.find((e) =>
+                e.type === 'tunnel.fail' && /timed out waiting for tcp_open_ack/.test(e.message),
+            );
+            expect(timeoutEvent).toBeDefined();
+            expect(timeoutEvent?.nodeId).toBe(14);
+            expect(timeoutEvent?.alias).toBe(target.alias);
+            expect(fakeStream.destroy).toHaveBeenCalled();
+            expect(fakeSrc.destroy).toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

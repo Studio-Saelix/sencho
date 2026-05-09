@@ -2,9 +2,11 @@ import net from 'net';
 import path from 'path';
 import fs from 'fs/promises';
 import { EventEmitter } from 'events';
+import * as YAML from 'yaml';
 import { ComposeService } from './ComposeService';
 import { DatabaseService } from './DatabaseService';
 import DockerController from './DockerController';
+import { FileSystemService } from './FileSystemService';
 import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { MeshForwarder, type MeshForwarderHost } from './MeshForwarder';
@@ -51,10 +53,11 @@ export function getSenchoIpFromSubnet(subnet: string): string {
 export type MeshActivitySource = 'pilot' | 'mesh';
 export type MeshActivityLevel = 'info' | 'warn' | 'error';
 export type MeshActivityType =
-    | 'route.resolve.ok' | 'route.resolve.denied'
+    | 'route.dispatch' | 'route.resolve.ok' | 'route.resolve.denied'
     | 'tunnel.open' | 'tunnel.fail' | 'tunnel.backpressure'
     | 'opt_in' | 'opt_out'
     | 'mesh.enable' | 'mesh.disable'
+    | 'mesh.override.preserved'
     | 'probe.ok' | 'probe.fail'
     | 'forwarder.listen' | 'forwarder.unlisten' | 'forwarder.error';
 
@@ -199,10 +202,25 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const ptm = PilotTunnelManager.getInstance();
         ptm.on('tunnel-down', (nodeId: number) => this.onTunnelDown(nodeId));
-        ptm.on('tunnel-up', (nodeId: number) => this.logActivity({
-            source: 'pilot', level: 'info', type: 'tunnel.open',
-            nodeId, message: `pilot tunnel up for node ${nodeId}`,
-        }));
+        ptm.on('tunnel-up', (nodeId: number) => {
+            this.logActivity({
+                source: 'pilot', level: 'info', type: 'tunnel.open',
+                nodeId, message: `pilot tunnel up for node ${nodeId}`,
+            });
+            // Boot regen runs before any pilot tunnel comes up, so any
+            // pilot-mode node misses its initial override push. Now that
+            // the tunnel is live, retry the regen for this node so its
+            // overrides on disk match what central holds. Idempotent:
+            // pushOverrideToNode writes the same file every time, and a
+            // tunnel reconnect during runtime regenerates harmlessly.
+            void this.regenerateOverridesForNode(nodeId).catch((err) => {
+                this.logActivity({
+                    source: 'mesh', level: 'warn', type: 'forwarder.error',
+                    nodeId,
+                    message: `tunnel-up regen failed for node ${nodeId}: ${sanitizeForLog((err as Error).message)}`,
+                });
+            });
+        });
 
         await this.setupMeshNetwork();
         try {
@@ -578,17 +596,38 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!this.senchoIp) return null;
 
         const aliases: MeshAlias[] = Array.from(this.aliasCache.values()).map((a) => ({ host: a.host }));
-        const services = await this.inspectStackServices(nodeId, stackName);
-        const yaml = generateOverrideYaml({
-            services: services.map((s) => s.service),
-            aliases,
-            senchoIp: this.senchoIp,
-        });
+        const serviceNames = await this.getDeclaredStackServiceNames(stackName, nodeId);
 
         const dir = this.overrideDirFor(nodeId);
         await fs.mkdir(dir, { recursive: true });
         const file = path.resolve(dir, `${stackName}.override.yml`);
         if (!isPathWithinBase(file, dir)) return null;
+
+        // Defensive fallback: a deploy that runs `compose down` immediately
+        // before `compose up` removes the containers, but the compose file
+        // is still on disk so getDeclaredStackServiceNames returns the
+        // declared services. The fallback below covers the much narrower
+        // case where the compose file itself is unreadable (permission
+        // glitch, transient FS error, mid-write rename); in that case
+        // keep any existing override rather than overwrite with `services: {}`.
+        if (serviceNames.length === 0) {
+            const existing = await this.readExistingOverrideServiceNames(file);
+            if (existing.length > 0) {
+                this.logActivity({
+                    source: 'mesh', level: 'warn', type: 'mesh.override.preserved',
+                    nodeId,
+                    message: `mesh override preserved for ${stackName}: declared services unreadable, keeping ${existing.length} existing entries`,
+                    details: { stackName, preservedServices: existing },
+                });
+                return file;
+            }
+        }
+
+        const yaml = generateOverrideYaml({
+            services: serviceNames,
+            aliases,
+            senchoIp: this.senchoIp,
+        });
         await fs.writeFile(file, yaml, 'utf8');
         return file;
     }
@@ -610,14 +649,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 this.networkSetupError || 'mesh data plane unavailable on this node',
             );
         }
-        const services = await this.inspectLocalStackServices(stackName);
-        const yaml = generateOverrideYaml({
-            services: services.map((s) => s.service),
-            aliases,
-            senchoIp: this.senchoIp,
-        });
-
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const serviceNames = await this.getDeclaredStackServiceNames(stackName, localNodeId);
+
         const dir = this.overrideDirFor(localNodeId);
         await fs.mkdir(dir, { recursive: true });
         // path.basename strips any directory component as defense-in-depth
@@ -625,6 +659,30 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         // CodeQL's path-injection model.
         const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
         if (!isPathWithinBase(file, dir)) return null;
+
+        // Defensive fallback (mirror of ensureStackOverride): keep any
+        // existing override when the compose file is transiently
+        // unreadable. The remote that pushed this update will retry on
+        // its next regen tick, so a one-shot read failure should not
+        // wipe out a working override.
+        if (serviceNames.length === 0) {
+            const existing = await this.readExistingOverrideServiceNames(file);
+            if (existing.length > 0) {
+                this.logActivity({
+                    source: 'mesh', level: 'warn', type: 'mesh.override.preserved',
+                    nodeId: localNodeId,
+                    message: `mesh override preserved for ${stackName}: declared services unreadable, keeping ${existing.length} existing entries`,
+                    details: { stackName, preservedServices: existing },
+                });
+                return file;
+            }
+        }
+
+        const yaml = generateOverrideYaml({
+            services: serviceNames,
+            aliases,
+            senchoIp: this.senchoIp,
+        });
         await fs.writeFile(file, yaml, 'utf8');
         return file;
     }
@@ -767,6 +825,66 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
     public async listAliases(): Promise<MeshGlobalAlias[]> {
         return Array.from(this.aliasCache.values());
+    }
+
+    /**
+     * Read the local stack's compose file and return its declared service
+     * names. Used by the override-write paths so a deploy that has just
+     * torn containers down still emits a complete services map even
+     * though Dockerode briefly returns no containers. Independent of
+     * runtime container state, so the override stays correct across the
+     * deploy lifecycle.
+     *
+     * Returns [] when the compose file is missing, unreadable, or fails
+     * to parse. Combined with the defensive fallback in
+     * {@link ensureStackOverride} / {@link applyLocalOverride} a transient
+     * empty result does not clobber a known-good override.
+     *
+     * LIMITATION: stacks that pull services in via compose `extends:` or
+     * `include:` will not have those external services covered. The
+     * top-level YAML.parse is sufficient for the supported compose
+     * shapes; if extends/include usage emerges, swap to
+     * `docker compose config --services` (subprocess).
+     */
+    public async getDeclaredStackServiceNames(stackName: string, nodeId?: number): Promise<string[]> {
+        if (!isValidStackName(stackName)) return [];
+        const targetNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+        try {
+            const fsSvc = FileSystemService.getInstance(targetNodeId);
+            const filename = await fsSvc.getComposeFilename(stackName);
+            const baseDir = fsSvc.getBaseDir();
+            const composePath = path.join(baseDir, stackName, filename);
+            // Defense-in-depth on top of isValidStackName + getComposeFilename.
+            if (!isPathWithinBase(composePath, baseDir)) return [];
+            const content = await fs.readFile(composePath, 'utf8');
+            const parsed = YAML.parse(content) as { services?: Record<string, unknown> } | null;
+            const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
+            if (!services) return [];
+            return Object.keys(services).filter((name) => /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name));
+        } catch (err) {
+            console.warn(
+                '[MeshService] getDeclaredStackServiceNames failed:',
+                sanitizeForLog((err as Error).message),
+            );
+            return [];
+        }
+    }
+
+    /**
+     * Parse an existing mesh override file and extract the service names
+     * it already lists. Used by the defensive fallback so a transient
+     * empty compose-file read does not clobber a known-good override.
+     */
+    private async readExistingOverrideServiceNames(filePath: string): Promise<string[]> {
+        try {
+            const content = await fs.readFile(filePath, 'utf8');
+            const parsed = YAML.parse(content) as { services?: Record<string, unknown> } | null;
+            const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
+            if (!services) return [];
+            return Object.keys(services);
+        } catch {
+            return [];
+        }
     }
 
     /**
@@ -1181,6 +1299,17 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     private openCrossNode(target: MeshTarget, src: net.Socket): void {
+        // Log every dispatch entry. Same-node logs route.resolve.ok on
+        // its TCP `connect` event; cross-node only logs route.resolve.ok
+        // once tcp_open_ack arrives from the agent. Without this entry
+        // log, a stuck cross-node dial leaves zero events in the activity
+        // buffer even though the prober's TCP handshake completed.
+        this.logActivity({
+            source: 'mesh', level: 'info', type: 'route.dispatch',
+            nodeId: target.nodeId, alias: target.alias,
+            message: `cross-node dispatch to ${target.alias} on node ${target.nodeId}`,
+        });
+
         const tcpStream = this.dialMeshTcpStream(target);
         if (!tcpStream) {
             this.logActivity({
@@ -1195,7 +1324,27 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
         const record = this.registerActiveStream(target.alias, tcpStream.streamId);
         const t0 = Date.now();
+
+        // Timer guards against the agent never returning a tcp_open_ack
+        // (broken pilot, frame dropped, dial stuck after handshake).
+        // Without this the stream sits forever and the operator sees
+        // nothing in the activity log between dispatch and close.
+        let openTimer: NodeJS.Timeout | null = setTimeout(() => {
+            openTimer = null;
+            this.logActivity({
+                source: 'pilot', level: 'warn', type: 'tunnel.fail',
+                nodeId: target.nodeId, alias: target.alias, streamId: record.streamId,
+                message: `cross-node dial to ${target.alias} timed out waiting for tcp_open_ack`,
+            });
+            try { tcpStream.destroy(); } catch { /* ignore */ }
+            try { src.destroy(); } catch { /* ignore */ }
+        }, PROBE_TIMEOUT_MS);
+        const clearOpenTimer = () => {
+            if (openTimer) { clearTimeout(openTimer); openTimer = null; }
+        };
+
         tcpStream.on('open', () => {
+            clearOpenTimer();
             this.logActivity({
                 source: 'mesh', level: 'info', type: 'route.resolve.ok',
                 nodeId: target.nodeId, alias: target.alias, streamId: record.streamId,
@@ -1208,6 +1357,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             try { src.write(chunk); } catch { /* ignore */ }
         });
         tcpStream.on('error', (err: Error) => {
+            clearOpenTimer();
             this.logActivity({
                 source: 'pilot', level: 'error', type: 'tunnel.fail',
                 nodeId: target.nodeId, alias: target.alias, streamId: record.streamId,
@@ -1217,6 +1367,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             try { src.destroy(); } catch { /* ignore */ }
         });
         tcpStream.on('close', () => {
+            clearOpenTimer();
             this.activeStreams.delete(record.streamId);
             try { src.end(); } catch { /* ignore */ }
         });
@@ -1225,8 +1376,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             tcpStream.write(chunk);
         });
         src.on('end', () => tcpStream.end());
-        src.on('close', () => tcpStream.destroy());
-        src.on('error', () => tcpStream.destroy());
+        src.on('close', () => { clearOpenTimer(); tcpStream.destroy(); });
+        src.on('error', () => { clearOpenTimer(); tcpStream.destroy(); });
     }
 
     private registerActiveStream(alias: string, streamId?: number): ActiveStreamRecord {
