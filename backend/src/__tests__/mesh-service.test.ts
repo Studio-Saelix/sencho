@@ -33,6 +33,7 @@ beforeEach(() => {
         senchoIp: string | null;
         meshSubnet: string;
         networkSetupError: string | null;
+        selfCentralNodeId: number | null;
     };
     svc.aliasCache = new Map();
     svc.aliasByPort = new Map();
@@ -43,6 +44,8 @@ beforeEach(() => {
     svc.senchoIp = '172.30.0.2';
     svc.meshSubnet = '172.30.0.0/24';
     svc.networkSetupError = null;
+    svc.selfCentralNodeId = null;
+    delete process.env.SENCHO_ENROLL_TOKEN;
     vi.restoreAllMocks();
 });
 
@@ -807,5 +810,97 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+});
+
+describe('MeshService pilot handleAccept dispatch', () => {
+    function makeEnrollToken(nodeId: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+        const payload = Buffer.from(JSON.stringify({ scope: 'pilot_enroll', nodeId })).toString('base64url');
+        return `${header}.${payload}.fakesig`;
+    }
+
+    it('resolveSelfCentralNodeId extracts nodeId from SENCHO_ENROLL_TOKEN', () => {
+        process.env.SENCHO_ENROLL_TOKEN = makeEnrollToken(14);
+        const svc = MeshService.getInstance() as unknown as {
+            resolveSelfCentralNodeId: () => number;
+        };
+        expect(svc.resolveSelfCentralNodeId()).toBe(14);
+    });
+
+    it('resolveSelfCentralNodeId falls back to local default when token is absent', () => {
+        delete process.env.SENCHO_ENROLL_TOKEN;
+        const svc = MeshService.getInstance() as unknown as {
+            resolveSelfCentralNodeId: () => number;
+        };
+        const db = DatabaseService.getInstance();
+        const defaultId = db.getDefaultNode()?.id ?? 1;
+        expect(svc.resolveSelfCentralNodeId()).toBe(defaultId);
+    });
+
+    it('resolveSelfCentralNodeId falls back to local default for a malformed token', () => {
+        process.env.SENCHO_ENROLL_TOKEN = 'not.a.jwt';
+        const svc = MeshService.getInstance() as unknown as {
+            resolveSelfCentralNodeId: () => number;
+        };
+        const db = DatabaseService.getInstance();
+        const defaultId = db.getDefaultNode()?.id ?? 1;
+        expect(svc.resolveSelfCentralNodeId()).toBe(defaultId);
+    });
+
+    it('handleAccept routes same-node alias to openSameNode on a pilot', async () => {
+        const svc = MeshService.getInstance();
+        const internals = svc as unknown as {
+            selfCentralNodeId: number | null;
+            aliasByPort: Map<number, unknown>;
+            openSameNode: (t: MeshTarget, s: unknown) => Promise<void>;
+            openCrossNode: (t: MeshTarget, s: unknown) => void;
+        };
+        internals.selfCentralNodeId = 14;
+        internals.aliasByPort.set(9001, {
+            host: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+            nodeId: 14,
+            nodeName: 'sencho-pilot-test',
+            stackName: 'audit-mesh-pilot',
+            serviceName: 'echo',
+            port: 9001,
+        });
+
+        const openSame = vi.spyOn(internals, 'openSameNode').mockResolvedValue(undefined);
+        const openCross = vi.spyOn(internals, 'openCrossNode').mockImplementation(() => undefined);
+        const fakeSrc = { remoteAddress: '127.0.0.1', destroy: vi.fn() } as unknown as import('net').Socket;
+
+        await svc.handleAccept(9001, fakeSrc);
+
+        expect(openSame).toHaveBeenCalledOnce();
+        expect(openCross).not.toHaveBeenCalled();
+    });
+
+    it('handleAccept routes cross-node alias to openCrossNode on a pilot', async () => {
+        const svc = MeshService.getInstance();
+        const internals = svc as unknown as {
+            selfCentralNodeId: number | null;
+            aliasByPort: Map<number, unknown>;
+            openSameNode: (t: MeshTarget, s: unknown) => Promise<void>;
+            openCrossNode: (t: MeshTarget, s: unknown) => void;
+        };
+        internals.selfCentralNodeId = 14;
+        internals.aliasByPort.set(9000, {
+            host: 'echo.audit-mesh-prod.Local.sencho',
+            nodeId: 1,
+            nodeName: 'Local',
+            stackName: 'audit-mesh-prod',
+            serviceName: 'echo',
+            port: 9000,
+        });
+
+        const openSame = vi.spyOn(internals, 'openSameNode').mockResolvedValue(undefined);
+        const openCross = vi.spyOn(internals, 'openCrossNode').mockImplementation(() => undefined);
+        const fakeSrc = { remoteAddress: '127.0.0.1', destroy: vi.fn() } as unknown as import('net').Socket;
+
+        await svc.handleAccept(9000, fakeSrc);
+
+        expect(openCross).toHaveBeenCalledOnce();
+        expect(openSame).not.toHaveBeenCalled();
     });
 });
