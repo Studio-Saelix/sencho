@@ -1031,6 +1031,44 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
     }
 
+    public async listLocalStacks(): Promise<string[]> {
+        const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        return FileSystemService.getInstance(localNodeId).getStacks();
+    }
+
+    /**
+     * Local nodes read the filesystem; remote nodes fetch their own
+     * Sencho's `/api/mesh/local-stacks` because the remote's compose
+     * directory is not visible from central (pilot's filesystem lives
+     * on a different host).
+     */
+    public async listStacksOnNode(nodeId: number): Promise<string[]> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) return [];
+        if (node.type !== 'remote') return this.listLocalStacks();
+
+        try {
+            const res = await this.proxyFetch(nodeId, 'GET', '/api/mesh/local-stacks', undefined, 5_000);
+            if (!res.ok) {
+                console.error(`[MeshService] listStacksOnNode: HTTP ${res.status} from node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return [];
+            }
+            const body = await res.json() as { stacks?: unknown };
+            if (!Array.isArray(body.stacks)) return [];
+            return body.stacks.filter((s): s is string => typeof s === 'string');
+        } catch (err) {
+            // proxyFetch throws MeshError('push_failed') when getProxyTarget
+            // returns null (e.g. pilot tunnel offline). Treat the same as a
+            // non-OK response: empty list.
+            if (err instanceof MeshError && err.code === 'push_failed') {
+                console.warn(`[MeshService] listStacksOnNode: no proxy target for node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return [];
+            }
+            console.error('[MeshService] listStacksOnNode remote unreachable:', sanitizeForLog((err as Error).message));
+            return [];
+        }
+    }
+
     /**
      * Build a `fetch` against a remote Sencho's API with the bearer token
      * and the proxy tier/variant headers in place. Centralizes the header
