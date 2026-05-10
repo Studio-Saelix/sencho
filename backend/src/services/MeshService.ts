@@ -174,6 +174,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private started = false;
     private aliasCache = new Map<string, MeshGlobalAlias>();
     private aliasByPort = new Map<number, MeshGlobalAlias>();
+    // Populated on pilot nodes via the D-1 override push. Central's
+    // db.listMeshStacks() is authoritative on central; pilots have no
+    // mesh_stacks rows (C-3 design), so the push payload carries the alias
+    // data they need to bind forwarder listeners for the reverse direction.
+    private pilotAliasOverlay = new Map<string, MeshGlobalAlias[]>();
     private activity: MeshActivityEvent[] = [];
     private activeStreams = new Map<number, ActiveStreamRecord>();
     private aliasRefreshTimer?: NodeJS.Timeout;
@@ -656,7 +661,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * network with its own subnet. Returns the absolute path on success
      * or null if path validation rejects the input.
      */
-    public async applyLocalOverride(stackName: string, aliases: MeshAlias[]): Promise<string | null> {
+    public async applyLocalOverride(
+        stackName: string,
+        aliases: MeshAlias[],
+        portAliases?: MeshGlobalAlias[],
+    ): Promise<string | null> {
         if (!isValidStackName(stackName)) return null;
         if (!this.senchoIp) {
             throw new MeshError(
@@ -699,6 +708,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             senchoIp: this.senchoIp,
         });
         await fs.writeFile(file, yaml, 'utf8');
+        if (portAliases && portAliases.length > 0) {
+            this.pilotAliasOverlay.set(stackName, portAliases);
+            await this.refreshAliasCache();
+            await this.syncForwarderListeners();
+        }
         return file;
     }
 
@@ -713,6 +727,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
         if (!isPathWithinBase(file, dir)) return;
         try { await fs.unlink(file); } catch { /* ignore not-exist */ }
+        if (this.pilotAliasOverlay.delete(stackName)) {
+            await this.refreshAliasCache();
+            await this.syncForwarderListeners();
+        }
     }
 
     private async removeStackOverride(nodeId: number, stackName: string): Promise<void> {
@@ -832,6 +850,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     next.set(host, alias);
                     if (!portMap.has(port)) portMap.set(port, alias);
                 }
+            }
+        }
+        // Merge pilot overlay. Invariant: on central, pilotAliasOverlay is
+        // always empty (DB is authoritative); on pilots, db.listMeshStacks()
+        // returns empty (C-3), so the two populations are mutually exclusive
+        // and the first-write-wins portMap policy is safe.
+        for (const overlayAliases of this.pilotAliasOverlay.values()) {
+            for (const alias of overlayAliases) {
+                next.set(alias.host, alias);
+                if (!portMap.has(alias.port)) portMap.set(alias.port, alias);
             }
         }
         this.aliasCache = next;
@@ -1036,12 +1064,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             return;
         }
 
-        const aliases: MeshAlias[] = Array.from(this.aliasCache.values()).map((a) => ({ host: a.host }));
+        const portAliases: MeshGlobalAlias[] = Array.from(this.aliasCache.values());
+        const aliases: MeshAlias[] = portAliases.map((a) => ({ host: a.host }));
         const res = await this.proxyFetch(
             nodeId,
             'PUT',
             `/api/mesh/local-override/${encodeURIComponent(stackName)}`,
-            { aliases },
+            { aliases, portAliases },
             5_000,
         );
         if (res.status === 404) {
