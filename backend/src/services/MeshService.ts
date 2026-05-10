@@ -592,13 +592,26 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     public async ensureStackOverride(nodeId: number, stackName: string): Promise<string | null> {
         if (!isValidStackName(stackName)) return null;
         const db = DatabaseService.getInstance();
-        if (!db.isMeshStackEnabled(nodeId, stackName)) return null;
+        const dir = this.overrideDirFor(nodeId);
+        if (!db.isMeshStackEnabled(nodeId, stackName)) {
+            // Pilot nodes intentionally have no mesh_stacks rows (opt-in state
+            // lives on central per the C-3 design). Use file-presence as the
+            // fallback: if central pushed an override via applyLocalOverride, return
+            // that path so ComposeService picks it up on the next deploy.
+            const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
+            if (!isPathWithinBase(file, dir)) return null;
+            try {
+                await fs.access(file);
+                return file;
+            } catch {
+                return null;
+            }
+        }
         if (!this.senchoIp) return null;
 
         const aliases: MeshAlias[] = Array.from(this.aliasCache.values()).map((a) => ({ host: a.host }));
         const serviceNames = await this.getDeclaredStackServiceNames(stackName, nodeId);
 
-        const dir = this.overrideDirFor(nodeId);
         await fs.mkdir(dir, { recursive: true });
         // path.basename mirrors the applyLocalOverride pattern (and is
         // the form CodeQL's path-injection model recognizes).
@@ -705,7 +718,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private async removeStackOverride(nodeId: number, stackName: string): Promise<void> {
         if (!isValidStackName(stackName)) return;
         const dir = this.overrideDirFor(nodeId);
-        const file = path.resolve(dir, `${stackName}.override.yml`);
+        const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
         if (!isPathWithinBase(file, dir)) return;
         try { await fs.unlink(file); } catch { /* ignore not-exist */ }
     }
