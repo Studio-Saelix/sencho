@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.5](https://github.com/Studio-Saelix/sencho/compare/v0.76.4...v0.76.5) (2026-05-10)
+
+
+### Fixed
+
+* **mesh:** push alias port map to pilot so reverse-direction forwarder binds listeners ([#1021](https://github.com/Studio-Saelix/sencho/issues/1021)) ([6ac7da9](https://github.com/Studio-Saelix/sencho/commit/6ac7da978c05e93b1239034b6f4ccdcfeb0f5256))
+
 ## [0.76.4](https://github.com/Studio-Saelix/sencho/compare/v0.76.3...v0.76.4) (2026-05-10)
 
 
