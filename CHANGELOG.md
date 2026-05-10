@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.7](https://github.com/Studio-Saelix/sencho/compare/v0.76.6...v0.76.7) (2026-05-10)
+
+
+### Fixed
+
+* **mesh:** enumerate stacks on remote pilot nodes for opt-in sheet ([#1025](https://github.com/Studio-Saelix/sencho/issues/1025)) ([b8af40d](https://github.com/Studio-Saelix/sencho/commit/b8af40d2b4f8d3e8f8b7ad79b764cc5d76846e5b))
+
 ## [0.76.6](https://github.com/Studio-Saelix/sencho/compare/v0.76.5...v0.76.6) (2026-05-10)
 
 
