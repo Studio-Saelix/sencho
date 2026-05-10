@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { MeshError, MeshService, type MeshRegenSummary } from '../services/MeshService';
+import { MeshError, MeshService, type MeshGlobalAlias, type MeshRegenSummary } from '../services/MeshService';
 import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
@@ -113,6 +113,20 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
 
 const MAX_ALIASES_PER_PUSH = 1024;
 
+function parsePortAlias(entry: unknown): MeshGlobalAlias | null {
+    const e = entry as Record<string, unknown>;
+    const { host, nodeId, nodeName, stackName, serviceName, port } = e ?? {};
+    if (
+        typeof host !== 'string' || host.length === 0 || host.length > 253 ||
+        typeof nodeId !== 'number' ||
+        typeof nodeName !== 'string' || nodeName.length === 0 ||
+        typeof stackName !== 'string' || stackName.length === 0 ||
+        typeof serviceName !== 'string' || serviceName.length === 0 ||
+        typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535
+    ) return null;
+    return { host, nodeId, nodeName, stackName, serviceName, port };
+}
+
 /**
  * Accepts a fleet-wide alias list from central and writes a mesh override
  * for the named stack onto THIS Sencho's local DATA_DIR. The pilot looks
@@ -125,7 +139,7 @@ meshRouter.put('/local-override/:stackName', async (req: Request, res: Response)
     if (!requireAdmiral(req, res)) return;
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
-    const body = req.body as { aliases?: unknown };
+    const body = req.body as { aliases?: unknown; portAliases?: unknown };
     if (!Array.isArray(body?.aliases)) { res.status(400).json({ error: 'Missing aliases array in body' }); return; }
     if (body.aliases.length > MAX_ALIASES_PER_PUSH) {
         res.status(413).json({ error: `Alias list exceeds ${MAX_ALIASES_PER_PUSH} entries` });
@@ -142,8 +156,20 @@ meshRouter.put('/local-override/:stackName', async (req: Request, res: Response)
         }
         aliases.push({ host });
     }
+    const portAliases: MeshGlobalAlias[] = [];
+    if (Array.isArray(body?.portAliases)) {
+        if (body.portAliases.length > MAX_ALIASES_PER_PUSH) {
+            res.status(413).json({ error: `portAliases list exceeds ${MAX_ALIASES_PER_PUSH} entries` });
+            return;
+        }
+        for (const entry of body.portAliases) {
+            const parsed = parsePortAlias(entry);
+            if (!parsed) { res.status(400).json({ error: 'Invalid portAliases entry' }); return; }
+            portAliases.push(parsed);
+        }
+    }
     try {
-        const written = await MeshService.getInstance().applyLocalOverride(stackName, aliases);
+        const written = await MeshService.getInstance().applyLocalOverride(stackName, aliases, portAliases);
         if (!written) { res.status(400).json({ error: 'Refused to write override (path validation failed)' }); return; }
         res.json({ ok: true, path: written });
     } catch (err) {
