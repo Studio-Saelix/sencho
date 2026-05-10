@@ -111,6 +111,24 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
     }
 });
 
+/**
+ * Returns the LOCAL Sencho's compose stacks. Always queries this
+ * instance's own filesystem regardless of `x-node-id`. Central calls this
+ * endpoint against each remote node via the existing proxy chain
+ * (`NodeRegistry.getProxyTarget`) so the mesh opt-in sheet can show the
+ * stacks deployed on the remote pilot rather than central's own list.
+ */
+meshRouter.get('/local-stacks', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    try {
+        const stacks = await MeshService.getInstance().listLocalStacks();
+        res.json({ stacks });
+    } catch (err) {
+        console.warn('[mesh] /local-stacks failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to list local stacks' });
+    }
+});
+
 const MAX_ALIASES_PER_PUSH = 1024;
 
 function parsePortAlias(entry: unknown): MeshGlobalAlias | null {
@@ -207,10 +225,9 @@ meshRouter.get('/nodes/:nodeId/stacks', async (req: Request, res: Response): Pro
     try {
         const db = DatabaseService.getInstance();
         const optedIn = new Set(db.listMeshStacks(nodeId).map((s) => s.stack_name));
-        const fsSvc = (await import('../services/FileSystemService')).FileSystemService.getInstance(nodeId);
-        const stacks = await fsSvc.getStacks();
+        const stacks = await MeshService.getInstance().listStacksOnNode(nodeId);
         res.json({
-            stacks: stacks.map((stackName: string) => ({
+            stacks: stacks.map((stackName) => ({
                 name: stackName,
                 optedIn: optedIn.has(stackName),
             })),
