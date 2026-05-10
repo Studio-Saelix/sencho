@@ -133,20 +133,6 @@ The **Cloud Snapshots** panel in **Settings → System → Cloud Backup** lists 
 
 For in-place rollback, use the **Restore** action on the snapshot detail view as described above; the local copy is the source of truth for live restore. Cloud snapshots cover the disaster-recovery case where the local disk is gone: download the archive, extract it, and bring up a fresh Sencho instance pointed at the recovered files.
 
-### Cloud Backup troubleshooting
-
-#### Bad credentials
-
-If **Test** reports an authentication error, double-check the Access Key ID, Secret Access Key, and bucket. Some providers require you to enable S3-compatible API access on the bucket separately. For MinIO, verify the user has read/write permission on the target bucket.
-
-#### Over quota (Sencho Cloud Backup)
-
-Sencho Cloud Backup has a 500 MB allowance per license. When you hit the cap, new uploads fail with a quota error. Delete older cloud snapshots from the **Cloud Snapshots** panel to free space. The local copies are unaffected.
-
-#### Network timeout or 5xx error
-
-Transient errors surface as a notification. Retry by clicking the cloud-upload action on the snapshot row, or wait for the next scheduled snapshot which will retry on its own. Persistent failures usually indicate an endpoint outage; verify the storage provider is reachable from your Sencho host.
-
 ## Access control
 
 | Action | Admin | Node Admin | Deployer | Auditor | Viewer |
@@ -169,25 +155,26 @@ Snapshots are stored in Sencho's SQLite database. Compose files are typically sm
 
 ## Troubleshooting
 
-### Snapshot shows skipped nodes
-
-If a remote node is offline, unreachable, or its API token has expired, the node is skipped during snapshot creation. The snapshot list shows a warning icon with a count of skipped nodes. Open the snapshot's detail view to see which nodes were skipped and the reason for each.
-
-Common causes:
-- The remote Sencho instance is stopped or restarting
-- The node's API URL or token was changed after it was added
-- A firewall or network issue is blocking the connection between nodes
-
-To resolve, verify the remote node is running and reachable, then update the node's API URL and token in the Fleet settings if needed. Create a new snapshot after fixing the connectivity issue.
-
-### Restore fails with "Target node no longer exists"
-
-This error occurs when the node recorded in the snapshot has been removed from your fleet since the snapshot was taken. You cannot restore to a node that is no longer registered. Re-add the node first, then retry the restore.
-
-### Restore fails with "No files found for this stack"
-
-The stack you're trying to restore may not have been captured in the snapshot (for example, if the compose file was missing or unreadable at the time the snapshot was taken). Open the snapshot's detail view to verify which stacks and files are available.
-
-### Diagnostic logging
-
-If you need to investigate snapshot operations in detail, enable **Developer Mode** in **Settings > Developer**. This activates diagnostic logging for snapshot creation (per-node capture timing and file counts), restore operations, and scheduled snapshot execution. Diagnostic logs appear in the server's standard output with a `:debug` suffix.
+<AccordionGroup>
+  <Accordion title="A snapshot shows skipped nodes">
+    If a remote node is offline, unreachable, or its API token has expired, the node is skipped during snapshot creation. The list shows a warning icon with a count of skipped nodes, and the snapshot's detail view names each one along with the reason. Common causes are the remote Sencho instance being stopped or restarting, the node's API URL or token having been changed after it was added, or a firewall or network issue blocking the connection. Verify the remote is running and reachable, update the node's API URL and token in **Settings → System → Nodes** if needed, then create a new snapshot.
+  </Accordion>
+  <Accordion title="Restore fails with 'Target node no longer exists'">
+    The node recorded in the snapshot has been removed from the fleet since the snapshot was taken. Snapshots reference nodes by registry ID, so a node that was deleted and re-added is treated as a different target. Re-add the node first, then retry the restore against the freshly registered row.
+  </Accordion>
+  <Accordion title="Restore fails with 'No files found for this stack'">
+    The stack was not captured in the snapshot, usually because its compose file was missing or unreadable on disk at the time the snapshot was taken. Open the snapshot's detail view to verify which stacks and files are available, and pick a different snapshot if the one you have is incomplete.
+  </Accordion>
+  <Accordion title="Cloud Backup Test reports an authentication error">
+    Double-check the Access Key ID, Secret Access Key, and bucket name; one wrong character is the most common cause. Some providers require S3-compatible API access to be enabled on the bucket separately from the credentials. For MinIO, confirm the user has read/write permission on the target bucket. After correcting the values, click **Test** again before saving.
+  </Accordion>
+  <Accordion title="Cloud uploads fail after hitting the 500 MB quota">
+    Sencho Cloud Backup carries a 500 MB allowance per license. Once you hit the cap, new uploads fail with a quota error and the storage gauge in the settings page reads at or near 500 MB. Free space by deleting older archives from the **Cloud Snapshots** panel in **Settings → System → Cloud Backup**. Local snapshots are unaffected by cloud deletions, so the in-place restore path stays intact. To raise the ceiling, switch the storage mode to **Custom S3 (BYOB)** and point at a bucket you control.
+  </Accordion>
+  <Accordion title="Cloud upload returns a network timeout or 5xx error">
+    Transient errors surface as a notification and leave the local snapshot in place. Retry by clicking the cloud-upload action on the snapshot row, or wait for the next scheduled snapshot which retries on its own. Persistent failures usually indicate an endpoint outage; verify the storage provider is reachable from your Sencho host (custom S3 endpoints often sit behind a different DNS or firewall path than the rest of your traffic).
+  </Accordion>
+  <Accordion title="I need more detail about a snapshot or restore operation">
+    Enable **Developer Mode** under **Settings → Developer** to activate diagnostic logging for snapshot creation (per-node capture timing and file counts), restore operations, and scheduled snapshot execution. Diagnostic logs appear in the server's standard output with a `:debug` suffix.
+  </Accordion>
+</AccordionGroup>
