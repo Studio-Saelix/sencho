@@ -11,13 +11,13 @@ Create point-in-time snapshots of every `compose.yaml` and `.env` file across yo
 
 ## Creating a snapshot
 
-1. Navigate to **Fleet View** and select the **Snapshots** tab
-2. Click **Create Snapshot** in the top-right corner
-3. An inline form appears with an optional description field (e.g. "Before v2 migration")
+1. Navigate to **Fleet** and select the **Snapshots** tab
+2. Click **Create Snapshot**
+3. An inline form appears above the snapshot list with an optional description field (e.g. "Before v2 migration")
 4. Click **Create** to capture files from every reachable node
 
 <Frame>
-  <img src="/images/fleet-backups/create-snapshot.png" alt="Inline form for creating a fleet snapshot with an optional description field" />
+  <img src="/images/fleet-backups/create-snapshot.png" alt="Inline create snapshot form with optional description field, showing Create and Cancel buttons above the snapshot table" />
 </Frame>
 
 During creation, Sencho connects to each node in parallel:
@@ -35,23 +35,25 @@ Fleet snapshots can also be created automatically on a recurring schedule. Navig
 The snapshot list shows each snapshot in a table with the following columns:
 
 - **Date** - when the snapshot was taken
-- **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones
-- **Scope** - how many nodes and stacks were captured (e.g. "2 nodes, 22 stacks")
+- **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Cloud Backup is configured, an upload icon in this column marks snapshots that have been mirrored off-site.
+- **Scope** - how many nodes and stacks were captured (e.g. "3 nodes, 21 stacks")
 - **Warnings** - a warning icon with a count if any nodes were skipped, or "None"
-- **Actions** - **View** to open the detail view, and a delete button for admins
+- **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored (Admiral only), and a delete button for admins
 
 <Frame>
-  <img src="/images/fleet-backups/browse-snapshots.png" alt="Snapshot list showing date, description, scope, warnings, and action buttons" />
+  <img src="/images/fleet-backups/browse-snapshots.png" alt="Snapshot list showing paginated rows with date, description with cloud upload indicator, scope, warnings, and action buttons" />
 </Frame>
 
 ## Snapshot detail view
 
-Click **View** on any snapshot to open the detail view. The header card displays the snapshot's title (or "Untitled Snapshot"), who created it, when, and badge counts for nodes and stacks captured.
+Click **View** on any snapshot to open the detail view. Use **Back to Snapshots** in the top-left to return to the list.
+
+The header shows the snapshot's title (or "Untitled Snapshot"), who created it, when, and badge counts for nodes and stacks captured.
 
 Below the header, each node appears as a collapsible card. Expand a node to see its stacks, then expand a stack to see individual files. Each file has a **Preview** button that renders the file contents inline.
 
 <Frame>
-  <img src="/images/fleet-backups/snapshot-detail.png" alt="Snapshot detail view showing a collapsible tree of nodes, stacks, and files with preview buttons" />
+  <img src="/images/fleet-backups/snapshot-detail.png" alt="Snapshot detail view with a node expanded, showing a stack expanded with a compose file, Preview button, and Restore button" />
 </Frame>
 
 If any nodes were unreachable during snapshot creation, a warning banner appears at the top of the detail view listing each skipped node and the reason it was skipped.
@@ -62,12 +64,12 @@ Admins can restore individual stacks from any snapshot:
 
 1. Open a snapshot's detail view
 2. Expand the node and stack you want to restore
-3. Click **Restore** below the file list
+3. Click **Restore** below the stack's file list
 4. A confirmation dialog appears. Optionally check **Redeploy stack after restore** to immediately apply the restored configuration.
 5. Click **Restore** to confirm
 
 <Frame>
-  <img src="/images/fleet-backups/restore-dialog.png" alt="Restore confirmation dialog with a redeploy checkbox" />
+  <img src="/images/fleet-backups/restore-dialog.png" alt="Restore confirmation dialog showing the target stack and node name, a redeploy checkbox, and Cancel and Restore buttons" />
 </Frame>
 
 Sencho writes the snapshot's files back to the target node:
@@ -85,18 +87,24 @@ Admins can delete snapshots from the list view by clicking the trash icon on the
 ## Cloud Backup
 
 <Note>
-  Cloud Backup requires an Admiral license. Configure it in **Settings → Cloud Backup**.
+  Cloud Backup requires an Admiral license. Configure it in **Settings → System → Cloud Backup**.
 </Note>
 
-Cloud Backup mirrors every fleet snapshot to off-site storage so your snapshots survive local disk failure. Two storage modes are supported.
+Cloud Backup mirrors every fleet snapshot to off-site storage so your snapshots survive local disk failure. The Cloud Backup settings page (reached via **Settings → System → Cloud Backup**) shows a header with your current scope, provider, storage used, and total snapshot count in the cloud. Two storage modes are supported.
 
 ### Sencho Cloud Backup (included)
 
-A managed 500 MB allowance backed by Cloudflare R2, included with every Admiral license. Open **Settings → Cloud Backup**, choose **Sencho Cloud Backup**, and click **Activate**. Sencho exchanges your license key for scoped storage credentials and starts replicating new snapshots automatically. The settings panel shows your storage usage and lets you reprovision credentials if needed.
+A managed 500 MB allowance backed by Cloudflare R2, included with every Admiral license. Open **Settings → System → Cloud Backup**, choose **Sencho Cloud Backup (Included)**, and click **Activate**. Sencho exchanges your license key for scoped storage credentials and starts replicating new snapshots automatically.
+
+Once active, the settings page shows a storage gauge (used / 500 MB and object count), a status message confirming auto-upload is on, and a **Reprovision** button to refresh credentials if needed. You can verify connectivity at any time with the **Test** button.
+
+<Frame>
+  <img src="/images/cloud-backup/cloud-backup-active.png" alt="Cloud Backup settings page with Sencho Cloud Backup active, showing the storage gauge, auto-upload status, and the Cloud Snapshots list" />
+</Frame>
 
 ### Custom S3 (BYOB)
 
-Bring any S3-compatible bucket: AWS S3, MinIO, Backblaze B2, Wasabi, or your own Cloudflare R2 token. Choose **Custom S3** in the storage-mode dropdown and fill in:
+Bring any S3-compatible bucket: AWS S3, MinIO, Backblaze B2, Wasabi, or your own Cloudflare R2 token. Choose **Custom S3 (BYOB)** in the storage-mode dropdown and fill in:
 
 - **Endpoint URL** (e.g. `https://s3.us-east-1.amazonaws.com`, `https://my-minio.example.com:9000`)
 - **Region** (e.g. `us-east-1`, or `auto` for R2)
@@ -107,15 +115,19 @@ Bring any S3-compatible bucket: AWS S3, MinIO, Backblaze B2, Wasabi, or your own
 
 Click **Test** to verify connectivity, then **Save**. Secret keys are encrypted at rest. Sencho only sends them to your configured endpoint.
 
+<Frame>
+  <img src="/images/cloud-backup/cloud-backup-custom.png" alt="Custom S3 configuration form with fields for Endpoint URL, Region, Bucket, Path Prefix, Access Key ID, Secret Access Key, and an Auto-upload toggle" />
+</Frame>
+
 ### Manual upload vs auto-upload
 
 When auto-upload is on, every fleet snapshot is replicated as soon as it is created. Manual snapshots from the **Fleet → Snapshots** view upload asynchronously so the UI returns immediately; scheduled snapshots block on the upload so the task's success status reflects cloud durability.
 
-To upload a single snapshot on demand, open the **Snapshots** tab in Fleet View. Each row that hasn't been mirrored yet shows a cloud-upload action next to the **View** button. Once a snapshot is in the cloud, a small cloud icon appears next to its description.
+To upload a single snapshot on demand, open the **Snapshots** tab in Fleet View. Each row that hasn't been mirrored yet shows a cloud-upload action in the Actions column. Once a snapshot is in the cloud, an upload icon appears next to its description.
 
 ### Browsing and downloading cloud snapshots
 
-The **Cloud Snapshots** panel in **Settings → Cloud Backup** lists every archive currently in your bucket, with size and last-modified timestamp. Click the download icon to save a `.tar.gz` archive locally for off-host disaster recovery. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack.
+The **Cloud Snapshots** panel in **Settings → System → Cloud Backup** lists every archive currently in your bucket, with size and last-modified timestamp. Click the download icon to save a `.tar.gz` archive locally for off-host disaster recovery. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack.
 
 ### Restoring from a cloud snapshot
 
@@ -144,6 +156,12 @@ Transient errors surface as a notification. Retry by clicking the cloud-upload a
 | Create snapshot | Yes | No | No | No | No |
 | Restore from snapshot | Yes | No | No | No | No |
 | Delete snapshot | Yes | No | No | No | No |
+| Upload snapshot to cloud | Yes | No | No | No | No |
+| Delete cloud snapshot | Yes | No | No | No | No |
+
+<Note>
+  Cloud backup actions (upload, delete cloud snapshots) also require an Admiral license.
+</Note>
 
 ## Storage
 
