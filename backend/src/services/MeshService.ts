@@ -189,6 +189,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private senchoIp: string | null = null;
     private meshSubnet: string = DEFAULT_MESH_SUBNET;
     private networkSetupError: string | null = null;
+    // On a pilot node, central's DB id for this node (e.g. 14). Used by
+    // handleAccept to decide same-node vs cross-node; the pilotAliasOverlay
+    // carries nodeIds from central's perspective, so comparing against the
+    // pilot's own local DB id (always 1) inverts dispatch. Null on central
+    // (fallback to getDefaultNodeId()). Populated from SENCHO_ENROLL_TOKEN.
+    private selfCentralNodeId: number | null = null;
 
     private constructor() {
         super();
@@ -199,6 +205,24 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     public static getInstance(): MeshService {
         if (!MeshService.instance) MeshService.instance = new MeshService();
         return MeshService.instance;
+    }
+
+    private resolveSelfCentralNodeId(): number {
+        const tok = process.env.SENCHO_ENROLL_TOKEN;
+        if (tok) {
+            try {
+                // Extract payload only — signature verification not needed here;
+                // we only need the nodeId claim, not auth.
+                const [, b64] = tok.split('.');
+                const payload = JSON.parse(
+                    Buffer.from(b64, 'base64url').toString('utf8'),
+                ) as Record<string, unknown>;
+                if (typeof payload.nodeId === 'number') return payload.nodeId;
+            } catch {
+                // Malformed token; fall through to local default.
+            }
+        }
+        return NodeRegistry.getInstance().getDefaultNodeId();
     }
 
     public async start(): Promise<void> {
@@ -226,6 +250,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 });
             });
         });
+
+        this.selfCentralNodeId = this.resolveSelfCentralNodeId();
 
         await this.setupMeshNetwork();
         try {
@@ -259,7 +285,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const dataPlane = this.senchoIp ? 'ok' : `unavailable (${this.networkSetupError ?? 'unknown'})`;
         this.logActivity({
             source: 'mesh', level: this.senchoIp ? 'info' : 'warn', type: 'mesh.enable',
-            message: `MeshService started (data plane ${dataPlane})`,
+            message: `MeshService started (data plane ${dataPlane}, self nodeId ${this.selfCentralNodeId})`,
         });
     }
 
@@ -1208,8 +1234,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             try { src.destroy(); } catch { /* ignore */ }
             return;
         }
-        const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        if (target.nodeId === localNodeId) {
+        const selfNodeId = this.selfCentralNodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+        if (target.nodeId === selfNodeId) {
             await this.openSameNode(target, src);
         } else {
             this.openCrossNode(target, src);
