@@ -622,6 +622,47 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
             && /orphaned-stack/.test(e.message),
         )).toBe(true);
     });
+
+    it('returns a pushed override file on pilot nodes where isMeshStackEnabled is always false', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        // Simulate the pilot scenario: no mesh_stacks row (isMeshStackEnabled → false),
+        // but the override file already exists on disk, pushed by central via D-1.
+        const dataDir = process.env.DATA_DIR as string;
+        const overrideDir = path.join(dataDir, 'mesh', 'overrides', String(localNodeId));
+        fsSync.mkdirSync(overrideDir, { recursive: true });
+        const overrideFile = path.join(overrideDir, 'pilot-stack.override.yml');
+        fsSync.writeFileSync(overrideFile, [
+            'services:',
+            '  echo:',
+            '    networks:',
+            '      - sencho_mesh',
+            '    extra_hosts:',
+            '      - echo.pilot-stack.pilot.sencho:172.30.0.2',
+            'networks:',
+            '  sencho_mesh:',
+            '    external: true',
+        ].join('\n'), 'utf8');
+
+        // No mesh_stacks row → isMeshStackEnabled returns false.
+        const result = await svc.ensureStackOverride(localNodeId, 'pilot-stack');
+        expect(result).toBe(overrideFile);
+
+        // Cleanup.
+        fsSync.unlinkSync(overrideFile);
+    });
+
+    it('returns null for pilot nodes when no pushed override file exists', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        // No mesh_stacks row, no file on disk.
+        const result = await svc.ensureStackOverride(localNodeId, 'no-such-stack');
+        expect(result).toBeNull();
+    });
 });
 
 describe('MeshService tunnel-up regen (BUG-2)', () => {
