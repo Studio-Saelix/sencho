@@ -111,6 +111,7 @@ export async function resolveAllEnvFilePaths(nodeId: number, stackName: string):
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024, files: 1 },
+  preservePath: true,
 });
 
 function getRelPath(req: Request): string {
@@ -821,7 +822,14 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
 
 // ── File explorer endpoints ──
 
-type FsErrorCode = 'INVALID_PATH' | 'SYMLINK_ESCAPE' | 'IS_DIRECTORY' | 'NOT_EMPTY' | 'NOT_FOUND' | 'TOO_LARGE';
+type FsErrorCode =
+  | 'INVALID_PATH'
+  | 'SYMLINK_ESCAPE'
+  | 'IS_DIRECTORY'
+  | 'NOT_EMPTY'
+  | 'NOT_FOUND'
+  | 'TOO_LARGE'
+  | 'ALREADY_EXISTS';
 
 function sendFsError(
   res: Response,
@@ -839,11 +847,45 @@ function sendFsError(
   if (e.code === 'NOT_EMPTY') {
     return res.status(409).json({ error: e.message, code: e.code as FsErrorCode });
   }
+  if (e.code === 'EEXIST') {
+    return res.status(409).json({ error: e.message, code: 'ALREADY_EXISTS' satisfies FsErrorCode });
+  }
+  if (e.code === 'ENOTDIR') {
+    return res.status(400).json({ error: 'Target path is not a directory', code: 'INVALID_PATH' satisfies FsErrorCode });
+  }
   if (e.code === 'ENOENT') {
     return res.status(404).json({ error: opts.notFoundMessage ?? 'File not found', code: 'NOT_FOUND' });
   }
-  console.error(`[files] ${fallback}:`, e.message);
+  console.error(`[files] ${fallback}:`, sanitizeForLog(e.message));
   return res.status(500).json({ error: fallback });
+}
+
+function logFileOperation(level: 'info' | 'warn', message: string, details: Record<string, unknown>): void {
+  const cleaned = Object.fromEntries(
+    Object.entries(details).map(([key, value]) => [key, sanitizeForLog(value)]),
+  );
+  const log = level === 'warn' ? console.warn : console.log;
+  log(`[Files] ${message}`, cleaned);
+}
+
+function fsErrorCode(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException & { code?: unknown }).code;
+  return typeof code === 'string' ? code : 'UNKNOWN';
+}
+
+function logFileDiag(message: string, details: Record<string, unknown>): void {
+  if (DatabaseService.getInstance().getGlobalSettings().developer_mode !== '1') return;
+  const cleaned = Object.fromEntries(
+    Object.entries(details).map(([key, value]) => [key, sanitizeForLog(value)]),
+  );
+  console.debug(`[Files:diag] ${message}`, cleaned);
+}
+
+function isSafeUploadFilename(rawName: string): boolean {
+  if (!rawName || rawName === '.' || rawName === '..') return false;
+  if (rawName.includes('\0') || rawName.includes('/') || rawName.includes('\\')) return false;
+  if (/^[a-zA-Z]:/.test(rawName) || path.isAbsolute(rawName)) return false;
+  return path.basename(rawName) === rawName;
 }
 
 stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
@@ -852,10 +894,14 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('list start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const entries = await FileSystemService.getInstance(req.nodeId).listStackDirectory(stackName, relPath);
+    logFileDiag('list complete', { stackName, relPath, nodeId: req.nodeId, entries: entries.length, elapsedMs: Date.now() - startedAt });
     return res.json(entries);
   } catch (err: unknown) {
+    logFileOperation('warn', 'list failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to list directory');
   }
 });
@@ -867,10 +913,22 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath);
+    logFileDiag('read complete', {
+      stackName,
+      relPath,
+      nodeId: req.nodeId,
+      binary: result.binary,
+      oversized: result.oversized,
+      size: result.size,
+      elapsedMs: Date.now() - startedAt,
+    });
     return res.json(result);
   } catch (err: unknown) {
+    logFileOperation('warn', 'read failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to read file');
   }
 });
@@ -879,9 +937,12 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
   if (!requirePaid(req, res)) return;
   const stackName = req.params.stackName as string;
   const relPath = getRelPath(req);
-  if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
+  if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
+  if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('download start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const result = await FileSystemService.getInstance(req.nodeId).streamStackFile(stackName, relPath);
     res.setHeader('Content-Type', result.mime);
@@ -890,14 +951,16 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     const safeFilename = result.filename.replace(/[\\"]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
     result.stream.on('error', (streamErr) => {
-      console.error('[files] stream error:', streamErr);
+      console.error('[files] stream error:', sanitizeForLog(getErrorMessage(streamErr, 'unknown')));
       if (!res.headersSent) res.status(500).end();
       else res.destroy();
     });
     req.on('close', () => result.stream.destroy());
+    logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
     result.stream.pipe(res);
     return;
   } catch (err: unknown) {
+    logFileOperation('warn', 'download failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to download file');
   }
 });
@@ -924,15 +987,20 @@ stacksRouter.post(
     if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
       return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
     }
-    const safeName = path.basename(req.file.originalname);
-    if (!safeName || safeName === '.' || safeName === '..') {
+    const originalName = req.file.originalname;
+    if (!isSafeUploadFilename(originalName)) {
       return res.status(400).json({ error: 'Invalid filename' });
     }
-    const targetRelPath = relPath ? `${relPath}/${safeName}` : safeName;
+    const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
+    const startedAt = Date.now();
+    logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size });
     try {
       await FileSystemService.getInstance(req.nodeId).writeStackFileBuffer(stackName, targetRelPath, req.file.buffer);
+      logFileOperation('info', 'upload complete', { nodeId: req.nodeId, size: req.file.size });
+      logFileDiag('upload timing', { stackName, relPath: targetRelPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
       return res.status(204).send();
     } catch (err: unknown) {
+      logFileOperation('warn', 'upload failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
       return sendFsError(res, err, 'Failed to upload file', { notFoundMessage: 'Target directory not found' });
     }
   },
@@ -943,17 +1011,23 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
-  if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
+  if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
+  if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
   const { content } = req.body as { content?: unknown };
   if (typeof content !== 'string') {
     return res.status(400).json({ error: '"content" must be a string' });
   }
+  const startedAt = Date.now();
+  logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8') });
   try {
     await FileSystemService.getInstance(req.nodeId).writeStackFile(stackName, relPath, content);
+    logFileOperation('info', 'write complete', { nodeId: req.nodeId });
+    logFileDiag('write timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'write failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to write file');
   }
 });
@@ -968,10 +1042,15 @@ stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => 
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
   const recursive = req.query.recursive === '1';
+  const startedAt = Date.now();
+  logFileDiag('delete start', { stackName, relPath, recursive, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).deleteStackPath(stackName, relPath, recursive);
+    logFileOperation('info', 'delete complete', { nodeId: req.nodeId, recursive });
+    logFileDiag('delete timing', { stackName, relPath, recursive, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'delete failed', { nodeId: req.nodeId, recursive, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to delete path');
   }
 });
@@ -985,10 +1064,15 @@ stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('mkdir start', { stackName, relPath, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).mkdirStackPath(stackName, relPath);
+    logFileOperation('info', 'mkdir complete', { nodeId: req.nodeId });
+    logFileDiag('mkdir timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'mkdir failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to create folder');
   }
 });
@@ -1010,10 +1094,15 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
   if (!isValidRelativeStackPath(to)) {
     return res.status(400).json({ error: 'Invalid destination path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('rename start', { stackName, from, to, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).renameStackPath(stackName, from, to);
+    logFileOperation('info', 'rename complete', { nodeId: req.nodeId });
+    logFileDiag('rename timing', { stackName, from, to, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'rename failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to rename');
   }
 });
@@ -1025,10 +1114,14 @@ stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Resp
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('permissions read start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const result = await FileSystemService.getInstance(req.nodeId).getStackEntryMode(stackName, relPath);
+    logFileDiag('permissions read complete', { stackName, relPath, nodeId: req.nodeId, mode: result.octal, elapsedMs: Date.now() - startedAt });
     return res.json(result);
   } catch (err: unknown) {
+    logFileOperation('warn', 'permissions read failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to read permissions');
   }
 });
@@ -1046,10 +1139,15 @@ stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Resp
   if (typeof mode !== 'number') {
     return res.status(400).json({ error: '"mode" must be a number' });
   }
+  const startedAt = Date.now();
+  logFileDiag('chmod start', { stackName, relPath, nodeId: req.nodeId, mode });
   try {
     await FileSystemService.getInstance(req.nodeId).chmodStackPath(stackName, relPath, mode);
+    logFileOperation('info', 'chmod complete', { nodeId: req.nodeId, mode });
+    logFileDiag('chmod timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'chmod failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to set permissions');
   }
 });

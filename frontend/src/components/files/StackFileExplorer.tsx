@@ -150,10 +150,11 @@ export function StackFileExplorer({
             <FileUploadDropzone
               stackName={stackName}
               currentDir={currentDir}
+              canEdit={canEdit}
               onUploaded={refresh}
             />
           </div>
-          {isPaid && (
+          {isPaid && canEdit && (
             <Button
               variant="ghost"
               size="icon"
@@ -207,16 +208,18 @@ export function StackFileExplorer({
               )}
               Download
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 text-destructive hover:text-destructive hover:bg-destructive/10"
-              data-testid="file-action-delete"
-              onClick={() => setDeleteOpen(true)}
-            >
-              <Trash2 className="w-3.5 h-3.5 mr-1" strokeWidth={1.5} />
-              Delete
-            </Button>
+            {canEdit && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-destructive hover:text-destructive hover:bg-destructive/10"
+                data-testid="file-action-delete"
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-1" strokeWidth={1.5} />
+                Delete
+              </Button>
+            )}
           </div>
         )}
         <div className="flex-1 min-h-0">
@@ -297,6 +300,7 @@ export function StackFileExplorer({
         relPath={permissionsRelPath}
         entryName={permissionsEntryName}
         isPaid={isPaid}
+        canEdit={canEdit}
       />
     </div>
   );

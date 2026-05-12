@@ -35,6 +35,7 @@ export function FileTreeContextMenu({
   children,
 }: FileTreeContextMenuProps) {
   const isDir = entry.type === 'directory';
+  const canWrite = canEdit && isPaid;
 
   return (
     <ContextMenu>
@@ -42,7 +43,7 @@ export function FileTreeContextMenu({
       <ContextMenuContent className="min-w-[180px]">
         {isDir ? (
           <>
-            {isPaid && (
+            {canWrite && (
               <>
                 <ContextMenuItem
                   onSelect={() => onRequestNewFile(relPath)}
@@ -59,13 +60,13 @@ export function FileTreeContextMenu({
                 <ContextMenuSeparator />
               </>
             )}
-            {canEdit && (
+            {canWrite && (
               <ContextMenuItem onSelect={() => onRequestRename(relPath)}>
                 <Pencil className="h-4 w-4 mr-2" strokeWidth={1.5} />
                 <span>Rename</span>
               </ContextMenuItem>
             )}
-            {canEdit && (
+            {canWrite && (
               <>
                 <ContextMenuSeparator />
                 <ContextMenuItem
@@ -80,7 +81,7 @@ export function FileTreeContextMenu({
           </>
         ) : (
           <>
-            {canEdit && (
+            {canWrite && (
               <ContextMenuItem onSelect={() => onRequestRename(relPath)}>
                 <Pencil className="h-4 w-4 mr-2" strokeWidth={1.5} />
                 <span>Rename</span>
@@ -90,7 +91,7 @@ export function FileTreeContextMenu({
               <Lock className="h-4 w-4 mr-2" strokeWidth={1.5} />
               <span>Permissions</span>
             </ContextMenuItem>
-            {canEdit && (
+            {canWrite && (
               <>
                 <ContextMenuSeparator />
                 <ContextMenuItem

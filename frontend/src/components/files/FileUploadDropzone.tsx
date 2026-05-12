@@ -9,18 +9,20 @@ const MAX_BYTES = 25 * 1024 * 1024; // 25 MB
 interface FileUploadDropzoneProps {
   stackName: string;
   currentDir: string;
+  canEdit: boolean;
   onUploaded: () => void;
 }
 
 export function FileUploadDropzone({
   stackName,
   currentDir,
+  canEdit,
   onUploaded,
 }: FileUploadDropzoneProps) {
   const { isPaid } = useLicense();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  if (!isPaid) return null;
+  if (!isPaid || !canEdit) return null;
 
   const handleFile = async (file: File) => {
     if (file.size > MAX_BYTES) {
