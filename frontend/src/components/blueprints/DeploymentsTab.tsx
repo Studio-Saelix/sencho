@@ -95,12 +95,13 @@ export function DeploymentsTab() {
     return (
         <div className="space-y-5">
             {blueprints.length === 0 ? (
-                <BlueprintEmptyState onCreate={() => setCreateOpen(true)} />
+                <BlueprintEmptyState onCreate={() => setCreateOpen(true)} canCreate={canEdit} />
             ) : (
                 <BlueprintCatalog
                     blueprints={blueprints}
                     onSelect={setSelectedId}
                     onCreate={() => setCreateOpen(true)}
+                    canCreate={canEdit}
                 />
             )}
 

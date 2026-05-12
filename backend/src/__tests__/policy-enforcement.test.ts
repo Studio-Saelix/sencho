@@ -57,7 +57,7 @@ vi.mock('../services/FleetSyncService', () => ({
   FleetSyncService: { getSelfIdentity: () => 'self-node' },
 }));
 
-import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { enforcePolicyForImageRefs, enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 
 function mkPolicy(overrides: Partial<ScanPolicy> = {}): ScanPolicy {
   return {
@@ -274,5 +274,44 @@ describe('enforcePolicyPreDeploy', () => {
     expect(result.ok).toBe(true);
     expect(result.violations).toEqual([]);
     expect(trivyStub.scanImagePreflight).toHaveBeenCalledTimes(2);
+  });
+
+  it('enforces a supplied image list without reading compose from disk', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({
+      id: 42,
+      highest_severity: 'HIGH',
+      high_count: 1,
+    }));
+
+    const result = await enforcePolicyForImageRefs('blueprint-web', 1, ['nginx:1.27-alpine'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]).toMatchObject({
+      imageRef: 'nginx:1.27-alpine',
+      severity: 'HIGH',
+      highCount: 1,
+      scanId: 42,
+    });
+    expect(composeStub.listStackImages).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on invalid supplied image refs when requested', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+
+    const result = await enforcePolicyForImageRefs('blueprint-web', 1, ['${IMAGE}'], { bypass: false, actor: 'u' }, undefined, true);
+
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]).toMatchObject({
+      imageRef: '${IMAGE}',
+      severity: 'UNKNOWN',
+      scanId: 0,
+    });
+    expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
+    expect(composeStub.listStackImages).not.toHaveBeenCalled();
   });
 });
