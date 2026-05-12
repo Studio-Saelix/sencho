@@ -100,7 +100,7 @@ vi.mock('../services/LogFormatter', () => ({
   LogFormatter: { formatLine: (line: string) => line },
 }));
 
-import { ComposeService } from '../services/ComposeService';
+import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 
 /** Creates an EventEmitter that mimics a child_process spawn result */
 function createMockProcess() {
@@ -235,7 +235,19 @@ describe('ComposeService - deployStack', () => {
     expect(mockBackupStackFiles).toHaveBeenCalledWith('my-stack');
   });
 
-  it('throws CONTAINER_CRASHED when exited container has non-zero exit code', async () => {
+  it('aborts atomic deploy before docker side effects when backup fails', async () => {
+    mockBackupStackFiles.mockRejectedValueOnce(new Error('disk full'));
+
+    const svc = ComposeService.getInstance(1);
+
+    await expect(svc.deployStack('my-stack', undefined, true)).rejects.toThrow(
+      'Atomic deployment backup failed',
+    );
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+  });
+
+  it('throws sanitized CONTAINER_CRASHED when exited container has non-zero exit code', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([{
       Id: 'crashed-c1',
@@ -243,7 +255,7 @@ describe('ComposeService - deployStack', () => {
       Labels: { 'com.docker.compose.project': 'my-stack' },
     }]);
     mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
-    mockContainerLogs.mockResolvedValue(Buffer.from('Error: something failed'));
+    mockContainerLogs.mockResolvedValue(Buffer.from('SECRET_TOKEN=leaked'));
 
     const svc = ComposeService.getInstance(1);
     // Attach catch handler immediately so rejection is never "unhandled"
@@ -253,6 +265,8 @@ describe('ComposeService - deployStack', () => {
     const error = await result;
     expect(error).not.toBeNull();
     expect(error!.message).toContain('CONTAINER_CRASHED');
+    expect(error!.message).not.toContain('SECRET_TOKEN');
+    expect(mockContainerLogs).not.toHaveBeenCalled();
   });
 
   it('rolls back on failure when atomic=true', async () => {
@@ -272,7 +286,27 @@ describe('ComposeService - deployStack', () => {
     const error = await result;
     expect(error).not.toBeNull();
     expect(error!.message).toContain('CONTAINER_CRASHED');
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: true });
     expect(mockRestoreStackFiles).toHaveBeenCalledWith('my-stack');
+  });
+
+  it('reports rollback failure when atomic restore fails', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockRestoreStackFiles.mockRejectedValueOnce(new Error('restore denied'));
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
   });
 
   it('does not roll back when atomic=false', async () => {

@@ -3,16 +3,15 @@ import path from 'path';
 import YAML from 'yaml';
 import multer from 'multer';
 import { FileSystemService } from '../services/FileSystemService';
-import { ComposeService } from '../services/ComposeService';
+import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { CacheService } from '../services/CacheService';
-import { LicenseService } from '../services/LicenseService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { requirePermission } from '../middleware/permissions';
-import { requirePaid, requireAdmin } from '../middleware/tierGates';
+import { requirePaid, requireAdmin, effectiveTier } from '../middleware/tierGates';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
@@ -588,7 +587,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const debug = isDebugEnabled();
-    const atomic = LicenseService.getInstance().getTier() === 'paid';
+    const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
     const t0 = Date.now();
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
@@ -602,8 +601,13 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     );
   } catch (error: unknown) {
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
-    const rolledBack = LicenseService.getInstance().getTier() === 'paid';
-    if (rolledBack) console.warn('[Stacks] Deploy failed, rolled back: %s', sanitizeForLog(stackName));
+    const rollbackInfo = getComposeRollbackInfo(error);
+    const rolledBack = rollbackInfo?.rolledBack ?? false;
+    if (rolledBack) {
+      console.warn('[Stacks] Deploy failed, rolled back: %s', sanitizeForLog(stackName));
+    } else if (rollbackInfo?.attempted) {
+      console.warn('[Stacks] Deploy failed, rollback did not complete: %s', sanitizeForLog(stackName));
+    }
     const message = getErrorMessage(error, 'Failed to deploy stack');
     notifyActionFailure('deploy', stackName, error);
     res.status(500).json({ error: message, rolledBack });
@@ -762,7 +766,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const debug = isDebugEnabled();
-    const atomic = LicenseService.getInstance().getTier() === 'paid';
+    const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
     const t0 = Date.now();
     await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
@@ -777,8 +781,13 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     );
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
-    const rolledBack = LicenseService.getInstance().getTier() === 'paid';
-    if (rolledBack) console.warn(`[Stacks] Update failed, rolled back: ${sanitizeForLog(stackName)}`);
+    const rollbackInfo = getComposeRollbackInfo(error);
+    const rolledBack = rollbackInfo?.rolledBack ?? false;
+    if (rolledBack) {
+      console.warn(`[Stacks] Update failed, rolled back: ${sanitizeForLog(stackName)}`);
+    } else if (rollbackInfo?.attempted) {
+      console.warn(`[Stacks] Update failed, rollback did not complete: ${sanitizeForLog(stackName)}`);
+    }
     notifyActionFailure('update', stackName, error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to update'), rolledBack });
   }
