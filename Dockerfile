@@ -90,12 +90,12 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
         npm ci --omit=dev; \
     fi
 
-# Stage 4a: Build Docker CLI from source against Go 1.26.2
+# Stage 4a: Build Docker CLI from source against Go 1.26.3
 #
 # CLI v29.4.1 ships otel/sdk v1.43.0, resolving CVE-2026-39883 (BSD kenv) and
 # CVE-2026-39882 (OTLP response OOM). It also carries the CVE-2025-15558 fix
 # (Windows plugin search path LPE, fixed since v29.2.0). Building from source
-# with Go 1.26.2 additionally eliminates Go stdlib CVEs present in the upstream
+# with Go 1.26.3 additionally eliminates Go stdlib CVEs present in the upstream
 # static binary.
 #
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for TARGET.
@@ -103,7 +103,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid SemVer
 # compliance requirements. We copy vendor.mod -> go.mod and build with -mod=vendor
 # so all deps come from the vendored tree (no network access needed).
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS cli-builder
 
 ARG TARGETARCH
 
@@ -120,11 +120,11 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
       -mod=vendor \
       -ldflags "-extldflags=-static \
         -X github.com/docker/cli/cli/version.Version=29.4.1 \
-        -X github.com/docker/cli/cli/version.GitCommit=source-go1.26.2" \
+        -X github.com/docker/cli/cli/version.GitCommit=source-go1.26.3" \
       -o /build/docker \
       ./cmd/docker
 
-# Stage 4b: Build Docker Compose from source against Go 1.26.2
+# Stage 4b: Build Docker Compose from source against Go 1.26.3
 #
 # Compose v5.1.3 removed the direct dependency on github.com/docker/docker
 # (replaced by moby/moby/api + moby/moby/client), eliminating CVE-2026-34040
@@ -135,7 +135,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # v0.29.0. The go get step below bumps otel to v1.43.0 to resolve
 # CVE-2026-39883 (BSD kenv) and CVE-2026-39882 (OTLP response OOM) so that
 # the compose binary scans completely clean.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS compose-builder
 
 ARG TARGETARCH
 
@@ -183,7 +183,8 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
 # `od -tx1` is used instead of `-c` because busybox and GNU coreutils render
 # `-c` with different field padding; hex output is stable across both.
 RUN test -f /build/docker-compose \
- && magic=$(dd if=/build/docker-compose bs=1 count=4 status=none | od -An -tx1 | tr -d ' \n') \
+ && magic=$(dd if=/build/docker-compose bs=1 count=4 status=none | od -An -tx1 | tr -d ' 
+') \
  && [ "$magic" = "7f454c46" ]
 
 # Stage 5: Production runtime
@@ -215,7 +216,7 @@ RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
-# These binaries were compiled with Go 1.26.2, resolving all Go stdlib CVEs that
+# These binaries were compiled with Go 1.26.3, resolving all Go stdlib CVEs that
 # were present in the upstream static release binaries.
 COPY --from=cli-builder /build/docker /usr/local/bin/docker
 COPY --from=compose-builder /build/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
