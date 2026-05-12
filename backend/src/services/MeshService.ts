@@ -16,6 +16,7 @@ import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComp
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
 const ACTIVITY_BUFFER_SIZE = 1000;
 const ALIAS_REFRESH_INTERVAL_MS = 60_000;
@@ -1188,6 +1189,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!node) throw new Error(`unknown node ${nodeId}`);
 
         if (node.type !== 'remote') {
+            await assertPolicyGateAllows(
+                stackName,
+                nodeId,
+                buildSystemPolicyGateOptions(actor, {
+                    auditPath: `/api/mesh/nodes/${nodeId}/stacks/${stackName}/redeploy`,
+                }),
+            );
             await ComposeService.getInstance(nodeId).deployStack(stackName);
             this.logActivity({
                 source: 'mesh', level: 'info', type: 'mesh.enable',

@@ -31,7 +31,7 @@ const {
   mockRmdirSync: vi.fn(),
 }));
 
-vi.mock('child_process', () => ({ spawn: mockSpawn }));
+vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
 
 vi.mock('fs', () => ({
   default: {
@@ -184,6 +184,20 @@ describe('ComposeService - runCommand', () => {
     proc.emit('close', 1);
 
     await expect(promise).rejects.toThrow('service not found');
+  });
+
+  it('redacts secrets from command failure errors', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'stop');
+    proc.stderr.emit('data', Buffer.from('token=abc123SECRET password=hunter2 Authorization: Bearer abc.def.ghi'));
+    proc.emit('close', 1);
+
+    await expect(promise).rejects.toThrow('token=[redacted]');
+    await expect(promise).rejects.toThrow('password=[redacted]');
+    await expect(promise).rejects.not.toThrow('abc.def.ghi');
   });
 
   it('sends output to WebSocket when provided', async () => {

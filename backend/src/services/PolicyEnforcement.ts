@@ -30,6 +30,11 @@ export interface PolicyViolation {
 export interface PolicyEnforcementOptions {
     bypass: boolean;
     actor: string;
+    /**
+     * Paid-tier deploy enforcement switch. Community keeps policies as
+     * evaluation-only and must not block compose starts.
+     */
+    blockingEnabled?: boolean;
     ip?: string;
     /** HTTP method of the originating request; used for audit attribution. */
     auditMethod?: string;
@@ -56,6 +61,10 @@ export async function enforcePolicyPreDeploy(
 
     if (!policy || !policy.enabled || !policy.block_on_deploy) {
         return { ok: true, bypassed: false, policy: policy ?? undefined, violations: [] };
+    }
+
+    if (opts.blockingEnabled === false) {
+        return { ok: true, bypassed: false, policy, violations: [] };
     }
 
     if (!svc.isTrivyAvailable()) {

@@ -150,6 +150,21 @@ describe('enforcePolicyPreDeploy', () => {
     expect(composeStub.listStackImages).not.toHaveBeenCalled();
   });
 
+  it('allows deploy without scanning when paid-tier blocking is disabled', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+
+    const result = await enforcePolicyPreDeploy('web', 1, {
+      bypass: false,
+      actor: 'u',
+      blockingEnabled: false,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.violations).toEqual([]);
+    expect(trivyStub.isTrivyAvailable).not.toHaveBeenCalled();
+    expect(composeStub.listStackImages).not.toHaveBeenCalled();
+  });
+
   it('fails open with a warning alert when Trivy is not installed', async () => {
     dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
     trivyStub.isTrivyAvailable.mockReturnValue(false);

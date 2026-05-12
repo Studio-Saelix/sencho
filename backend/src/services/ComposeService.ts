@@ -13,7 +13,7 @@ import { RegistryService } from './RegistryService';
 
 import { isDebugEnabled } from '../utils/debug';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
 /**
  * ComposeService - local docker compose CLI execution.
@@ -92,15 +92,15 @@ export class ComposeService {
           ws.send(`Command exited with code ${code}\n`);
         }
         if (code === 0) resolve();
-        else if (throwOnError) reject(new Error(errorLog.trim() || `Command failed with code ${code}`));
+        else if (throwOnError) reject(new Error(redactSensitiveText(errorLog.trim()) || `Command failed with code ${code}`));
         else resolve();
       });
 
       child.on('error', (error: Error) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(`Error: ${error.message}\n`);
+          ws.send(`Error: ${redactSensitiveText(error.message)}\n`);
         }
-        if (throwOnError) reject(error);
+        if (throwOnError) reject(new Error(redactSensitiveText(error.message)));
         else resolve();
       });
     });
@@ -203,7 +203,7 @@ export class ComposeService {
 
           if (exitCode !== 0) {
             const logs = await container.logs({ stdout: true, stderr: true, tail: 50 });
-            const logStr = logs.toString('utf-8');
+            const logStr = redactSensitiveText(logs.toString('utf-8'));
             throw new Error(`CONTAINER_CRASHED\nExit Code: ${exitCode}\n${logStr}`);
           }
         }
@@ -397,7 +397,7 @@ export class ComposeService {
 
           if (exitCode !== 0) {
             const logs = await container.logs({ stdout: true, stderr: true, tail: 50 });
-            const logStr = logs.toString('utf-8');
+            const logStr = redactSensitiveText(logs.toString('utf-8'));
             throw new Error(`CONTAINER_CRASHED\nExit Code: ${exitCode}\n${logStr}`);
           }
         }

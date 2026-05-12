@@ -13,6 +13,7 @@ import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { LicenseService } from './LicenseService';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
 const MARKER_FILENAME = '.blueprint.json';
 const COMPOSE_FILENAME = 'docker-compose.yml';
@@ -342,6 +343,13 @@ export class BlueprintService {
         }
         await fs.writeStackFile(blueprint.name, COMPOSE_FILENAME, blueprint.compose_content);
         await fs.writeStackFile(blueprint.name, MARKER_FILENAME, JSON.stringify(marker, null, 2));
+        await assertPolicyGateAllows(
+            blueprint.name,
+            node.id,
+            buildSystemPolicyGateOptions('blueprint', {
+                auditPath: `/api/blueprints/${blueprint.id}/deployments/${node.id}`,
+            }),
+        );
         await ComposeService.getInstance(node.id).deployStack(blueprint.name, undefined, false);
     }
 

@@ -17,6 +17,7 @@ import TrivyService from './TrivyService';
 import type { ScanAllNodeImagesResult } from './TrivyService';
 import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
 const TRIVY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TRIVY_UPDATE_CHECK_STARTUP_DELAY_MS = 5 * 60 * 1000;
@@ -440,6 +441,13 @@ export class SchedulerService {
 
     private async executeAutoStart(task: ScheduledTask): Promise<string> {
         this.assertStackTarget(task, 'Auto-start');
+        await assertPolicyGateAllows(
+            task.target_id,
+            task.node_id,
+            buildSystemPolicyGateOptions('scheduler:auto-start', {
+                auditPath: `/api/scheduled-tasks/${task.id}/run`,
+            }),
+        );
         await ComposeService.getInstance(task.node_id).deployStack(task.target_id);
         return `Started stack "${task.target_id}"`;
     }
@@ -713,6 +721,13 @@ export class SchedulerService {
             return `Stack "${stackName}": all images up to date.`;
         }
 
+        await assertPolicyGateAllows(
+            stackName,
+            nodeId,
+            buildSystemPolicyGateOptions('scheduler:auto-update', {
+                auditPath: `/api/scheduled-tasks/auto-update/${stackName}`,
+            }),
+        );
         await compose.updateStack(stackName, undefined, true);
         db.clearStackUpdateStatus(nodeId, stackName);
 

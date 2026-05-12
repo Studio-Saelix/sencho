@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import path from 'path';
 import { GitSourceService } from '../services/GitSourceService';
 import { FileSystemService } from '../services/FileSystemService';
+import { DatabaseService } from '../services/DatabaseService';
 import { checkPermission, requirePermission } from '../middleware/permissions';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { triggerPostDeployScan } from '../helpers/policyGate';
@@ -199,10 +200,17 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
       res.status(400).json({ error: 'commitSha is required' });
       return;
     }
+    const source = DatabaseService.getInstance().getGitSource(stackName);
+    const willDeploy = typeof deploy === 'boolean' ? deploy : source?.auto_deploy_on_apply === true;
+    if (willDeploy && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
     const result = await GitSourceService.getInstance().apply(
       stackName,
       commitSha.trim(),
-      { deploy: typeof deploy === 'boolean' ? deploy : undefined },
+      {
+        deploy: typeof deploy === 'boolean' ? deploy : undefined,
+        actor: req.user?.username ?? 'unknown',
+        bypassPolicy: req.query.ignorePolicy === 'true' && req.user?.role === 'admin',
+      },
     );
     invalidateNodeCaches(req.nodeId);
     const shortSha = commitSha.trim().slice(0, 7);
