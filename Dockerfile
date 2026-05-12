@@ -183,8 +183,7 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
 # `od -tx1` is used instead of `-c` because busybox and GNU coreutils render
 # `-c` with different field padding; hex output is stable across both.
 RUN test -f /build/docker-compose \
- && magic=$(dd if=/build/docker-compose bs=1 count=4 status=none | od -An -tx1 | tr -d ' 
-') \
+ && magic=$(dd if=/build/docker-compose bs=1 count=4 status=none | od -An -tx1 | tr -d ' \n') \
  && [ "$magic" = "7f454c46" ]
 
 # Stage 5: Production runtime
