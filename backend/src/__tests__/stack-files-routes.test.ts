@@ -7,6 +7,8 @@
  *   PUT    /:stackName/files/content   (Skipper+)
  *   DELETE /:stackName/files           (Skipper+)
  *   POST   /:stackName/files/folder    (Skipper+)
+ *   PATCH  /:stackName/files/rename    (Skipper+)
+ *   PUT    /:stackName/files/permissions (Skipper+)
  *
  * Covers: auth gating, tier gating (Community vs paid), input validation,
  * upload size limit, and happy-path 204/200 responses.
@@ -96,6 +98,30 @@ describe('GET /api/stacks/:stackName/files', () => {
     const names = res.body.map((e: { name: string }) => e.name);
     expect(names).toContain('compose.yaml');
     expect(names).toContain('.env');
+  });
+
+  it('emits diagnostic logs only when developer_mode is enabled', async () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+    DatabaseService.getInstance().updateGlobalSetting('developer_mode', '0');
+    await request(app)
+      .get(`/api/stacks/${STACK}/files`)
+      .set('Cookie', adminCookie);
+    expect(debugSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('[Files:diag]'),
+      expect.anything(),
+    );
+
+    DatabaseService.getInstance().updateGlobalSetting('developer_mode', '1');
+    await request(app)
+      .get(`/api/stacks/${STACK}/files`)
+      .set('Cookie', adminCookie);
+    expect(debugSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[Files:diag]'),
+      expect.anything(),
+    );
+
+    DatabaseService.getInstance().updateGlobalSetting('developer_mode', '0');
   });
 
   it('returns 400 for an invalid stack name containing path traversal', async () => {
@@ -188,6 +214,14 @@ describe('GET /api/stacks/:stackName/files/download', () => {
     expect(res.status).toBe(403);
   });
 
+  it('returns 400 INVALID_PATH when path query parameter is missing', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PATH');
+  });
+
   it('streams the file for a paid tier user', async () => {
     const res = await request(app)
       .get(`/api/stacks/${STACK}/files/download`)
@@ -223,6 +257,27 @@ describe('POST /api/stacks/:stackName/files/upload', () => {
       .post(`/api/stacks/${STACK}/files/upload`)
       .set('Cookie', adminCookie);
     expect(res.status).toBe(400);
+  });
+
+  it('rejects upload filenames with path separators', async () => {
+    const boundary = '----sencho-test-boundary';
+    const body = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="file"; filename="../evil.txt"',
+      'Content-Type: text/plain',
+      '',
+      'data',
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .set('Content-Type', `multipart/form-data; boundary=${boundary}`)
+      .send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid filename');
   });
 
   it('returns 413 TOO_LARGE when file exceeds 25 MB', async () => {
@@ -291,6 +346,15 @@ describe('PUT /api/stacks/:stackName/files/content', () => {
     expect(res.status).toBe(400);
   });
 
+  it('returns 400 INVALID_PATH when path query parameter is missing', async () => {
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/content`)
+      .set('Cookie', adminCookie)
+      .send({ content: 'hello' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PATH');
+  });
+
   it('returns 204 and writes the file for a paid tier admin', async () => {
     const res = await request(app)
       .put(`/api/stacks/${STACK}/files/content`)
@@ -301,6 +365,36 @@ describe('PUT /api/stacks/:stackName/files/content', () => {
 
     const content = await fs.readFile(path.join(stacksDir, STACK, 'written.txt'), 'utf-8');
     expect(content).toBe('written via PUT');
+  });
+});
+
+// ── PATCH /:stackName/files/rename ───────────────────────────────────────────
+
+describe('PATCH /api/stacks/:stackName/files/rename', () => {
+  it('returns 409 ALREADY_EXISTS when destination exists', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'rename-source.txt'), 'source');
+    await fs.writeFile(path.join(stacksDir, STACK, 'rename-target.txt'), 'target');
+
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'rename-source.txt', to: 'rename-target.txt' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ALREADY_EXISTS');
+  });
+});
+
+// ── PUT /:stackName/files/permissions ────────────────────────────────────────
+
+describe('PUT /api/stacks/:stackName/files/permissions', () => {
+  it('returns 400 INVALID_PATH for invalid chmod modes', async () => {
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/permissions`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie)
+      .send({ mode: 0o1000 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PATH');
   });
 });
 
@@ -442,6 +536,23 @@ describe('permission gating', () => {
       .post(`/api/stacks/${STACK}/files/folder`)
       .query({ path: 'somedir' })
       .set('Cookie', viewerCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it('viewer receives 403 from PATCH /files/rename', async () => {
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', viewerCookie)
+      .send({ from: 'compose.yaml', to: 'compose-renamed.yaml' });
+    expect(res.status).toBe(403);
+  });
+
+  it('viewer receives 403 from PUT /files/permissions', async () => {
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/permissions`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', viewerCookie)
+      .send({ mode: 0o644 });
     expect(res.status).toBe(403);
   });
 });
