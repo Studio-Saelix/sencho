@@ -1,7 +1,7 @@
 /**
  * BlueprintReconciler decision-logic tests.
  *
- * The reconciler's `computeDecision` is the load-bearing pure logic — given
+ * The reconciler's `computeDecision` is the load-bearing pure logic. Given
  * a blueprint, an actual deployment table, and a desired node set, it must
  * decide for each node whether to deploy, withdraw, drift-check, state-review,
  * or evict-block. We test that decision in isolation by accessing the
@@ -9,10 +9,10 @@
  * pattern.
  *
  * Local deploy / remote HTTP / actual `docker compose` invocation are not
- * exercised here — they're integration concerns covered by the manual
+ * exercised here; they're integration concerns covered by the manual
  * lifecycle in the plan.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { Blueprint, Node } from '../services/DatabaseService';
 import type { ReconcileDecision } from '../services/BlueprintReconciler';
@@ -42,6 +42,8 @@ beforeEach(() => {
     db.prepare('DELETE FROM blueprints').run();
     db.prepare('DELETE FROM node_labels').run();
     db.prepare("DELETE FROM nodes WHERE is_default = 0").run();
+    db.prepare("UPDATE global_settings SET value = '0' WHERE key = 'developer_mode'").run();
+    vi.restoreAllMocks();
 });
 
 function seedNode(): number {
@@ -126,6 +128,22 @@ describe('BlueprintReconciler.computeDecision', () => {
         const allNodes = DatabaseService.getInstance().getNodes();
         const decision = reconciler.computeDecision(bp, allNodes);
         expect(decision.deploy.map((n: { id: number }) => n.id)).toContain(nodeId);
+    });
+
+    it('queues state-review when a stateful deployment revision moves', () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [nodeId] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'active',
+            applied_revision: bp.revision - 1,
+        });
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute;
+        const allNodes = DatabaseService.getInstance().getNodes();
+        const decision = reconciler.computeDecision(bp, allNodes);
+        expect(decision.stateReview.map((n: { id: number }) => n.id)).toContain(nodeId);
+        expect(decision.deploy).toEqual([]);
     });
 
     it('queues stateless eviction when a node leaves the selector', () => {
@@ -349,6 +367,29 @@ describe('BlueprintReconciler.computeDecision', () => {
         const decision = reconciler.computeDecision(bp, allNodes);
         expect(decision.deploy.map((n: { id: number }) => n.id)).toContain(nodeA);
         expect(decision.deploy.map((n: { id: number }) => n.id)).not.toContain(nodeB);
+    });
+});
+
+describe('BlueprintReconciler developer-mode diagnostics', () => {
+    it('does not emit diagnostic logs when developer mode is off', async () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [nodeId] });
+        const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+
+        expect(infoSpy.mock.calls.some(([message]) => String(message).includes('[BlueprintReconciler:diag]'))).toBe(false);
+    });
+
+    it('emits diagnostic decision logs when developer mode is on', async () => {
+        DatabaseService.getInstance().updateGlobalSetting('developer_mode', '1');
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [nodeId] });
+        const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+
+        expect(infoSpy.mock.calls.some(([message]) => String(message).includes('[BlueprintReconciler:diag]'))).toBe(true);
     });
 });
 

@@ -21,6 +21,7 @@ blueprintsRouter.use(authMiddleware);
 const VALID_DRIFT_MODES: readonly DriftMode[] = ['observe', 'suggest', 'enforce'];
 const MAX_SELECTOR_ENTRIES = 200;
 const MAX_DESCRIPTION_LENGTH = 2048;
+export const MAX_BLUEPRINT_COMPOSE_BYTES = 96 * 1024;
 const BLUEPRINT_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 
 interface BlueprintBody {
@@ -85,6 +86,18 @@ function validateDriftMode(mode: unknown): string | null {
     return null;
 }
 
+function validateComposeContent(composeContent: unknown): string | null {
+    if (typeof composeContent !== 'string' || composeContent.trim().length === 0) {
+        return 'compose_content must be a non-empty string';
+    }
+    if (Buffer.byteLength(composeContent, 'utf8') > MAX_BLUEPRINT_COMPOSE_BYTES) {
+        return `compose_content must be ${MAX_BLUEPRINT_COMPOSE_BYTES} bytes or fewer`;
+    }
+    const analysis = BlueprintAnalyzer.analyze(composeContent);
+    if (analysis.parseError) return `compose_content must be valid YAML: ${analysis.parseError}`;
+    return null;
+}
+
 function summarizeBlueprint(blueprintId: number) {
     const db = DatabaseService.getInstance();
     const blueprint = db.getBlueprint(blueprintId);
@@ -121,10 +134,8 @@ blueprintsRouter.post('/', (req: Request, res: Response): void => {
     const body = req.body as BlueprintBody;
     const nameError = validateName(body.name);
     if (nameError) { res.status(400).json({ error: nameError }); return; }
-    if (typeof body.compose_content !== 'string' || body.compose_content.trim().length === 0) {
-        res.status(400).json({ error: 'compose_content must be a non-empty string' });
-        return;
-    }
+    const composeError = validateComposeContent(body.compose_content);
+    if (composeError) { res.status(400).json({ error: composeError }); return; }
     const descError = validateDescription(body.description);
     if (descError) { res.status(400).json({ error: descError }); return; }
     const selectorResult = parseSelector(body.selector);
@@ -132,11 +143,12 @@ blueprintsRouter.post('/', (req: Request, res: Response): void => {
     const driftModeError = validateDriftMode(body.drift_mode ?? 'suggest');
     if (driftModeError) { res.status(400).json({ error: driftModeError }); return; }
     try {
-        const analysis = BlueprintAnalyzer.analyze(body.compose_content);
+        const composeContent = body.compose_content as string;
+        const analysis = BlueprintAnalyzer.analyze(composeContent);
         const blueprint = DatabaseService.getInstance().createBlueprint({
             name: (body.name as string).trim(),
             description: typeof body.description === 'string' ? body.description : null,
-            compose_content: body.compose_content,
+            compose_content: composeContent,
             selector: selectorResult.selector,
             drift_mode: (body.drift_mode as DriftMode | undefined) ?? 'suggest',
             classification: analysis.classification,
@@ -188,12 +200,11 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
         updates.description = body.description as string | null;
     }
     if (body.compose_content !== undefined) {
-        if (typeof body.compose_content !== 'string' || body.compose_content.trim().length === 0) {
-            res.status(400).json({ error: 'compose_content must be a non-empty string' });
-            return;
-        }
-        const analysis = BlueprintAnalyzer.analyze(body.compose_content);
-        updates.compose_content = body.compose_content;
+        const composeError = validateComposeContent(body.compose_content);
+        if (composeError) { res.status(400).json({ error: composeError }); return; }
+        const composeContent = body.compose_content as string;
+        const analysis = BlueprintAnalyzer.analyze(composeContent);
+        updates.compose_content = composeContent;
         updates.classification = analysis.classification;
         updates.classification_reasons = analysis.reasons;
         updates.bumpRevision = true;
@@ -211,7 +222,7 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
     if (body.enabled !== undefined) {
         const next = Boolean(body.enabled);
         if (!next) {
-            // Refuse to disable a blueprint with active deployments — operator must withdraw explicitly.
+            // Refuse to disable a blueprint with active deployments. Operator must withdraw explicitly.
             const existing = DatabaseService.getInstance().getBlueprint(id);
             if (existing?.enabled) {
                 const deployments = DatabaseService.getInstance().listDeployments(id);
@@ -251,7 +262,7 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        // Refuse delete on stateful blueprints with active deployments — operator must withdraw explicitly first
+        // Refuse delete on stateful blueprints with active deployments. Operator must withdraw explicitly first
         if (blueprint.classification === 'stateful' || blueprint.classification === 'unknown') {
             const deployments = DatabaseService.getInstance().listDeployments(id);
             const blocking = deployments.filter(d => d.status === 'active' || d.status === 'evict_blocked' || d.status === 'pending_state_review');
@@ -487,6 +498,10 @@ blueprintsRouter.post('/analyze', (req: Request, res: Response): void => {
     const composeContent = typeof req.body?.compose_content === 'string' ? req.body.compose_content : '';
     if (!composeContent.trim()) {
         res.status(400).json({ error: 'compose_content is required' });
+        return;
+    }
+    if (Buffer.byteLength(composeContent, 'utf8') > MAX_BLUEPRINT_COMPOSE_BYTES) {
+        res.status(400).json({ error: `compose_content must be ${MAX_BLUEPRINT_COMPOSE_BYTES} bytes or fewer` });
         return;
     }
     const result = BlueprintAnalyzer.analyze(composeContent);

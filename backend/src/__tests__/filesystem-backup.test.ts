@@ -1,6 +1,6 @@
 /**
  * Verifies that FileSystemService stores stack backups under
- * <DATA_DIR>/backups/<stackName>/ rather than inside the user's compose
+ * <DATA_DIR>/backups/<nodeId>/<stackName>/ rather than inside the user's compose
  * folder. The old in-stack-folder location failed with EACCES whenever a
  * container had chowned the bind mount, breaking the atomic rollback
  * feature for those stacks.
@@ -12,12 +12,12 @@ import { promises as fsPromises } from 'fs';
 
 // Mutable state the mocked NodeRegistry reads. Each test rewrites these
 // before instantiating FileSystemService.
-const mockState = { composeDir: '' };
+const mockState = { composeDir: '', composeDirs: new Map<number, string>() };
 
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
     getInstance: () => ({
-      getComposeDir: () => mockState.composeDir,
+      getComposeDir: (nodeId?: number) => mockState.composeDirs.get(nodeId ?? 1) ?? mockState.composeDir,
       getDefaultNodeId: () => 1,
     }),
   },
@@ -34,6 +34,7 @@ describe('FileSystemService backup location', () => {
     composeDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-compose-'));
     dataDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-data-'));
     mockState.composeDir = composeDir;
+    mockState.composeDirs = new Map([[1, composeDir]]);
     originalDataDir = process.env.DATA_DIR;
     process.env.DATA_DIR = dataDir;
   });
@@ -45,7 +46,7 @@ describe('FileSystemService backup location', () => {
     await fsPromises.rm(dataDir, { recursive: true, force: true });
   });
 
-  it('writes backups under <DATA_DIR>/backups/<stackName>/, not inside the stack folder', async () => {
+  it('writes backups under <DATA_DIR>/backups/<nodeId>/<stackName>/, not inside the stack folder', async () => {
     const stackName = 'web';
     const stackDir = path.join(composeDir, stackName);
     await fsPromises.mkdir(stackDir, { recursive: true });
@@ -55,7 +56,7 @@ describe('FileSystemService backup location', () => {
     const service = FileSystemService.getInstance();
     await service.backupStackFiles(stackName);
 
-    const newBackupDir = path.join(dataDir, 'backups', stackName);
+    const newBackupDir = path.join(dataDir, 'backups', '1', stackName);
     const oldBackupDir = path.join(stackDir, '.sencho-backup');
 
     // New location has every backed-up file
@@ -81,6 +82,32 @@ describe('FileSystemService backup location', () => {
     const after = await service.getBackupInfo(stackName);
     expect(after.exists).toBe(true);
     expect(typeof after.timestamp).toBe('number');
+  });
+
+  it('scopes backups by node id when stack names overlap', async () => {
+    const stackName = 'web';
+    const secondComposeDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-compose-'));
+    mockState.composeDirs.set(2, secondComposeDir);
+    try {
+      const nodeOneStackDir = path.join(composeDir, stackName);
+      const nodeTwoStackDir = path.join(secondComposeDir, stackName);
+      await fsPromises.mkdir(nodeOneStackDir, { recursive: true });
+      await fsPromises.mkdir(nodeTwoStackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(nodeOneStackDir, 'compose.yaml'), 'services:\n  one: {}\n', 'utf-8');
+      await fsPromises.writeFile(path.join(nodeTwoStackDir, 'compose.yaml'), 'services:\n  two: {}\n', 'utf-8');
+
+      await FileSystemService.getInstance(1).backupStackFiles(stackName);
+      await FileSystemService.getInstance(2).backupStackFiles(stackName);
+
+      await expect(
+        fsPromises.readFile(path.join(dataDir, 'backups', '1', stackName, 'compose.yaml'), 'utf-8'),
+      ).resolves.toContain('one');
+      await expect(
+        fsPromises.readFile(path.join(dataDir, 'backups', '2', stackName, 'compose.yaml'), 'utf-8'),
+      ).resolves.toContain('two');
+    } finally {
+      await fsPromises.rm(secondComposeDir, { recursive: true, force: true });
+    }
   });
 
   it('restoreStackFiles copies files from the new location back to the stack dir', async () => {

@@ -9,7 +9,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest';
 import request from 'supertest';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { ComposeRollbackError } from '../services/ComposeService';
 
 // ── Hoisted mocks (must come before importing the app) ──────────────────────
 
@@ -143,6 +145,46 @@ describe('deploy_failure notification on /deploy error', () => {
     expect(call[2]).toContain('network timeout');
     expect(call[3]).toEqual({ stackName: 'webapp' });
   });
+
+  it('returns rolledBack=true only when compose rollback completed', async () => {
+    mockDeployStack.mockRejectedValue(
+      new ComposeRollbackError(new Error('image pull failed'), true, true),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ rolledBack: true });
+  });
+
+  it('returns rolledBack=false when compose rollback failed', async () => {
+    mockDeployStack.mockRejectedValue(
+      new ComposeRollbackError(new Error('image pull failed'), true, false),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ rolledBack: false });
+  });
+
+  it('uses trusted proxy tier headers for remote atomic deploys', async () => {
+    mockDeployStack.mockResolvedValue(undefined);
+    const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-sencho-tier', 'paid')
+      .set('x-sencho-variant', 'skipper');
+
+    expect(res.status).toBe(200);
+    expect(mockDeployStack.mock.calls[0][2]).toBe(true);
+  });
 });
 
 describe('deploy_failure notification on /down error', () => {
@@ -228,5 +270,18 @@ describe('deploy_failure notification on /update error', () => {
       expect.stringContaining('image not found'),
       { stackName: 'myapp' },
     );
+  });
+
+  it('returns rollback completion status when updateStack throws rollback metadata', async () => {
+    mockUpdateStack.mockRejectedValue(
+      new ComposeRollbackError(new Error('image not found'), true, false),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/update')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ rolledBack: false });
   });
 });

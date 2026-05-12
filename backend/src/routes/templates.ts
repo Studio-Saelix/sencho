@@ -2,13 +2,12 @@ import { Router, type Request, type Response } from 'express';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin } from '../middleware/tierGates';
+import { effectiveTier, requireAdmin } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import { templateService } from '../services/TemplateService';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { DatabaseService } from '../services/DatabaseService';
-import { LicenseService } from '../services/LicenseService';
 import { ErrorParser } from '../utils/ErrorParser';
 import { isValidStackName, isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
@@ -125,7 +124,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         }
         return;
       }
-      const atomic = LicenseService.getInstance().getTier() === 'paid';
+      const atomic = effectiveTier(req) === 'paid';
       await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
       invalidateNodeCaches(req.nodeId);
       console.log(`[Templates] Deploy completed: ${stackName}`);
@@ -141,25 +140,31 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
       const parsed = ErrorParser.parse(rawError);
 
       const shouldRollback = parsed.rule ? parsed.rule.canSilentlyRollback : true;
+      let rolledBack = false;
 
       if (shouldRollback) {
+        let dockerDownCompleted = true;
+        let fileDeleteCompleted = true;
         try {
           await ComposeService.getInstance(req.nodeId).downStack(stackName);
         } catch (downErr) {
+          dockerDownCompleted = false;
           console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);
         }
 
         try {
           await fsService.deleteStack(stackName);
         } catch (fsErr) {
+          fileDeleteCompleted = false;
           console.error("[Templates] Rollback Stage 2 (File deletion) failed:", fsErr);
         }
+        rolledBack = dockerDownCompleted && fileDeleteCompleted;
       }
 
       invalidateNodeCaches(req.nodeId);
       res.status(500).json({
         error: parsed.message,
-        rolledBack: shouldRollback,
+        rolledBack,
         ruleId: parsed.rule?.id || 'UNKNOWN'
       });
     }

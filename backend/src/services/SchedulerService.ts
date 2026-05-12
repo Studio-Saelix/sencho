@@ -2,6 +2,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService } from './DatabaseService';
 import type { ScheduledTask } from './DatabaseService';
 import { LicenseService } from './LicenseService';
+import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
@@ -633,6 +634,7 @@ export class SchedulerService {
         }
 
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         if (isDebugEnabled()) {
             console.log(`[SchedulerService] executeUpdateRemote: node=${nodeId} target=${target}`);
         }
@@ -642,6 +644,8 @@ export class SchedulerService {
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
             },
             body: JSON.stringify({ target }),
             signal: AbortSignal.timeout(300_000), // 5 minute timeout for long updates
