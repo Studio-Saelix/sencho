@@ -3,9 +3,10 @@ import { Button } from '@/components/ui/button';
 
 interface BlueprintEmptyStateProps {
     onCreate: () => void;
+    canCreate: boolean;
 }
 
-export function BlueprintEmptyState({ onCreate }: BlueprintEmptyStateProps) {
+export function BlueprintEmptyState({ onCreate, canCreate }: BlueprintEmptyStateProps) {
     return (
         <div className="mx-auto max-w-3xl rounded-xl border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
             <div className="flex flex-col gap-5 p-8">
@@ -30,10 +31,12 @@ export function BlueprintEmptyState({ onCreate }: BlueprintEmptyStateProps) {
                     <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">
                         First blueprint, no fleet required
                     </span>
-                    <Button size="sm" onClick={onCreate} className="gap-2">
-                        <Sparkles className="h-4 w-4" strokeWidth={1.5} />
-                        Create your first Blueprint
-                    </Button>
+                    {canCreate && (
+                        <Button size="sm" onClick={onCreate} className="gap-2">
+                            <Sparkles className="h-4 w-4" strokeWidth={1.5} />
+                            Create your first Blueprint
+                        </Button>
+                    )}
                 </div>
             </div>
         </div>

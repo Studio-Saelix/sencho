@@ -13,10 +13,30 @@ import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { LicenseService } from './LicenseService';
+import { enforcePolicyForImageRefs } from './PolicyEnforcement';
+import { triggerPostDeployScan } from '../helpers/policyGate';
+import { BlueprintAnalyzer } from './BlueprintAnalyzer';
+import { sanitizeForLog } from '../utils/safeLog';
 
 const MARKER_FILENAME = '.blueprint.json';
 const COMPOSE_FILENAME = 'docker-compose.yml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
+
+function isDeveloperModeEnabled(): boolean {
+    try {
+        return DatabaseService.getInstance().getGlobalSettings().developer_mode === '1';
+    } catch {
+        return false;
+    }
+}
+
+function diagnosticLog(message: string, fields: Record<string, string | number | boolean | null | undefined>): void {
+    if (!isDeveloperModeEnabled()) return;
+    const safeFields = Object.fromEntries(
+        Object.entries(fields).map(([key, value]) => [key, typeof value === 'string' ? sanitizeForLog(value) : value]),
+    );
+    console.info(`[BlueprintService:diag] ${message}`, safeFields);
+}
 
 export interface BlueprintMarker {
     blueprintId: number;
@@ -185,18 +205,34 @@ export class BlueprintService {
         if (!this.acquireLock(blueprint.id, node.id)) {
             return { status: 'pending' };
         }
+        const started = Date.now();
+        console.info('[BlueprintService] deploy start blueprint=%s node=%s type=%s revision=%s',
+            sanitizeForLog(blueprint.name), node.id, node.type, blueprint.revision);
+        diagnosticLog('deploy inputs', {
+            blueprintId: blueprint.id,
+            blueprintName: blueprint.name,
+            nodeId: node.id,
+            nodeType: node.type,
+            revision: blueprint.revision,
+            classification: blueprint.classification,
+            driftMode: blueprint.drift_mode,
+        });
         try {
             this.setStatus(blueprint.id, node.id, 'deploying');
             if (await this.hasNameConflict(blueprint.name, node)) {
                 this.setStatus(blueprint.id, node.id, 'name_conflict', {
                     last_error: `A stack named "${blueprint.name}" already exists on this node and is not managed by Sencho.`,
                 });
+                console.warn('[BlueprintService] deploy name conflict blueprint=%s node=%s durationMs=%s',
+                    sanitizeForLog(blueprint.name), node.id, Date.now() - started);
                 return { status: 'name_conflict', error: 'name_conflict' };
             }
             const marker = this.buildMarker(blueprint);
             if (node.type === 'local') {
+                diagnosticLog('deploy branch', { blueprintId: blueprint.id, nodeId: node.id, target: 'local' });
                 await this.deployLocal(blueprint, node, marker);
             } else {
+                diagnosticLog('deploy branch', { blueprintId: blueprint.id, nodeId: node.id, target: 'remote' });
                 await this.deployRemote(blueprint, node, marker);
             }
             this.setStatus(blueprint.id, node.id, 'active', {
@@ -206,10 +242,14 @@ export class BlueprintService {
                 drift_summary: null,
                 last_error: null,
             });
+            console.info('[BlueprintService] deploy complete blueprint=%s node=%s durationMs=%s',
+                sanitizeForLog(blueprint.name), node.id, Date.now() - started);
             return { status: 'active' };
         } catch (err) {
             const message = BlueprintService.formatError(err);
             this.setStatus(blueprint.id, node.id, 'failed', { last_error: message });
+            console.error('[BlueprintService] deploy failed blueprint=%s node=%s durationMs=%s error=%s',
+                sanitizeForLog(blueprint.name), node.id, Date.now() - started, sanitizeForLog(message));
             return { status: 'failed', error: message };
         } finally {
             this.releaseLock(blueprint.id, node.id);
@@ -225,6 +265,16 @@ export class BlueprintService {
         if (!this.acquireLock(blueprint.id, node.id)) {
             return { status: 'pending' };
         }
+        const started = Date.now();
+        console.info('[BlueprintService] withdraw start blueprint=%s node=%s type=%s',
+            sanitizeForLog(blueprint.name), node.id, node.type);
+        diagnosticLog('withdraw inputs', {
+            blueprintId: blueprint.id,
+            blueprintName: blueprint.name,
+            nodeId: node.id,
+            nodeType: node.type,
+            classification: blueprint.classification,
+        });
         try {
             this.setStatus(blueprint.id, node.id, 'withdrawing');
             // Refuse to withdraw a directory we do not own
@@ -236,15 +286,21 @@ export class BlueprintService {
                 return { status: 'name_conflict' };
             }
             if (node.type === 'local') {
+                diagnosticLog('withdraw branch', { blueprintId: blueprint.id, nodeId: node.id, target: 'local' });
                 await this.withdrawLocal(blueprint, node);
             } else {
+                diagnosticLog('withdraw branch', { blueprintId: blueprint.id, nodeId: node.id, target: 'remote' });
                 await this.withdrawRemote(blueprint, node);
             }
             DatabaseService.getInstance().deleteDeployment(blueprint.id, node.id);
+            console.info('[BlueprintService] withdraw complete blueprint=%s node=%s durationMs=%s',
+                sanitizeForLog(blueprint.name), node.id, Date.now() - started);
             return { status: 'withdrawn' };
         } catch (err) {
             const message = BlueprintService.formatError(err);
             this.setStatus(blueprint.id, node.id, 'failed', { last_error: `withdraw failed: ${message}` });
+            console.error('[BlueprintService] withdraw failed blueprint=%s node=%s durationMs=%s error=%s',
+                sanitizeForLog(blueprint.name), node.id, Date.now() - started, sanitizeForLog(message));
             return { status: 'failed', error: message };
         } finally {
             this.releaseLock(blueprint.id, node.id);
@@ -336,6 +392,17 @@ export class BlueprintService {
     }
 
     private async deployLocal(blueprint: Blueprint, node: Node, marker: BlueprintMarker): Promise<void> {
+        const imageRefs = BlueprintAnalyzer.extractImageRefs(blueprint.compose_content);
+        const gate = await enforcePolicyForImageRefs(blueprint.name, node.id, imageRefs, {
+            bypass: false,
+            actor: 'blueprint-reconciler',
+            auditMethod: 'POST',
+            auditPath: `/api/blueprints/${blueprint.id}/apply`,
+        }, undefined, true);
+        if (!gate.ok) {
+            throw new Error(`Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`);
+        }
+
         const fs = FileSystemService.getInstance(node.id);
         if (!(await this.stackDirExists(node, blueprint.name))) {
             await fs.createStack(blueprint.name);
@@ -343,6 +410,10 @@ export class BlueprintService {
         await fs.writeStackFile(blueprint.name, COMPOSE_FILENAME, blueprint.compose_content);
         await fs.writeStackFile(blueprint.name, MARKER_FILENAME, JSON.stringify(marker, null, 2));
         await ComposeService.getInstance(node.id).deployStack(blueprint.name, undefined, false);
+        triggerPostDeployScan(blueprint.name, node.id).catch(err => {
+            console.error('[BlueprintService] post-deploy scan failed for "%s" on node %s: %s',
+                sanitizeForLog(blueprint.name), node.id, sanitizeForLog(BlueprintService.formatError(err)));
+        });
     }
 
     private async withdrawLocal(blueprint: Blueprint, node: Node): Promise<void> {
