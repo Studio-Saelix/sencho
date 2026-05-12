@@ -55,7 +55,6 @@ export async function enforcePolicyPreDeploy(
     nodeId: number,
     opts: PolicyEnforcementOptions,
 ): Promise<PolicyEnforcementResult> {
-    const svc = TrivyService.getInstance();
     const db = DatabaseService.getInstance();
     const policy = db.getMatchingPolicy(nodeId, stackName, FleetSyncService.getSelfIdentity());
 
@@ -67,6 +66,7 @@ export async function enforcePolicyPreDeploy(
         return { ok: true, bypassed: false, policy, violations: [] };
     }
 
+    const svc = TrivyService.getInstance();
     if (!svc.isTrivyAvailable()) {
         NotificationService.getInstance().dispatchAlert(
             'warning',
@@ -97,9 +97,49 @@ export async function enforcePolicyPreDeploy(
         };
     }
 
+    return enforcePolicyForImageRefs(stackName, nodeId, imageRefs, opts, policy);
+}
+
+export async function enforcePolicyForImageRefs(
+    stackName: string,
+    nodeId: number,
+    imageRefs: string[],
+    opts: PolicyEnforcementOptions,
+    matchedPolicy?: ScanPolicy,
+    failClosedInvalidRefs = false,
+): Promise<PolicyEnforcementResult> {
+    const db = DatabaseService.getInstance();
+    const policy = matchedPolicy ?? db.getMatchingPolicy(nodeId, stackName, FleetSyncService.getSelfIdentity());
+
+    if (!policy || !policy.enabled || !policy.block_on_deploy) {
+        return { ok: true, bypassed: false, policy: policy ?? undefined, violations: [] };
+    }
+
+    const svc = TrivyService.getInstance();
+    if (!svc.isTrivyAvailable()) {
+        NotificationService.getInstance().dispatchAlert(
+            'warning',
+            'scan_finding',
+            `Pre-deploy scan for "${stackName}" skipped: Trivy not installed on this node`,
+            { stackName },
+        );
+        return { ok: true, bypassed: false, policy, violations: [], trivyMissing: true };
+    }
+
     const violations: PolicyViolation[] = [];
     for (const imageRef of imageRefs) {
-        if (!validateImageRef(imageRef)) continue;
+        if (!validateImageRef(imageRef)) {
+            if (failClosedInvalidRefs) {
+                violations.push({
+                    imageRef,
+                    severity: 'UNKNOWN',
+                    criticalCount: 0,
+                    highCount: 0,
+                    scanId: 0,
+                });
+            }
+            continue;
+        }
         try {
             const scan = await svc.scanImagePreflight(imageRef, nodeId, stackName);
             const severity = scan.highest_severity ?? 'UNKNOWN';
