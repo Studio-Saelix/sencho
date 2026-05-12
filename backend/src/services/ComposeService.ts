@@ -12,8 +12,31 @@ import { NodeRegistry } from './NodeRegistry';
 import { RegistryService } from './RegistryService';
 
 import { isDebugEnabled } from '../utils/debug';
+import { getErrorMessage } from '../utils/errors';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+
+export class ComposeRollbackError extends Error {
+  public readonly rollbackAttempted: boolean;
+  public readonly rolledBack: boolean;
+  public readonly originalError: unknown;
+
+  constructor(originalError: unknown, rollbackAttempted: boolean, rolledBack: boolean) {
+    super(getErrorMessage(originalError, 'Compose operation failed'));
+    this.name = 'ComposeRollbackError';
+    this.rollbackAttempted = rollbackAttempted;
+    this.rolledBack = rolledBack;
+    this.originalError = originalError;
+    Object.setPrototypeOf(this, ComposeRollbackError.prototype);
+  }
+}
+
+export function getComposeRollbackInfo(error: unknown): { attempted: boolean; rolledBack: boolean } | null {
+  if (!(error instanceof ComposeRollbackError)) {
+    return null;
+  }
+  return { attempted: error.rollbackAttempted, rolledBack: error.rolledBack };
+}
 
 /**
  * ComposeService - local docker compose CLI execution.
@@ -145,6 +168,49 @@ export class ComposeService {
     }
   }
 
+  private async createAtomicBackup(
+    stackName: string,
+    operation: 'deployment' | 'update',
+    sendOutput: (data: string) => void,
+  ): Promise<void> {
+    try {
+      const fsSvc = FileSystemService.getInstance(this.nodeId);
+      await fsSvc.backupStackFiles(stackName);
+      sendOutput(`=== Backup created for atomic ${operation} ===\n`);
+    } catch (error) {
+      console.error('Atomic backup failed for %s:', sanitizeForLog(stackName), getErrorMessage(error, 'unknown error'));
+      sendOutput(`=== Atomic ${operation} backup failed. Operation aborted ===\n`);
+      throw new Error(`Atomic ${operation} backup failed: ${getErrorMessage(error, 'unknown error')}`);
+    }
+  }
+
+  private async restoreAtomicBackup(
+    stackName: string,
+    stackDir: string,
+    ws: WebSocket | undefined,
+    sendOutput: (data: string) => void,
+  ): Promise<boolean> {
+    try {
+      const fsSvc = FileSystemService.getInstance(this.nodeId);
+      await fsSvc.restoreStackFiles(stackName);
+      await this.withRegistryAuth(async (env) => {
+        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
+      }, sendOutput);
+      sendOutput('=== Rolled back successfully ===\n');
+      return true;
+    } catch (rollbackError) {
+      console.error('Rollback failed for %s:', sanitizeForLog(stackName), getErrorMessage(rollbackError, 'unknown error'));
+      sendOutput('=== Rollback failed. Manual intervention may be required ===\n');
+      return false;
+    }
+  }
+
+  private createContainerCrashError(exitCode: number): Error {
+    return new Error(
+      `CONTAINER_CRASHED\nExit Code: ${exitCode}\nContainer exited after deployment. Check container logs for details.`
+    );
+  }
+
   async runCommand(stackName: string, action: 'down' | 'start' | 'stop' | 'restart', ws?: WebSocket): Promise<void> {
     const stackDir = path.join(this.baseDir, stackName);
     await this.execute('docker', ['compose', action], stackDir, ws);
@@ -159,15 +225,8 @@ export class ComposeService {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
 
-    // Atomic: backup files before deploying
     if (atomic) {
-      try {
-        const fsSvc = FileSystemService.getInstance(this.nodeId);
-        await fsSvc.backupStackFiles(stackName);
-        sendOutput('=== Backup created for atomic deployment ===\n');
-      } catch (e) {
-        console.warn('Failed to backup stack files for %s:', sanitizeForLog(stackName), e);
-      }
+      await this.createAtomicBackup(stackName, 'deployment', sendOutput);
     }
 
     try {
@@ -202,28 +261,16 @@ export class ComposeService {
           const exitCode = inspectData.State.ExitCode;
 
           if (exitCode !== 0) {
-            const logs = await container.logs({ stdout: true, stderr: true, tail: 50 });
-            const logStr = redactSensitiveText(logs.toString('utf-8'));
-            throw new Error(`CONTAINER_CRASHED\nExit Code: ${exitCode}\n${logStr}`);
+            throw this.createContainerCrashError(exitCode);
           }
         }
       }
       if (debug) console.debug(`[ComposeService:debug] deployStack completed in ${Date.now() - t0}ms`, { stackName });
     } catch (deployError) {
-      // Atomic: auto-rollback on failure
       if (atomic) {
         sendOutput('\n=== Deployment failed - rolling back to previous version ===\n');
-        try {
-          const fsSvc = FileSystemService.getInstance(this.nodeId);
-          await fsSvc.restoreStackFiles(stackName);
-          await this.withRegistryAuth(async (env) => {
-            await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
-          }, sendOutput);
-          sendOutput('=== Rolled back successfully ===\n');
-        } catch (rollbackError) {
-          console.error('Rollback failed for %s:', sanitizeForLog(stackName), rollbackError);
-          sendOutput('=== Rollback failed - manual intervention may be required ===\n');
-        }
+        const rolledBack = await this.restoreAtomicBackup(stackName, stackDir, ws, sendOutput);
+        throw new ComposeRollbackError(deployError, true, rolledBack);
       }
       throw deployError;
     }
@@ -349,15 +396,8 @@ export class ComposeService {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
 
-    // Atomic: backup files before updating
     if (atomic) {
-      try {
-        const fsSvc = FileSystemService.getInstance(this.nodeId);
-        await fsSvc.backupStackFiles(stackName);
-        sendOutput('=== Backup created for atomic update ===\n');
-      } catch (e) {
-        console.warn('Failed to backup stack files for %s:', sanitizeForLog(stackName), e);
-      }
+      await this.createAtomicBackup(stackName, 'update', sendOutput);
     }
 
     try {
@@ -396,9 +436,7 @@ export class ComposeService {
           const exitCode = inspectData.State.ExitCode;
 
           if (exitCode !== 0) {
-            const logs = await container.logs({ stdout: true, stderr: true, tail: 50 });
-            const logStr = redactSensitiveText(logs.toString('utf-8'));
-            throw new Error(`CONTAINER_CRASHED\nExit Code: ${exitCode}\n${logStr}`);
+            throw this.createContainerCrashError(exitCode);
           }
         }
       }
@@ -406,20 +444,10 @@ export class ComposeService {
       sendOutput('=== Stack updated successfully ===\n');
       if (debug) console.debug(`[ComposeService:debug] updateStack completed in ${Date.now() - t0}ms`, { stackName });
     } catch (updateError) {
-      // Atomic: auto-rollback on failure
       if (atomic) {
         sendOutput('\n=== Update failed - rolling back to previous version ===\n');
-        try {
-          const fsSvc = FileSystemService.getInstance(this.nodeId);
-          await fsSvc.restoreStackFiles(stackName);
-          await this.withRegistryAuth(async (env) => {
-            await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
-          }, sendOutput);
-          sendOutput('=== Rolled back successfully ===\n');
-        } catch (rollbackError) {
-          console.error('Rollback failed for %s:', sanitizeForLog(stackName), rollbackError);
-          sendOutput('=== Rollback failed - manual intervention may be required ===\n');
-        }
+        const rolledBack = await this.restoreAtomicBackup(stackName, stackDir, ws, sendOutput);
+        throw new ComposeRollbackError(updateError, true, rolledBack);
       }
       throw updateError;
     }
