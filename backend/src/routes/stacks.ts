@@ -805,6 +805,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     }
     console.log(`[Stacks] Rollback initiated: ${sanitizeForLog(stackName)}`);
     await fsSvc.restoreStackFiles(stackName);
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), false);
     invalidateNodeCaches(req.nodeId);
     console.log(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);

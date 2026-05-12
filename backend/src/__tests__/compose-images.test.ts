@@ -14,7 +14,7 @@ import { EventEmitter } from 'events';
 
 const { mockSpawn } = vi.hoisted(() => ({ mockSpawn: vi.fn() }));
 
-vi.mock('child_process', () => ({ spawn: mockSpawn }));
+vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
 
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {

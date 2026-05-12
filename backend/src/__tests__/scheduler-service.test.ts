@@ -23,6 +23,7 @@ const {
   mockScanAllNodeImages,
   mockGetStackAutoUpdateSettingsForNode,
   mockDeleteScheduledTask,
+  mockGetMatchingPolicy,
   mockRunCommand,
   mockDeployStack,
   mockBackupStackFiles,
@@ -63,6 +64,7 @@ const {
   }),
   mockGetStackAutoUpdateSettingsForNode: vi.fn().mockReturnValue({}),
   mockDeleteScheduledTask: vi.fn(),
+  mockGetMatchingPolicy: vi.fn().mockReturnValue(null),
   mockRunCommand: vi.fn().mockResolvedValue(undefined),
   mockDeployStack: vi.fn().mockResolvedValue(undefined),
   mockBackupStackFiles: vi.fn().mockResolvedValue(undefined),
@@ -86,7 +88,14 @@ vi.mock('../services/DatabaseService', () => ({
       deleteOldScans: mockDeleteOldScans,
       getStackAutoUpdateSettingsForNode: mockGetStackAutoUpdateSettingsForNode,
       deleteScheduledTask: mockDeleteScheduledTask,
+      getMatchingPolicy: mockGetMatchingPolicy,
     }),
+  },
+}));
+
+vi.mock('../services/FleetSyncService', () => ({
+  FleetSyncService: {
+    getSelfIdentity: () => 'self-node',
   },
 }));
 

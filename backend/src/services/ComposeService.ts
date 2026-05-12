@@ -14,7 +14,7 @@ import { RegistryService } from './RegistryService';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
 export class ComposeRollbackError extends Error {
   public readonly rollbackAttempted: boolean;
@@ -115,15 +115,15 @@ export class ComposeService {
           ws.send(`Command exited with code ${code}\n`);
         }
         if (code === 0) resolve();
-        else if (throwOnError) reject(new Error(errorLog.trim() || `Command failed with code ${code}`));
+        else if (throwOnError) reject(new Error(redactSensitiveText(errorLog.trim()) || `Command failed with code ${code}`));
         else resolve();
       });
 
       child.on('error', (error: Error) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(`Error: ${error.message}\n`);
+          ws.send(`Error: ${redactSensitiveText(error.message)}\n`);
         }
-        if (throwOnError) reject(error);
+        if (throwOnError) reject(new Error(redactSensitiveText(error.message)));
         else resolve();
       });
     });

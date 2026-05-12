@@ -4,6 +4,8 @@ import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NotificationService } from '../services/NotificationService';
 import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
+import { LicenseService } from '../services/LicenseService';
+import { effectiveTier } from '../middleware/tierGates';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 
@@ -18,10 +20,35 @@ export function buildPolicyGateOptions(
   return {
     bypass: overrides.bypass ?? defaultBypass,
     actor: overrides.actor ?? req.user?.username ?? 'unknown',
+    blockingEnabled: effectiveTier(req) === 'paid',
     ip: (req.ip ?? req.socket.remoteAddress ?? '') as string,
     auditMethod: req.method,
     auditPath: req.originalUrl || req.url,
   };
+}
+
+export function buildSystemPolicyGateOptions(
+  actor: string,
+  overrides: { bypass?: boolean; blockingEnabled?: boolean; auditPath?: string; auditMethod?: string } = {},
+): PolicyEnforcementOptions {
+  return {
+    bypass: overrides.bypass ?? false,
+    actor,
+    blockingEnabled: overrides.blockingEnabled ?? LicenseService.getInstance().getTier() === 'paid',
+    auditMethod: overrides.auditMethod ?? 'POST',
+    auditPath: overrides.auditPath,
+  };
+}
+
+export async function assertPolicyGateAllows(
+  stackName: string,
+  nodeId: number,
+  options: PolicyEnforcementOptions,
+): Promise<void> {
+  const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
+  if (!gate.ok) {
+    throw new Error(`Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`);
+  }
 }
 
 /**

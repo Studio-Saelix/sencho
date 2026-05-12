@@ -16,6 +16,7 @@ import { fetchRemoteMeta, getSenchoVersion, isValidVersion } from '../services/C
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierGates';
 import { scheduleLocalUpdate } from './license';
+import { runPolicyGate } from '../helpers/policyGate';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, type SnapshotNodeData } from '../utils/snapshot-capture';
 import { getLatestVersion } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
@@ -1325,6 +1326,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       }
 
       if (redeploy) {
+        if (!(await runPolicyGate(req, res, stackName, node.id))) return;
         const composeService = ComposeService.getInstance(node.id);
         await composeService.deployStack(stackName);
       }
@@ -1335,9 +1337,12 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       }
 
       const baseUrl = node.api_url.replace(/\/$/, '');
+      const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
       const headers: Record<string, string> = {
         Authorization: `Bearer ${node.api_token}`,
         'Content-Type': 'application/json',
+        [PROXY_TIER_HEADER]: proxyHeaders.tier,
+        [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
       };
 
       for (const file of files) {
@@ -1361,11 +1366,12 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       }
 
       if (redeploy) {
-        await fetch(`${baseUrl}/api/compose/${encodeURIComponent(stackName)}/up`, {
+        const deployRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
           method: 'POST',
           headers,
           signal: AbortSignal.timeout(30000),
         });
+        if (!deployRes.ok) throw new Error('Failed to redeploy stack on remote node');
       }
     }
 

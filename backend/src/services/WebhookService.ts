@@ -4,6 +4,7 @@ import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
 import { GitSourceService } from './GitSourceService';
 import { NodeRegistry } from './NodeRegistry';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
 export class WebhookService {
     private static instance: WebhookService;
@@ -63,6 +64,11 @@ export class WebhookService {
             const compose = ComposeService.getInstance(defaultNodeId);
             switch (action) {
                 case 'deploy':
+                    await assertPolicyGateAllows(
+                        webhook.stack_name,
+                        defaultNodeId,
+                        buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
+                    );
                     await compose.deployStack(webhook.stack_name, undefined, atomic);
                     break;
                 case 'restart':
@@ -75,6 +81,11 @@ export class WebhookService {
                     await compose.runCommand(webhook.stack_name, 'start');
                     break;
                 case 'pull':
+                    await assertPolicyGateAllows(
+                        webhook.stack_name,
+                        defaultNodeId,
+                        buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
+                    );
                     await compose.updateStack(webhook.stack_name, undefined, atomic);
                     break;
                 case 'git-pull': {
