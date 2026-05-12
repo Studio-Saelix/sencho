@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.8](https://github.com/Studio-Saelix/sencho/compare/v0.76.7...v0.76.8) (2026-05-12)
+
+
+### Fixed
+
+* bump protobufjs to clear npm audit high-severity advisories ([#1031](https://github.com/Studio-Saelix/sencho/issues/1031)) ([668474e](https://github.com/Studio-Saelix/sencho/commit/668474e9a8110626ca1cb0dd82f707af9689af08))
+* harden atomic deployment rollback ([#1029](https://github.com/Studio-Saelix/sencho/issues/1029)) ([74ae2ce](https://github.com/Studio-Saelix/sencho/commit/74ae2ce0c698ee506a0b4c835aecc1eeb40518a2))
+* harden blueprint deployment guardrails ([#1027](https://github.com/Studio-Saelix/sencho/issues/1027)) ([19cdb36](https://github.com/Studio-Saelix/sencho/commit/19cdb3681df2803d50be628f30258768f7639a56))
+* harden deploy enforcement paths ([#1030](https://github.com/Studio-Saelix/sencho/issues/1030)) ([b1c5fe8](https://github.com/Studio-Saelix/sencho/commit/b1c5fe8391b8415283130d9451ba138fff7569eb))
+* harden stack file explorer operations ([#1028](https://github.com/Studio-Saelix/sencho/issues/1028)) ([69b6ac1](https://github.com/Studio-Saelix/sencho/commit/69b6ac1f3bc172b0d636cc443460acec521a23e2))
+
 ## [0.76.7](https://github.com/Studio-Saelix/sencho/compare/v0.76.6...v0.76.7) (2026-05-10)
 
 
