@@ -178,7 +178,7 @@ export class ComposeService {
       await fsSvc.backupStackFiles(stackName);
       sendOutput(`=== Backup created for atomic ${operation} ===\n`);
     } catch (error) {
-      console.error('Atomic backup failed for %s:', sanitizeForLog(stackName), error);
+      console.error('Atomic backup failed for %s:', sanitizeForLog(stackName), getErrorMessage(error, 'unknown error'));
       sendOutput(`=== Atomic ${operation} backup failed. Operation aborted ===\n`);
       throw new Error(`Atomic ${operation} backup failed: ${getErrorMessage(error, 'unknown error')}`);
     }
@@ -199,7 +199,7 @@ export class ComposeService {
       sendOutput('=== Rolled back successfully ===\n');
       return true;
     } catch (rollbackError) {
-      console.error('Rollback failed for %s:', sanitizeForLog(stackName), rollbackError);
+      console.error('Rollback failed for %s:', sanitizeForLog(stackName), getErrorMessage(rollbackError, 'unknown error'));
       sendOutput('=== Rollback failed. Manual intervention may be required ===\n');
       return false;
     }
