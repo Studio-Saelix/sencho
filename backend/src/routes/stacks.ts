@@ -388,6 +388,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       auto_apply_on_webhook,
       auto_deploy_on_apply,
       deploy_now,
+      skip_scan,
     } = req.body ?? {};
     fromGitStackName = typeof stack_name === 'string' ? stack_name : '';
 
@@ -512,7 +513,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       deployed,
       deployError,
     });
-    if (deployed) {
+    if (deployed && skip_scan !== true) {
       triggerPostDeployScan(stack_name, req.nodeId).catch(err =>
         console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stack_name)}:`, err),
       );
@@ -602,6 +603,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
@@ -612,9 +614,11 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
     res.json({ message: 'Deployed successfully' });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
-    triggerPostDeployScan(stackName, req.nodeId).catch(err =>
-      console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
-    );
+    if (!skipScan) {
+      triggerPostDeployScan(stackName, req.nodeId).catch(err =>
+        console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
+      );
+    }
   } catch (error: unknown) {
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
     const rollbackInfo = getComposeRollbackInfo(error);
@@ -781,6 +785,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
@@ -792,9 +797,11 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
     res.json({ status: 'Update completed' });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
-    triggerPostDeployScan(stackName, req.nodeId).catch(err =>
-      console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
-    );
+    if (!skipScan) {
+      triggerPostDeployScan(stackName, req.nodeId).catch(err =>
+        console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
+      );
+    }
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
     const rollbackInfo = getComposeRollbackInfo(error);

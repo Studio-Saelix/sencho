@@ -755,6 +755,13 @@ export class SchedulerService {
         if (task.node_id == null && isDebugEnabled()) {
             console.log(`[SchedulerService:debug] Scan task ${task.id}: no node_id specified, using default node ${nodeId}`);
         }
+        const node = NodeRegistry.getInstance().getNode(nodeId);
+        if (!node) {
+            throw new Error('Scheduled vulnerability scans require an existing local node.');
+        }
+        if (node?.type === 'remote') {
+            throw new Error('Scheduled vulnerability scans currently require a local node.');
+        }
 
         const scanStart = Date.now();
         if (isDebugEnabled()) console.log(`[SchedulerService:debug] executeScan start: task=${task.id} node=${nodeId}`);
@@ -802,6 +809,13 @@ export function formatScanOutput(summary: ScanAllNodeImagesResult): string {
         if (skipped > 0) parts.push(`${skipped} skipped (cached)`);
         if (failed > 0) parts.push(`${failed} failed`);
         header = parts.join('; ');
+    }
+
+    if (summary.truncated) {
+        const total = summary.totalImages ?? scanned + skipped + failed;
+        const processed = summary.processedImages ?? scanned + skipped + failed;
+        header += `. Scan limited after ${processed} of ${total} image(s)`;
+        if (summary.limitReason) header += ` (${summary.limitReason})`;
     }
 
     const severityTiers: Array<[string, number]> = [

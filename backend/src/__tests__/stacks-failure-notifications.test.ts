@@ -22,6 +22,10 @@ const {
   mockGetContainersByStack,
   mockRestartContainer,
   mockStopContainer,
+  mockListContainers,
+  mockIsTrivyAvailable,
+  mockGetImageDigest,
+  mockRunScanAndPersist,
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockRunCommand: vi.fn(),
@@ -29,6 +33,10 @@ const {
   mockGetContainersByStack: vi.fn(),
   mockRestartContainer: vi.fn(),
   mockStopContainer: vi.fn(),
+  mockListContainers: vi.fn(),
+  mockIsTrivyAvailable: vi.fn(),
+  mockGetImageDigest: vi.fn(),
+  mockRunScanAndPersist: vi.fn(),
 }));
 
 vi.mock('../services/ComposeService', async () => {
@@ -60,6 +68,26 @@ vi.mock('../services/DockerController', async () => {
         getContainersByStack: mockGetContainersByStack,
         restartContainer: mockRestartContainer,
         stopContainer: mockStopContainer,
+        getDocker: () => ({
+          listContainers: mockListContainers,
+        }),
+      }),
+    },
+  };
+});
+
+vi.mock('../services/TrivyService', async () => {
+  const actual = await vi.importActual<typeof import('../services/TrivyService')>(
+    '../services/TrivyService',
+  );
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      getInstance: () => ({
+        isTrivyAvailable: mockIsTrivyAvailable,
+        getImageDigest: mockGetImageDigest,
+        runScanAndPersist: mockRunScanAndPersist,
       }),
     },
   };
@@ -105,6 +133,17 @@ beforeEach(() => {
   mockGetContainersByStack.mockReset();
   mockRestartContainer.mockReset();
   mockStopContainer.mockReset();
+  mockListContainers.mockReset();
+  mockIsTrivyAvailable.mockReset();
+  mockGetImageDigest.mockReset();
+  mockRunScanAndPersist.mockReset();
+  mockIsTrivyAvailable.mockReturnValue(true);
+  mockListContainers.mockResolvedValue([{ Image: 'nginx:latest' }]);
+  mockGetImageDigest.mockResolvedValue(null);
+  mockRunScanAndPersist.mockResolvedValue({
+    critical_count: 0,
+    high_count: 0,
+  });
   dispatchAlertSpy.mockClear();
 });
 
@@ -184,6 +223,23 @@ describe('deploy_failure notification on /deploy error', () => {
 
     expect(res.status).toBe(200);
     expect(mockDeployStack.mock.calls[0][2]).toBe(true);
+  });
+});
+
+describe('post-deploy scan opt-out', () => {
+  it('does not trigger a post-deploy scan when skip_scan is true', async () => {
+    mockDeployStack.mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie)
+      .send({ skip_scan: true });
+
+    expect(res.status).toBe(200);
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(mockListContainers).not.toHaveBeenCalled();
+    expect(mockRunScanAndPersist).not.toHaveBeenCalled();
   });
 });
 
