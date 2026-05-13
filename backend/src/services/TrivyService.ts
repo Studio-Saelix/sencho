@@ -25,6 +25,8 @@ const execFileAsync = promisify(execFile);
 const SCAN_TIMEOUT_MS = 5 * 60 * 1000;
 const SBOM_TIMEOUT_MS = 3 * 60 * 1000;
 export const DIGEST_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_SCAN_ALL_MAX_IMAGES = 100;
+const DEFAULT_SCAN_ALL_MAX_DURATION_MS = 30 * 60 * 1000;
 
 const TRIVY_TEMP_DIR_PREFIX = 'sencho-trivy-';
 const TRIVY_TEMP_DIR_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
@@ -136,6 +138,10 @@ export interface ScanAllNodeImagesResult {
     scanned: number;
     skipped: number;
     failed: number;
+    totalImages?: number;
+    processedImages?: number;
+    truncated?: boolean;
+    limitReason?: string;
     severity: ScanAllNodeImagesSeverityTotals;
     /**
      * Policy violations observed across the freshly-scanned or cached rows.
@@ -220,6 +226,12 @@ export interface TrivyComposeScanResult {
 }
 
 export type SbomFormat = 'spdx-json' | 'cyclonedx';
+
+function positiveIntFromEnv(name: string, fallback: number): number {
+    const value = Number(process.env[name]);
+    if (!Number.isFinite(value) || value <= 0) return fallback;
+    return Math.floor(value);
+}
 
 // Keep scanners in canonical order so the DB value is comparable as-is.
 export function normalizeScanners(input?: readonly TrivyScanner[]): TrivyScanner[] {
@@ -1029,10 +1041,16 @@ class TrivyService {
                 if (tag && tag !== '<none>:<none>') imageRefs.add(tag);
             }
         }
+        const refs = Array.from(imageRefs);
+        const maxImages = positiveIntFromEnv('TRIVY_SCAN_ALL_MAX_IMAGES', DEFAULT_SCAN_ALL_MAX_IMAGES);
+        const maxDurationMs = positiveIntFromEnv('TRIVY_SCAN_ALL_MAX_DURATION_MS', DEFAULT_SCAN_ALL_MAX_DURATION_MS);
 
         let scanned = 0;
         let skipped = 0;
         let failed = 0;
+        let processedImages = 0;
+        let truncated = false;
+        let limitReason: string | undefined;
         const severity = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
         const countedDigests = new Set<string>();
         const violations: ScanAllNodeImagesViolation[] = [];
@@ -1068,7 +1086,19 @@ class TrivyService {
             }
         };
 
-        for (const ref of imageRefs) {
+        for (const ref of refs) {
+            if (processedImages >= maxImages) {
+                truncated = true;
+                limitReason = `image limit ${maxImages} reached`;
+                break;
+            }
+            const elapsedMs = Date.now() - batchStartedAt;
+            if (elapsedMs >= maxDurationMs) {
+                truncated = true;
+                limitReason = `duration limit ${maxDurationMs}ms reached`;
+                break;
+            }
+            processedImages++;
             try {
                 const digest = await this.getImageDigest(ref, nodeId);
                 if (digest) {
@@ -1097,9 +1127,19 @@ class TrivyService {
         diag(
             `scanAllNodeImages: nodeId=${nodeId} unique=${imageRefs.size} `
             + `scanned=${scanned} skipped=${skipped} failed=${failed} `
-            + `violations=${violations.length} elapsedMs=${Date.now() - batchStartedAt}`,
+            + `violations=${violations.length} truncated=${truncated} elapsedMs=${Date.now() - batchStartedAt}`,
         );
-        return { scanned, skipped, failed, severity, violations };
+        return {
+            scanned,
+            skipped,
+            failed,
+            totalImages: refs.length,
+            processedImages,
+            truncated,
+            limitReason,
+            severity,
+            violations,
+        };
     }
 
     async generateSBOM(imageRef: string, format: SbomFormat): Promise<string> {

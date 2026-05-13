@@ -99,7 +99,7 @@ function toSuppressions(decision: Partial<SuppressionDecision>): SarifSuppressio
         {
             kind: 'external',
             status: 'accepted',
-            justification: decision.suppression_reason?.trim() || 'Suppressed in Sencho',
+            justification: 'Suppressed in Sencho',
         },
     ];
 }
@@ -112,7 +112,7 @@ function toAckSuppressions(
         {
             kind: 'external',
             status: 'accepted',
-            justification: decision.acknowledgement_reason?.trim() || 'Acknowledged in Sencho',
+            justification: 'Acknowledged in Sencho',
         },
     ];
 }
