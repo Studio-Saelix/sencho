@@ -7,6 +7,7 @@ import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { NodeRegistry } from './NodeRegistry';
 import { getErrorMessage } from '../utils/errors';
+import { isValidStackName } from '../utils/validation';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
 type ExecutionResult = { success: boolean; error?: string; duration_ms: number };
@@ -228,11 +229,36 @@ export class WebhookService {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS);
         try {
-            const base = new URL(target.apiUrl);
-            if (base.protocol !== 'http:' && base.protocol !== 'https:') {
+            // nodeId selects a server-controlled entry from the registry
+            // (CodeQL GOOD pattern: user input maps to known values, not concatenated into the URL).
+            const targetBase = new URL(target.apiUrl);
+            const protocol = targetBase.protocol;
+            const host = targetBase.host;
+            const hostname = targetBase.hostname;
+
+            // Verify the hostname is in the configured-node allow-list.
+            const allowedHosts = DatabaseService.getInstance().getNodes()
+                .filter(n => n.api_url)
+                .map(n => new URL(n.api_url!).hostname);
+            if (!allowedHosts.includes(hostname)) {
+                throw new Error('Remote node hostname is not a configured node');
+            }
+
+            // Restrict protocol to http/https (prevents file://, ftp://, etc.).
+            if (protocol !== 'http:' && protocol !== 'https:') {
                 throw new Error('Remote node URL must use http:// or https://');
             }
-            const url = new URL(`/api/stacks/${encodeURIComponent(stackName)}/${endpoint}`, base).toString();
+
+            // Validate path components to prevent traversal.
+            if (!isValidStackName(stackName)) {
+                throw new Error('Invalid stack name');
+            }
+            if (!/^[a-z][a-z0-9\/-]*$/.test(endpoint) || endpoint.includes('..')) {
+                throw new Error('Invalid endpoint');
+            }
+
+            // Build URL from validated, server-controlled components.
+            const url = `${protocol}//${host}/api/stacks/${encodeURIComponent(stackName)}/${endpoint}`;
             return await fetch(url, {
                 method,
                 headers,
