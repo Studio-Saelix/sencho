@@ -12,7 +12,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
-import { isPathWithinBase } from '../utils/validation';
+import { isPathWithinBase, isValidGitSourcePath } from '../utils/validation';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
 
 // isomorphic-git is the heaviest dependency in the backend (~5 MB) and only
@@ -278,6 +278,9 @@ async function hasSubmodules(dir: string): Promise<boolean> {
 }
 
 async function readRepoFile(rootDir: string, relPath: string, label: string): Promise<string> {
+    if (!isValidGitSourcePath(relPath)) {
+        throw new GitSourceError('FILE_NOT_FOUND', `${label} is not a valid repository path.`);
+    }
     const abs = path.resolve(rootDir, relPath);
     if (!isPathWithinBase(abs, rootDir)) {
         throw new GitSourceError('FILE_NOT_FOUND', `${label} resolves outside the repository.`);

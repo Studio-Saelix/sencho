@@ -226,6 +226,12 @@ export class WebhookService {
         headers[PROXY_TIER_HEADER] = licenseHeaders.tier;
         headers[PROXY_VARIANT_HEADER] = licenseHeaders.variant || '';
 
+        const parsedUrl = new URL(url);
+        const targetHost = new URL(target.apiUrl).hostname;
+        if (parsedUrl.hostname !== targetHost) {
+            throw new Error('Unable to resolve remote node address');
+        }
+
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS);
         try {

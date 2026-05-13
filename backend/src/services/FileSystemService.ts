@@ -187,6 +187,9 @@ export class FileSystemService {
   }
 
   async getEnvContent(stackName: string): Promise<string> {
+    if (!isValidStackName(stackName)) {
+      throw Object.assign(new Error('Invalid stack name'), { code: 'INVALID_STACK_NAME' });
+    }
     const stackDir = this.resolveStackDir(stackName);
     const envPath = path.join(stackDir, '.env');
     try {
