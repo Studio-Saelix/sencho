@@ -530,6 +530,25 @@ describe('GitSourceService.fetchFromGit (.git metadata guard)', () => {
             composePath: 'gitops.yaml',
         })).resolves.toBeDefined();
     });
+
+    it('rejects compose paths that are symbolic links', async () => {
+        mockSuccessfulClone();
+        const { promises: fsp } = await import('fs');
+        const lstatSpy = vi.spyOn(fsp, 'lstat').mockResolvedValue({
+            isSymbolicLink: () => true,
+        } as Awaited<ReturnType<typeof fsp.lstat>>);
+
+        await expect(svc().fetchFromGit({
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePath: 'compose.yaml',
+        })).rejects.toMatchObject({
+            code: 'FILE_NOT_FOUND',
+            message: expect.stringMatching(/symbolic link/i),
+        });
+
+        lstatSpy.mockRestore();
+    });
 });
 
 describe('GitSourceService.fetchFromGit (LFS + submodule detection)', () => {

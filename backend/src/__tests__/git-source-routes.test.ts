@@ -155,6 +155,70 @@ describe('PUT /api/stacks/:stackName/git-source — stack existence guard', () =
     });
 });
 
+describe('git-source routes — repository path validation', () => {
+    it('rejects compose_path traversal before service execution', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_path: '../compose.yaml',
+                auth_type: 'none',
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/compose_path/i);
+    });
+
+    it('rejects absolute env_path on create-from-git', async () => {
+        const res = await request(app)
+            .post('/api/stacks/from-git')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                stack_name: 'route-from-git-env-abs',
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                sync_env: true,
+                env_path: '/etc/passwd',
+                auth_type: 'none',
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/env_path/i);
+    });
+
+    it('rejects string auto_deploy_on_apply on update', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                auth_type: 'none',
+                auto_deploy_on_apply: 'true',
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/auto_deploy_on_apply/i);
+    });
+
+    it('rejects string auto_deploy_on_apply on create-from-git', async () => {
+        const res = await request(app)
+            .post('/api/stacks/from-git')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                stack_name: 'route-from-git-auto-deploy-string',
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                auth_type: 'none',
+                auto_deploy_on_apply: 'true',
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/auto_deploy_on_apply/i);
+    });
+});
+
 describe('git-source routes — invalid stack names', () => {
     it('returns 400 for traversal attempts on GET per-stack', async () => {
         const res = await request(app)

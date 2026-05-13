@@ -187,8 +187,11 @@ export class FileSystemService {
   }
 
   async getEnvContent(stackName: string): Promise<string> {
-    const stackDir = this.resolveStackDir(stackName);
-    const envPath = path.join(stackDir, '.env');
+    const base = path.resolve(this.baseDir);
+    const envPath = path.resolve(base, path.basename(stackName), '.env');
+    if (!isPathWithinBase(envPath, base)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
     try {
       return await fsPromises.readFile(envPath, 'utf-8');
     } catch (error) {

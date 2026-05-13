@@ -13,7 +13,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { requirePermission } from '../middleware/permissions';
 import { requirePaid, requireAdmin, effectiveTier } from '../middleware/tierGates';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
-import { isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
+import { isValidGitSourcePath, isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -406,6 +406,12 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     if (typeof compose_path !== 'string' || !compose_path.trim()) {
       return res.status(400).json({ error: 'compose_path is required' });
     }
+    if (auto_apply_on_webhook !== undefined && typeof auto_apply_on_webhook !== 'boolean') {
+      return res.status(400).json({ error: 'auto_apply_on_webhook must be a boolean' });
+    }
+    if (auto_deploy_on_apply !== undefined && typeof auto_deploy_on_apply !== 'boolean') {
+      return res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
+    }
     const resolvedAuthType = auth_type === 'token' ? 'token' : 'none';
     if (!/^https:\/\//i.test(repo_url)) {
       return res.status(400).json({ error: 'Only HTTPS repository URLs are supported' });
@@ -425,6 +431,16 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     if (typeof token === 'string' && token.length > 8192) {
       return res.status(400).json({ error: 'token is too long' });
     }
+    if (!isValidGitSourcePath(compose_path.trim())) {
+      return res.status(400).json({ error: 'compose_path must be a relative repository file path' });
+    }
+    if (typeof env_path === 'string' && env_path.trim() && !isValidGitSourcePath(env_path.trim())) {
+      return res.status(400).json({ error: 'env_path must be a relative repository file path' });
+    }
+    const autoApplyOnWebhook = auto_apply_on_webhook === true;
+    const autoDeployOnApply = auto_deploy_on_apply === true;
+    if (autoDeployOnApply && !requirePermission(req, res, 'stack:deploy', 'stack', stack_name)) return;
+    if (deploy_now === true && !requirePermission(req, res, 'stack:deploy', 'stack', stack_name)) return;
 
     const stacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     if (stacks.includes(stack_name)) {
@@ -440,7 +456,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
 
     if (fromGitDiag) {
       console.log(
-        `[Stacks:diag] from-git start stack=${sanitizeForLog(stack_name)} nodeId=${req.nodeId ?? 'local'} host=${sanitizeForLog(gitRepoHost(repo_url))} branch=${sanitizeForLog(branch)} composePath=${sanitizeForLog(compose_path)} envPath=${sanitizeForLog(resolvedEnvPath ?? 'none')} authType=${sanitizeForLog(resolvedAuthType)} autoApplyOnWebhook=${Boolean(auto_apply_on_webhook)} autoDeployOnApply=${Boolean(auto_deploy_on_apply)} deployNow=${deploy_now === true}`
+        `[Stacks:diag] from-git start stack=${sanitizeForLog(stack_name)} nodeId=${req.nodeId ?? 'local'} host=${sanitizeForLog(gitRepoHost(repo_url))} branch=${sanitizeForLog(branch)} composePath=${sanitizeForLog(compose_path)} envPath=${sanitizeForLog(resolvedEnvPath ?? 'none')} authType=${sanitizeForLog(resolvedAuthType)} autoApplyOnWebhook=${autoApplyOnWebhook} autoDeployOnApply=${autoDeployOnApply} deployNow=${deploy_now === true}`
       );
     }
 
@@ -453,8 +469,8 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       envPath: resolvedEnvPath,
       authType: resolvedAuthType,
       token: resolvedAuthType === 'token' && typeof token === 'string' && token !== '' ? token : null,
-      autoApplyOnWebhook: Boolean(auto_apply_on_webhook),
-      autoDeployOnApply: Boolean(auto_deploy_on_apply),
+      autoApplyOnWebhook,
+      autoDeployOnApply,
     });
 
     invalidateNodeCaches(req.nodeId);
