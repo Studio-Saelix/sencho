@@ -111,7 +111,6 @@ export class AutoHealService {
             return;
         }
 
-        const db = DatabaseService.getInstance();
         const eventSvc = DockerEventManager.getInstance().getService(nodeId);
         const now = Date.now();
 
