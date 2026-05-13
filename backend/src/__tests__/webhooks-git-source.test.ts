@@ -94,7 +94,7 @@ describe('node-aware Git source webhooks', () => {
 
         expect(res.status).toBe(201);
         expect(fetchSpy).toHaveBeenCalledWith(
-            'http://remote.example/api/stacks/remote-stack/git-source',
+            new URL('http://remote.example/api/stacks/remote-stack/git-source'),
             expect.objectContaining({ method: 'GET' }),
         );
     });
