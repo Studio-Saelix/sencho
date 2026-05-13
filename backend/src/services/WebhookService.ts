@@ -7,6 +7,7 @@ import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { NodeRegistry } from './NodeRegistry';
 import { getErrorMessage } from '../utils/errors';
+import { buildRemoteApiUrl } from '../utils/safeUrl';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
 type ExecutionResult = { success: boolean; error?: string; duration_ms: number };
@@ -228,8 +229,7 @@ export class WebhookService {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS);
         try {
-            const targetBase = new URL(target.apiUrl);
-            const url = new URL(`/api/stacks/${encodeURIComponent(stackName)}/${endpoint}`, targetBase);
+            const url = buildRemoteApiUrl(target.apiUrl, `/api/stacks/${encodeURIComponent(stackName)}/${endpoint}`);
             return await fetch(url, {
                 method,
                 headers,
