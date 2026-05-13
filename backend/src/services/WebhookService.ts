@@ -253,7 +253,7 @@ export class WebhookService {
             if (!isValidStackName(stackName)) {
                 throw new Error('Invalid stack name');
             }
-            if (!/^[a-z][a-z0-9\/-]*$/.test(endpoint) || endpoint.includes('..')) {
+            if (!/^[a-z][a-z0-9/-]*$/.test(endpoint) || endpoint.includes('..')) {
                 throw new Error('Invalid endpoint');
             }
 
