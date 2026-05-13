@@ -20,6 +20,7 @@ import { DatabaseService } from '../services/DatabaseService';
 
 export function isDebugEnabled(): boolean {
   try {
+    if (process.env.NODE_ENV === 'test' && !process.env.DATA_DIR) return false;
     return DatabaseService.getInstance().getGlobalSettings().developer_mode === '1';
   } catch {
     return false;
