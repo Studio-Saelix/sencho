@@ -3,6 +3,7 @@ import { DatabaseService, AutoHealPolicy, AutoHealHistoryEntry } from './Databas
 import DockerController from './DockerController';
 import { DockerEventManager } from './DockerEventManager';
 import { ContainerHealthSnapshot } from './DockerEventService';
+import { LicenseService } from './LicenseService';
 import { NotificationService } from './NotificationService';
 
 // Dockerode listContainers shape (subset used here)
@@ -10,11 +11,14 @@ type ContainerInfo = {
     Id: string;
     Names?: string[];
     Labels?: Record<string, string>;
+    State?: string;
+    Status?: string;
 };
 
 const EVAL_INTERVAL_MS = 30_000;
 const INITIAL_DELAY_MS = 10_000;
 const RATE_LIMIT_WINDOW_MS = 60 * 60_000; // 1 hour
+const HISTORY_THROTTLE_MS = 5 * 60_000;
 
 export class AutoHealService {
     private static instance: AutoHealService;
@@ -22,6 +26,8 @@ export class AutoHealService {
     private initialTimer: NodeJS.Timeout | null = null;
     private isProcessing = false;
     private restartTimestamps = new Map<string, number[]>();
+    private observedUnhealthySince = new Map<string, number>();
+    private historyTimestamps = new Map<string, number>();
 
     private constructor() {}
 
@@ -33,6 +39,7 @@ export class AutoHealService {
     }
 
     start(): void {
+        if (this.initialTimer || this.intervalId) return;
         this.initialTimer = setTimeout(() => {
             void this.evaluate();
             this.intervalId = setInterval(() => void this.evaluate(), EVAL_INTERVAL_MS);
@@ -54,13 +61,18 @@ export class AutoHealService {
         if (this.isProcessing) return;
         this.isProcessing = true;
         try {
+            const localPaid = LicenseService.getInstance().getTier() === 'paid';
             const db = DatabaseService.getInstance();
-            const policies = db.getAutoHealPolicies().filter(p => p.enabled === 1);
-            if (policies.length === 0) return;
 
             // Evaluate only on local nodes (remote nodes self-monitor via their own instance)
             const nodes = db.getNodes().filter(n => n.type === 'local');
+            const now = Date.now();
             for (const node of nodes) {
+                const policies = db.getAutoHealPolicies(undefined, node.id).filter(p =>
+                    p.enabled === 1 && (localPaid || p.proxy_entitled_until > now)
+                );
+                this.pruneInactivePolicyHistory(node.id, policies);
+                if (policies.length === 0) continue;
                 await this.evaluateForNode(node.id, policies);
             }
         } catch (err) {
@@ -75,10 +87,27 @@ export class AutoHealService {
         try {
             containers = await DockerController.getInstance(nodeId).getRunningContainers();
         } catch (err) {
+            const now = Date.now();
+            const errorMsg = err instanceof Error ? err.message : String(err);
             console.error(
                 `[AutoHeal] failed to list containers on node ${nodeId}:`,
-                err instanceof Error ? err.message : err,
+                errorMsg,
             );
+            for (const policy of policies) {
+                if (policy.id === undefined) continue;
+                this.recordThrottledHistory(policy, {
+                    policy_id: policy.id!,
+                    stack_name: policy.stack_name,
+                    service_name: policy.service_name,
+                    container_name: `node-${nodeId}`,
+                    container_id: `node-${nodeId}`,
+                    action: 'docker_unavailable',
+                    reason: 'Skipped: Docker daemon is unavailable for this node.',
+                    success: 0,
+                    error: errorMsg,
+                    timestamp: now,
+                }, nodeId);
+            }
             return;
         }
 
@@ -88,14 +117,23 @@ export class AutoHealService {
 
         // Prune stale entries for containers no longer running on this node
         const liveIds = new Set(containers.map(c => c.Id));
-        for (const [cid, timestamps] of this.restartTimestamps.entries()) {
+        const liveKeys = new Set(containers.map(c => this.containerKey(nodeId, c.Id)));
+        for (const [key, timestamps] of this.restartTimestamps.entries()) {
+            if (!key.startsWith(`${nodeId}:`)) continue;
+            const containerId = key.slice(String(nodeId).length + 1);
             const recent = timestamps.filter(t => now - t < RATE_LIMIT_WINDOW_MS);
-            if (recent.length === 0 || !liveIds.has(cid)) {
-                this.restartTimestamps.delete(cid);
+            if (recent.length === 0 || !liveIds.has(containerId)) {
+                this.restartTimestamps.delete(key);
             } else {
-                this.restartTimestamps.set(cid, recent);
+                this.restartTimestamps.set(key, recent);
             }
         }
+        for (const key of this.observedUnhealthySince.keys()) {
+            if (key.startsWith(`${nodeId}:`) && !liveKeys.has(key)) {
+                this.observedUnhealthySince.delete(key);
+            }
+        }
+        this.pruneInactivePolicyHistory(nodeId, policies);
 
         for (const policy of policies) {
             if (policy.id === undefined) {
@@ -115,8 +153,8 @@ export class AutoHealService {
                 const containerName =
                     container.Names?.[0]?.replace(/^\//, '') ?? container.Id.slice(0, 12);
                 const serviceOverride = container.Labels?.['com.docker.compose.service'] ?? null;
-                const state = eventSvc?.getContainerState(container.Id);
-                const decision = this.shouldHeal(state, policy, container.Id, now);
+                const state = this.getEffectiveState(nodeId, container, eventSvc?.getContainerState(container.Id), now);
+                const decision = this.shouldHeal(state, policy, this.containerKey(nodeId, container.Id), now);
 
                 if (!decision.heal) {
                     if (
@@ -124,7 +162,7 @@ export class AutoHealService {
                         decision.skipReason !== 'not_unhealthy' &&
                         decision.skipReason !== 'duration_not_met'
                     ) {
-                        db.recordAutoHealHistory({
+                        this.recordThrottledHistory(policy, {
                             policy_id: policy.id!,
                             stack_name: policy.stack_name,
                             service_name: policy.service_name ?? serviceOverride,
@@ -135,7 +173,7 @@ export class AutoHealService {
                             success: 0,
                             error: null,
                             timestamp: now,
-                        });
+                        }, nodeId, container.Id);
                     }
                     continue;
                 }
@@ -149,6 +187,51 @@ export class AutoHealService {
                 );
             }
         }
+    }
+
+    private getEffectiveState(
+        nodeId: number,
+        container: ContainerInfo,
+        eventState: ContainerHealthSnapshot | undefined,
+        now: number,
+    ): ContainerHealthSnapshot | undefined {
+        const key = this.containerKey(nodeId, container.Id);
+        const statusText = `${container.State ?? ''} ${container.Status ?? ''}`.toLowerCase();
+        const dockerHealth = statusText.includes('unhealthy')
+            ? 'unhealthy'
+            : statusText.includes('healthy')
+                ? 'healthy'
+                : statusText.includes('starting')
+                    ? 'starting'
+                    : undefined;
+
+        if (dockerHealth === 'unhealthy') {
+            const unhealthySince = eventState?.healthStatus === 'unhealthy' && eventState.unhealthySince
+                ? eventState.unhealthySince
+                : this.observedUnhealthySince.get(key) ?? now;
+            this.observedUnhealthySince.set(key, unhealthySince);
+            return {
+                id: container.Id,
+                name: eventState?.name ?? container.Names?.[0]?.replace(/^\//, ''),
+                stackName: eventState?.stackName ?? container.Labels?.['com.docker.compose.project'],
+                healthStatus: 'unhealthy',
+                unhealthySince,
+                lastKillAt: eventState?.lastKillAt,
+            };
+        }
+
+        if (dockerHealth === 'healthy' || dockerHealth === 'starting') {
+            this.observedUnhealthySince.delete(key);
+            return {
+                id: container.Id,
+                name: eventState?.name ?? container.Names?.[0]?.replace(/^\//, ''),
+                stackName: eventState?.stackName ?? container.Labels?.['com.docker.compose.project'],
+                healthStatus: dockerHealth,
+                lastKillAt: eventState?.lastKillAt,
+            };
+        }
+
+        return eventState;
     }
 
     private shouldHeal(
@@ -213,10 +296,11 @@ export class AutoHealService {
             db.resetConsecutiveFailures(policy.id!);
             db.updateAutoHealPolicy(policy.id!, { last_fired_at: now });
 
-            const timestamps = this.restartTimestamps.get(containerId) ?? [];
+            const restartKey = this.containerKey(nodeId, containerId);
+            const timestamps = this.restartTimestamps.get(restartKey) ?? [];
             timestamps.push(now);
             this.restartTimestamps.set(
-                containerId,
+                restartKey,
                 timestamps.filter(t => now - t < RATE_LIMIT_WINDOW_MS),
             );
 
@@ -232,7 +316,7 @@ export class AutoHealService {
                 timestamp: now,
                 username: 'system',
                 method: 'POST',
-                path: '/api/auto-heal/execute',
+                path: '/system/auto-heal',
                 status_code: 200,
                 node_id: nodeId,
                 ip_address: '127.0.0.1',
@@ -304,6 +388,34 @@ export class AutoHealService {
                 { stackName: policy.stack_name },
             )
             .catch(e => console.error('[AutoHeal] notification dispatch failed:', e));
+    }
+
+    private recordThrottledHistory(
+        policy: AutoHealPolicy,
+        entry: Omit<AutoHealHistoryEntry, 'id'>,
+        nodeId: number,
+        containerId = entry.container_id,
+    ): void {
+        if (policy.id === undefined) return;
+        const key = `${nodeId}:${policy.id}:${containerId}:${entry.action}`;
+        const lastRecorded = this.historyTimestamps.get(key) ?? 0;
+        if (entry.timestamp - lastRecorded < HISTORY_THROTTLE_MS) return;
+        this.historyTimestamps.set(key, entry.timestamp);
+        DatabaseService.getInstance().recordAutoHealHistory(entry);
+    }
+
+    private pruneInactivePolicyHistory(nodeId: number, policies: AutoHealPolicy[]): void {
+        const activePolicyIds = new Set(policies.map(p => p.id).filter((id): id is number => id !== undefined));
+        for (const key of this.historyTimestamps.keys()) {
+            const [keyNodeId, policyId] = key.split(':');
+            if (keyNodeId === String(nodeId) && !activePolicyIds.has(Number(policyId))) {
+                this.historyTimestamps.delete(key);
+            }
+        }
+    }
+
+    private containerKey(nodeId: number, containerId: string): string {
+        return `${nodeId}:${containerId}`;
     }
 
     private skipReasonText(reason: string): string {

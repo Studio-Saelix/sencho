@@ -35,6 +35,8 @@ interface StackAlert {
 
 interface AutoHealPolicy {
     id?: number;
+    node_id: number;
+    proxy_entitled_until: number;
     stack_name: string;
     service_name: string | null;
     unhealthy_duration_mins: number;
@@ -55,7 +57,7 @@ interface AutoHealHistoryEntry {
     service_name: string | null;
     container_name: string;
     container_id: string;
-    action: 'restarted' | 'skipped_user_action' | 'skipped_cooldown' | 'skipped_rate_limit' | 'failed' | 'policy_auto_disabled';
+    action: 'restarted' | 'skipped_user_action' | 'skipped_cooldown' | 'skipped_rate_limit' | 'failed' | 'policy_auto_disabled' | 'docker_unavailable';
     reason: string;
     success: number;
     error: string | null;
@@ -122,6 +124,7 @@ function actionLabel(action: AutoHealHistoryEntry['action']): string {
         case 'skipped_rate_limit': return 'Skipped (rate limit)';
         case 'failed': return 'Failed';
         case 'policy_auto_disabled': return 'Auto-disabled';
+        case 'docker_unavailable': return 'Docker unavailable';
     }
 }
 
