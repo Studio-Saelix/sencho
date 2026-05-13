@@ -7,6 +7,7 @@ import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { NodeRegistry } from './NodeRegistry';
 import { getErrorMessage } from '../utils/errors';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
 type ExecutionResult = { success: boolean; error?: string; duration_ms: number };
 type ExecutionStatus = 'success' | 'failure';
@@ -104,6 +105,11 @@ export class WebhookService {
             const compose = ComposeService.getInstance(nodeId);
             switch (action) {
                 case 'deploy':
+                    await assertPolicyGateAllows(
+                        stackName,
+                        nodeId,
+                        buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
+                    );
                     await compose.deployStack(stackName, undefined, atomic);
                     break;
                 case 'restart':
@@ -116,6 +122,11 @@ export class WebhookService {
                     await compose.runCommand(stackName, 'start');
                     break;
                 case 'pull':
+                    await assertPolicyGateAllows(
+                        stackName,
+                        nodeId,
+                        buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
+                    );
                     await compose.updateStack(stackName, undefined, atomic);
                     break;
                 case 'git-pull':

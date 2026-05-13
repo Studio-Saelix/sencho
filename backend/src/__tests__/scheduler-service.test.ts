@@ -12,7 +12,7 @@ const {
   mockUpdateScheduledTask, mockCleanupOldTaskRuns, mockGetScheduledTask, mockGetNodes, mockGetNode,
   mockCreateSnapshot, mockInsertSnapshotFiles, mockClearStackUpdateStatus,
   mockMarkStaleRunsAsFailed, mockDeleteOldScans,
-  mockGetTier, mockGetVariant,
+  mockGetTier, mockGetVariant, mockGetProxyHeaders,
   mockGetContainersByStack, mockRestartContainer, mockPruneSystem,
   mockUpdateStack,
   mockGetStacks, mockGetStackContent, mockGetEnvContent,
@@ -23,6 +23,7 @@ const {
   mockScanAllNodeImages,
   mockGetStackAutoUpdateSettingsForNode,
   mockDeleteScheduledTask,
+  mockGetMatchingPolicy,
   mockRunCommand,
   mockDeployStack,
   mockBackupStackFiles,
@@ -42,6 +43,7 @@ const {
   mockDeleteOldScans: vi.fn().mockReturnValue(0),
   mockGetTier: vi.fn().mockReturnValue('paid'),
   mockGetVariant: vi.fn().mockReturnValue('admiral'),
+  mockGetProxyHeaders: vi.fn().mockReturnValue({ tier: 'paid', variant: 'admiral' }),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
   mockRestartContainer: vi.fn().mockResolvedValue(undefined),
   mockPruneSystem: vi.fn().mockResolvedValue({ success: true, reclaimedBytes: 0 }),
@@ -62,6 +64,7 @@ const {
   }),
   mockGetStackAutoUpdateSettingsForNode: vi.fn().mockReturnValue({}),
   mockDeleteScheduledTask: vi.fn(),
+  mockGetMatchingPolicy: vi.fn().mockReturnValue(null),
   mockRunCommand: vi.fn().mockResolvedValue(undefined),
   mockDeployStack: vi.fn().mockResolvedValue(undefined),
   mockBackupStackFiles: vi.fn().mockResolvedValue(undefined),
@@ -85,7 +88,14 @@ vi.mock('../services/DatabaseService', () => ({
       deleteOldScans: mockDeleteOldScans,
       getStackAutoUpdateSettingsForNode: mockGetStackAutoUpdateSettingsForNode,
       deleteScheduledTask: mockDeleteScheduledTask,
+      getMatchingPolicy: mockGetMatchingPolicy,
     }),
+  },
+}));
+
+vi.mock('../services/FleetSyncService', () => ({
+  FleetSyncService: {
+    getSelfIdentity: () => 'self-node',
   },
 }));
 
@@ -94,6 +104,7 @@ vi.mock('../services/LicenseService', () => ({
     getInstance: () => ({
       getTier: mockGetTier,
       getVariant: mockGetVariant,
+      getProxyHeaders: mockGetProxyHeaders,
     }),
   },
 }));
@@ -1349,6 +1360,11 @@ describe('SchedulerService - executeUpdateRemote', () => {
       'http://remote:1852/api/auto-update/execute',
       expect.objectContaining({
         method: 'POST',
+        headers: expect.objectContaining({
+          'Authorization': 'Bearer test-token',
+          'x-sencho-tier': 'paid',
+          'x-sencho-variant': 'admiral',
+        }),
         body: JSON.stringify({ target: 'web-app' }),
       })
     );

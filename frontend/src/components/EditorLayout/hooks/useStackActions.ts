@@ -14,7 +14,10 @@ import type { PolicyBlockPayload } from '../../stack/PolicyBlockDialog';
 interface RunResult {
   ok: boolean;
   errorMessage?: string;
+  rolledBack?: boolean;
 }
+
+type StackActionError = Error & { rolledBack?: boolean };
 
 type EditorState = ReturnType<typeof useEditorViewState>;
 type StackListState = ReturnType<typeof useStackListState>;
@@ -35,6 +38,30 @@ interface UseStackActionsOptions {
   ) => Promise<RunResult>;
   diffPreviewEnabled: boolean;
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const parseStackActionError = (rawBody: string, fallback: string): StackActionError => {
+  let message = rawBody || fallback;
+  let rolledBack = false;
+
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    if (isRecord(parsed)) {
+      if (typeof parsed.error === 'string' && parsed.error.trim()) {
+        message = parsed.error;
+      }
+      rolledBack = parsed.rolledBack === true;
+    }
+  } catch {
+    /* not JSON */
+  }
+
+  const error = new Error(message) as StackActionError;
+  error.rolledBack = rolledBack;
+  return error;
+};
 
 export function useStackActions(options: UseStackActionsOptions) {
   const {
@@ -349,7 +376,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackFile: string,
     ignorePolicy: boolean,
     started?: Promise<void>,
-  ): Promise<{ ok: boolean; errorMessage?: string }> => {
+  ): Promise<RunResult> => {
     const previousStatus = stackListState.stackStatuses[stackFile];
     stackListState.setOptimisticStatus(stackFile, 'running');
     try {
@@ -381,7 +408,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             };
           }
         }
-        throw new Error(rawBody || 'Deploy failed');
+        throw parseStackActionError(rawBody, 'Deploy failed');
       }
       overlayState.setPolicyBlock(null);
       toast.success(
@@ -405,13 +432,14 @@ export function useStackActions(options: UseStackActionsOptions) {
       console.error('Failed to deploy:', error);
       if (previousStatus !== undefined)
         stackListState.setOptimisticStatus(stackFile, previousStatus as 'running' | 'exited');
-      const errorMessage = (error as Error).message || 'Failed to deploy stack';
+      const deployError = error as StackActionError;
+      const errorMessage = deployError.message || 'Failed to deploy stack';
       toast.error(
-        isPaid
+        isPaid && deployError.rolledBack === true
           ? `${errorMessage} - automatically rolled back to previous version.`
           : errorMessage,
       );
-      return { ok: false, errorMessage };
+      return { ok: false, errorMessage, rolledBack: deployError.rolledBack };
     }
   };
 
@@ -550,7 +578,12 @@ export function useStackActions(options: UseStackActionsOptions) {
           const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST' });
           if (!response.ok) {
             const errText = await response.text();
-            return { ok: false as const, errorMessage: errText || `${action} failed` };
+            const actionError = parseStackActionError(errText, `${action} failed`);
+            return {
+              ok: false as const,
+              errorMessage: actionError.message,
+              rolledBack: actionError.rolledBack,
+            };
           }
           toast.success(successMessage);
           if (action === 'update') stackListState.fetchImageUpdates();
@@ -695,7 +728,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST' });
       if (!response.ok) {
         const errText = await response.text();
-        throw new Error(errText || `${action} failed`);
+        throw parseStackActionError(errText, `${action} failed`);
       }
       toast.success(`Stack ${action}ed successfully!`);
       if (stackListState.selectedFile === stackFile) {
@@ -714,9 +747,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
     } catch (error) {
       console.error(`Failed to ${action}:`, error);
-      const msg = (error as Error).message || `Failed to ${action} stack`;
+      const actionError = error as StackActionError;
+      const msg = actionError.message || `Failed to ${action} stack`;
       toast.error(
-        action === 'deploy' && isPaid
+        action === 'deploy' && isPaid && actionError.rolledBack === true
           ? `${msg} - automatically rolled back to previous version.`
           : msg,
       );

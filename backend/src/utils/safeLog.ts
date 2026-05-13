@@ -13,3 +13,12 @@ export function sanitizeForLog(value: unknown): string {
   const s = typeof value === 'string' ? value : String(value);
   return s.replace(CONTROL_CHARS_REGEX, '');
 }
+
+export function redactSensitiveText(value: unknown): string {
+  const s = typeof value === 'string' ? value : String(value);
+  return s
+    .replace(/Bearer\s+[A-Za-z0-9\-._~+/=]+/gi, 'Bearer [redacted]')
+    .replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted-jwt]')
+    .replace(/https?:\/\/[^/\s:@]+:[^/\s@]+@/gi, 'https://[redacted]@')
+    .replace(/((?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]');
+}

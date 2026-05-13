@@ -11,6 +11,7 @@ interface BlueprintCatalogProps {
     blueprints: BlueprintListItem[];
     onSelect: (id: number) => void;
     onCreate: () => void;
+    canCreate: boolean;
 }
 
 type ModeFilter = 'all' | 'observe' | 'suggest' | 'enforce' | 'drifted';
@@ -41,7 +42,7 @@ function statusDot(status: BlueprintDeploymentStatus | null): string {
     }
 }
 
-export function BlueprintCatalog({ blueprints, onSelect, onCreate }: BlueprintCatalogProps) {
+export function BlueprintCatalog({ blueprints, onSelect, onCreate, canCreate }: BlueprintCatalogProps) {
     const [filter, setFilter] = useState<ModeFilter>('all');
 
     const counts = useMemo(() => {
@@ -69,10 +70,12 @@ export function BlueprintCatalog({ blueprints, onSelect, onCreate }: BlueprintCa
                         Deployments · Blueprints
                     </span>
                 </div>
-                <Button size="sm" onClick={onCreate} className="gap-2">
-                    <Plus className="h-4 w-4" strokeWidth={1.5} />
-                    New Blueprint
-                </Button>
+                {canCreate && (
+                    <Button size="sm" onClick={onCreate} className="gap-2">
+                        <Plus className="h-4 w-4" strokeWidth={1.5} />
+                        New Blueprint
+                    </Button>
+                )}
             </div>
 
             <div className="flex items-center gap-1 flex-wrap">

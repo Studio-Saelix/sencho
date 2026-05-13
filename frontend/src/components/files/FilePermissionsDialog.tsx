@@ -50,6 +50,7 @@ interface FilePermissionsDialogProps {
   relPath: string;
   entryName: string;
   isPaid: boolean;
+  canEdit: boolean;
 }
 
 export function FilePermissionsDialog({
@@ -59,6 +60,7 @@ export function FilePermissionsDialog({
   relPath,
   entryName,
   isPaid,
+  canEdit,
 }: FilePermissionsDialogProps) {
   const [mode, setMode] = useState<number>(0o644);
   const [loading, setLoading] = useState(false);
@@ -101,6 +103,7 @@ export function FilePermissionsDialog({
   };
 
   const octal = mode.toString(8).padStart(3, '0');
+  const canModify = isPaid && canEdit;
 
   return (
     <Modal open={open} onOpenChange={handleClose} size="sm">
@@ -138,15 +141,15 @@ export function FilePermissionsDialog({
                       <button
                         key={bit.label}
                         type="button"
-                        disabled={!isPaid || saving}
+                        disabled={!canModify || saving}
                         onClick={() => setMode((m) => toggleBit(m, totalShift))}
                         className={cn(
                           'mx-auto flex h-7 w-7 items-center justify-center rounded-md border text-xs font-mono transition-colors',
                           checked
                             ? 'border-primary/60 bg-primary/10 text-primary'
                             : 'border-border bg-muted/30 text-muted-foreground',
-                          isPaid && !saving && 'hover:border-primary/50 cursor-pointer',
-                          (!isPaid || saving) && 'opacity-50 cursor-not-allowed'
+                          canModify && !saving && 'hover:border-primary/50 cursor-pointer',
+                          (!canModify || saving) && 'opacity-50 cursor-not-allowed'
                         )}
                         aria-label={`${cat.label} ${bit.label} ${checked ? 'on' : 'off'}`}
                       >
@@ -169,11 +172,11 @@ export function FilePermissionsDialog({
       <ModalFooter
         secondary={
           <Button variant="outline" size="sm" onClick={() => handleClose(false)} disabled={saving}>
-            {isPaid ? 'Cancel' : 'Close'}
+            {canModify ? 'Cancel' : 'Close'}
           </Button>
         }
         primary={
-          isPaid ? (
+          canModify ? (
             <Button
               size="sm"
               onClick={() => void handleSave()}

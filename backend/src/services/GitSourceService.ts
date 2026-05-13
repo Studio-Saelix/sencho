@@ -8,6 +8,8 @@ import { CryptoService } from './CryptoService';
 import { DatabaseService, type StackGitSource, type GitSourceAuthType } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeService } from './ComposeService';
+import { NodeRegistry } from './NodeRegistry';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase } from '../utils/validation';
@@ -839,7 +841,7 @@ export class GitSourceService {
     public async apply(
         stackName: string,
         commitSha: string,
-        opts: { deploy?: boolean } = {},
+        opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean } = {},
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string }> {
         return this.withStackLock(stackName, async () => {
             const diag = isDebugEnabled();
@@ -883,6 +885,15 @@ export class GitSourceService {
 
             if (shouldDeploy) {
                 try {
+                    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+                    await assertPolicyGateAllows(
+                        stackName,
+                        nodeId,
+                        buildSystemPolicyGateOptions(opts.actor ?? 'git-source', {
+                            bypass: opts.bypassPolicy === true,
+                            auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                        }),
+                    );
                     await ComposeService.getInstance().deployStack(stackName);
                     console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
                     return { applied: true, deployed: true };
