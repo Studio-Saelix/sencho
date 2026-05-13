@@ -44,13 +44,13 @@ const MAX_VISIBLE_LABELS = 3;
 
 export function StackRow(props: StackRowProps) {
   const {
-    file, displayName, status, isBusy, isActive, isPaid, labels,
+    file, displayName, status, isBusy, isActive, labels,
     hasUpdate, hasGitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
   } = props;
 
-  const visibleLabels = isPaid ? labels.slice(0, MAX_VISIBLE_LABELS) : [];
-  const overflowCount = isPaid ? Math.max(0, labels.length - MAX_VISIBLE_LABELS) : 0;
+  const visibleLabels = labels.slice(0, MAX_VISIBLE_LABELS);
+  const overflowCount = Math.max(0, labels.length - MAX_VISIBLE_LABELS);
 
   const handleClick = () => {
     if (bulkMode) onToggleSelect?.(file);

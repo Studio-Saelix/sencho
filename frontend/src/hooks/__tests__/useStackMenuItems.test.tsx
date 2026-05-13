@@ -95,6 +95,17 @@ describe('useStackMenuItems', () => {
     expect(inspect.items.find(i => i.id === 'auto-update')).toBeUndefined();
   });
 
+  it('keeps label assignment available when !isPaid', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({
+      isPaid: false,
+      labels: [{ id: 1, node_id: 0, name: 'prod', color: 'teal' }],
+    })));
+    const organize = result.current.find(g => g.id === 'organize')!;
+    const labelsItem = organize.items.find(i => i.id === 'labels');
+    expect(labelsItem).toBeDefined();
+    expect(labelsItem?.subItems?.[0]).toMatchObject({ id: 'label:1', label: 'prod' });
+  });
+
   it('auto-update toggle calls setAutoUpdateEnabled with toggled value', () => {
     const setAutoUpdateEnabled = vi.fn();
     const { result } = renderHook(() =>

@@ -73,4 +73,13 @@ describe('StackRow', () => {
     expect(container.querySelector('.animate-spin')).not.toBeNull();
     expect(screen.queryByText('UP')).not.toBeInTheDocument();
   });
+
+  it('renders label indicators on community tier', () => {
+    const labels: Label[] = [
+      { id: 1, node_id: 0, name: 'prod', color: 'teal' },
+      { id: 2, node_id: 0, name: 'media', color: 'blue' },
+    ];
+    const { container } = render(<StackRow {...base({ isPaid: false, labels })} />);
+    expect(container.querySelectorAll('[style*="--label-"]')).toHaveLength(2);
+  });
 });

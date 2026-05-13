@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useImageUpdates } from '@/hooks/useImageUpdates';
 import { usePinnedStacks } from '@/hooks/usePinnedStacks';
 import { useSidebarGroupCollapse } from '@/hooks/useSidebarGroupCollapse';
@@ -32,7 +31,6 @@ export interface RemoteResult {
 
 export function useStackListState() {
   const { nodes, activeNode } = useNodes();
-  const { isPaid } = useLicense();
 
   const [files, setFiles] = useState<string[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -84,7 +82,6 @@ export function useStackListState() {
   };
 
   const refreshLabels = useCallback(async () => {
-    if (!isPaid) return;
     try {
       const [labelsRes, assignmentsRes] = await Promise.all([
         apiFetch('/labels'),
@@ -95,7 +92,7 @@ export function useStackListState() {
     } catch {
       // Labels are non-critical; fail silently
     }
-  }, [isPaid]);
+  }, []);
 
   useEffect(() => {
     const handler = () => refreshLabels();
