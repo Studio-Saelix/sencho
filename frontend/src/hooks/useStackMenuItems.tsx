@@ -48,21 +48,19 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     groups.push({ id: 'inspect', items: inspect });
 
     const organize: MenuItem[] = [];
-    if (isPaid) {
-      organize.push({
-        id: 'labels',
-        label: 'Labels',
+    organize.push({
+      id: 'labels',
+      label: 'Labels',
+      icon: Tag,
+      shortcut: 'L ›',
+      onSelect: () => {},
+      subItems: labels.map(l => ({
+        id: `label:${l.id}`,
+        label: l.name,
         icon: Tag,
-        shortcut: 'L ›',
-        onSelect: () => {},
-        subItems: labels.map(l => ({
-          id: `label:${l.id}`,
-          label: l.name,
-          icon: Tag,
-          onSelect: () => toggleLabel(l.id),
-        })),
-      });
-    }
+        onSelect: () => toggleLabel(l.id),
+      })),
+    });
     organize.push(
       isPinned
         ? { id: 'pin', label: 'Unpin', icon: PinOff, shortcut: 'P', onSelect: unpin }
