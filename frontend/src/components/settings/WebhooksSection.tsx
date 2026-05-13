@@ -5,6 +5,7 @@ import { TogglePill } from '@/components/ui/toggle-pill';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/components/ui/toast-store';
+import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
 import {
@@ -19,6 +20,7 @@ import { useMastheadStats } from './MastheadStatsContext';
 
 interface WebhookItem {
     id: number;
+    node_id: number;
     name: string;
     stack_name: string;
     action: string;
@@ -40,6 +42,7 @@ interface WebhookExecution {
 }
 
 export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
+    const { activeNode, nodes } = useNodes();
     const [webhooks, setWebhooks] = useState<WebhookItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [creating, setCreating] = useState(false);
@@ -68,7 +71,7 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
         } catch { /* ignore */ }
     };
 
-    useEffect(() => { fetchWebhooks(); fetchStacks(); }, []);
+    useEffect(() => { fetchWebhooks(); fetchStacks(); }, [activeNode?.id]);
 
     const enabledCount = webhooks.filter(w => w.enabled).length;
     useMastheadStats(
@@ -94,7 +97,7 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
             const res = await apiFetch('/webhooks', {
                 method: 'POST',
                 localOnly: true,
-                body: JSON.stringify({ name: formName, stack_name: formStack, action: formAction }),
+                body: JSON.stringify({ name: formName, stack_name: formStack, action: formAction, node_id: activeNode?.id }),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -175,6 +178,13 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
                             </SelectContent>
                         </Select>
                     </SettingsField>
+                    {activeNode && (
+                        <SettingsField label="Node" helper="Webhook execution is pinned to the currently active node.">
+                            <div className="rounded-md border border-card-border bg-muted px-3 py-2 text-xs text-stat-subtitle">
+                                {activeNode.name}
+                            </div>
+                        </SettingsField>
+                    )}
                     <SettingsField label="Action" helper="What happens when the webhook is triggered." htmlFor="webhook-action">
                         <Select value={formAction} onValueChange={setFormAction}>
                             <SelectTrigger id="webhook-action"><SelectValue /></SelectTrigger>
@@ -240,6 +250,7 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
                         {webhooks.map(wh => {
                             const triggerUrl = `${window.location.origin}/api/webhooks/${wh.id}/trigger`;
                             const isExpanded = expandedHistory === wh.id;
+                            const nodeName = nodes.find(n => n.id === wh.node_id)?.name ?? `Node ${wh.node_id}`;
                             return (
                                 <div key={wh.id} className="border border-card-border rounded-md overflow-hidden bg-card">
                                     <div className="p-4 space-y-3">
@@ -252,6 +263,9 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
                                                 </span>
                                                 <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle border border-card-border rounded px-1.5 py-0.5 shrink-0">
                                                     {wh.stack_name}
+                                                </span>
+                                                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle border border-card-border rounded px-1.5 py-0.5 shrink-0">
+                                                    {nodeName}
                                                 </span>
                                             </div>
                                             <div className="flex items-center gap-2 shrink-0">

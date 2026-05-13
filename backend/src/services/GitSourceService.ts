@@ -10,6 +10,8 @@ import { FileSystemService } from './FileSystemService';
 import { ComposeService } from './ComposeService';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isPathWithinBase } from '../utils/validation';
+import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
 
 // isomorphic-git is the heaviest dependency in the backend (~5 MB) and only
 // fires when a stack is created from a Git source. Lazy-load it so cold
@@ -30,6 +32,70 @@ async function loadIsomorphicGit(): Promise<{ git: IsomorphicGit; gitHttp: Isomo
         cachedGitHttp = gitHttpMod.default;
     }
     return { git: cachedGit, gitHttp: cachedGitHttp };
+}
+
+function cloneTimeoutError(): Error & { code: string } {
+    return Object.assign(new Error('Clone timed out'), { code: 'ETIMEDOUT' });
+}
+
+async function collectGitBody(body: AsyncIterableIterator<Uint8Array>, signal: AbortSignal): Promise<Uint8Array> {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for await (const chunk of body) {
+        if (signal.aborted) throw cloneTimeoutError();
+        chunks.push(chunk);
+        size += chunk.byteLength;
+    }
+    const result = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return result;
+}
+
+function responseBodyIterator(body: ReadableStream<Uint8Array> | null): AsyncIterableIterator<Uint8Array> {
+    async function* iterate(): AsyncIterableIterator<Uint8Array> {
+        if (!body) return;
+        const reader = body.getReader();
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) return;
+                yield value;
+            }
+        } finally {
+            reader.releaseLock();
+        }
+    }
+    return iterate();
+}
+
+function createAbortableGitHttp(signal: AbortSignal): HttpClient {
+    return {
+        async request(request: GitHttpRequest): Promise<GitHttpResponse> {
+            if (signal.aborted) {
+                throw cloneTimeoutError();
+            }
+
+            const response = await fetch(request.url, {
+                method: request.method ?? 'GET',
+                headers: request.headers,
+                body: request.body ? await collectGitBody(request.body, signal) : undefined,
+                signal,
+            });
+
+            return {
+                url: response.url,
+                method: request.method,
+                statusCode: response.status,
+                statusMessage: response.statusText,
+                headers: Object.fromEntries(response.headers.entries()),
+                body: responseBodyIterator(response.body),
+            };
+        },
+    };
 }
 
 /**
@@ -206,6 +272,45 @@ async function hasSubmodules(dir: string): Promise<boolean> {
         return stat.isFile() && stat.size > 0;
     } catch {
         return false;
+    }
+}
+
+async function readRepoFile(rootDir: string, relPath: string, label: string): Promise<string> {
+    const abs = path.resolve(rootDir, relPath);
+    if (!isPathWithinBase(abs, rootDir)) {
+        throw new GitSourceError('FILE_NOT_FOUND', `${label} resolves outside the repository.`);
+    }
+
+    let stat;
+    try {
+        stat = await fsPromises.lstat(abs);
+    } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new GitSourceError('FILE_NOT_FOUND', `File not found in repository: ${relPath}`);
+        }
+        throw new GitSourceError('GIT_ERROR', scrubCredentials((e as Error).message));
+    }
+    if (stat.isSymbolicLink()) {
+        throw new GitSourceError('FILE_NOT_FOUND', `${label} cannot be a symbolic link.`);
+    }
+
+    let real;
+    try {
+        real = await fsPromises.realpath(abs);
+    } catch (e) {
+        throw new GitSourceError('GIT_ERROR', scrubCredentials((e as Error).message));
+    }
+    if (!isPathWithinBase(real, rootDir)) {
+        throw new GitSourceError('FILE_NOT_FOUND', `${label} resolves outside the repository.`);
+    }
+
+    try {
+        return await fsPromises.readFile(real, 'utf-8');
+    } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new GitSourceError('FILE_NOT_FOUND', `File not found in repository: ${relPath}`);
+        }
+        throw new GitSourceError('GIT_ERROR', scrubCredentials((e as Error).message));
     }
 }
 
@@ -412,23 +517,22 @@ export class GitSourceService {
             : undefined;
 
         try {
-            const { git, gitHttp } = await loadIsomorphicGit();
-            // isomorphic-git does not natively accept an AbortSignal, so we
-            // wrap the clone in a Promise.race against a timeout rejection.
-            // The clone will keep running in the background until the socket
-            // resolves, but we will not block the caller indefinitely.
+            const { git } = await loadIsomorphicGit();
+            // Bound clone duration and abort the HTTP transport so timed-out
+            // fetches do not keep sockets and packfile streams alive.
             let timer: NodeJS.Timeout | undefined;
+            const controller = new AbortController();
             const timeout = new Promise<never>((_, reject) => {
-                timer = setTimeout(
-                    () => reject(Object.assign(new Error('Clone timed out'), { code: 'ETIMEDOUT' })),
-                    timeoutMs,
-                );
+                timer = setTimeout(() => {
+                    controller.abort();
+                    reject(cloneTimeoutError());
+                }, timeoutMs);
             });
             try {
                 await Promise.race([
                     git.clone({
                         fs: { promises: fsPromises },
-                        http: gitHttp,
+                        http: createAbortableGitHttp(controller.signal),
                         dir,
                         url: repoUrl,
                         ref: branch,
@@ -451,19 +555,7 @@ export class GitSourceService {
             }
             const commitSha = log[0].oid;
 
-            const composeAbs = path.resolve(dir, composePath);
-            if (!composeAbs.startsWith(path.resolve(dir))) {
-                throw new GitSourceError('FILE_NOT_FOUND', 'Compose path resolves outside the repository.');
-            }
-            let composeContent: string;
-            try {
-                composeContent = await fsPromises.readFile(composeAbs, 'utf-8');
-            } catch (e) {
-                if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
-                    throw new GitSourceError('FILE_NOT_FOUND', `File not found in repository: ${composePath}`);
-                }
-                throw new GitSourceError('GIT_ERROR', scrubCredentials((e as Error).message));
-            }
+            const composeContent = await readRepoFile(dir, composePath, 'Compose path');
             if (isLfsPointer(composeContent)) {
                 console.error(`[GitSource] LFS pointer detected in ${sanitizeForLog(composePath)}`);
                 throw new GitSourceError(
@@ -474,20 +566,16 @@ export class GitSourceService {
 
             let envContent: string | null = null;
             if (envPath) {
-                const envAbs = path.resolve(dir, envPath);
-                if (!envAbs.startsWith(path.resolve(dir))) {
-                    throw new GitSourceError('FILE_NOT_FOUND', 'Env path resolves outside the repository.');
-                }
                 try {
-                    envContent = await fsPromises.readFile(envAbs, 'utf-8');
+                    envContent = await readRepoFile(dir, envPath, 'Env path');
                 } catch (e) {
-                    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+                    if (e instanceof GitSourceError && e.code === 'FILE_NOT_FOUND' && e.message.startsWith('File not found')) {
                         // A missing sibling .env is legitimate (repo may not carry one
                         // in the requested directory). Return null so the caller can
                         // decide whether to warn.
                         envContent = null;
                     } else {
-                        throw new GitSourceError('GIT_ERROR', scrubCredentials((e as Error).message));
+                        throw e;
                     }
                 }
                 if (envContent !== null && isLfsPointer(envContent)) {
