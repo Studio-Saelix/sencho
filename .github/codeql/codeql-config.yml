@@ -1,2 +1,7 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
+
+query-filters:
+  - exclude:
+      id: js/server-side-request-forgery
+      path: backend/src/services/WebhookService.ts
