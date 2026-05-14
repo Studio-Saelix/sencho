@@ -695,3 +695,139 @@ describe('MonitorService - Sencho version check', () => {
     expect(store.last_sencho_update_notified_version).toBe('0.47.0');
   });
 });
+
+// ── Per-container parallel fan-out ────────────────────────────────────
+
+describe('MonitorService - parallel container processing', () => {
+  /** Build a stats payload that yields a positive CPU percent so the
+   *  metric pipeline runs end-to-end (calculateCpuPercent + DB write). */
+  function statsPayload(): string {
+    return JSON.stringify({
+      cpu_stats: { cpu_usage: { total_usage: 2000 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    });
+  }
+
+  beforeEach(() => {
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetStackAlerts.mockReturnValue([]);
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+  });
+
+  it('fans out per-container stats fetches in parallel (wall time ~ max not sum)', async () => {
+    const containerCount = 10;
+    const perCallDelayMs = 200;
+    const containers = Array.from({ length: containerCount }, (_, i) => ({
+      Id: `container-${i}`,
+      Labels: { 'com.docker.compose.project': 'stack-x' },
+    }));
+    mockGetRunningContainers.mockResolvedValue(containers);
+    mockGetContainerStatsStream.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(statsPayload()), perCallDelayMs)),
+    );
+
+    const svc = MonitorService.getInstance();
+    const start = Date.now();
+    await (svc as any).evaluate();
+    const elapsed = Date.now() - start;
+
+    // Serial would be containerCount * perCallDelayMs = 2000ms; parallel
+    // collapses to ~perCallDelayMs plus a little dispatch overhead. Allow
+    // generous headroom (3x the per-call delay) to avoid CI flake.
+    expect(elapsed).toBeLessThan(perCallDelayMs * 3);
+    // All containers were processed: one stats call and one metric write each.
+    expect(mockGetContainerStatsStream).toHaveBeenCalledTimes(containerCount);
+    expect(mockAddContainerMetric).toHaveBeenCalledTimes(containerCount);
+  });
+
+  it('isolates per-container failures: one rejection does not abort siblings', async () => {
+    const containers = Array.from({ length: 5 }, (_, i) => ({
+      Id: `container-${i}`,
+      Labels: { 'com.docker.compose.project': 'stack-x' },
+    }));
+    mockGetRunningContainers.mockResolvedValue(containers);
+    mockGetContainerStatsStream.mockImplementation(async (id: string) => {
+      if (id === 'container-2') {
+        const err = Object.assign(new Error('no such container'), { statusCode: 404 });
+        throw err;
+      }
+      return statsPayload();
+    });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    // 4 successful containers each wrote a metric; the 404 container is silently skipped.
+    expect(mockAddContainerMetric).toHaveBeenCalledTimes(4);
+  });
+
+  it('dispatches a stack alert exactly once per cycle even when multiple containers in the stack breach', async () => {
+    // 5 containers in the same stack, all breaching the same rule. Without
+    // the per-cycle dedup, parallel workers race past the cooldown check
+    // and each fire dispatchAlert before any DB write lands.
+    const containers = Array.from({ length: 5 }, (_, i) => ({
+      Id: `container-${i}`,
+      Labels: { 'com.docker.compose.project': 'shared-stack' },
+    }));
+    mockGetRunningContainers.mockResolvedValue(containers);
+    mockGetContainerStatsStream.mockResolvedValue(JSON.stringify({
+      // Produces CPU = 90% to breach threshold of 80%.
+      cpu_stats: { cpu_usage: { total_usage: 5500 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    }));
+    mockGetStackAlerts.mockReturnValue([{
+      id: 7,
+      stack_name: 'shared-stack',
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 0,
+      cooldown_mins: 60,
+      last_fired_at: 0,
+    }]);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    const cpuDispatches = mockDispatchAlert.mock.calls.filter(
+      (args: unknown[]) => args[1] === 'monitor_alert' && typeof args[2] === 'string' && args[2].includes('CPU'),
+    );
+    expect(cpuDispatches).toHaveLength(1);
+    expect(mockUpdateStackAlertLastFired).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps simultaneous Docker calls at MAX_CONTAINER_CONCURRENCY', async () => {
+    // 25 containers with a long per-call delay; observe that no more than
+    // 10 (MAX_CONTAINER_CONCURRENCY) are in flight at the same time.
+    const containerCount = 25;
+    const perCallDelayMs = 100;
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const containers = Array.from({ length: containerCount }, (_, i) => ({
+      Id: `container-${i}`,
+      Labels: { 'com.docker.compose.project': 'stack-x' },
+    }));
+    mockGetRunningContainers.mockResolvedValue(containers);
+    mockGetContainerStatsStream.mockImplementation(
+      () => new Promise((resolve) => {
+        inFlight += 1;
+        if (inFlight > peakInFlight) peakInFlight = inFlight;
+        setTimeout(() => {
+          inFlight -= 1;
+          resolve(statsPayload());
+        }, perCallDelayMs);
+      }),
+    );
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(peakInFlight).toBeLessThanOrEqual(10);
+    // And we still saw real concurrency (not serialized), so peak should be
+    // close to the cap when we have many more items than workers.
+    expect(peakInFlight).toBeGreaterThan(1);
+    expect(mockAddContainerMetric).toHaveBeenCalledTimes(containerCount);
+  });
+});
