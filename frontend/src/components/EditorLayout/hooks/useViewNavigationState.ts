@@ -108,11 +108,11 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     ];
     if (isPaid && isAdmin) {
       items.push({ value: 'auto-updates', label: 'Auto-Update', icon: RefreshCw });
+      items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
     }
     if (isPaid && license?.variant === 'admiral') {
       if (isAdmin) items.push({ value: 'host-console', label: 'Console', icon: Terminal });
       if (can('system:audit')) items.push({ value: 'audit-log', label: 'Audit', icon: ScrollText });
-      if (isAdmin) items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
     }
     return isRemote
       ? items.filter(i => !HUB_ONLY_VIEWS.has(i.value))

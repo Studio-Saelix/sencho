@@ -59,9 +59,12 @@ export const requireNodeProxy = (req: Request, res: Response): boolean => {
   return true;
 };
 
-/** Tier gate for scheduled tasks: `update`, `scan`, and `snapshot` require Skipper+, everything else requires Admiral. */
+/** Scheduled task actions a Skipper-tier license may create and view. All other actions are Admiral-only. */
+export const SKIPPER_SCHEDULED_ACTIONS: ReadonlySet<string> = new Set(['update', 'scan', 'snapshot']);
+
+/** Tier gate for scheduled tasks: SKIPPER_SCHEDULED_ACTIONS require Skipper+, everything else requires Admiral. */
 export const requireScheduledTaskTier = (action: string, req: Request, res: Response): boolean => {
-  if (action === 'update' || action === 'scan' || action === 'snapshot') return requirePaid(req, res);
+  if (SKIPPER_SCHEDULED_ACTIONS.has(action)) return requirePaid(req, res);
   return requireAdmiral(req, res);
 };
 
