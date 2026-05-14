@@ -340,4 +340,18 @@ describe('deploy_failure notification on /update error', () => {
     expect(res.status).toBe(500);
     expect(res.body).toMatchObject({ rolledBack: false });
   });
+
+  it('uses trusted proxy tier headers for remote atomic updates', async () => {
+    mockUpdateStack.mockResolvedValue(undefined);
+    const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/update')
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-sencho-tier', 'paid')
+      .set('x-sencho-variant', 'skipper');
+
+    expect(res.status).toBe(200);
+    expect(mockUpdateStack.mock.calls[0][2]).toBe(true);
+  });
 });
