@@ -60,7 +60,14 @@ export function RoutingTab() {
 
     const totalAliases = aliases.length;
     const meshedNodes = status.filter((s) => s.enabled).length;
-    const onlineNodes = status.filter((s) => s.pilotConnected).length;
+    // A node is "reachable for mesh" when it is local, a pilot with an
+    // active tunnel, or a Distributed API remote with valid credentials
+    // (central can dial the on-demand proxy tunnel as needed).
+    const reachableNodes = status.filter((s) => (
+        s.reachableMode === 'local'
+        || (s.reachableMode === 'pilot' && s.pilotConnected)
+        || s.reachableMode === 'proxy'
+    )).length;
 
     if (loading) {
         return (
@@ -86,7 +93,7 @@ export function RoutingTab() {
     if (meshedNodes === 0) {
         return (
             <div className="space-y-4">
-                <RoutingMasthead meshedNodes={meshedNodes} onlineNodes={onlineNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
+                <RoutingMasthead meshedNodes={meshedNodes} reachableNodes={reachableNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
                 <div className="flex flex-col items-center justify-center py-12 rounded border border-dashed border-card-border bg-card/50">
                     <ArrowLeftRight className="w-12 h-12 text-stat-subtitle mb-4" />
                     <div className="text-lg font-display italic mb-2">Mesh containers across nodes</div>
@@ -100,7 +107,6 @@ export function RoutingTab() {
                                 key={s.nodeId}
                                 status={s}
                                 aliases={aliases}
-                                isLocal={s.nodeId === status[0]?.nodeId && s.pilotConnected}
                                 onAddStack={() => setOptInNode({ id: s.nodeId, name: s.nodeName })}
                                 onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
                                 onShowAlias={(alias) => setRouteDetailAlias(alias)}
@@ -123,14 +129,13 @@ export function RoutingTab() {
 
     return (
         <div className="space-y-4">
-            <RoutingMasthead meshedNodes={meshedNodes} onlineNodes={onlineNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
+            <RoutingMasthead meshedNodes={meshedNodes} reachableNodes={reachableNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 {status.map((s) => (
                     <RoutingNodeCard
                         key={s.nodeId}
                         status={s}
                         aliases={aliases}
-                        isLocal={s.nodeId === status[0]?.nodeId && s.pilotConnected}
                         onAddStack={() => setOptInNode({ id: s.nodeId, name: s.nodeName })}
                         onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
                         onShowAlias={(alias) => setRouteDetailAlias(alias)}
@@ -150,10 +155,10 @@ export function RoutingTab() {
     );
 }
 
-function RoutingMasthead({ meshedNodes, onlineNodes, totalAliases, onShowActivity }: {
-    meshedNodes: number; onlineNodes: number; totalAliases: number; onShowActivity: () => void;
+function RoutingMasthead({ meshedNodes, reachableNodes, totalAliases, onShowActivity }: {
+    meshedNodes: number; reachableNodes: number; totalAliases: number; onShowActivity: () => void;
 }) {
-    const stateWord = meshedNodes === 0 ? 'unmeshed' : meshedNodes < onlineNodes ? 'partial' : 'meshed';
+    const stateWord = meshedNodes === 0 ? 'unmeshed' : meshedNodes < reachableNodes ? 'partial' : 'meshed';
     return (
         <div className="flex items-center justify-between rounded-lg border border-card-border bg-card p-4 shadow-card-bevel">
             <div className="flex items-center gap-4">
@@ -161,7 +166,7 @@ function RoutingMasthead({ meshedNodes, onlineNodes, totalAliases, onShowActivit
                 <div className="grid grid-cols-3 gap-4 text-xs">
                     <div>
                         <div className="text-[10px] leading-3 tracking-[0.18em] uppercase text-stat-subtitle font-mono">meshed</div>
-                        <div className="font-mono text-stat-value">{meshedNodes}/{onlineNodes}</div>
+                        <div className="font-mono text-stat-value">{meshedNodes}/{reachableNodes}</div>
                     </div>
                     <div>
                         <div className="text-[10px] leading-3 tracking-[0.18em] uppercase text-stat-subtitle font-mono">aliases</div>

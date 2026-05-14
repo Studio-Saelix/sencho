@@ -9,13 +9,20 @@ export interface MeshAlias {
     port: number;
 }
 
+export type MeshReachableMode = 'local' | 'pilot' | 'proxy' | 'unreachable';
+
 export interface MeshNodeStatus {
     nodeId: number;
     nodeName: string;
     enabled: boolean;
-    /** Forwarder state for the LOCAL Sencho instance only. `null` for non-local nodes — cross-node forwarder state lands in Phase B. */
+    /** Forwarder state for the LOCAL Sencho instance only. `null` for non-local nodes; cross-node forwarder state lands in Phase B. */
     localForwarderListening: boolean | null;
+    /** True iff a pilot tunnel is currently registered. Only meaningful when `reachableMode === 'pilot'`. */
     pilotConnected: boolean;
+    /** How this node participates in mesh routing. Drives Routing tab badge state. */
+    reachableMode: MeshReachableMode;
+    /** Operator-facing reason when `reachableMode === 'unreachable'`. Null otherwise. */
+    reachableReason: string | null;
     optedInStacks: string[];
     activeStreamCount: number;
 }
