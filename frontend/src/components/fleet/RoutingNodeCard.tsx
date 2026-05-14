@@ -59,7 +59,7 @@ export function RoutingNodeCard({
                                 ★ Local
                             </span>
                         )}
-                        {status.reachableMode === 'pilot' && !status.pilotConnected && status.nodeId !== -1 && (
+                        {status.reachableMode === 'pilot' && !status.pilotConnected && (
                             <span className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-destructive/40 bg-destructive/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-destructive">
                                 pilot offline
                             </span>
@@ -141,7 +141,11 @@ export function RoutingNodeCard({
                                 );
                             })}
                         </div>
-                        <Button variant="outline" size="sm" className="w-full" onClick={onAddStack}>
+                        <Button
+                            variant="outline" size="sm" className="w-full"
+                            onClick={onAddStack}
+                            disabled={status.reachableMode === 'unreachable'}
+                        >
                             <Plus className="w-3 h-3 mr-1" /> Add stack to mesh
                         </Button>
                     </>

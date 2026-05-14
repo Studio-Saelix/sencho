@@ -29,8 +29,6 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { httpUrlToWs } from '../utils/wsUrl';
 import { isDebugEnabled } from '../utils/debug';
 
-export { ReverseTcpStreamHandle } from '../mesh/tcpStreamSwitchboard';
-
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
 const LOOPBACK_TOKEN_TTL_SECONDS = 300;

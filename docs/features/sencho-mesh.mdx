@@ -140,7 +140,7 @@ A few things are deliberately out of scope for the first release:
   </Accordion>
 
   <Accordion title="A Distributed API node shows `unreachable` on the Routing tab">
-    Central could not open a mesh tunnel to this node. The badge tooltip shows the specific reason. Common causes:
+    Central could not open a mesh tunnel to this node. The badge tooltip shows the specific reason. While a node is in this state the **mesh toggle and Add stack to mesh action on the node card are disabled** so a redeploy is not triggered against an unreachable target. Common causes:
 
     - `api token rejected (scope must be full-admin)` — the API token configured for this node is restricted. Open the remote Sencho, generate a token with the **full-admin** scope, and update the node's credentials in **Settings → Nodes**.
     - `remote does not support proxy mesh` — the remote Sencho is on a version that predates proxy-mode mesh. Update the remote and the badge clears on the next refresh.

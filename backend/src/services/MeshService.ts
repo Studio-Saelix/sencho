@@ -135,7 +135,14 @@ export interface MeshNodeStatus {
     enabled: boolean;
     /** Forwarder state for the LOCAL node (the Sencho instance answering this request). Always `null` for any non-local node — fetching the remote forwarder state requires a cross-node call which lands in Phase B. */
     localForwarderListening: boolean | null;
-    /** True iff a pilot tunnel is currently registered for this node. Only meaningful when `reachableMode === 'pilot'`. Kept for diagnostic surfaces; the Routing tab badge logic consumes `reachableMode` and ignores this field for proxy / local nodes. */
+    /**
+     * True iff a pilot tunnel is currently registered for this node. Only
+     * meaningful when `reachableMode === 'pilot'`. Kept for diagnostic
+     * surfaces; the Routing tab badge logic consumes `reachableMode` and
+     * ignores this field for proxy / local nodes.
+     * TODO: collapse into `reachableMode` (introduce `pilot_offline` value)
+     * once no remaining caller reads `pilotConnected` directly.
+     */
     pilotConnected: boolean;
     /** Canonical reachability classification consumed by the Routing tab. */
     reachableMode: MeshReachableMode;
@@ -1401,6 +1408,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      */
     public setReverseDialer(dialer: ReverseMeshDialer | null, expected?: ReverseMeshDialer | null): boolean {
         if (expected !== undefined && this.reverseDialer !== expected) return false;
+        // Loud warn instead of silent overwrite: pilot and proxy modes are
+        // mutually exclusive by topology, so this branch indicates a
+        // misconfigured deployment rather than an expected race.
+        if (expected === undefined && dialer !== null && this.reverseDialer !== null && this.reverseDialer !== dialer) {
+            console.warn('[MeshService] reverse dialer overwritten without CAS; pilot/proxy mode race or duplicate install');
+        }
         this.reverseDialer = dialer;
         return true;
     }
@@ -1600,19 +1613,18 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     // --- Diagnostics ---
 
     /**
-     * Whether mesh traffic to this node can flow. Local nodes are always
-     * reachable because mesh uses the same-node fast path on localhost.
-     * Remote nodes are reachable only when a pilot tunnel is registered. The
-     * literal `hasActiveTunnel(localNodeId)` would always be false (local
-     * nodes do not establish tunnels to themselves), so a direct call would
-     * render every local alias as `tunnel down` in the UI even on a working
-     * route.
+     * Whether mesh CAN route to a node based on current configuration.
+     * Distinct from "live tunnel up right now": for proxy-mode remotes
+     * the tunnel is opened on demand, so a caller that demanded a
+     * current tunnel would misreport every idle proxy-mode route as
+     * `tunnel down`. Live pilot-tunnel state is surfaced separately.
      */
-    private isMeshReachable(nodeId: number): boolean {
-        const node = DatabaseService.getInstance().getNode(nodeId);
+    private isNodeMeshConfigured(node: ReturnType<typeof DatabaseService.prototype.getNode>): boolean {
         if (!node) return false;
         if (node.type !== 'remote') return true;
-        return PilotTunnelManager.getInstance().hasActiveTunnel(nodeId);
+        if (node.mode === 'pilot_agent') return true;
+        if (node.mode === 'proxy') return !!node.api_url && !!node.api_token;
+        return false;
     }
 
     /**
@@ -1651,14 +1663,20 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             return { alias, target: null, pilot: { connected: false, lastSeen: null }, lastError, lastProbeMs, state: 'not authorized' };
         }
 
-        const pilotConnected = this.isMeshReachable(target.nodeId);
         const node = DatabaseService.getInstance().getNode(target.nodeId);
+        const routable = this.isNodeMeshConfigured(node);
+        // Pilot-mode routes surface live tunnel state; proxy-mode routes
+        // fall back to `routable` because the tunnel is opened on demand
+        // and a quiescent state is normal.
+        const pilotLive = node?.type === 'remote' && node.mode === 'pilot_agent'
+            ? PilotTunnelManager.getInstance().hasActiveTunnel(target.nodeId)
+            : routable;
         const lastSeen = node?.pilot_last_seen ?? null;
         const optedIn = DatabaseService.getInstance().isMeshStackEnabled(target.nodeId, target.stackName);
 
         let state: MeshRouteDiagnostic['state'];
         if (!optedIn) state = 'not authorized';
-        else if (!pilotConnected) state = 'tunnel down';
+        else if (!routable || !pilotLive) state = 'tunnel down';
         else if (lastError && Date.now() - lastError.ts < 60_000) state = 'unreachable';
         else if (lastProbeMs !== null && lastProbeMs > SLOW_PROBE_THRESHOLD_MS) state = 'degraded';
         else state = 'healthy';
@@ -1672,7 +1690,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 port: target.port,
                 alias,
             },
-            pilot: { connected: pilotConnected, lastSeen },
+            pilot: { connected: pilotLive, lastSeen },
             lastError,
             lastProbeMs,
             state,
@@ -1772,7 +1790,7 @@ export class MeshError extends Error {
 /**
  * Common surface of an outbound mesh TCP stream as MeshService consumes
  * it. Both the central-side `PilotTunnelBridge.TcpStream` and the
- * pilot-side `ReverseTcpStreamHandle` (from `pilot/agent.ts`) implement
+ * pilot-side `ReverseTcpStreamHandle` (from `mesh/tcpStreamSwitchboard.ts`) implement
  * this shape structurally so MeshService.openCrossNode can splice bytes
  * against either without caring which side initiated the stream.
  */
