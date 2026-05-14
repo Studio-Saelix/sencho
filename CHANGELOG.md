@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.9](https://github.com/Studio-Saelix/sencho/compare/v0.76.8...v0.76.9) (2026-05-14)
+
+
+### Fixed
+
+* **fleet:** show capabilities, version, metrics, and stacks for pilot-agent nodes ([#1044](https://github.com/Studio-Saelix/sencho/issues/1044)) ([8dd0fce](https://github.com/Studio-Saelix/sencho/commit/8dd0fce621496be788f14242a4dab9cd478b0082))
+* harden auto-heal policies ([#1042](https://github.com/Studio-Saelix/sencho/issues/1042)) ([e7a3b54](https://github.com/Studio-Saelix/sencho/commit/e7a3b544c0964362649054c5625430a9a9c5c370))
+* harden git source webhooks ([#1033](https://github.com/Studio-Saelix/sencho/issues/1033)) ([c31d48b](https://github.com/Studio-Saelix/sencho/commit/c31d48b93349e1500f1669112cf21885a38aa28d))
+* harden stack label permissions ([#1036](https://github.com/Studio-Saelix/sencho/issues/1036)) ([b523230](https://github.com/Studio-Saelix/sencho/commit/b52323036b6d399d81d3a5c4cf519368c627a9ab))
+* harden stack management operations ([#1046](https://github.com/Studio-Saelix/sencho/issues/1046)) ([5461bc3](https://github.com/Studio-Saelix/sencho/commit/5461bc316bdb993f2cf0efb6897091cf15320501))
+* harden vulnerability scan scheduling ([#1035](https://github.com/Studio-Saelix/sencho/issues/1035)) ([328a984](https://github.com/Studio-Saelix/sencho/commit/328a98439dd75134ac13402599ee3ea9ec2f756b))
+* **monitor:** parallelize per-container stats fetch in evaluation cycle ([#1045](https://github.com/Studio-Saelix/sencho/issues/1045)) ([2dda1be](https://github.com/Studio-Saelix/sencho/commit/2dda1bee1fb46e6a0adc83a23f8cb415f7871f9b))
+* **schedules:** align Schedules surface with backend tier gate for Skipper admins ([#1047](https://github.com/Studio-Saelix/sencho/issues/1047)) ([44e40af](https://github.com/Studio-Saelix/sencho/commit/44e40afb6205b0cce42b5998ef0488e51411f533))
+
 ## [0.76.8](https://github.com/Studio-Saelix/sencho/compare/v0.76.7...v0.76.8) (2026-05-12)
 
 
