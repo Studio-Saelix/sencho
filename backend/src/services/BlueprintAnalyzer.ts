@@ -17,6 +17,7 @@ interface ComposeShape {
 }
 
 interface ComposeService {
+    image?: string | null;
     volumes?: Array<string | ComposeServiceVolume> | null;
     tmpfs?: string | string[] | null;
 }
@@ -206,6 +207,20 @@ export class BlueprintAnalyzer {
             if (!next.has(name)) return true;
         }
         return false;
+    }
+
+    static extractImageRefs(composeContent: string): string[] {
+        const doc = (parseYaml(composeContent) ?? {}) as ComposeShape;
+        const services = doc.services ?? {};
+        const seen = new Set<string>();
+        const images: string[] = [];
+        for (const serviceDef of Object.values(services)) {
+            const image = typeof serviceDef?.image === 'string' ? serviceDef.image.trim() : '';
+            if (!image || image.startsWith('sha256:') || seen.has(image)) continue;
+            seen.add(image);
+            images.push(image);
+        }
+        return images;
     }
 
     private static extractNamedVolumes(composeContent: string): Set<string> {

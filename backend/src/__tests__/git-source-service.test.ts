@@ -51,6 +51,7 @@ beforeEach(() => {
     // Wipe persisted git sources between tests
     const db = DatabaseService.getInstance();
     for (const s of db.getGitSources()) db.deleteGitSource(s.stack_name);
+    for (const p of db.getScanPolicies()) db.deleteScanPolicy(p.id);
 });
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -529,6 +530,25 @@ describe('GitSourceService.fetchFromGit (.git metadata guard)', () => {
             composePath: 'gitops.yaml',
         })).resolves.toBeDefined();
     });
+
+    it('rejects compose paths that are symbolic links', async () => {
+        mockSuccessfulClone();
+        const { promises: fsp } = await import('fs');
+        const lstatSpy = vi.spyOn(fsp, 'lstat').mockResolvedValue({
+            isSymbolicLink: () => true,
+        } as Awaited<ReturnType<typeof fsp.lstat>>);
+
+        await expect(svc().fetchFromGit({
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePath: 'compose.yaml',
+        })).rejects.toMatchObject({
+            code: 'FILE_NOT_FOUND',
+            message: expect.stringMatching(/symbolic link/i),
+        });
+
+        lstatSpy.mockRestore();
+    });
 });
 
 describe('GitSourceService.fetchFromGit (LFS + submodule detection)', () => {
@@ -851,5 +871,73 @@ describe('GitSourceService.apply', () => {
 
         validateSpy.mockRestore();
         saveSpy.mockRestore();
+    });
+
+    it('returns deployError and skips compose deploy when policy blocks apply deploy', async () => {
+        const sha = 'dddd444dddd444dddd444dddd444dddd444dddd4';
+        const svc = await seedPending('apply-policy-block', 'services:\n  x:\n    image: nginx:bad\n', sha);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        const { LicenseService } = await import('../services/LicenseService');
+        const TrivyService = (await import('../services/TrivyService')).default;
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        const listImagesSpy = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+        const trivy = TrivyService.getInstance();
+        const trivyAvailableSpy = vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(true);
+        const scanSpy = vi.spyOn(trivy, 'scanImagePreflight').mockResolvedValue({
+            id: 77,
+            node_id: 1,
+            image_ref: 'nginx:bad',
+            image_digest: null,
+            scanned_at: Date.now(),
+            total_vulnerabilities: 1,
+            critical_count: 1,
+            high_count: 0,
+            medium_count: 0,
+            low_count: 0,
+            unknown_count: 0,
+            fixable_count: 0,
+            secret_count: 0,
+            misconfig_count: 0,
+            scanners_used: 'vuln',
+            highest_severity: 'CRITICAL',
+            os_info: null,
+            trivy_version: '0.50.0',
+            scan_duration_ms: null,
+            triggered_by: 'deploy-preflight',
+            status: 'completed',
+            error: null,
+            stack_context: 'apply-policy-block',
+            policy_evaluation: null,
+        });
+
+        DatabaseService.getInstance().createScanPolicy({
+            name: 'block-high',
+            node_id: null,
+            node_identity: '',
+            stack_pattern: 'apply-policy-block',
+            max_severity: 'HIGH',
+            block_on_deploy: 1,
+            enabled: 1,
+            replicated_from_control: 0,
+        });
+
+        const result = await svc.apply('apply-policy-block', sha, { deploy: true });
+
+        expect(result.applied).toBe(true);
+        expect(result.deployed).toBe(false);
+        expect(result.deployError).toContain('Policy "block-high" blocked deploy');
+        expect(deploySpy).not.toHaveBeenCalled();
+
+        validateSpy.mockRestore();
+        saveSpy.mockRestore();
+        listImagesSpy.mockRestore();
+        deploySpy.mockRestore();
+        tierSpy.mockRestore();
+        trivyAvailableSpy.mockRestore();
+        scanSpy.mockRestore();
     });
 });

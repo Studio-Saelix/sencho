@@ -18,6 +18,7 @@ type TargetType = typeof VALID_TARGET_TYPES[number];
 type ScheduledAction = typeof VALID_ACTIONS[number];
 
 const STACK_ONLY_ACTIONS = new Set<ScheduledAction>(['auto_backup', 'auto_stop', 'auto_down', 'auto_start']);
+const SKIPPER_VISIBLE_ACTIONS = new Set<ScheduledAction>(['update', 'scan', 'snapshot']);
 
 /**
  * Validate that the target_type is compatible with the action. Each action
@@ -32,6 +33,18 @@ function validateActionTarget(action: ScheduledAction, targetType: TargetType): 
   if (action === 'scan' && targetType !== 'system') return 'Scan action requires target_type "system".';
   if (STACK_ONLY_ACTIONS.has(action) && targetType !== 'stack') {
     return `${action} action requires target_type "stack".`;
+  }
+  return null;
+}
+
+function validateScanNode(nodeId: unknown): string | null {
+  if (nodeId == null) return 'Scan action requires node_id.';
+  const parsedNodeId = Number(nodeId);
+  if (!Number.isFinite(parsedNodeId)) return 'Scan action requires a valid node_id.';
+  const node = DatabaseService.getInstance().getNode(parsedNodeId);
+  if (!node) return 'Scheduled vulnerability scans require an existing local node.';
+  if (node?.type === 'remote') {
+    return 'Scheduled vulnerability scans currently require a local node.';
   }
   return null;
 }
@@ -77,10 +90,10 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
   if (!requirePaid(req, res)) return;
   try {
     let tasks = DatabaseService.getInstance().getScheduledTasks();
-    // Skipper users only see 'update' tasks; Admiral sees all.
+    // Skipper users see v1 fleet-maintenance tasks; Admiral sees all.
     const ls = LicenseService.getInstance();
     if (ls.getVariant() !== 'admiral') {
-      tasks = tasks.filter(t => t.action === 'update');
+      tasks = tasks.filter(t => SKIPPER_VISIBLE_ACTIONS.has(t.action as ScheduledAction));
     }
     // Split Auto-Update and Scheduled Operations into distinct views.
     const actionFilter = typeof req.query.action === 'string' ? req.query.action : undefined;
@@ -129,6 +142,10 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
 
     if (action === 'scan' && !node_id) {
       res.status(400).json({ error: 'Scan action requires node_id.' }); return;
+    }
+    if (action === 'scan') {
+      const nodeErr = validateScanNode(node_id);
+      if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     }
     if (action === 'update' && target_type === 'fleet' && !node_id) {
       res.status(400).json({ error: ERR_FLEET_NODE_REQUIRED }); return;
@@ -223,9 +240,8 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
 
     if (finalAction === 'scan') {
       const finalNodeId = node_id !== undefined ? node_id : existing.node_id;
-      if (!finalNodeId) {
-        res.status(400).json({ error: 'Scan action requires node_id.' }); return;
-      }
+      const nodeErr = validateScanNode(finalNodeId);
+      if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     }
     if (finalAction === 'update' && finalTargetType === 'fleet') {
       const finalNodeId = node_id !== undefined ? node_id : existing.node_id;

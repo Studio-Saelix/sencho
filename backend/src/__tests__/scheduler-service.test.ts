@@ -12,7 +12,7 @@ const {
   mockUpdateScheduledTask, mockCleanupOldTaskRuns, mockGetScheduledTask, mockGetNodes, mockGetNode,
   mockCreateSnapshot, mockInsertSnapshotFiles, mockClearStackUpdateStatus,
   mockMarkStaleRunsAsFailed, mockDeleteOldScans,
-  mockGetTier, mockGetVariant,
+  mockGetTier, mockGetVariant, mockGetProxyHeaders,
   mockGetContainersByStack, mockRestartContainer, mockPruneSystem,
   mockUpdateStack,
   mockGetStacks, mockGetStackContent, mockGetEnvContent,
@@ -23,6 +23,7 @@ const {
   mockScanAllNodeImages,
   mockGetStackAutoUpdateSettingsForNode,
   mockDeleteScheduledTask,
+  mockGetMatchingPolicy,
   mockRunCommand,
   mockDeployStack,
   mockBackupStackFiles,
@@ -42,6 +43,7 @@ const {
   mockDeleteOldScans: vi.fn().mockReturnValue(0),
   mockGetTier: vi.fn().mockReturnValue('paid'),
   mockGetVariant: vi.fn().mockReturnValue('admiral'),
+  mockGetProxyHeaders: vi.fn().mockReturnValue({ tier: 'paid', variant: 'admiral' }),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
   mockRestartContainer: vi.fn().mockResolvedValue(undefined),
   mockPruneSystem: vi.fn().mockResolvedValue({ success: true, reclaimedBytes: 0 }),
@@ -62,6 +64,7 @@ const {
   }),
   mockGetStackAutoUpdateSettingsForNode: vi.fn().mockReturnValue({}),
   mockDeleteScheduledTask: vi.fn(),
+  mockGetMatchingPolicy: vi.fn().mockReturnValue(null),
   mockRunCommand: vi.fn().mockResolvedValue(undefined),
   mockDeployStack: vi.fn().mockResolvedValue(undefined),
   mockBackupStackFiles: vi.fn().mockResolvedValue(undefined),
@@ -85,7 +88,14 @@ vi.mock('../services/DatabaseService', () => ({
       deleteOldScans: mockDeleteOldScans,
       getStackAutoUpdateSettingsForNode: mockGetStackAutoUpdateSettingsForNode,
       deleteScheduledTask: mockDeleteScheduledTask,
+      getMatchingPolicy: mockGetMatchingPolicy,
     }),
+  },
+}));
+
+vi.mock('../services/FleetSyncService', () => ({
+  FleetSyncService: {
+    getSelfIdentity: () => 'self-node',
   },
 }));
 
@@ -94,6 +104,7 @@ vi.mock('../services/LicenseService', () => ({
     getInstance: () => ({
       getTier: mockGetTier,
       getVariant: mockGetVariant,
+      getProxyHeaders: mockGetProxyHeaders,
     }),
   },
 }));
@@ -957,11 +968,19 @@ describe('SchedulerService - scheduled scan notifications', () => {
     medium?: number;
     low?: number;
     unknown?: number;
+    totalImages?: number;
+    processedImages?: number;
+    truncated?: boolean;
+    limitReason?: string;
   } = {}) {
     return {
       scanned: opts.scanned ?? 0,
       skipped: opts.skipped ?? 0,
       failed: opts.failed ?? 0,
+      totalImages: opts.totalImages,
+      processedImages: opts.processedImages,
+      truncated: opts.truncated,
+      limitReason: opts.limitReason,
       severity: {
         critical: opts.critical ?? 0,
         high: opts.high ?? 0,
@@ -1079,6 +1098,25 @@ describe('SchedulerService - scheduled scan notifications', () => {
     );
   });
 
+  it('fails scheduled scan tasks that target remote nodes before scanning', async () => {
+    mockGetScheduledTask.mockReturnValue(makeScanTask({ id: 210, node_id: 2 }));
+    mockGetNode
+      .mockReturnValueOnce({ id: 2, name: 'remote', type: 'remote', status: 'online' })
+      .mockReturnValueOnce({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(210);
+
+    expect(mockScanAllNodeImages).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringMatching(/local node/i),
+      }),
+    );
+  });
+
   it('includes severity counts in the notification message', async () => {
     mockGetScheduledTask.mockReturnValue(makeScanTask({ id: 206 }));
     mockScanAllNodeImages.mockResolvedValue(
@@ -1122,6 +1160,24 @@ describe('SchedulerService - scheduled scan notifications', () => {
       expect.stringContaining('All 12 image(s) already scanned recently'),
       { stackName: undefined },
     );
+  });
+
+  it('reports when scan-all stops at a configured bound', async () => {
+    mockGetScheduledTask.mockReturnValue(makeScanTask({ id: 211 }));
+    mockScanAllNodeImages.mockResolvedValue(scanResult({
+      scanned: 100,
+      totalImages: 250,
+      processedImages: 100,
+      truncated: true,
+      limitReason: 'image limit 100 reached',
+    }));
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(211);
+
+    const message = mockDispatchAlert.mock.calls[0][2] as string;
+    expect(message).toContain('Scan limited after 100 of 250 image(s)');
+    expect(message).toContain('image limit 100 reached');
   });
 
   it('persists the run as success even when notification dispatch throws', async () => {
@@ -1349,6 +1405,11 @@ describe('SchedulerService - executeUpdateRemote', () => {
       'http://remote:1852/api/auto-update/execute',
       expect.objectContaining({
         method: 'POST',
+        headers: expect.objectContaining({
+          'Authorization': 'Bearer test-token',
+          'x-sencho-tier': 'paid',
+          'x-sencho-variant': 'admiral',
+        }),
         body: JSON.stringify({ target: 'web-app' }),
       })
     );

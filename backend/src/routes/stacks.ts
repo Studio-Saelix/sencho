@@ -3,18 +3,17 @@ import path from 'path';
 import YAML from 'yaml';
 import multer from 'multer';
 import { FileSystemService } from '../services/FileSystemService';
-import { ComposeService } from '../services/ComposeService';
+import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { CacheService } from '../services/CacheService';
-import { LicenseService } from '../services/LicenseService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { requirePermission } from '../middleware/permissions';
-import { requirePaid, requireAdmin } from '../middleware/tierGates';
+import { requirePaid, requireAdmin, effectiveTier } from '../middleware/tierGates';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
-import { isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
+import { isValidGitSourcePath, isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -111,6 +110,7 @@ export async function resolveAllEnvFilePaths(nodeId: number, stackName: string):
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024, files: 1 },
+  preservePath: true,
 });
 
 function getRelPath(req: Request): string {
@@ -388,6 +388,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       auto_apply_on_webhook,
       auto_deploy_on_apply,
       deploy_now,
+      skip_scan,
     } = req.body ?? {};
     fromGitStackName = typeof stack_name === 'string' ? stack_name : '';
 
@@ -405,6 +406,12 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     }
     if (typeof compose_path !== 'string' || !compose_path.trim()) {
       return res.status(400).json({ error: 'compose_path is required' });
+    }
+    if (auto_apply_on_webhook !== undefined && typeof auto_apply_on_webhook !== 'boolean') {
+      return res.status(400).json({ error: 'auto_apply_on_webhook must be a boolean' });
+    }
+    if (auto_deploy_on_apply !== undefined && typeof auto_deploy_on_apply !== 'boolean') {
+      return res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
     }
     const resolvedAuthType = auth_type === 'token' ? 'token' : 'none';
     if (!/^https:\/\//i.test(repo_url)) {
@@ -425,6 +432,16 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     if (typeof token === 'string' && token.length > 8192) {
       return res.status(400).json({ error: 'token is too long' });
     }
+    if (!isValidGitSourcePath(compose_path.trim())) {
+      return res.status(400).json({ error: 'compose_path must be a relative repository file path' });
+    }
+    if (typeof env_path === 'string' && env_path.trim() && !isValidGitSourcePath(env_path.trim())) {
+      return res.status(400).json({ error: 'env_path must be a relative repository file path' });
+    }
+    const autoApplyOnWebhook = auto_apply_on_webhook === true;
+    const autoDeployOnApply = auto_deploy_on_apply === true;
+    if (autoDeployOnApply && !requirePermission(req, res, 'stack:deploy', 'stack', stack_name)) return;
+    if (deploy_now === true && !requirePermission(req, res, 'stack:deploy', 'stack', stack_name)) return;
 
     const stacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     if (stacks.includes(stack_name)) {
@@ -440,7 +457,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
 
     if (fromGitDiag) {
       console.log(
-        `[Stacks:diag] from-git start stack=${sanitizeForLog(stack_name)} nodeId=${req.nodeId ?? 'local'} host=${sanitizeForLog(gitRepoHost(repo_url))} branch=${sanitizeForLog(branch)} composePath=${sanitizeForLog(compose_path)} envPath=${sanitizeForLog(resolvedEnvPath ?? 'none')} authType=${sanitizeForLog(resolvedAuthType)} autoApplyOnWebhook=${Boolean(auto_apply_on_webhook)} autoDeployOnApply=${Boolean(auto_deploy_on_apply)} deployNow=${deploy_now === true}`
+        `[Stacks:diag] from-git start stack=${sanitizeForLog(stack_name)} nodeId=${req.nodeId ?? 'local'} host=${sanitizeForLog(gitRepoHost(repo_url))} branch=${sanitizeForLog(branch)} composePath=${sanitizeForLog(compose_path)} envPath=${sanitizeForLog(resolvedEnvPath ?? 'none')} authType=${sanitizeForLog(resolvedAuthType)} autoApplyOnWebhook=${autoApplyOnWebhook} autoDeployOnApply=${autoDeployOnApply} deployNow=${deploy_now === true}`
       );
     }
 
@@ -453,8 +470,8 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       envPath: resolvedEnvPath,
       authType: resolvedAuthType,
       token: resolvedAuthType === 'token' && typeof token === 'string' && token !== '' ? token : null,
-      autoApplyOnWebhook: Boolean(auto_apply_on_webhook),
-      autoDeployOnApply: Boolean(auto_deploy_on_apply),
+      autoApplyOnWebhook,
+      autoDeployOnApply,
     });
 
     invalidateNodeCaches(req.nodeId);
@@ -496,7 +513,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       deployed,
       deployError,
     });
-    if (deployed) {
+    if (deployed && skip_scan !== true) {
       triggerPostDeployScan(stack_name, req.nodeId).catch(err =>
         console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stack_name)}:`, err),
       );
@@ -586,8 +603,9 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
-    const atomic = LicenseService.getInstance().getTier() === 'paid';
+    const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
     const t0 = Date.now();
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
@@ -596,13 +614,20 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
     res.json({ message: 'Deployed successfully' });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
-    triggerPostDeployScan(stackName, req.nodeId).catch(err =>
-      console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
-    );
+    if (!skipScan) {
+      triggerPostDeployScan(stackName, req.nodeId).catch(err =>
+        console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
+      );
+    }
   } catch (error: unknown) {
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
-    const rolledBack = LicenseService.getInstance().getTier() === 'paid';
-    if (rolledBack) console.warn('[Stacks] Deploy failed, rolled back: %s', sanitizeForLog(stackName));
+    const rollbackInfo = getComposeRollbackInfo(error);
+    const rolledBack = rollbackInfo?.rolledBack ?? false;
+    if (rolledBack) {
+      console.warn('[Stacks] Deploy failed, rolled back: %s', sanitizeForLog(stackName));
+    } else if (rollbackInfo?.attempted) {
+      console.warn('[Stacks] Deploy failed, rollback did not complete: %s', sanitizeForLog(stackName));
+    }
     const message = getErrorMessage(error, 'Failed to deploy stack');
     notifyActionFailure('deploy', stackName, error);
     res.status(500).json({ error: message, rolledBack });
@@ -760,8 +785,9 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
-    const atomic = LicenseService.getInstance().getTier() === 'paid';
+    const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
     const t0 = Date.now();
     await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
@@ -771,13 +797,20 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
     res.json({ status: 'Update completed' });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
-    triggerPostDeployScan(stackName, req.nodeId).catch(err =>
-      console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
-    );
+    if (!skipScan) {
+      triggerPostDeployScan(stackName, req.nodeId).catch(err =>
+        console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
+      );
+    }
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
-    const rolledBack = LicenseService.getInstance().getTier() === 'paid';
-    if (rolledBack) console.warn(`[Stacks] Update failed, rolled back: ${sanitizeForLog(stackName)}`);
+    const rollbackInfo = getComposeRollbackInfo(error);
+    const rolledBack = rollbackInfo?.rolledBack ?? false;
+    if (rolledBack) {
+      console.warn(`[Stacks] Update failed, rolled back: ${sanitizeForLog(stackName)}`);
+    } else if (rollbackInfo?.attempted) {
+      console.warn(`[Stacks] Update failed, rollback did not complete: ${sanitizeForLog(stackName)}`);
+    }
     notifyActionFailure('update', stackName, error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to update'), rolledBack });
   }
@@ -795,6 +828,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     }
     console.log(`[Stacks] Rollback initiated: ${sanitizeForLog(stackName)}`);
     await fsSvc.restoreStackFiles(stackName);
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), false);
     invalidateNodeCaches(req.nodeId);
     console.log(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
@@ -821,7 +855,14 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
 
 // ── File explorer endpoints ──
 
-type FsErrorCode = 'INVALID_PATH' | 'SYMLINK_ESCAPE' | 'IS_DIRECTORY' | 'NOT_EMPTY' | 'NOT_FOUND' | 'TOO_LARGE';
+type FsErrorCode =
+  | 'INVALID_PATH'
+  | 'SYMLINK_ESCAPE'
+  | 'IS_DIRECTORY'
+  | 'NOT_EMPTY'
+  | 'NOT_FOUND'
+  | 'TOO_LARGE'
+  | 'ALREADY_EXISTS';
 
 function sendFsError(
   res: Response,
@@ -839,11 +880,45 @@ function sendFsError(
   if (e.code === 'NOT_EMPTY') {
     return res.status(409).json({ error: e.message, code: e.code as FsErrorCode });
   }
+  if (e.code === 'EEXIST') {
+    return res.status(409).json({ error: e.message, code: 'ALREADY_EXISTS' satisfies FsErrorCode });
+  }
+  if (e.code === 'ENOTDIR') {
+    return res.status(400).json({ error: 'Target path is not a directory', code: 'INVALID_PATH' satisfies FsErrorCode });
+  }
   if (e.code === 'ENOENT') {
     return res.status(404).json({ error: opts.notFoundMessage ?? 'File not found', code: 'NOT_FOUND' });
   }
-  console.error(`[files] ${fallback}:`, e.message);
+  console.error(`[files] ${fallback}:`, sanitizeForLog(e.message));
   return res.status(500).json({ error: fallback });
+}
+
+function logFileOperation(level: 'info' | 'warn', message: string, details: Record<string, unknown>): void {
+  const cleaned = Object.fromEntries(
+    Object.entries(details).map(([key, value]) => [key, sanitizeForLog(value)]),
+  );
+  const log = level === 'warn' ? console.warn : console.log;
+  log(`[Files] ${message}`, cleaned);
+}
+
+function fsErrorCode(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException & { code?: unknown }).code;
+  return typeof code === 'string' ? code : 'UNKNOWN';
+}
+
+function logFileDiag(message: string, details: Record<string, unknown>): void {
+  if (DatabaseService.getInstance().getGlobalSettings().developer_mode !== '1') return;
+  const cleaned = Object.fromEntries(
+    Object.entries(details).map(([key, value]) => [key, sanitizeForLog(value)]),
+  );
+  console.debug(`[Files:diag] ${message}`, cleaned);
+}
+
+function isSafeUploadFilename(rawName: string): boolean {
+  if (!rawName || rawName === '.' || rawName === '..') return false;
+  if (rawName.includes('\0') || rawName.includes('/') || rawName.includes('\\')) return false;
+  if (/^[a-zA-Z]:/.test(rawName) || path.isAbsolute(rawName)) return false;
+  return path.basename(rawName) === rawName;
 }
 
 stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
@@ -852,10 +927,14 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('list start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const entries = await FileSystemService.getInstance(req.nodeId).listStackDirectory(stackName, relPath);
+    logFileDiag('list complete', { stackName, relPath, nodeId: req.nodeId, entries: entries.length, elapsedMs: Date.now() - startedAt });
     return res.json(entries);
   } catch (err: unknown) {
+    logFileOperation('warn', 'list failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to list directory');
   }
 });
@@ -867,10 +946,22 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath);
+    logFileDiag('read complete', {
+      stackName,
+      relPath,
+      nodeId: req.nodeId,
+      binary: result.binary,
+      oversized: result.oversized,
+      size: result.size,
+      elapsedMs: Date.now() - startedAt,
+    });
     return res.json(result);
   } catch (err: unknown) {
+    logFileOperation('warn', 'read failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to read file');
   }
 });
@@ -879,9 +970,12 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
   if (!requirePaid(req, res)) return;
   const stackName = req.params.stackName as string;
   const relPath = getRelPath(req);
-  if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
+  if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
+  if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('download start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const result = await FileSystemService.getInstance(req.nodeId).streamStackFile(stackName, relPath);
     res.setHeader('Content-Type', result.mime);
@@ -890,14 +984,16 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     const safeFilename = result.filename.replace(/[\\"]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
     result.stream.on('error', (streamErr) => {
-      console.error('[files] stream error:', streamErr);
+      console.error('[files] stream error:', sanitizeForLog(getErrorMessage(streamErr, 'unknown')));
       if (!res.headersSent) res.status(500).end();
       else res.destroy();
     });
     req.on('close', () => result.stream.destroy());
+    logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
     result.stream.pipe(res);
     return;
   } catch (err: unknown) {
+    logFileOperation('warn', 'download failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to download file');
   }
 });
@@ -924,15 +1020,20 @@ stacksRouter.post(
     if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
       return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
     }
-    const safeName = path.basename(req.file.originalname);
-    if (!safeName || safeName === '.' || safeName === '..') {
+    const originalName = req.file.originalname;
+    if (!isSafeUploadFilename(originalName)) {
       return res.status(400).json({ error: 'Invalid filename' });
     }
-    const targetRelPath = relPath ? `${relPath}/${safeName}` : safeName;
+    const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
+    const startedAt = Date.now();
+    logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size });
     try {
       await FileSystemService.getInstance(req.nodeId).writeStackFileBuffer(stackName, targetRelPath, req.file.buffer);
+      logFileOperation('info', 'upload complete', { nodeId: req.nodeId, size: req.file.size });
+      logFileDiag('upload timing', { stackName, relPath: targetRelPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
       return res.status(204).send();
     } catch (err: unknown) {
+      logFileOperation('warn', 'upload failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
       return sendFsError(res, err, 'Failed to upload file', { notFoundMessage: 'Target directory not found' });
     }
   },
@@ -943,17 +1044,23 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
-  if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
+  if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
+  if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
   const { content } = req.body as { content?: unknown };
   if (typeof content !== 'string') {
     return res.status(400).json({ error: '"content" must be a string' });
   }
+  const startedAt = Date.now();
+  logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8') });
   try {
     await FileSystemService.getInstance(req.nodeId).writeStackFile(stackName, relPath, content);
+    logFileOperation('info', 'write complete', { nodeId: req.nodeId });
+    logFileDiag('write timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'write failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to write file');
   }
 });
@@ -968,10 +1075,15 @@ stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => 
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
   const recursive = req.query.recursive === '1';
+  const startedAt = Date.now();
+  logFileDiag('delete start', { stackName, relPath, recursive, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).deleteStackPath(stackName, relPath, recursive);
+    logFileOperation('info', 'delete complete', { nodeId: req.nodeId, recursive });
+    logFileDiag('delete timing', { stackName, relPath, recursive, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'delete failed', { nodeId: req.nodeId, recursive, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to delete path');
   }
 });
@@ -985,10 +1097,15 @@ stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('mkdir start', { stackName, relPath, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).mkdirStackPath(stackName, relPath);
+    logFileOperation('info', 'mkdir complete', { nodeId: req.nodeId });
+    logFileDiag('mkdir timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'mkdir failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to create folder');
   }
 });
@@ -1010,10 +1127,15 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
   if (!isValidRelativeStackPath(to)) {
     return res.status(400).json({ error: 'Invalid destination path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('rename start', { stackName, from, to, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).renameStackPath(stackName, from, to);
+    logFileOperation('info', 'rename complete', { nodeId: req.nodeId });
+    logFileDiag('rename timing', { stackName, from, to, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'rename failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to rename');
   }
 });
@@ -1025,10 +1147,14 @@ stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Resp
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const startedAt = Date.now();
+  logFileDiag('permissions read start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const result = await FileSystemService.getInstance(req.nodeId).getStackEntryMode(stackName, relPath);
+    logFileDiag('permissions read complete', { stackName, relPath, nodeId: req.nodeId, mode: result.octal, elapsedMs: Date.now() - startedAt });
     return res.json(result);
   } catch (err: unknown) {
+    logFileOperation('warn', 'permissions read failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to read permissions');
   }
 });
@@ -1046,10 +1172,15 @@ stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Resp
   if (typeof mode !== 'number') {
     return res.status(400).json({ error: '"mode" must be a number' });
   }
+  const startedAt = Date.now();
+  logFileDiag('chmod start', { stackName, relPath, nodeId: req.nodeId, mode });
   try {
     await FileSystemService.getInstance(req.nodeId).chmodStackPath(stackName, relPath, mode);
+    logFileOperation('info', 'chmod complete', { nodeId: req.nodeId, mode });
+    logFileDiag('chmod timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();
   } catch (err: unknown) {
+    logFileOperation('warn', 'chmod failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to set permissions');
   }
 });

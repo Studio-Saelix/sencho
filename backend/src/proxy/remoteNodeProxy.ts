@@ -5,6 +5,8 @@ import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-hea
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { getErrorMessage } from '../utils/errors';
+import { DatabaseService } from '../services/DatabaseService';
+import { redactSensitiveText } from '../utils/safeLog';
 
 /**
  * Build the remote-node HTTP proxy middleware. Mount once at `/api/` after
@@ -74,8 +76,25 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // a bad token causes an immediate logout loop.
         proxyRes.headers['x-sencho-proxy'] = '1';
       },
-      error: (err, _req, proxyRes) => {
+      error: (err, req, proxyRes) => {
         console.error('[Proxy] Remote node error:', getErrorMessage(err, 'unknown'));
+        const path = req.originalUrl || req.url;
+        if (req.method === 'POST' && /^\/api\/stacks\/[^/]+\/(?:deploy|update)(?:\?|$)/.test(path)) {
+          try {
+            DatabaseService.getInstance().insertAuditLog({
+              timestamp: Date.now(),
+              username: req.user?.username ?? 'unknown',
+              method: req.method,
+              path,
+              status_code: 502,
+              node_id: req.nodeId,
+              ip_address: req.ip ?? '',
+              summary: `remote deploy proxy error: ${redactSensitiveText(getErrorMessage(err, 'unknown'))}`,
+            });
+          } catch (auditErr) {
+            console.warn('[Proxy] Failed to record remote deploy proxy error:', getErrorMessage(auditErr, 'unknown'));
+          }
+        }
         // proxyRes can be either a ServerResponse (HTTP) or a raw Socket
         // (WS/TCP errors). Only attempt to send an HTTP 502 if it is a
         // proper ServerResponse with a headersSent flag; otherwise silently

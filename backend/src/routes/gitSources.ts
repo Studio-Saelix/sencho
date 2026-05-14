@@ -2,10 +2,11 @@ import { Router, type Request, type Response } from 'express';
 import path from 'path';
 import { GitSourceService } from '../services/GitSourceService';
 import { FileSystemService } from '../services/FileSystemService';
+import { DatabaseService } from '../services/DatabaseService';
 import { checkPermission, requirePermission } from '../middleware/permissions';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { triggerPostDeployScan } from '../helpers/policyGate';
-import { isValidStackName } from '../utils/validation';
+import { isValidGitSourcePath, isValidStackName } from '../utils/validation';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
 
@@ -94,6 +95,14 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'auth_type must be "none" or "token"' });
       return;
     }
+    if (auto_apply_on_webhook !== undefined && typeof auto_apply_on_webhook !== 'boolean') {
+      res.status(400).json({ error: 'auto_apply_on_webhook must be a boolean' });
+      return;
+    }
+    if (auto_deploy_on_apply !== undefined && typeof auto_deploy_on_apply !== 'boolean') {
+      res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
+      return;
+    }
     if (!/^https:\/\//i.test(repo_url)) {
       res.status(400).json({ error: 'Only HTTPS repository URLs are supported' });
       return;
@@ -114,10 +123,21 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'env_path is too long' });
       return;
     }
+    if (!isValidGitSourcePath(compose_path.trim())) {
+      res.status(400).json({ error: 'compose_path must be a relative repository file path' });
+      return;
+    }
+    if (typeof env_path === 'string' && env_path.trim() && !isValidGitSourcePath(env_path.trim())) {
+      res.status(400).json({ error: 'env_path must be a relative repository file path' });
+      return;
+    }
     if (typeof token === 'string' && token.length > MAX_TOKEN_LENGTH) {
       res.status(400).json({ error: 'token is too long' });
       return;
     }
+    const autoApplyOnWebhook = auto_apply_on_webhook === true;
+    const autoDeployOnApply = auto_deploy_on_apply === true;
+    if (autoDeployOnApply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
 
     // Confirm the stack actually exists on the active node. Without this guard
     // a caller could stash a git-source row for a name that does not exist
@@ -144,8 +164,8 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       envPath: resolvedEnvPath,
       authType: auth_type,
       token: typeof token === 'string' ? token : undefined,
-      autoApplyOnWebhook: Boolean(auto_apply_on_webhook),
-      autoDeployOnApply: Boolean(auto_deploy_on_apply),
+      autoApplyOnWebhook,
+      autoDeployOnApply,
     });
 
     console.log(`[GitSource] Configured git source for ${stackName}`);
@@ -199,10 +219,17 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
       res.status(400).json({ error: 'commitSha is required' });
       return;
     }
+    const source = DatabaseService.getInstance().getGitSource(stackName);
+    const willDeploy = typeof deploy === 'boolean' ? deploy : source?.auto_deploy_on_apply === true;
+    if (willDeploy && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
     const result = await GitSourceService.getInstance().apply(
       stackName,
       commitSha.trim(),
-      { deploy: typeof deploy === 'boolean' ? deploy : undefined },
+      {
+        deploy: typeof deploy === 'boolean' ? deploy : undefined,
+        actor: req.user?.username ?? 'unknown',
+        bypassPolicy: req.query.ignorePolicy === 'true' && req.user?.role === 'admin',
+      },
     );
     invalidateNodeCaches(req.nodeId);
     const shortSha = commitSha.trim().slice(0, 7);
@@ -219,6 +246,23 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
         console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stackName)}:`, err),
       );
     }
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/webhook-pull', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const source = GitSourceService.getInstance().get(stackName);
+    if (source?.auto_apply_on_webhook && source.auto_deploy_on_apply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+    const result = await GitSourceService.getInstance().handleWebhookPull(stackName);
+    res.json(result);
   } catch (error) {
     sendGitSourceError(res, error);
   }

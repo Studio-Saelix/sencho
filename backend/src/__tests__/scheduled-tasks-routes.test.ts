@@ -13,6 +13,7 @@ let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let adminCookie: string;
 let viewerCookie: string;
+let variantSpy: ReturnType<typeof vi.spyOn>;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -20,7 +21,7 @@ beforeAll(async () => {
 
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
+  variantSpy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
   vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
@@ -39,6 +40,7 @@ beforeEach(() => {
   // Start each test with an empty scheduled_tasks table.
   const db = DatabaseService.getInstance().getDb();
   db.prepare('DELETE FROM scheduled_tasks').run();
+  variantSpy.mockReturnValue('admiral');
 });
 
 describe('GET /api/scheduled-tasks', () => {
@@ -86,6 +88,73 @@ describe('GET /api/scheduled-tasks', () => {
     expect(res.body.length).toBe(1);
     expect(res.body[0].name).toBe('nightly-scan');
     expect(Array.isArray(res.body[0].next_runs)).toBe(true);
+  });
+
+  it('shows scan and snapshot tasks to Skipper users', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    db.createScheduledTask({
+      name: 'nightly-scan',
+      target_type: 'system',
+      target_id: null,
+      node_id: 1,
+      action: 'scan',
+      cron_expression: '0 0 * * *',
+      enabled: 1,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      last_status: null,
+      last_error: null,
+      prune_targets: null,
+      target_services: null,
+      prune_label_filter: null,
+    });
+    db.createScheduledTask({
+      name: 'daily-snapshot',
+      target_type: 'fleet',
+      target_id: null,
+      node_id: 1,
+      action: 'snapshot',
+      cron_expression: '0 1 * * *',
+      enabled: 1,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      last_status: null,
+      last_error: null,
+      prune_targets: null,
+      target_services: null,
+      prune_label_filter: null,
+    });
+    db.createScheduledTask({
+      name: 'system-prune',
+      target_type: 'system',
+      target_id: null,
+      node_id: 1,
+      action: 'prune',
+      cron_expression: '0 2 * * *',
+      enabled: 1,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      last_status: null,
+      last_error: null,
+      prune_targets: JSON.stringify(['images']),
+      target_services: null,
+      prune_label_filter: null,
+    });
+    variantSpy.mockReturnValue('individual');
+
+    const res = await request(app).get('/api/scheduled-tasks').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.map((t: { action: string }) => t.action).sort()).toEqual(['scan', 'snapshot']);
   });
 });
 
@@ -147,6 +216,27 @@ describe('POST /api/scheduled-tasks', () => {
     });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/Scan action requires node_id/);
+  });
+
+  it('rejects scheduled scans on remote nodes', async () => {
+    const remoteNodeId = DatabaseService.getInstance().addNode({
+      name: 'remote-scan-node',
+      type: 'remote',
+      api_url: 'http://remote.local:1852',
+      api_token: 'token',
+      compose_dir: '/srv/compose',
+      is_default: false,
+    });
+
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'remote-scan',
+      target_type: 'system',
+      node_id: remoteNodeId,
+      action: 'scan',
+      cron_expression: '0 0 * * *',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/local node/i);
   });
 
   it('rejects target_services with wrong action', async () => {

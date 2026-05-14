@@ -12,14 +12,24 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 let tmpDir: string;
 let app: import('express').Express;
 let authHeader: string;
+let viewerAuthHeader: string;
+let nodeAdminAuthHeader: string;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
+let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ app } = await import('../index'));
   ({ LicenseService } = await import('../services/LicenseService'));
+  ({ DatabaseService } = await import('../services/DatabaseService'));
+  DatabaseService.getInstance().addUser({ username: 'labels-viewer', password_hash: 'hash', role: 'viewer' });
+  DatabaseService.getInstance().addUser({ username: 'labels-node-admin', password_hash: 'hash', role: 'node-admin' });
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+  const viewerToken = jwt.sign({ username: 'labels-viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+  const nodeAdminToken = jwt.sign({ username: 'labels-node-admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
   authHeader = `Bearer ${token}`;
+  viewerAuthHeader = `Bearer ${viewerToken}`;
+  nodeAdminAuthHeader = `Bearer ${nodeAdminToken}`;
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -87,6 +97,16 @@ describe('Stack Labels on Community tier', () => {
     expect(res.body.success).toBe(true);
   });
 
+  it('allows node-admins to create labels through the stack edit permission', async () => {
+    mockTier('community');
+    const res = await request(app)
+      .post('/api/labels')
+      .set('Authorization', nodeAdminAuthHeader)
+      .send({ name: 'node-admin-label', color: 'green' });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ name: 'node-admin-label', color: 'green' });
+  });
+
   it('PUT /api/stacks/:stackName/labels accepts an empty assignment on community', async () => {
     mockTier('community');
     const res = await request(app)
@@ -95,6 +115,87 @@ describe('Stack Labels on Community tier', () => {
       .send({ labelIds: [] });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
+  });
+
+  it('rejects path traversal stack names before assigning labels', async () => {
+    mockTier('community');
+    const res = await request(app)
+      .put(`/api/stacks/${encodeURIComponent('../secret')}/labels`)
+      .set('Authorization', authHeader)
+      .send({ labelIds: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid stack name');
+  });
+});
+
+describe('Stack Labels RBAC', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('allows viewers to read labels but denies label creation', async () => {
+    mockTier('community');
+    const list = await request(app).get('/api/labels').set('Authorization', viewerAuthHeader);
+    expect(list.status).toBe(200);
+
+    const create = await request(app)
+      .post('/api/labels')
+      .set('Authorization', viewerAuthHeader)
+      .send({ name: 'viewer-create', color: 'teal' });
+    expect(create.status).toBe(403);
+    expect(create.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('denies viewers label update, delete, and stack assignment', async () => {
+    mockTier('community');
+    const created = await request(app)
+      .post('/api/labels')
+      .set('Authorization', authHeader)
+      .send({ name: 'rbac-target', color: 'blue' });
+    expect(created.status).toBe(201);
+
+    const update = await request(app)
+      .put(`/api/labels/${created.body.id}`)
+      .set('Authorization', viewerAuthHeader)
+      .send({ color: 'rose' });
+    expect(update.status).toBe(403);
+    expect(update.body.code).toBe('PERMISSION_DENIED');
+
+    const assign = await request(app)
+      .put('/api/stacks/rbac-stack/labels')
+      .set('Authorization', viewerAuthHeader)
+      .send({ labelIds: [created.body.id] });
+    expect(assign.status).toBe(403);
+    expect(assign.body.code).toBe('PERMISSION_DENIED');
+
+    const remove = await request(app)
+      .delete(`/api/labels/${created.body.id}`)
+      .set('Authorization', viewerAuthHeader);
+    expect(remove.status).toBe(403);
+    expect(remove.body.code).toBe('PERMISSION_DENIED');
+  });
+});
+
+describe('Stack Labels Developer Mode logging', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('only emits label debug logs when Developer Mode is enabled', async () => {
+    mockTier('community');
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const db = DatabaseService.getInstance();
+
+    db.updateGlobalSetting('developer_mode', '0');
+    const quiet = await request(app).get('/api/labels').set('Authorization', authHeader);
+    expect(quiet.status).toBe(200);
+    expect(debugSpy).not.toHaveBeenCalled();
+
+    db.updateGlobalSetting('developer_mode', '1');
+    const noisy = await request(app).get('/api/labels').set('Authorization', authHeader);
+    expect(noisy.status).toBe(200);
+    expect(debugSpy).toHaveBeenCalledWith(
+      '[Labels:debug] List labels: nodeId=',
+      expect.any(Number),
+      'count=',
+      expect.any(Number),
+    );
   });
 });
 
