@@ -237,6 +237,7 @@ export class PilotTunnelManager extends EventEmitter {
             }
         });
         this.bridges.set(nodeId, bridge);
+        PilotMetrics.increment('proxy_bridges_total');
         this.emit('proxy-bridge-up', nodeId);
     }
 

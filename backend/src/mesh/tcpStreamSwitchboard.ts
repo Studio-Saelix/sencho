@@ -15,6 +15,7 @@ import {
 } from '../pilot/protocol';
 import { lookupContainerIp } from './containerLookup';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isDebugEnabled } from '../utils/debug';
 
 /**
  * Sencho Mesh TCP stream switchboard.
@@ -41,7 +42,7 @@ import { sanitizeForLog } from '../utils/safeLog';
  * `reverseTcpStreams`, `reverseStreamIds`, per-stream idle timers) is
  * scoped to a single WS instance — recreate the switchboard on reconnect.
  */
-export const MESH_CONNECT_TIMEOUT_MS = 10_000;
+const MESH_CONNECT_TIMEOUT_MS = 10_000;
 
 export type MeshResolveResult =
     | { ok: true; host: string; port: number }
@@ -270,7 +271,9 @@ export class TcpStreamSwitchboard {
                 this.clearIdleTimer(frame.s);
                 return;
             }
-            console.warn(`[${this.logLabel}] tcp stream error:`, sanitizeForLog(err.message));
+            if (isDebugEnabled()) {
+                console.warn(`[${this.logLabel}:diag] tcp stream error:`, sanitizeForLog(err.message));
+            }
             if (this.tcpStreams.delete(frame.s)) {
                 this.clearIdleTimer(frame.s);
                 try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: frame.s })); } catch { /* ignore */ }
@@ -404,7 +407,9 @@ export async function resolveByComposeLabels(stack: string, service: string, por
         if (!ip) return { ok: false, err: 'no_target' };
         return { ok: true, host: ip, port };
     } catch (err) {
-        console.warn('[Mesh] resolveByComposeLabels failed:', sanitizeForLog((err as Error).message));
+        if (isDebugEnabled()) {
+            console.warn('[Mesh:diag] resolveByComposeLabels failed:', sanitizeForLog((err as Error).message));
+        }
         return { ok: false, err: 'agent_error' };
     }
 }
