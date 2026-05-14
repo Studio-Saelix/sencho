@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import type WebSocket from 'ws';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -102,16 +103,23 @@ vi.mock('../services/LogFormatter', () => ({
 
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 
+const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
+
 /** Creates an EventEmitter that mimics a child_process spawn result */
 function createMockProcess() {
   const proc = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter;
     stderr: EventEmitter;
     kill: ReturnType<typeof vi.fn>;
+    killed: boolean;
   };
   proc.stdout = new EventEmitter();
   proc.stderr = new EventEmitter();
-  proc.kill = vi.fn();
+  proc.killed = false;
+  proc.kill = vi.fn(() => {
+    proc.killed = true;
+    return true;
+  });
   return proc;
 }
 
@@ -125,14 +133,22 @@ function setupAutoCloseSpawn(exitCode = 0) {
   });
 }
 
-function createMockWs() {
-  return {
+type MockWebSocket = EventEmitter & {
+  readyState: number;
+  send: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+  OPEN: number;
+} & WebSocket;
+
+function createMockWs(): MockWebSocket {
+  const ws = new EventEmitter() as MockWebSocket;
+  Object.assign(ws, {
     readyState: 1,
     send: vi.fn(),
-    on: vi.fn(),
     close: vi.fn(),
     OPEN: 1,
-  };
+  });
+  return ws;
 }
 
 beforeEach(() => {
@@ -142,6 +158,11 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  if (originalComposeTimeout === undefined) {
+    delete process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
+  } else {
+    process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS = originalComposeTimeout;
+  }
 });
 
 // ── runCommand ─────────────────────────────────────────────────────────
@@ -206,12 +227,48 @@ describe('ComposeService - runCommand', () => {
     const ws = createMockWs();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.runCommand('my-stack', 'restart', ws as any);
+    const promise = svc.runCommand('my-stack', 'restart', ws);
     proc.stdout.emit('data', Buffer.from('Restarting...'));
     proc.emit('close', 0);
     await promise;
 
     expect(ws.send).toHaveBeenCalledWith('Restarting...');
+  });
+
+  it('kills and rejects commands that exceed the compose timeout', async () => {
+    process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS = '1000';
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart');
+    const expectation = expect(promise).rejects.toThrow('Command timed out after 1s');
+    let settled = false;
+    promise.finally(() => { settled = true; }).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(settled).toBe(false);
+    proc.emit('close', null);
+    await expectation;
+  });
+
+  it('kills and rejects running commands when the WebSocket disconnects', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const ws = createMockWs();
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart', ws);
+    const expectation = expect(promise).rejects.toThrow('client disconnected');
+    let settled = false;
+    promise.finally(() => { settled = true; }).catch(() => undefined);
+    ws.emit('close');
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(settled).toBe(false);
+    proc.emit('close', null);
+    await expectation;
   });
 });
 
@@ -389,7 +446,7 @@ describe('ComposeService - withRegistryAuth', () => {
     const ws = createMockWs();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.deployStack('my-stack', ws as any);
+    const promise = svc.deployStack('my-stack', ws);
 
     await vi.advanceTimersByTimeAsync(3100);
     await promise;
