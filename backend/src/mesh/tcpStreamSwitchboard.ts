@@ -13,6 +13,7 @@ import {
     encodeBinaryFrame,
     encodeJsonFrame,
 } from '../pilot/protocol';
+import { lookupContainerIp } from './containerLookup';
 import { sanitizeForLog } from '../utils/safeLog';
 
 /**
@@ -389,25 +390,19 @@ export function attachTcpStreamSwitchboard(ctx: SwitchboardCtx): TcpStreamSwitch
 
 /**
  * Resolve a Compose-managed container's IP address by stack name + service
- * name. Returns the first usable IP found on any Docker network the
- * container is attached to. Used by both the pilot agent and the
- * proxy-mode WS handler.
+ * name. Honors the deterministic network preference shared with
+ * `MeshService.resolveContainerIp` so a redeploy that adds or reorders
+ * networks does not flip which IP is returned. Used by both the pilot
+ * agent and the proxy-mode WS handler.
  */
 export async function resolveByComposeLabels(stack: string, service: string, port: number): Promise<MeshResolveResult> {
     try {
         const dockerodeMod = await import('dockerode');
-        const Docker = (dockerodeMod as { default: new (opts?: unknown) => { listContainers: (opts?: unknown) => Promise<unknown[]> } }).default;
+        const Docker = (dockerodeMod as { default: new (opts?: unknown) => Parameters<typeof lookupContainerIp>[0] }).default;
         const docker = new Docker();
-        const containers = (await docker.listContainers({
-            filters: { label: [`com.docker.compose.project=${stack}`, `com.docker.compose.service=${service}`] },
-        })) as Array<{ NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> } }>;
-        for (const c of containers) {
-            const networks = c.NetworkSettings?.Networks ?? {};
-            for (const n of Object.values(networks)) {
-                if (n.IPAddress) return { ok: true, host: n.IPAddress, port };
-            }
-        }
-        return { ok: false, err: 'no_target' };
+        const ip = await lookupContainerIp(docker, stack, service);
+        if (!ip) return { ok: false, err: 'no_target' };
+        return { ok: true, host: ip, port };
     } catch (err) {
         console.warn('[Mesh] resolveByComposeLabels failed:', sanitizeForLog((err as Error).message));
         return { ok: false, err: 'agent_error' };

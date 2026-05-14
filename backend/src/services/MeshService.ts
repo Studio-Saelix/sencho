@@ -12,8 +12,9 @@ import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { MeshForwarder, type MeshForwarderHost } from './MeshForwarder';
 import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
-import { MeshProxyTunnelDialer } from './MeshProxyTunnelDialer';
+import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDialer';
 import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
+import { lookupContainerIp } from '../mesh/containerLookup';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
@@ -24,6 +25,14 @@ const ALIAS_REFRESH_INTERVAL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const SLOW_PROBE_THRESHOLD_MS = 500;
 const DEFAULT_MESH_SUBNET = '172.30.0.0/24';
+
+const REACHABLE_REASON: Record<DialFailureCode, string> = {
+    auth_failed: 'api token rejected (scope must be full-admin)',
+    endpoint_not_found: 'remote does not support proxy mesh',
+    tls_failed: 'TLS handshake failed',
+    no_target: 'proxy target missing',
+    network_error: 'remote unreachable',
+};
 
 /**
  * Returns the static IPv4 address Sencho will pin itself to on the mesh
@@ -1360,56 +1369,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * central.
      */
     public async resolveContainerIp(target: { stack: string; service: string }): Promise<string | null> {
+        const docker = DockerController.getInstance().getDocker() as unknown as Parameters<typeof lookupContainerIp>[0];
         try {
-            const docker = DockerController.getInstance().getDocker();
-            // Compose default container name pattern; -1 is the first replica.
-            const conventionalName = `${target.stack}-${target.service}-1`;
-            const info = await docker.getContainer(conventionalName).inspect().catch(() => null);
-            const fromInspect = info ? this.extractContainerIp(target.stack, info) : null;
-            if (fromInspect) return fromInspect;
-            // Fallback: filter by compose labels in case of a non-conventional
-            // container name (operator overrode `container_name` or compose
-            // project).
-            const containers = await docker.listContainers({
-                all: true,
-                filters: {
-                    label: [
-                        `com.docker.compose.project=${target.stack}`,
-                        `com.docker.compose.service=${target.service}`,
-                    ],
-                },
-            });
-            if (containers.length === 0) return null;
-            const fallbackInfo = await docker.getContainer(containers[0].Id).inspect().catch(() => null);
-            return fallbackInfo ? this.extractContainerIp(target.stack, fallbackInfo) : null;
+            return await lookupContainerIp(docker, target.stack, target.service);
         } catch (err) {
             console.warn('[MeshService] container IP lookup failed:', sanitizeForLog((err as Error).message));
             return null;
         }
-    }
-
-    /**
-     * Pick a deterministic IP. Prefer the compose default network
-     * (`<stack>_default` or any network whose name starts with `<stack>_`),
-     * then any other declared network, then the legacy bridge `IPAddress`.
-     * Without this preference order, `Object.values(Networks)` ordering on
-     * containers attached to multiple networks varies across daemon
-     * versions and can make same-node forwarding flaky on a redeploy.
-     */
-    private extractContainerIp(
-        stackName: string,
-        info: { NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }>; IPAddress?: string } },
-    ): string | null {
-        const networks = info.NetworkSettings?.Networks ?? {};
-        const composeDefault = networks[`${stackName}_default`];
-        if (composeDefault?.IPAddress) return composeDefault.IPAddress;
-        for (const [name, net] of Object.entries(networks)) {
-            if (name.startsWith(`${stackName}_`) && net?.IPAddress) return net.IPAddress;
-        }
-        for (const net of Object.values(networks)) {
-            if (net?.IPAddress) return net.IPAddress;
-        }
-        return info.NetworkSettings?.IPAddress || null;
     }
 
     /**
@@ -1652,10 +1618,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     /**
      * Compute the reachability classification surfaced in `MeshNodeStatus`
      * and consumed by the Routing tab. See `MeshReachableMode` for the
-     * meaning of each value.
+     * meaning of each value. Callers pass in the already-fetched node row
+     * (and the local nodeId) so this helper is free of DB I/O when
+     * `getStatus` iterates the fleet.
      */
-    private computeReachable(nodeId: number, localNodeId: number): { mode: MeshReachableMode; reason: string | null } {
-        const node = DatabaseService.getInstance().getNode(nodeId);
+    private computeReachable(node: ReturnType<typeof DatabaseService.prototype.getNode>, localNodeId: number): { mode: MeshReachableMode; reason: string | null } {
         if (!node) return { mode: 'unreachable', reason: 'unknown node' };
         if (node.id === localNodeId || node.type !== 'remote') return { mode: 'local', reason: null };
         if (node.mode === 'pilot_agent') return { mode: 'pilot', reason: null };
@@ -1665,17 +1632,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             // Recent-failure cache surfaces the last failed dial so the
             // operator sees a clear reason without triggering a redial
             // storm.
-            const failure = MeshProxyTunnelDialer.getInstance().getRecentFailure(nodeId);
+            const failure = MeshProxyTunnelDialer.getInstance().getRecentFailure(node.id);
             if (failure) {
-                const reason = failure.code === 'auth_failed'
-                    ? 'api token rejected (scope must be full-admin)'
-                    : failure.code === 'endpoint_not_found'
-                        ? 'remote does not support proxy mesh'
-                        : failure.code === 'tls_failed'
-                            ? 'TLS handshake failed'
-                            : failure.code === 'no_target'
-                                ? 'proxy target missing'
-                                : failure.message || 'remote unreachable';
+                const reason = REACHABLE_REASON[failure.code] ?? failure.message ?? 'remote unreachable';
                 return { mode: 'unreachable', reason };
             }
             return { mode: 'proxy', reason: null };
@@ -1762,7 +1721,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const localListening = this.isLocalForwarderActive();
         const ptm = PilotTunnelManager.getInstance();
         return nodes.map((node) => {
-            const reach = this.computeReachable(node.id, localNodeId);
+            const reach = this.computeReachable(node, localNodeId);
             return {
                 nodeId: node.id,
                 nodeName: node.name,

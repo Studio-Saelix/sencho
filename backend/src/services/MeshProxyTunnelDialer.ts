@@ -5,6 +5,8 @@ import { PilotTunnelBridge, type MeshTunnelHandle } from './PilotTunnelBridge';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { NodeRegistry } from './NodeRegistry';
 import { sanitizeForLog } from '../utils/safeLog';
+import { httpUrlToWs } from '../utils/wsUrl';
+import type { MeshActivityType } from './MeshService';
 
 /**
  * Central-side dialer for proxy-mode mesh tunnels.
@@ -41,6 +43,14 @@ export type DialFailureCode =
     | 'auth_failed'
     | 'tls_failed'
     | 'network_error';
+
+type ProxyTunnelEvent = 'open.ok' | 'open.fail' | 'close';
+
+const ACTIVITY_TYPE: Record<ProxyTunnelEvent, MeshActivityType> = {
+    'open.ok': 'proxy-tunnel.open.ok',
+    'open.fail': 'proxy-tunnel.open.fail',
+    'close': 'proxy-tunnel.close',
+};
 
 export interface DialFailure {
     code: DialFailureCode;
@@ -158,7 +168,7 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             return null;
         }
 
-        const wsUrl = target.apiUrl.replace(/^http/, 'ws').replace(/\/$/, '') + '/api/mesh/proxy-tunnel';
+        const wsUrl = httpUrlToWs(target.apiUrl) + '/api/mesh/proxy-tunnel';
         let ws: WebSocket;
         try {
             ws = new WebSocket(wsUrl, {
@@ -274,25 +284,19 @@ export class MeshProxyTunnelDialer extends EventEmitter {
 
     private async logActivity(
         nodeId: number,
-        event: 'open.ok' | 'open.fail' | 'close',
+        event: ProxyTunnelEvent,
         details: Record<string, unknown>,
     ): Promise<void> {
         try {
             // Lazy import to avoid a circular dependency with MeshService.
             const { MeshService } = await import('./MeshService');
-            const type = event === 'open.ok'
-                ? 'proxy-tunnel.open.ok'
-                : event === 'open.fail'
-                    ? 'proxy-tunnel.open.fail'
-                    : 'proxy-tunnel.close';
-            const level: 'info' | 'error' = event === 'open.fail' ? 'error' : 'info';
             const message = typeof details.message === 'string'
                 ? details.message
                 : `proxy tunnel ${event} for node ${nodeId}`;
             MeshService.getInstance().logActivity({
                 source: 'mesh',
-                level,
-                type,
+                level: event === 'open.fail' ? 'error' : 'info',
+                type: ACTIVITY_TYPE[event],
                 nodeId,
                 message,
                 details,

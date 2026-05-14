@@ -26,6 +26,7 @@ import {
     resolveByComposeLabels,
 } from '../mesh/tcpStreamSwitchboard';
 import { sanitizeForLog } from '../utils/safeLog';
+import { httpUrlToWs } from '../utils/wsUrl';
 import { isDebugEnabled } from '../utils/debug';
 
 export { ReverseTcpStreamHandle } from '../mesh/tcpStreamSwitchboard';
@@ -171,7 +172,7 @@ export class PilotAgent {
     private connect(): void {
         if (this.shuttingDown) return;
 
-        const wsUrl = this.options.primaryUrl.replace(/^http/, 'ws').replace(/\/$/, '') + '/api/pilot/tunnel';
+        const wsUrl = httpUrlToWs(this.options.primaryUrl) + '/api/pilot/tunnel';
         const ws = new WebSocket(wsUrl, {
             headers: {
                 Authorization: `Bearer ${this.token}`,
