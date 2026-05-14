@@ -227,14 +227,14 @@ describe('useViewNavigationState', () => {
 
   // ── navItems: skipper admin ────────────────────────────────────────────────
 
-  it('navItems for skipper paid admin contains auto-updates but not admiral items', () => {
+  it('navItems for skipper paid admin contains schedules and auto-updates but not admiral items', () => {
     mockSkipperAdmin();
     const { result } = renderHook(() => useViewNavigationState());
     const values = result.current.navItems.map(i => i.value);
     expect(values).toContain('auto-updates');
+    expect(values).toContain('scheduled-ops');
     expect(values).not.toContain('host-console');
     expect(values).not.toContain('audit-log');
-    expect(values).not.toContain('scheduled-ops');
   });
 
   // ── navItems: hub-only gating on remote node ───────────────────────────────

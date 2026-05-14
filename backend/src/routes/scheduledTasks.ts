@@ -3,7 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService, type ScheduledTask } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import { SchedulerService } from '../services/SchedulerService';
-import { requirePaid, requireAdmin, requireScheduledTaskTier } from '../middleware/tierGates';
+import { requirePaid, requireAdmin, requireScheduledTaskTier, SKIPPER_SCHEDULED_ACTIONS } from '../middleware/tierGates';
 import { escapeCsvField } from '../utils/csv';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
@@ -18,7 +18,6 @@ type TargetType = typeof VALID_TARGET_TYPES[number];
 type ScheduledAction = typeof VALID_ACTIONS[number];
 
 const STACK_ONLY_ACTIONS = new Set<ScheduledAction>(['auto_backup', 'auto_stop', 'auto_down', 'auto_start']);
-const SKIPPER_VISIBLE_ACTIONS = new Set<ScheduledAction>(['update', 'scan', 'snapshot']);
 
 /**
  * Validate that the target_type is compatible with the action. Each action
@@ -93,7 +92,7 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
     // Skipper users see v1 fleet-maintenance tasks; Admiral sees all.
     const ls = LicenseService.getInstance();
     if (ls.getVariant() !== 'admiral') {
-      tasks = tasks.filter(t => SKIPPER_VISIBLE_ACTIONS.has(t.action as ScheduledAction));
+      tasks = tasks.filter(t => SKIPPER_SCHEDULED_ACTIONS.has(t.action));
     }
     // Split Auto-Update and Scheduled Operations into distinct views.
     const actionFilter = typeof req.query.action === 'string' ? req.query.action : undefined;

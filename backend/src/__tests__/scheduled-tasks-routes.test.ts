@@ -385,6 +385,50 @@ describe('POST /api/scheduled-tasks - new lifecycle actions', () => {
   });
 });
 
+describe('POST /api/scheduled-tasks - Skipper tier gating', () => {
+  beforeEach(() => {
+    variantSpy.mockReturnValue('skipper');
+  });
+
+  it('allows Skipper admins to create update tasks', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'skipper-update', target_type: 'stack', target_id: 'my-stack', node_id: 1,
+      action: 'update', cron_expression: '0 3 * * *', enabled: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.action).toBe('update');
+  });
+
+  it('allows Skipper admins to create scan tasks', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'skipper-scan', target_type: 'system', node_id: 1,
+      action: 'scan', cron_expression: '0 0 * * *', enabled: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.action).toBe('scan');
+  });
+
+  it('allows Skipper admins to create snapshot tasks', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'skipper-snapshot', target_type: 'fleet', node_id: 1,
+      action: 'snapshot', cron_expression: '0 1 * * *', enabled: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.action).toBe('snapshot');
+  });
+
+  for (const action of ['restart', 'prune', 'auto_backup', 'auto_stop', 'auto_down', 'auto_start']) {
+    it(`rejects Skipper admins from creating ${action} tasks with 403`, async () => {
+      const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+        name: `skipper-${action}`, target_type: 'stack', target_id: 'my-stack', node_id: 1,
+        action, cron_expression: '0 3 * * *', enabled: true,
+      });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
+    });
+  }
+});
+
 describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
   it('can toggle delete_after_run via update', async () => {
     const now = Date.now();
