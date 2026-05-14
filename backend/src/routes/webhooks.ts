@@ -1,7 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { WebhookService } from '../services/WebhookService';
-import { GitSourceService } from '../services/GitSourceService';
 import { LicenseService } from '../services/LicenseService';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin } from '../middleware/tierGates';
@@ -27,7 +26,7 @@ webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
   if (!requireAdmin(req, res)) return;
   if (!requirePaid(req, res)) return;
   try {
-    const { name, stack_name, action, enabled } = req.body;
+    const { name, stack_name, action, enabled, node_id } = req.body;
     if (!name || !stack_name || !action) {
       res.status(400).json({ error: 'name, stack_name, and action are required' });
       return;
@@ -36,7 +35,16 @@ webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
       res.status(400).json({ error: `action must be one of: ${VALID_WEBHOOK_ACTIONS.join(', ')}` });
       return;
     }
-    if (action === 'git-pull' && !GitSourceService.getInstance().get(stack_name)) {
+    if (node_id !== undefined && !Number.isInteger(node_id)) {
+      res.status(400).json({ error: 'node_id must be an integer' });
+      return;
+    }
+    const targetNodeId = node_id ?? req.nodeId ?? DatabaseService.getInstance().getDefaultNode()?.id;
+    if (!targetNodeId || !DatabaseService.getInstance().getNode(targetNodeId)) {
+      res.status(400).json({ error: 'node_id must reference an existing node' });
+      return;
+    }
+    if (action === 'git-pull' && !(await WebhookService.getInstance().gitSourceExists(stack_name, targetNodeId))) {
       res.status(400).json({ error: 'Configure a Git source for this stack before creating a git-pull webhook' });
       return;
     }
@@ -44,6 +52,7 @@ webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
     const svc = WebhookService.getInstance();
     const secret = svc.generateSecret();
     const id = DatabaseService.getInstance().addWebhook({
+      node_id: targetNodeId,
       name, stack_name, action, secret, enabled: enabled !== false,
     });
 
@@ -63,20 +72,31 @@ webhooksRouter.put('/:id', authMiddleware, async (req: Request, res: Response): 
     const webhook = DatabaseService.getInstance().getWebhook(id);
     if (!webhook) { res.status(404).json({ error: 'Webhook not found' }); return; }
 
-    const { name, stack_name, action, enabled } = req.body;
+    const { name, stack_name, action, enabled, node_id } = req.body;
+    if (node_id !== undefined && !Number.isInteger(node_id)) {
+      res.status(400).json({ error: 'node_id must be an integer' });
+      return;
+    }
+    const targetNodeId = node_id ?? webhook.node_id;
+    if (node_id !== undefined && !DatabaseService.getInstance().getNode(targetNodeId)) {
+      res.status(400).json({ error: 'node_id must reference an existing node' });
+      return;
+    }
     if (action && !VALID_WEBHOOK_ACTIONS.includes(action)) {
       res.status(400).json({ error: `action must be one of: ${VALID_WEBHOOK_ACTIONS.join(', ')}` });
       return;
     }
-    if (action === 'git-pull') {
-      const targetStack = stack_name || webhook.stack_name;
-      if (!GitSourceService.getInstance().get(targetStack)) {
+    const effectiveAction = action ?? webhook.action;
+    const effectiveStackName = stack_name ?? webhook.stack_name;
+    if (effectiveAction === 'git-pull') {
+      const targetStack = effectiveStackName;
+      if (!(await WebhookService.getInstance().gitSourceExists(targetStack, targetNodeId))) {
         res.status(400).json({ error: 'Configure a Git source for this stack before enabling a git-pull webhook' });
         return;
       }
     }
 
-    DatabaseService.getInstance().updateWebhook(id, { name, stack_name, action, enabled });
+    DatabaseService.getInstance().updateWebhook(id, { node_id, name, stack_name, action, enabled });
     res.json({ success: true });
   } catch (error) {
     console.error('[Webhooks] Update error:', error);

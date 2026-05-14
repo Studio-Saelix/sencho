@@ -8,9 +8,26 @@ import { BlueprintService } from './BlueprintService';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { NodeLabelService } from './NodeLabelService';
 import { NotificationService } from './NotificationService';
+import { sanitizeForLog } from '../utils/safeLog';
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
+
+function isDeveloperModeEnabled(): boolean {
+    try {
+        return DatabaseService.getInstance().getGlobalSettings().developer_mode === '1';
+    } catch {
+        return false;
+    }
+}
+
+function diagnosticLog(message: string, fields: Record<string, string | number | boolean | null | undefined>): void {
+    if (!isDeveloperModeEnabled()) return;
+    const safeFields = Object.fromEntries(
+        Object.entries(fields).map(([key, value]) => [key, typeof value === 'string' ? sanitizeForLog(value) : value]),
+    );
+    console.info(`[BlueprintReconciler:diag] ${message}`, safeFields);
+}
 
 export interface ReconcileDecision {
     deploy: Node[];
@@ -77,17 +94,21 @@ export class BlueprintReconciler {
         const blueprint = DatabaseService.getInstance().getBlueprint(blueprintId);
         if (!blueprint || !blueprint.enabled) return;
         const nodes = DatabaseService.getInstance().getNodes();
+        diagnosticLog('manual reconcile requested', { blueprintId, nodeCount: nodes.length });
         await this.reconcileBlueprint(blueprint, nodes);
     }
 
     private async evaluate(): Promise<void> {
         if (this.running) return; // prevent overlap on slow ticks
         this.running = true;
+        const started = Date.now();
         try {
             const db = DatabaseService.getInstance();
             const blueprints = db.listEnabledBlueprints();
             if (blueprints.length === 0) return;
             const nodes = db.getNodes();
+            console.info('[BlueprintReconciler] tick start blueprints=%s nodes=%s', blueprints.length, nodes.length);
+            diagnosticLog('tick inputs', { blueprintCount: blueprints.length, nodeCount: nodes.length });
             for (const blueprint of blueprints) {
                 try {
                     await this.reconcileBlueprint(blueprint, nodes);
@@ -95,6 +116,7 @@ export class BlueprintReconciler {
                     console.error(`[BlueprintReconciler] failed for blueprint "${blueprint.name}":`, err);
                 }
             }
+            console.info('[BlueprintReconciler] tick complete blueprints=%s durationMs=%s', blueprints.length, Date.now() - started);
         } finally {
             this.running = false;
         }
@@ -102,15 +124,28 @@ export class BlueprintReconciler {
 
     private async reconcileBlueprint(blueprint: Blueprint, allNodes: Node[]): Promise<void> {
         const decision = this.computeDecision(blueprint, allNodes);
+        diagnosticLog('decision computed', {
+            blueprintId: blueprint.id,
+            blueprintName: blueprint.name,
+            revision: blueprint.revision,
+            deploy: decision.deploy.length,
+            withdraw: decision.withdraw.length,
+            check: decision.check.length,
+            stateReview: decision.stateReview.length,
+            evictBlocked: decision.evictBlocked.length,
+        });
 
         // 1. State-review guard for stateful blueprints reaching new nodes.
         for (const node of decision.stateReview) {
+            const existing = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
             DatabaseService.getInstance().upsertDeployment({
                 blueprint_id: blueprint.id,
                 node_id: node.id,
                 status: 'pending_state_review',
                 last_checked_at: Date.now(),
-                drift_summary: 'Stateful blueprint awaiting operator confirmation before first deploy',
+                drift_summary: existing
+                    ? 'Stateful blueprint revision change awaits operator confirmation'
+                    : 'Stateful blueprint awaiting operator confirmation before first deploy',
             });
         }
 
@@ -213,8 +248,11 @@ export class BlueprintReconciler {
                 continue;
             }
             if (dep.applied_revision !== blueprint.revision) {
-                // revision drift: re-deploy (stateful never auto-redeploys volume-destroying changes; handled in handleDrift)
-                decision.deploy.push(node);
+                if (blueprint.classification === 'stateful' || blueprint.classification === 'unknown') {
+                    decision.stateReview.push(node);
+                } else {
+                    decision.deploy.push(node);
+                }
                 continue;
             }
             if (dep.status === 'failed' || dep.status === 'pending') {

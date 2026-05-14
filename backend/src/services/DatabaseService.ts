@@ -105,6 +105,7 @@ export type WebhookAction = 'deploy' | 'restart' | 'stop' | 'start' | 'pull' | '
 
 export interface Webhook {
     id?: number;
+    node_id: number;
     name: string;
     stack_name: string;
     action: WebhookAction;
@@ -760,6 +761,7 @@ export class DatabaseService {
 
       CREATE TABLE IF NOT EXISTS webhooks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER,
         name TEXT NOT NULL,
         stack_name TEXT NOT NULL,
         action TEXT NOT NULL DEFAULT 'deploy',
@@ -1162,6 +1164,12 @@ export class DatabaseService {
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
         maybeAddCol('nodes', 'api_token', "TEXT DEFAULT ''");
+        maybeAddCol('webhooks', 'node_id', 'INTEGER');
+        this.db.prepare(`
+          UPDATE webhooks
+          SET node_id = COALESCE((SELECT id FROM nodes WHERE is_default = 1 LIMIT 1), 1)
+          WHERE node_id IS NULL
+        `).run();
 
         // Pilot Agent outbound-mode columns
         maybeAddCol('nodes', 'mode', "TEXT NOT NULL DEFAULT 'proxy'");
@@ -2336,6 +2344,7 @@ export class DatabaseService {
     public getWebhooks(): Webhook[] {
         return this.db.prepare('SELECT * FROM webhooks ORDER BY created_at DESC').all().map((row: any) => ({
             ...row,
+            node_id: Number(row.node_id ?? this.getDefaultNode()?.id ?? 1),
             enabled: row.enabled === 1,
         }));
     }
@@ -2343,21 +2352,26 @@ export class DatabaseService {
     public getWebhook(id: number): Webhook | undefined {
         const row = this.db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id) as any;
         if (!row) return undefined;
-        return { ...row, enabled: row.enabled === 1 };
+        return {
+            ...row,
+            node_id: Number(row.node_id ?? this.getDefaultNode()?.id ?? 1),
+            enabled: row.enabled === 1,
+        };
     }
 
     public addWebhook(webhook: Omit<Webhook, 'id' | 'created_at' | 'updated_at'>): number {
         const now = Date.now();
         const result = this.db.prepare(
-            'INSERT INTO webhooks (name, stack_name, action, secret, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(webhook.name, webhook.stack_name, webhook.action, webhook.secret, webhook.enabled ? 1 : 0, now, now);
+            'INSERT INTO webhooks (node_id, name, stack_name, action, secret, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        ).run(webhook.node_id, webhook.name, webhook.stack_name, webhook.action, webhook.secret, webhook.enabled ? 1 : 0, now, now);
         return result.lastInsertRowid as number;
     }
 
-    public updateWebhook(id: number, updates: Partial<Pick<Webhook, 'name' | 'stack_name' | 'action' | 'enabled'>>): void {
+    public updateWebhook(id: number, updates: Partial<Pick<Webhook, 'node_id' | 'name' | 'stack_name' | 'action' | 'enabled'>>): void {
         const fields: string[] = [];
         const values: (string | number)[] = [];
 
+        if (updates.node_id !== undefined) { fields.push('node_id = ?'); values.push(updates.node_id); }
         if (updates.name !== undefined) { fields.push('name = ?'); values.push(updates.name); }
         if (updates.stack_name !== undefined) { fields.push('stack_name = ?'); values.push(updates.stack_name); }
         if (updates.action !== undefined) { fields.push('action = ?'); values.push(updates.action); }

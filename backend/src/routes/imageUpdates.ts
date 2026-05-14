@@ -6,11 +6,10 @@ import { CacheService } from '../services/CacheService';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
-import { LicenseService } from '../services/LicenseService';
 import { NotificationService } from '../services/NotificationService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { effectiveTier, requireAdmin, requirePaid } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -215,7 +214,7 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
     const imageUpdateService = ImageUpdateService.getInstance();
     const compose = ComposeService.getInstance(req.nodeId);
     const db = DatabaseService.getInstance();
-    const atomic = LicenseService.getInstance().getTier() === 'paid';
+    const atomic = effectiveTier(req) === 'paid';
     const results: string[] = [];
 
     for (const stackName of stackNames) {

@@ -9,7 +9,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest';
 import request from 'supertest';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { ComposeRollbackError } from '../services/ComposeService';
 
 // ── Hoisted mocks (must come before importing the app) ──────────────────────
 
@@ -20,6 +22,10 @@ const {
   mockGetContainersByStack,
   mockRestartContainer,
   mockStopContainer,
+  mockListContainers,
+  mockIsTrivyAvailable,
+  mockGetImageDigest,
+  mockRunScanAndPersist,
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockRunCommand: vi.fn(),
@@ -27,6 +33,10 @@ const {
   mockGetContainersByStack: vi.fn(),
   mockRestartContainer: vi.fn(),
   mockStopContainer: vi.fn(),
+  mockListContainers: vi.fn(),
+  mockIsTrivyAvailable: vi.fn(),
+  mockGetImageDigest: vi.fn(),
+  mockRunScanAndPersist: vi.fn(),
 }));
 
 vi.mock('../services/ComposeService', async () => {
@@ -58,6 +68,26 @@ vi.mock('../services/DockerController', async () => {
         getContainersByStack: mockGetContainersByStack,
         restartContainer: mockRestartContainer,
         stopContainer: mockStopContainer,
+        getDocker: () => ({
+          listContainers: mockListContainers,
+        }),
+      }),
+    },
+  };
+});
+
+vi.mock('../services/TrivyService', async () => {
+  const actual = await vi.importActual<typeof import('../services/TrivyService')>(
+    '../services/TrivyService',
+  );
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      getInstance: () => ({
+        isTrivyAvailable: mockIsTrivyAvailable,
+        getImageDigest: mockGetImageDigest,
+        runScanAndPersist: mockRunScanAndPersist,
       }),
     },
   };
@@ -103,6 +133,17 @@ beforeEach(() => {
   mockGetContainersByStack.mockReset();
   mockRestartContainer.mockReset();
   mockStopContainer.mockReset();
+  mockListContainers.mockReset();
+  mockIsTrivyAvailable.mockReset();
+  mockGetImageDigest.mockReset();
+  mockRunScanAndPersist.mockReset();
+  mockIsTrivyAvailable.mockReturnValue(true);
+  mockListContainers.mockResolvedValue([{ Image: 'nginx:latest' }]);
+  mockGetImageDigest.mockResolvedValue(null);
+  mockRunScanAndPersist.mockResolvedValue({
+    critical_count: 0,
+    high_count: 0,
+  });
   dispatchAlertSpy.mockClear();
 });
 
@@ -142,6 +183,63 @@ describe('deploy_failure notification on /deploy error', () => {
     expect(call[1]).toBe('deploy_failure');
     expect(call[2]).toContain('network timeout');
     expect(call[3]).toEqual({ stackName: 'webapp' });
+  });
+
+  it('returns rolledBack=true only when compose rollback completed', async () => {
+    mockDeployStack.mockRejectedValue(
+      new ComposeRollbackError(new Error('image pull failed'), true, true),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ rolledBack: true });
+  });
+
+  it('returns rolledBack=false when compose rollback failed', async () => {
+    mockDeployStack.mockRejectedValue(
+      new ComposeRollbackError(new Error('image pull failed'), true, false),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ rolledBack: false });
+  });
+
+  it('uses trusted proxy tier headers for remote atomic deploys', async () => {
+    mockDeployStack.mockResolvedValue(undefined);
+    const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-sencho-tier', 'paid')
+      .set('x-sencho-variant', 'skipper');
+
+    expect(res.status).toBe(200);
+    expect(mockDeployStack.mock.calls[0][2]).toBe(true);
+  });
+});
+
+describe('post-deploy scan opt-out', () => {
+  it('does not trigger a post-deploy scan when skip_scan is true', async () => {
+    mockDeployStack.mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie)
+      .send({ skip_scan: true });
+
+    expect(res.status).toBe(200);
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(mockListContainers).not.toHaveBeenCalled();
+    expect(mockRunScanAndPersist).not.toHaveBeenCalled();
   });
 });
 
@@ -228,5 +326,18 @@ describe('deploy_failure notification on /update error', () => {
       expect.stringContaining('image not found'),
       { stackName: 'myapp' },
     );
+  });
+
+  it('returns rollback completion status when updateStack throws rollback metadata', async () => {
+    mockUpdateStack.mockRejectedValue(
+      new ComposeRollbackError(new Error('image not found'), true, false),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/update')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ rolledBack: false });
   });
 });

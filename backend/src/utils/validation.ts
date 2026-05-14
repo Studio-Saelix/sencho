@@ -96,6 +96,18 @@ export function isValidRelativeStackPath(rel: string): boolean {
 }
 
 /**
+ * Validates a file path inside a fetched Git repository.
+ * Git source paths are POSIX-style relative file paths. They must not escape
+ * the clone root or target Git metadata.
+ */
+export function isValidGitSourcePath(rel: string): boolean {
+  if (!isValidRelativeStackPath(rel)) return false;
+  if (rel === '') return false;
+  const segments = rel.split('/').map(seg => seg.toLowerCase());
+  return !segments.some(seg => seg === '.git');
+}
+
+/**
  * Asserts that a resolved file path stays within a given base directory.
  * Returns true if the path is safe, false if it escapes the base.
  */

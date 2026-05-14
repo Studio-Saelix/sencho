@@ -127,7 +127,7 @@ describe('generateSarif', () => {
         ]);
     });
 
-    it('attaches SARIF suppressions[] when a finding is marked suppressed', () => {
+    it('attaches SARIF suppressions[] without leaking free-form reasons', () => {
         const suppressed = {
             ...vuln(),
             suppressed: true,
@@ -140,7 +140,7 @@ describe('generateSarif', () => {
         expect(result.suppressions?.[0]).toEqual({
             kind: 'external',
             status: 'accepted',
-            justification: 'Not exploitable in our config',
+            justification: 'Suppressed in Sencho',
         });
     });
 
@@ -153,6 +153,29 @@ describe('generateSarif', () => {
         const suppressed = { ...vuln(), suppressed: true, suppression_reason: '   ' };
         const doc = generateSarif(mkScan(), [suppressed], [], []);
         expect(doc.runs[0].results[0].suppressions?.[0].justification).toBe('Suppressed in Sencho');
+    });
+
+    it('exports acknowledged misconfigs without leaking free-form reasons', () => {
+        const misconfig: MisconfigFinding & { acknowledged: boolean; acknowledgement_reason: string } = {
+            id: 1,
+            scan_id: 1,
+            rule_id: 'DS002',
+            check_id: 'AVD-DS-0002',
+            severity: 'HIGH',
+            title: 'Running as root',
+            message: 'Specify a non-root user',
+            resolution: 'Set user:',
+            target: 'docker-compose.yml',
+            primary_url: null,
+            acknowledged: true,
+            acknowledgement_reason: 'Accepted for internal lab stack',
+        };
+        const doc = generateSarif(mkScan(), [], [], [misconfig]);
+        expect(doc.runs[0].results[0].suppressions?.[0]).toEqual({
+            kind: 'external',
+            status: 'accepted',
+            justification: 'Acknowledged in Sencho',
+        });
     });
 
     it('deduplicates rules across findings with the same CVE id', () => {

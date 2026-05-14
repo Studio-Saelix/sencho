@@ -51,11 +51,11 @@ const MIME_MAP: Record<string, string> = {
  */
 export class FileSystemService {
   private baseDir: string;
+  private nodeId: number;
 
   constructor(nodeId?: number) {
-    this.baseDir = NodeRegistry.getInstance().getComposeDir(
-      nodeId ?? NodeRegistry.getInstance().getDefaultNodeId()
-    );
+    this.nodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+    this.baseDir = NodeRegistry.getInstance().getComposeDir(this.nodeId);
   }
 
   public static getInstance(nodeId?: number): FileSystemService {
@@ -75,6 +75,13 @@ export class FileSystemService {
     const stackDir = path.join(this.baseDir, stackName);
     this.assertWithinBase(stackDir);
     return stackDir;
+  }
+
+  private getBackupDir(stackName: string): string {
+    if (!isValidStackName(stackName)) {
+      throw Object.assign(new Error('Invalid stack name'), { code: 'INVALID_STACK_NAME' });
+    }
+    return path.join(getBackupBaseDir(), String(this.nodeId), stackName);
   }
 
   async hasComposeFile(dir: string): Promise<boolean> {
@@ -180,8 +187,11 @@ export class FileSystemService {
   }
 
   async getEnvContent(stackName: string): Promise<string> {
-    const stackDir = this.resolveStackDir(stackName);
-    const envPath = path.join(stackDir, '.env');
+    const base = path.resolve(this.baseDir);
+    const envPath = path.resolve(base, path.basename(stackName), '.env');
+    if (!isPathWithinBase(envPath, base)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
     try {
       return await fsPromises.readFile(envPath, 'utf-8');
     } catch (error) {
@@ -298,7 +308,7 @@ export class FileSystemService {
   /**
    * Backup stack files (compose.yaml + .env) into Sencho's data dir.
    *
-   * Backups live at <DATA_DIR>/backups/<stackName>/ (NOT inside the user's
+   * Backups live at <DATA_DIR>/backups/<nodeId>/<stackName>/ (NOT inside the user's
    * compose folder) so the operation always succeeds even when the stack
    * folder is owned by another UID (e.g., a container running as root has
    * chowned its bind mount). DATA_DIR is the same writable location that
@@ -308,7 +318,7 @@ export class FileSystemService {
     const debug = isDebugEnabled();
     const t0 = Date.now();
     const stackDir = this.resolveStackDir(stackName);
-    const backupDir = path.join(getBackupBaseDir(), stackName);
+    const backupDir = this.getBackupDir(stackName);
     await fsPromises.mkdir(backupDir, { recursive: true });
 
     // Copy compose file
@@ -347,7 +357,7 @@ export class FileSystemService {
     const debug = isDebugEnabled();
     const t0 = Date.now();
     const stackDir = this.resolveStackDir(stackName);
-    const backupDir = path.join(getBackupBaseDir(), stackName);
+    const backupDir = this.getBackupDir(stackName);
 
     const items = await fsPromises.readdir(backupDir);
     for (const item of items) {
@@ -358,7 +368,7 @@ export class FileSystemService {
   }
 
   async getBackupInfo(stackName: string): Promise<{ exists: boolean; timestamp: number | null }> {
-    const backupDir = path.join(getBackupBaseDir(), stackName);
+    const backupDir = this.getBackupDir(stackName);
     try {
       await fsPromises.access(backupDir);
       const tsFile = path.join(backupDir, '.timestamp');
