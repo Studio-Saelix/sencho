@@ -13,6 +13,8 @@ let db: any;
 const makePolicy = (overrides: Record<string, unknown> = {}) => {
     const now = Date.now();
     return {
+        node_id: 1,
+        proxy_entitled_until: 0,
         stack_name: 'teststack',
         service_name: null,
         unhealthy_duration_mins: 5,
@@ -59,6 +61,8 @@ describe('DatabaseService - auto-heal policy CRUD', () => {
         const fetched = db.getAutoHealPolicy(created.id);
         expect(fetched).toBeDefined();
         expect(fetched.stack_name).toBe('roundtrip-stack');
+        expect(fetched.node_id).toBe(1);
+        expect(fetched.proxy_entitled_until).toBe(0);
         expect(fetched.service_name).toBe('web');
         expect(fetched.unhealthy_duration_mins).toBe(3);
         expect(fetched.cooldown_mins).toBe(15);
@@ -92,6 +96,51 @@ describe('DatabaseService - auto-heal policy CRUD', () => {
 
         expect(yPolicies.length).toBeGreaterThanOrEqual(1);
         expect(yPolicies.every((p: any) => p.stack_name === 'filter-stack-y')).toBe(true);
+    });
+
+    it('getAutoHealPolicies with nodeId filter returns only matching rows', () => {
+        db.addAutoHealPolicy(makePolicy({ stack_name: 'node-filter-a', node_id: 1 }));
+        db.addAutoHealPolicy(makePolicy({ stack_name: 'node-filter-b', node_id: 2 }));
+
+        const nodeOnePolicies = db.getAutoHealPolicies(undefined, 1);
+        const nodeTwoPolicies = db.getAutoHealPolicies(undefined, 2);
+
+        expect(nodeOnePolicies.every((p: any) => p.node_id === 1)).toBe(true);
+        expect(nodeTwoPolicies.every((p: any) => p.node_id === 2)).toBe(true);
+    });
+
+    it('auto-heal node migration does not rewrite already-scoped node 1 policies', () => {
+        const created = db.addAutoHealPolicy(makePolicy({ stack_name: 'migration-node-one', node_id: 1 }));
+        db.addNode({
+            name: 'new-default-node',
+            type: 'local',
+            compose_dir: process.env.COMPOSE_DIR ?? '',
+            is_default: true,
+            api_url: '',
+            api_token: '',
+        });
+
+        (db as any).migrateAutoHealNodeId();
+
+        expect(db.getAutoHealPolicy(created.id).node_id).toBe(1);
+    });
+
+    it('auto-heal node migration resumes backfill when the completion marker is missing', () => {
+        db.updateGlobalSetting('migration_auto_heal_node_scope_v1', '');
+        const created = db.addAutoHealPolicy(makePolicy({ stack_name: 'migration-partial', node_id: 1 }));
+        const newDefaultId = db.addNode({
+            name: 'partial-new-default-node',
+            type: 'local',
+            compose_dir: process.env.COMPOSE_DIR ?? '',
+            is_default: true,
+            api_url: '',
+            api_token: '',
+        });
+
+        (db as any).migrateAutoHealNodeId();
+
+        expect(db.getAutoHealPolicy(created.id).node_id).toBe(newDefaultId);
+        expect(db.getGlobalSettings().migration_auto_heal_node_scope_v1).toBe('1');
     });
 
     it('updateAutoHealPolicy partial update changes only specified fields', () => {
@@ -211,6 +260,32 @@ describe('DatabaseService - auto-heal history', () => {
         expect(limited[0].reason).toBe('entry-9');
         expect(limited[1].reason).toBe('entry-8');
         expect(limited[2].reason).toBe('entry-7');
+    });
+
+    it('recordAutoHealHistory prunes old rows beyond the retained window', () => {
+        const policy = db.addAutoHealPolicy(makePolicy({ stack_name: 'history-prune-stack' }));
+        const policyId: number = policy.id;
+        const baseTs = Date.now();
+
+        for (let i = 0; i < 505; i++) {
+            db.recordAutoHealHistory({
+                policy_id: policyId,
+                stack_name: 'history-prune-stack',
+                service_name: null,
+                container_name: 'history-prune-stack-web-1',
+                container_id: 'hist-prune',
+                action: 'skipped_cooldown',
+                reason: `entry-${i}`,
+                success: 0,
+                error: null,
+                timestamp: baseTs + i,
+            });
+        }
+
+        const retained = db.getAutoHealHistory(policyId, 600);
+        expect(retained.length).toBe(500);
+        expect(retained[0].reason).toBe('entry-504');
+        expect(retained[499].reason).toBe('entry-5');
     });
 });
 

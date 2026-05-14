@@ -65,7 +65,7 @@ export function buildLocalConfigurationStatus(
   const alertRules = db.getStackAlerts().length;
   const notifRoutes = db.getNotificationRoutes();
 
-  const healPolicies = db.getAutoHealPolicies();
+  const healPolicies = db.getAutoHealPolicies(undefined, nodeId);
   const autoUpdateMap = db.getStackAutoUpdateSettingsForNode(nodeId);
   const autoUpdateEnabled = Object.values(autoUpdateMap).filter(Boolean).length;
   const autoUpdateTotal = Object.keys(autoUpdateMap).length;

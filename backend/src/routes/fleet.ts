@@ -222,39 +222,55 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
   }
 }
 
+function pilotLastSeenSeconds(node: Node): number | null {
+  return node.mode === 'pilot_agent' && node.pilot_last_seen
+    ? Math.floor(node.pilot_last_seen / 1000)
+    : null;
+}
+
+function noTargetMessage(node: Node): string {
+  return node.mode === 'pilot_agent'
+    ? `Pilot tunnel to "${node.name}" is disconnected. Operations resume when the agent reconnects.`
+    : 'Remote node not configured';
+}
+
+function offlineRemoteOverview(node: Node, status: 'online' | 'offline'): FleetNodeOverview {
+  const pilotSeen = pilotLastSeenSeconds(node);
+  // For pilot-agent rows the tunnel heartbeat is the contact signal. Mirror
+  // it into last_successful_contact so the Fleet "last seen" cell renders
+  // the recent tunnel timestamp instead of a stale HTTP-success time.
+  const lastContact = pilotSeen ?? node.last_successful_contact ?? null;
+  return {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    mode: node.mode,
+    status,
+    stats: null,
+    systemStats: null,
+    stacks: null,
+    last_successful_contact: lastContact,
+    pilot_last_seen: pilotSeen,
+    cordoned: node.cordoned,
+    cordoned_at: node.cordoned_at,
+    cordoned_reason: node.cordoned_reason,
+  };
+}
+
 async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise<FleetNodeOverview> {
-  // Pilot-agent nodes: use pilot_last_seen as the contact signal; no HTTP fetch.
-  if (node.mode === 'pilot_agent') {
-    return {
-      id: node.id,
-      name: node.name,
-      type: node.type,
-      mode: node.mode,
-      status: node.pilot_last_seen ? 'online' : 'offline',
-      stats: null,
-      systemStats: null,
-      stacks: null,
-      last_successful_contact: node.pilot_last_seen ? Math.floor(node.pilot_last_seen / 1000) : null,
-      pilot_last_seen: node.pilot_last_seen ? Math.floor(node.pilot_last_seen / 1000) : null,
-      cordoned: node.cordoned,
-      cordoned_at: node.cordoned_at,
-      cordoned_reason: node.cordoned_reason,
-    };
+  const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+  if (!target) {
+    // Soft-online keeps the Fleet card from flapping during a brief pilot
+    // tunnel reconnect: a recent pilot_last_seen still counts as reachable.
+    const status: 'online' | 'offline' =
+      node.mode === 'pilot_agent' && node.pilot_last_seen ? 'online' : 'offline';
+    return offlineRemoteOverview(node, status);
   }
 
-  if (!node.api_url || !node.api_token) {
-    return {
-      id: node.id, name: node.name, type: node.type, status: 'offline',
-      stats: null, systemStats: null, stacks: null,
-      last_successful_contact: node.last_successful_contact ?? null,
-      cordoned: node.cordoned,
-      cordoned_at: node.cordoned_at,
-      cordoned_reason: node.cordoned_reason,
-    };
-  }
-
-  const baseUrl = node.api_url.replace(/\/$/, '');
-  const headers = { Authorization: `Bearer ${node.api_token}` };
+  const baseUrl = target.apiUrl.replace(/\/$/, '');
+  const headers: Record<string, string> = target.apiToken
+    ? { Authorization: `Bearer ${target.apiToken}` }
+    : {};
   const t0 = Date.now();
 
   try {
@@ -309,20 +325,14 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
       last_successful_contact: isOnline
         ? Math.floor(completedAt / 1000)
         : node.last_successful_contact ?? null,
+      pilot_last_seen: pilotLastSeenSeconds(node),
       cordoned: node.cordoned,
       cordoned_at: node.cordoned_at,
       cordoned_reason: node.cordoned_reason,
     };
   } catch (error) {
     console.error(`[Fleet] Remote node ${node.name} error:`, error);
-    return {
-      id: node.id, name: node.name, type: node.type, mode: node.mode, status: 'offline',
-      stats: null, systemStats: null, stacks: null,
-      last_successful_contact: node.last_successful_contact ?? null,
-      cordoned: node.cordoned,
-      cordoned_at: node.cordoned_at,
-      cordoned_reason: node.cordoned_reason,
-    };
+    return offlineRemoteOverview(node, 'offline');
   }
 }
 
@@ -552,16 +562,17 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
           };
         }
 
-        if (!node.api_url || !node.api_token) {
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) {
           return { id: node.id, name: node.name, type: 'remote', status: 'offline', configuration: null };
         }
 
         try {
           const resp = await fetch(
-            `${node.api_url.replace(/\/$/, '')}/api/dashboard/configuration`,
+            `${target.apiUrl.replace(/\/$/, '')}/api/dashboard/configuration`,
             {
               headers: {
-                Authorization: `Bearer ${node.api_token}`,
+                ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}),
                 [PROXY_TIER_HEADER]: localTier,
                 [PROXY_VARIANT_HEADER]: localVariant ?? '',
               },
@@ -606,12 +617,13 @@ fleetRouter.get('/node/:nodeId/stacks', authMiddleware, async (req: Request, res
     }
 
     if (node.type === 'remote') {
-      if (!node.api_url || !node.api_token) {
-        res.status(503).json({ error: 'Remote node not configured' });
+      const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+      if (!target) {
+        res.status(503).json({ error: noTargetMessage(node) });
         return;
       }
-      const response = await fetch(`${node.api_url.replace(/\/$/, '')}/api/stacks`, {
-        headers: { Authorization: `Bearer ${node.api_token}` },
+      const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/stacks`, {
+        headers: target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {},
         signal: AbortSignal.timeout(10000),
       });
       if (!response.ok) {
@@ -649,12 +661,13 @@ fleetRouter.get('/node/:nodeId/stacks/:stackName/containers', authMiddleware, as
     }
 
     if (node.type === 'remote') {
-      if (!node.api_url || !node.api_token) {
-        res.status(503).json({ error: 'Remote node not configured' });
+      const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+      if (!target) {
+        res.status(503).json({ error: noTargetMessage(node) });
         return;
       }
-      const response = await fetch(`${node.api_url.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/containers`, {
-        headers: { Authorization: `Bearer ${node.api_token}` },
+      const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/containers`, {
+        headers: target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {},
         signal: AbortSignal.timeout(10000),
       });
       if (!response.ok) {
@@ -696,8 +709,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let remoteOnline = false;
         if (node.type === 'local') {
           version = gatewayVersion;
-        } else if (node.api_url && node.api_token) {
-          const meta = await fetchRemoteMeta(node.api_url, node.api_token);
+        } else {
+          const meta = await NodeRegistry.getInstance().fetchMetaForNode(node.id);
           version = meta.version;
           remoteStartedAt = meta.startedAt;
           remoteUpdateError = meta.updateError;

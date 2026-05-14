@@ -1,7 +1,7 @@
 import si from 'systeminformation';
 import semver from 'semver';
 import DockerController from './DockerController';
-import { DatabaseService } from './DatabaseService';
+import { DatabaseService, Node, StackAlert } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
@@ -80,6 +80,40 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// Cap on simultaneous Docker socket requests when fanning out per-container
+// work. Mirrors the implicit safety profile of updateGlobalDockerNetwork in
+// DockerController.ts (which fans out unbounded every 5 s on typical nodes);
+// the explicit cap protects pathological hosts running 100+ containers.
+const MAX_CONTAINER_CONCURRENCY = 10;
+
+/**
+ * Run an async task across `items` with at most `limit` workers in flight.
+ * Each task is responsible for handling its own errors. An unexpected throw
+ * from a task is logged and swallowed so siblings continue running.
+ */
+async function runWithConcurrency<T>(
+    items: T[],
+    limit: number,
+    fn: (item: T) => Promise<void>,
+): Promise<void> {
+    if (items.length === 0) return;
+    let cursor = 0;
+    const worker = async () => {
+        while (cursor < items.length) {
+            const i = cursor++;
+            try {
+                await fn(items[i]);
+            } catch (e) {
+                // Defensive net: per-task code is expected to handle its own
+                // errors. Logging here surfaces logic bugs in the task body.
+                console.error('[Monitor] Unexpected error in container worker:', e);
+            }
+        }
+    };
+    const workerCount = Math.min(limit, items.length);
+    await Promise.all(Array.from({ length: workerCount }, worker));
+}
+
 export class MonitorService {
     private static instance: MonitorService;
     private intervalId: NodeJS.Timeout | null = null;
@@ -92,6 +126,14 @@ export class MonitorService {
     // Track previous network counters per container for rate calculation.
     // key: container_id, value: { rx bytes, tx bytes, sample timestamp }
     private previousNetworkStats = new Map<string, { rx: number; tx: number; ts: number }>();
+
+    // Per-cycle dispatch dedup. Stack rules are shared across every container
+    // in the stack, so parallel processContainer calls can race past the
+    // cooldown check (DB write happens after the awaited dispatch) and fire
+    // the same alert N times on first breach. The synchronous check-and-add
+    // below is atomic in JS between awaits, so only the first worker wins.
+    // Reset at the start of each evaluateStackAlerts call.
+    private firedThisCycle = new Set<number>();
 
     // Crash and healthcheck detection live in DockerEventService (event-driven,
     // causal classification). MonitorService no longer polls for container
@@ -321,6 +363,7 @@ export class MonitorService {
     private async evaluateStackAlerts(db: DatabaseService) {
         const alerts = db.getStackAlerts();
         const nodes = db.getNodes();
+        this.firedThisCycle.clear();
 
         // Pre-group alerts by stack name to avoid O(containers * alerts) scanning
         const alertsByStack = new Map<string, typeof alerts>();
@@ -337,137 +380,21 @@ export class MonitorService {
             try {
                 const docker = DockerController.getInstance(node.id);
                 const containers = await docker.getRunningContainers();
-                for (const container of containers) {
-                    const stackName = container.Labels?.['com.docker.compose.project'] || 'system';
 
-                    try {
-                        const rawStats = await withTimeout(
-                            docker.getContainerStatsStream(container.Id),
-                            STATS_TIMEOUT_MS,
-                            `stats for ${container.Id}`,
-                        );
-                        const stats: DockerContainerStats = JSON.parse(rawStats);
-
-                        const usedMemory = (stats.memory_stats?.usage || 0) - (stats.memory_stats?.stats?.cache || 0);
-
-                        // Only fetch restart count when at least one rule for this stack uses it
-                        const stackAlerts = alertsByStack.get(stackName) || [];
-                        const needsRestartCount = stackAlerts.some(a => a.metric === 'restart_count');
-                        const restartCount = needsRestartCount
-                            ? await docker.getContainerRestartCount(container.Id)
-                            : 0;
-
-                        // Network rate calculation: compute delta from previous sample
-                        // to produce MB/s instead of meaningless cumulative totals.
-                        const rawRxMb = this.calculateNetwork(stats, 'rx');
-                        const rawTxMb = this.calculateNetwork(stats, 'tx');
-                        const now = Date.now();
-                        const prevNet = this.previousNetworkStats.get(container.Id);
-                        let netRxRate = 0;
-                        let netTxRate = 0;
-                        if (prevNet) {
-                            const elapsedSec = (now - prevNet.ts) / 1000;
-                            if (elapsedSec > 0) {
-                                netRxRate = Math.max(0, (rawRxMb - prevNet.rx) / elapsedSec);
-                                netTxRate = Math.max(0, (rawTxMb - prevNet.tx) / elapsedSec);
-                            }
-                        }
-                        this.previousNetworkStats.set(container.Id, { rx: rawRxMb, tx: rawTxMb, ts: now });
-
-                        const metrics = {
-                            cpu_percent: this.calculateCpuPercent(stats),
-                            memory_percent: this.calculateMemoryPercent(stats),
-                            memory_mb: Math.max(0, usedMemory) / (1024 * 1024),
-                            net_rx: netRxRate,
-                            net_tx: netTxRate,
-                            restart_count: restartCount,
-                        };
-
-                        db.addContainerMetric({
-                            container_id: container.Id,
-                            stack_name: stackName,
-                            cpu_percent: metrics.cpu_percent || 0,
-                            memory_mb: metrics.memory_mb || 0,
-                            net_rx_mb: netRxRate || 0,
-                            net_tx_mb: netTxRate || 0,
-                            timestamp: now,
-                        });
-
-                        for (const rule of stackAlerts) {
-                            const ruleId = rule.id!;
-                            const currentValue = metrics[rule.metric as keyof typeof metrics];
-
-                            if (currentValue === undefined) continue;
-
-                            const isBreaching = this.evaluateCondition(currentValue, rule.operator, rule.threshold);
-
-                            if (isBreaching) {
-                                if (!this.activeBreaches.has(ruleId)) {
-                                    this.activeBreaches.set(ruleId, { breachStartedAt: Date.now() });
-                                    if (isDebugEnabled()) console.log(`[Monitor:diag] Breach entered: rule ${ruleId} (${rule.metric} ${rule.operator} ${rule.threshold}) on stack "${rule.stack_name}"`);
-                                }
-
-                                const breachState = this.activeBreaches.get(ruleId)!;
-                                const durationMs = Date.now() - breachState.breachStartedAt;
-                                const requiredDurationMs = rule.duration_mins * 60 * 1000;
-
-                                if (durationMs >= requiredDurationMs) {
-                                    // Duration met! Check cooldown
-                                    const timeSinceLastFired = Date.now() - (rule.last_fired_at || 0);
-                                    const requiredCooldownMs = rule.cooldown_mins * 60 * 1000;
-
-                                    if (timeSinceLastFired >= requiredCooldownMs) {
-                                        // Formatted Alert Message
-                                        const { name: metricName, unit } = getMetricDetails(rule.metric);
-                                        const operatorPhrase = getOperatorPhrase(rule.operator);
-
-                                        const safeCurrent = typeof currentValue === 'number' ? Number(currentValue.toFixed(2)) : currentValue;
-                                        const safeThreshold = typeof rule.threshold === 'number' ? Number(rule.threshold.toFixed(2)) : rule.threshold;
-
-                                        const message = `[Node: ${node.name}] The **${metricName}** for **${rule.stack_name}** ${operatorPhrase} **${safeThreshold}${unit}** (Currently: ${safeCurrent}${unit}).`;
-
-                                        console.log(`[MonitorService] Alert fired: rule ${ruleId} on stack "${rule.stack_name}" — ${metricName} ${operatorPhrase} ${safeThreshold}${unit}`);
-                                        await NotificationService.getInstance().dispatchAlert(
-                                            'warning',
-                                            'monitor_alert',
-                                            message,
-                                            { stackName: rule.stack_name },
-                                        );
-
-                                        // Update last fired
-                                        db.updateStackAlertLastFired(ruleId, Date.now());
-                                    } else if (isDebugEnabled()) {
-                                        console.log(`[Monitor:diag] Cooldown active for rule ${ruleId}: ${Math.round((requiredCooldownMs - timeSinceLastFired) / 1000)}s remaining`);
-                                    }
-                                }
-                            } else {
-                                // Rule isn't breaching anymore, reset tracker
-                                if (this.activeBreaches.has(ruleId)) {
-                                    if (isDebugEnabled()) console.log(`[Monitor:diag] Breach cleared: rule ${ruleId} on stack "${rule.stack_name}"`);
-                                    this.activeBreaches.delete(ruleId);
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        // Containers can be removed between getRunningContainers() and the
-                        // per-container stats call (e.g., during a stack update). Dockerode
-                        // throws a 404 in that case. That's expected churn, not a real
-                        // error, so skip silently rather than flooding the logs.
-                        const err = e as { statusCode?: number; reason?: string };
-                        if (err?.statusCode === 404 || err?.reason === 'no such container') {
-                            continue;
-                        }
-                        if (e instanceof TimeoutError) {
-                            console.warn(`Stats timeout for container ${container.Id} on node ${node.name}`);
-                            continue;
-                        }
-                        console.error(`Error parsing stats for container ${container.Id} on node ${node.name}`, e);
-                    }
-                }
+                // Per-container work runs in parallel with bounded concurrency.
+                // Each Docker stats call inherently waits ~1 s for the engine
+                // to produce a sample, so a serial loop scales linearly with
+                // container count; fanning out collapses the cycle to roughly
+                // max(per-container time) plus the start-up stagger.
+                await runWithConcurrency(
+                    containers,
+                    MAX_CONTAINER_CONCURRENCY,
+                    (container) => this.processContainer(node, container, alertsByStack, docker, db),
+                );
 
                 // Clean up stale network stats for containers on this node that no longer run
                 if (this.previousNetworkStats.size > containers.length * 2) {
-                    const currentIds = new Set(containers.map(c => c.Id));
+                    const currentIds = new Set(containers.map((c: { Id: string }) => c.Id));
                     for (const key of this.previousNetworkStats.keys()) {
                         if (!currentIds.has(key)) this.previousNetworkStats.delete(key);
                     }
@@ -496,6 +423,152 @@ export class MonitorService {
             if (isDebugEnabled()) console.log(`[Monitor:diag] Cleanup: metrics ${isNaN(retentionHours) ? 24 : retentionHours}h, notifications ${isNaN(retentionDays) ? 30 : retentionDays}d, audit ${isNaN(auditRetentionDays) ? 90 : auditRetentionDays}d`);
         } catch (e) {
             console.error('MonitorService: failed to cleanup old data', e);
+        }
+    }
+
+    /**
+     * Evaluate one container's metrics against the alert rules for its stack.
+     * Owns its own try/catch so per-container failures (404 churn, stats
+     * timeouts) do not abort sibling work in the parallel fan-out.
+     */
+    private async processContainer(
+        node: Node,
+        container: { Id: string; Labels?: Record<string, string> },
+        alertsByStack: Map<string, StackAlert[]>,
+        docker: DockerController,
+        db: DatabaseService,
+    ): Promise<void> {
+        const stackName = container.Labels?.['com.docker.compose.project'] || 'system';
+
+        try {
+            const rawStats = await withTimeout(
+                docker.getContainerStatsStream(container.Id),
+                STATS_TIMEOUT_MS,
+                `stats for ${container.Id}`,
+            );
+            const stats: DockerContainerStats = JSON.parse(rawStats);
+
+            const usedMemory = (stats.memory_stats?.usage || 0) - (stats.memory_stats?.stats?.cache || 0);
+
+            // Only fetch restart count when at least one rule for this stack uses it
+            const stackAlerts = alertsByStack.get(stackName) || [];
+            const needsRestartCount = stackAlerts.some(a => a.metric === 'restart_count');
+            const restartCount = needsRestartCount
+                ? await docker.getContainerRestartCount(container.Id)
+                : 0;
+
+            // Network rate calculation: compute delta from previous sample
+            // to produce MB/s instead of meaningless cumulative totals.
+            const rawRxMb = this.calculateNetwork(stats, 'rx');
+            const rawTxMb = this.calculateNetwork(stats, 'tx');
+            const now = Date.now();
+            const prevNet = this.previousNetworkStats.get(container.Id);
+            let netRxRate = 0;
+            let netTxRate = 0;
+            if (prevNet) {
+                const elapsedSec = (now - prevNet.ts) / 1000;
+                if (elapsedSec > 0) {
+                    netRxRate = Math.max(0, (rawRxMb - prevNet.rx) / elapsedSec);
+                    netTxRate = Math.max(0, (rawTxMb - prevNet.tx) / elapsedSec);
+                }
+            }
+            this.previousNetworkStats.set(container.Id, { rx: rawRxMb, tx: rawTxMb, ts: now });
+
+            const metrics = {
+                cpu_percent: this.calculateCpuPercent(stats),
+                memory_percent: this.calculateMemoryPercent(stats),
+                memory_mb: Math.max(0, usedMemory) / (1024 * 1024),
+                net_rx: netRxRate,
+                net_tx: netTxRate,
+                restart_count: restartCount,
+            };
+
+            db.addContainerMetric({
+                container_id: container.Id,
+                stack_name: stackName,
+                cpu_percent: metrics.cpu_percent || 0,
+                memory_mb: metrics.memory_mb || 0,
+                net_rx_mb: netRxRate || 0,
+                net_tx_mb: netTxRate || 0,
+                timestamp: now,
+            });
+
+            for (const rule of stackAlerts) {
+                const ruleId = rule.id!;
+                const currentValue = metrics[rule.metric as keyof typeof metrics];
+
+                if (currentValue === undefined) continue;
+
+                const isBreaching = this.evaluateCondition(currentValue, rule.operator, rule.threshold);
+
+                if (isBreaching) {
+                    if (!this.activeBreaches.has(ruleId)) {
+                        this.activeBreaches.set(ruleId, { breachStartedAt: Date.now() });
+                        if (isDebugEnabled()) console.log(`[Monitor:diag] Breach entered: rule ${ruleId} (${rule.metric} ${rule.operator} ${rule.threshold}) on stack "${rule.stack_name}"`);
+                    }
+
+                    const breachState = this.activeBreaches.get(ruleId)!;
+                    const durationMs = Date.now() - breachState.breachStartedAt;
+                    const requiredDurationMs = rule.duration_mins * 60 * 1000;
+
+                    if (durationMs >= requiredDurationMs) {
+                        const timeSinceLastFired = Date.now() - (rule.last_fired_at || 0);
+                        const requiredCooldownMs = rule.cooldown_mins * 60 * 1000;
+
+                        if (timeSinceLastFired >= requiredCooldownMs) {
+                            // Claim this rule for the cycle before awaiting
+                            // dispatch. The check-and-add is synchronous, so
+                            // sibling workers evaluating the same shared rule
+                            // see the claim and skip — preventing N-fire when
+                            // multiple containers in one stack all breach.
+                            if (this.firedThisCycle.has(ruleId)) {
+                                if (isDebugEnabled()) console.log(`[Monitor:diag] Skipping duplicate dispatch for rule ${ruleId} (already fired this cycle by sibling container)`);
+                            } else {
+                                this.firedThisCycle.add(ruleId);
+
+                                const { name: metricName, unit } = getMetricDetails(rule.metric);
+                                const operatorPhrase = getOperatorPhrase(rule.operator);
+
+                                const safeCurrent = typeof currentValue === 'number' ? Number(currentValue.toFixed(2)) : currentValue;
+                                const safeThreshold = typeof rule.threshold === 'number' ? Number(rule.threshold.toFixed(2)) : rule.threshold;
+
+                                const message = `[Node: ${node.name}] The **${metricName}** for **${rule.stack_name}** ${operatorPhrase} **${safeThreshold}${unit}** (Currently: ${safeCurrent}${unit}).`;
+
+                                console.log(`[MonitorService] Alert fired: rule ${ruleId} on stack "${rule.stack_name}": ${metricName} ${operatorPhrase} ${safeThreshold}${unit}`);
+                                await NotificationService.getInstance().dispatchAlert(
+                                    'warning',
+                                    'monitor_alert',
+                                    message,
+                                    { stackName: rule.stack_name },
+                                );
+
+                                db.updateStackAlertLastFired(ruleId, Date.now());
+                            }
+                        } else if (isDebugEnabled()) {
+                            console.log(`[Monitor:diag] Cooldown active for rule ${ruleId}: ${Math.round((requiredCooldownMs - timeSinceLastFired) / 1000)}s remaining`);
+                        }
+                    }
+                } else {
+                    if (this.activeBreaches.has(ruleId)) {
+                        if (isDebugEnabled()) console.log(`[Monitor:diag] Breach cleared: rule ${ruleId} on stack "${rule.stack_name}"`);
+                        this.activeBreaches.delete(ruleId);
+                    }
+                }
+            }
+        } catch (e) {
+            // Containers can be removed between getRunningContainers() and the
+            // per-container stats call (e.g., during a stack update). Dockerode
+            // throws a 404 in that case. That's expected churn, not a real
+            // error, so skip silently rather than flooding the logs.
+            const err = e as { statusCode?: number; reason?: string };
+            if (err?.statusCode === 404 || err?.reason === 'no such container') {
+                return;
+            }
+            if (e instanceof TimeoutError) {
+                console.warn(`Stats timeout for container ${container.Id} on node ${node.name}`);
+                return;
+            }
+            console.error(`Error parsing stats for container ${container.Id} on node ${node.name}`, e);
         }
     }
 

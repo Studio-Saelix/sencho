@@ -8,6 +8,7 @@ import { escapeCsvField } from '../utils/csv';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isValidStackName } from '../utils/validation';
 
 const VALID_TARGET_TYPES = ['stack', 'fleet', 'system'] as const;
 const VALID_ACTIONS = ['restart', 'snapshot', 'prune', 'update', 'scan', 'auto_backup', 'auto_stop', 'auto_down', 'auto_start'] as const;
@@ -33,6 +34,25 @@ function validateActionTarget(action: ScheduledAction, targetType: TargetType): 
   if (STACK_ONLY_ACTIONS.has(action) && targetType !== 'stack') {
     return `${action} action requires target_type "stack".`;
   }
+  return null;
+}
+
+function validateStackTarget(targetType: TargetType, targetId: unknown, nodeId: unknown): string | null {
+  if (targetType !== 'stack') return null;
+
+  if (typeof targetId !== 'string' || !targetId.trim() || nodeId === null || nodeId === undefined) {
+    return 'Stack operations require target_id and node_id.';
+  }
+
+  if (targetId !== targetId.trim() || !isValidStackName(targetId)) {
+    return 'Stack target_id must be a valid stack name.';
+  }
+
+  const parsedNodeId = Number(nodeId);
+  if (!Number.isInteger(parsedNodeId) || parsedNodeId <= 0) {
+    return 'Stack operations require a valid node_id.';
+  }
+
   return null;
 }
 
@@ -149,9 +169,8 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     if (action === 'update' && target_type === 'fleet' && !node_id) {
       res.status(400).json({ error: ERR_FLEET_NODE_REQUIRED }); return;
     }
-    if (target_type === 'stack' && (!target_id || !node_id)) {
-      res.status(400).json({ error: 'Stack operations require target_id and node_id.' }); return;
-    }
+    const stackTargetErr = validateStackTarget(target_type, target_id, node_id);
+    if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
 
     const optionalErr = validateOptionalFields(action, target_type, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
@@ -225,29 +244,32 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
 
     const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run } = req.body;
 
-    if (target_type && !(VALID_TARGET_TYPES as readonly string[]).includes(target_type)) {
+    if (target_type !== undefined && !(VALID_TARGET_TYPES as readonly string[]).includes(target_type)) {
       res.status(400).json({ error: 'Invalid target_type' }); return;
     }
-    if (action && !(VALID_ACTIONS as readonly string[]).includes(action)) {
+    if (action !== undefined && !(VALID_ACTIONS as readonly string[]).includes(action)) {
       res.status(400).json({ error: 'Invalid action' }); return;
     }
 
-    const finalAction = (action || existing.action) as ScheduledAction;
-    const finalTargetType = (target_type || existing.target_type) as TargetType;
+    const finalAction = (action ?? existing.action) as ScheduledAction;
+    const finalTargetType = (target_type ?? existing.target_type) as TargetType;
+    const finalTargetId = target_id !== undefined ? target_id : existing.target_id;
+    const finalNodeId = node_id !== undefined ? node_id : existing.node_id;
     const targetErr = validateActionTarget(finalAction, finalTargetType);
     if (targetErr) { res.status(400).json({ error: targetErr }); return; }
 
     if (finalAction === 'scan') {
-      const finalNodeId = node_id !== undefined ? node_id : existing.node_id;
       const nodeErr = validateScanNode(finalNodeId);
       if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     }
     if (finalAction === 'update' && finalTargetType === 'fleet') {
-      const finalNodeId = node_id !== undefined ? node_id : existing.node_id;
       if (!finalNodeId) {
         res.status(400).json({ error: ERR_FLEET_NODE_REQUIRED }); return;
       }
     }
+
+    const stackTargetErr = validateStackTarget(finalTargetType, finalTargetId, finalNodeId);
+    if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
 
     const optionalErr = validateOptionalFields(finalAction, finalTargetType, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }

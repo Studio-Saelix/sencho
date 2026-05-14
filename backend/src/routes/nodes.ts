@@ -9,7 +9,8 @@ import { enrollmentLimiter } from '../middleware/rateLimiters';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
-import { CAPABILITIES, getSenchoVersion, fetchRemoteMeta, type RemoteMeta } from '../services/CapabilityRegistry';
+import { REMOTE_META_NAMESPACE } from '../helpers/cacheInvalidation';
+import { CAPABILITIES, getSenchoVersion, type RemoteMeta } from '../services/CapabilityRegistry';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotCloseCode } from '../pilot/protocol';
 import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
@@ -18,7 +19,6 @@ import { isValidRemoteUrl } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
-const REMOTE_META_NAMESPACE = 'remote-meta';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
 
 function mintPilotEnrollment(nodeId: number, req: Request): { token: string; expiresAt: number; dockerRun: string } {
@@ -354,18 +354,12 @@ nodesRouter.get('/:id/meta', authMiddleware, async (req: Request, res: Response)
       return;
     }
 
-    const baseUrl = node.api_url?.replace(/\/$/, '');
-    if (!baseUrl || !node.api_token) {
-      res.json({ version: null, capabilities: [] });
-      return;
-    }
-
     const cacheKey = `${REMOTE_META_NAMESPACE}:${id}`;
     const meta = await CacheService.getInstance().getOrFetch<RemoteMeta>(
       cacheKey,
       REMOTE_META_CACHE_TTL,
       async () => {
-        const fetched = await fetchRemoteMeta(baseUrl, node.api_token!);
+        const fetched = await NodeRegistry.getInstance().fetchMetaForNode(id);
         if (fetched.version === null) {
           throw new Error('Remote meta fetch returned null version');
         }

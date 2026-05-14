@@ -2,7 +2,7 @@ import Docker from 'dockerode';
 import axios from 'axios';
 import { EventEmitter } from 'events';
 import { DatabaseService, Node } from './DatabaseService';
-import { fetchRemoteMeta } from './CapabilityRegistry';
+import { fetchRemoteMeta, OFFLINE_META, RemoteMeta } from './CapabilityRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
 
 /**
@@ -117,6 +117,17 @@ export class NodeRegistry extends EventEmitter {
 
         if (!node.api_url || !node.api_token) return null;
         return { apiUrl: node.api_url, apiToken: node.api_token };
+    }
+
+    /**
+     * Fetch /api/meta from a remote node, dispatching through the proxy
+     * target. Returns OFFLINE_META when no target is reachable (proxy-mode
+     * missing api_url/api_token, or pilot-agent tunnel disconnected).
+     */
+    public async fetchMetaForNode(nodeId: number): Promise<RemoteMeta> {
+        const target = this.getProxyTarget(nodeId);
+        if (!target) return { ...OFFLINE_META };
+        return fetchRemoteMeta(target.apiUrl, target.apiToken);
     }
 
     /**

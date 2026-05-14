@@ -246,6 +246,30 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/target_services can only be used with restart/);
   });
+
+  it('rejects invalid stack target_id values', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, target_id: '../etc/passwd',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid stack name/);
+  });
+
+  it('rejects stack target_id values with surrounding whitespace', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, target_id: ' my-stack ',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid stack name/);
+  });
+
+  it('rejects invalid stack node_id values', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, node_id: 'not-a-node',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid node_id/);
+  });
 });
 
 describe('GET /api/scheduled-tasks/:id', () => {
@@ -452,5 +476,69 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       .send({ delete_after_run: false });
     expect(res2.status).toBe(200);
     expect(res2.body.delete_after_run).toBe(0);
+  });
+});
+
+describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
+  let taskId: number;
+
+  beforeEach(() => {
+    const now = Date.now();
+    taskId = DatabaseService.getInstance().createScheduledTask({
+      name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
+      cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: null, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 0,
+    });
+  });
+
+  it('rejects updates that introduce path traversal in stack target_id', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ target_id: '../bad' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid stack name/);
+  });
+
+  it('rejects updates that introduce whitespace in stack target_id', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ target_id: ' s ' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid stack name/);
+  });
+
+  it('rejects updates that clear node_id for a stack target', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ node_id: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/node_id/);
+  });
+
+  it('rejects updates that clear target_type', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ target_type: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid target_type/);
+  });
+
+  it('rejects updates that clear action', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ action: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid action/);
   });
 });
