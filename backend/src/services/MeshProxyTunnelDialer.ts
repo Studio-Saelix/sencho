@@ -4,8 +4,10 @@ import { MAX_FRAME_SIZE_BYTES } from '../pilot/protocol';
 import { PilotTunnelBridge, type MeshTunnelHandle } from './PilotTunnelBridge';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { NodeRegistry } from './NodeRegistry';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { httpUrlToWs } from '../utils/wsUrl';
+import { isDebugEnabled } from '../utils/debug';
+import { PilotMetrics } from './PilotMetrics';
 import type { MeshActivityType } from './MeshService';
 
 /**
@@ -43,6 +45,15 @@ export type DialFailureCode =
     | 'auth_failed'
     | 'tls_failed'
     | 'network_error';
+
+/**
+ * Activity-log reason. Wider than `DialFailureCode` because some failures
+ * share a wire-level code (e.g., `network_error`) but deserve a more
+ * specific label in the operator-facing log to distinguish a network-
+ * layer failure from a post-handshake bridge failure or a manager
+ * rejection.
+ */
+type DialFailureReason = DialFailureCode | 'bridge_start_failed' | 'manager_rejected';
 
 type ProxyTunnelEvent = 'open.ok' | 'open.fail' | 'close';
 
@@ -112,9 +123,9 @@ export class MeshProxyTunnelDialer extends EventEmitter {
     }
 
     /**
-     * Dial-if-needed. Concurrent callers receive the same Promise so a
-     * burst of mesh dispatches does not open multiple WebSockets to the
-     * same remote.
+     * Dial-if-needed. Concurrent callers dedupe through `inflight`; a
+     * cached recent failure short-circuits the dial so a misconfigured
+     * remote does not see one upgrade attempt per cross-node TCP open.
      */
     public async ensureBridge(nodeId: number): Promise<MeshTunnelHandle | null> {
         const existing = this.bridges.get(nodeId);
@@ -122,6 +133,7 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             this.idleSince.set(nodeId, Date.now());
             return existing;
         }
+        if (this.getRecentFailure(nodeId)) return null;
         const inflight = this.inflight.get(nodeId);
         if (inflight) return inflight;
         const dial = this.dial(nodeId).finally(() => {
@@ -153,6 +165,7 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         }
         this.idleSince.clear();
         this.recentFailures.clear();
+        this.inflight.clear();
     }
 
     /** Test hook: count active bridges. */
@@ -163,9 +176,14 @@ export class MeshProxyTunnelDialer extends EventEmitter {
     private async dial(nodeId: number): Promise<MeshTunnelHandle | null> {
         const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
         if (!target || !target.apiToken) {
-            this.cacheFailure(nodeId, 'no_target', 'no proxy target configured');
-            void this.logActivity(nodeId, 'open.fail', { reason: 'no_target' });
+            this.recordFailure(nodeId, 'no_target', 'no proxy target configured');
             return null;
+        }
+
+        if (this.stopped) return null;
+        const dialStartedAt = Date.now();
+        if (isDebugEnabled()) {
+            console.log(`[MeshProxyDialer:diag] dialing node=${nodeId} url=${sanitizeForLog(target.apiUrl)}`);
         }
 
         const wsUrl = httpUrlToWs(target.apiUrl) + '/api/mesh/proxy-tunnel';
@@ -177,19 +195,26 @@ export class MeshProxyTunnelDialer extends EventEmitter {
                 maxPayload: MAX_FRAME_SIZE_BYTES,
             });
         } catch (err) {
-            const message = sanitizeForLog((err as Error).message);
-            this.cacheFailure(nodeId, 'network_error', message);
-            void this.logActivity(nodeId, 'open.fail', { reason: 'network_error', message });
+            this.recordFailure(nodeId, 'network_error', (err as Error).message);
             return null;
         }
 
         try {
             await this.awaitOpen(ws);
         } catch (err) {
+            // `awaitOpen` removes the 'error' listener on reject; calling
+            // `close()` on a still-CONNECTING socket emits a tail 'error'
+            // ('WebSocket was closed before the connection was established')
+            // that would otherwise propagate as an unhandled exception.
+            ws.on('error', () => { /* swallow tail error */ });
             try { ws.close(); } catch { /* ignore */ }
             const failure = classifyDialError(err);
-            this.cacheFailure(nodeId, failure.code, failure.message);
-            void this.logActivity(nodeId, 'open.fail', { reason: failure.code, message: failure.message });
+            this.recordFailure(nodeId, failure.code, failure.message);
+            return null;
+        }
+
+        if (this.stopped) {
+            try { ws.close(1001, 'dialer shutdown'); } catch { /* ignore */ }
             return null;
         }
 
@@ -197,10 +222,13 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         try {
             await bridge.start();
         } catch (err) {
-            const message = sanitizeForLog((err as Error).message);
-            this.cacheFailure(nodeId, 'network_error', message);
-            void this.logActivity(nodeId, 'open.fail', { reason: 'bridge_start_failed', message });
+            this.recordFailure(nodeId, 'network_error', (err as Error).message, 'bridge_start_failed');
             try { bridge.close(1011, 'bridge start failed'); } catch { /* ignore */ }
+            return null;
+        }
+
+        if (this.stopped) {
+            try { bridge.close(1001, 'dialer shutdown'); } catch { /* ignore */ }
             return null;
         }
 
@@ -208,9 +236,7 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             PilotTunnelManager.getInstance().registerProxyBridge(nodeId, bridge);
         } catch (err) {
             // Cap hit or a pilot tunnel concurrently claimed this nodeId.
-            const message = sanitizeForLog((err as Error).message);
-            this.cacheFailure(nodeId, 'network_error', message);
-            void this.logActivity(nodeId, 'open.fail', { reason: 'manager_rejected', message });
+            this.recordFailure(nodeId, 'network_error', (err as Error).message, 'manager_rejected');
             try { bridge.close(1013, 'manager rejected'); } catch { /* ignore */ }
             return null;
         }
@@ -231,6 +257,9 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         this.recentFailures.delete(nodeId);
         void this.logActivity(nodeId, 'open.ok', {});
         this.emit('proxy-bridge-up', nodeId);
+        if (isDebugEnabled()) {
+            console.log(`[MeshProxyDialer:diag] dial ok node=${nodeId} elapsedMs=${Date.now() - dialStartedAt}`);
+        }
         return bridge;
     }
 
@@ -253,8 +282,27 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         });
     }
 
-    private cacheFailure(nodeId: number, code: DialFailureCode, message?: string): void {
+    /**
+     * Cache a dial failure and emit at most one activity-log entry per
+     * cache window per `(nodeId, code)`. The dedupe bounds operator log
+     * noise when a meshed container retries cross-node TCP opens against
+     * a misconfigured remote.
+     */
+    private recordFailure(nodeId: number, code: DialFailureCode, rawMessage?: string, reasonOverride?: DialFailureReason): void {
+        const message = rawMessage ? sanitizeForLog(redactSensitiveText(rawMessage)) : undefined;
+        const previous = this.recentFailures.get(nodeId);
+        const reason = reasonOverride ?? code;
+        const isFresh = !previous
+            || Date.now() - previous.ts > FAILURE_CACHE_TTL_MS
+            || previous.code !== code;
         this.recentFailures.set(nodeId, { code, message, ts: Date.now() });
+        PilotMetrics.increment('proxy_dials_failed');
+        if (isFresh) {
+            void this.logActivity(nodeId, 'open.fail', message ? { reason, message } : { reason });
+        }
+        if (isDebugEnabled()) {
+            console.warn(`[MeshProxyDialer:diag] dial failure node=${nodeId} code=${code} reason=${reason}${message ? ` message=${message}` : ''}`);
+        }
     }
 
     private startIdleCheck(): void {
@@ -276,8 +324,12 @@ export class MeshProxyTunnelDialer extends EventEmitter {
                 this.bridges.delete(nodeId);
                 this.idleSince.delete(nodeId);
                 try { bridge.close(1000, 'idle timeout'); } catch { /* ignore */ }
+                PilotMetrics.increment('proxy_idle_closes');
                 void this.logActivity(nodeId, 'close', { reason: 'idle' });
                 this.emit('proxy-bridge-down', nodeId);
+                if (isDebugEnabled()) {
+                    console.log(`[MeshProxyDialer:diag] idle close node=${nodeId} idleMs=${now - last}`);
+                }
             }
         }
     }
