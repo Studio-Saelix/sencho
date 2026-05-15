@@ -48,7 +48,7 @@ Four guarantees:
 
 1. **Only opted-in services are reachable.** A stack reaches another stack's services through the mesh only if both stacks have explicitly opted in. The Pilot agent on the target node refuses any request for a non-opted service.
 2. **Aliases are not internet-reachable.** Sencho listens on an internal Docker network; nothing about the mesh exposes new ports beyond the host's existing firewall posture.
-3. **Traffic is encrypted in transit.** Cross-node bytes ride an authenticated WSS tunnel between Sencho instances. Distributed API nodes additionally require an API token with the **full-admin** scope; tokens with narrower scopes cannot carry mesh traffic.
+3. **Traffic is encrypted in transit.** Cross-node bytes ride an authenticated WSS tunnel between Sencho instances. The Node Token generated during fleet enrollment is the credential that authorizes the mesh tunnel; restricted API token scopes (read-only, deploy-only) cannot carry mesh traffic.
 4. **Tier-gated and audit-logged.** Only Admiral users can configure the mesh. Enable, disable, opt-in, and opt-out events write durable rows to the audit log with the actor's identity.
 
 What the mesh does **not** do:
@@ -142,7 +142,7 @@ A few things are deliberately out of scope for the first release:
   <Accordion title="A Distributed API node shows `unreachable` on the Routing tab">
     Central could not open a mesh tunnel to this node. The badge tooltip shows the specific reason. While a node is in this state the **mesh toggle and Add stack to mesh action on the node card are disabled** so a redeploy is not triggered against an unreachable target. Common causes:
 
-    - `api token rejected (scope must be full-admin)` — the API token configured for this node is restricted. Open the remote Sencho, generate a token with the **full-admin** scope, and update the node's credentials in **Settings → Nodes**.
+    - `api token rejected by remote` — the credential central uses to dial this node is not accepted. Open the remote Sencho, generate a fresh Node Token via **Settings → Nodes → Generate Token**, and paste it back into the node's credentials in central's **Settings → Nodes**.
     - `remote does not support proxy mesh` — the remote Sencho is on a version that predates proxy-mode mesh. Update the remote and the badge clears on the next refresh.
     - `TLS handshake failed` — the remote serves a certificate Node's default trust store does not accept. Use a certificate issued by a trusted authority on the remote.
     - `api_url not set` or `api token missing` — the node was added without credentials. Edit the node in **Settings → Nodes** and supply the URL and token.

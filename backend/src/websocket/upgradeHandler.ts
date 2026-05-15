@@ -33,7 +33,7 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
  *   1. `/api/pilot/tunnel`        -> handlePilotTunnel (own auth, own wss)
  *   2. shared cookie/Bearer auth + JWT verify (rejects unauthenticated)
  *   3. API token scope gate (read-only / deploy-only restricted to logs + notifications)
- *   4. `/api/mesh/proxy-tunnel`   -> handleMeshProxyTunnel (requires full-admin api_token scope)
+ *   4. `/api/mesh/proxy-tunnel`   -> handleMeshProxyTunnel (machine-to-machine: node_proxy or full-admin api_token)
  *   5. `/ws/notifications` local -> handleNotificationsWs
  *   6. remote nodeId path         -> handleRemoteForwarder
  *   7. `/api/stacks/:name/logs`   -> handleLogsWs
@@ -123,11 +123,14 @@ export function attachUpgrade(
       }
 
       // Mesh proxy-tunnel ingress: a sibling Sencho is dialing this node
-      // to carry mesh TCP traffic. Require an api_token Bearer with the
-      // full-admin scope; mesh manipulates traffic and must not be
-      // reachable under a session cookie or a node_proxy JWT.
+      // to carry mesh TCP traffic. Accept any machine-to-machine credential:
+      // node_proxy JWT (the token enrolled nodes carry) or a full-admin
+      // api_token. Session cookies fall through to a 403 here because their
+      // decoded scope is undefined (isProxyToken=false, wsApiTokenScope=null).
+      // Restricted api_token scopes (read-only, deploy-only) are blocked
+      // earlier by the scope gate above before this branch is reached.
       if (pathname === '/api/mesh/proxy-tunnel') {
-        if (wsApiTokenScope !== 'full-admin') {
+        if (!isProxyToken && wsApiTokenScope !== 'full-admin') {
           return reject(socket, 403, 'Forbidden');
         }
         await handleMeshProxyTunnel(req, socket, head);

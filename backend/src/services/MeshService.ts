@@ -27,7 +27,7 @@ const SLOW_PROBE_THRESHOLD_MS = 500;
 const DEFAULT_MESH_SUBNET = '172.30.0.0/24';
 
 const REACHABLE_REASON: Record<DialFailureCode, string> = {
-    auth_failed: 'api token rejected (scope must be full-admin)',
+    auth_failed: 'api token rejected by remote',
     endpoint_not_found: 'remote does not support proxy mesh',
     tls_failed: 'TLS handshake failed',
     no_target: 'proxy target missing',
