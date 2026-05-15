@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.79.0](https://github.com/Studio-Saelix/sencho/compare/v0.78.1...v0.79.0) (2026-05-15)
+
+
+### Added
+
+* **api-tokens:** switch to sen_sk_ prefixed opaque keys ([#1062](https://github.com/Studio-Saelix/sencho/issues/1062)) ([d882f22](https://github.com/Studio-Saelix/sencho/commit/d882f223f4ad1cad37ffda24d697e02351ba5b1f))
+
 ## [0.78.1](https://github.com/Studio-Saelix/sencho/compare/v0.78.0...v0.78.1) (2026-05-15)
 
 
