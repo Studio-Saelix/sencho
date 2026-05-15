@@ -6,6 +6,7 @@ import { NodeCard } from './NodeCard';
 import { OverviewToolbar } from './OverviewToolbar';
 import type { FleetTopologyNode, LayoutMode, SavedPositions } from '@/lib/fleet-topology-layout';
 import type { Label as StackLabel } from '../label-types';
+import type { Node } from '@/context/NodeContext';
 import type { FleetNode, NodeUpdateStatus, ViewMode, FleetPreferences, FleetPaletteEntry } from './types';
 
 interface OverviewTabProps {
@@ -32,6 +33,8 @@ interface OverviewTabProps {
     onRetryUpdate?: (nodeId: number) => void;
     onDismissUpdate?: (nodeId: number) => void;
     onCordonChange?: () => void;
+    onEditNode?: (node: Node) => void;
+    onDeleteNode?: (node: Node) => void;
     isPaid: boolean;
     topologyMode: LayoutMode;
     onTopologyModeChange: (mode: LayoutMode) => void;
@@ -63,6 +66,8 @@ export function OverviewTab({
     onRetryUpdate,
     onDismissUpdate,
     onCordonChange,
+    onEditNode,
+    onDeleteNode,
     isPaid,
     topologyMode,
     onTopologyModeChange,
@@ -93,7 +98,7 @@ export function OverviewTab({
                 <div className="flex flex-col items-center justify-center py-20 text-center">
                     <Server className="w-12 h-12 text-muted-foreground/50 mb-4" />
                     <h3 className="text-lg font-medium mb-1">No nodes configured</h3>
-                    <p className="text-sm text-muted-foreground">Add nodes in Settings to see your fleet here.</p>
+                    <p className="text-sm text-muted-foreground">Add a node to see your fleet here.</p>
                 </div>
             )}
 
@@ -136,6 +141,8 @@ export function OverviewTab({
                                     onRetryUpdate={onRetryUpdate}
                                     onDismissUpdate={onDismissUpdate}
                                     onCordonChange={onCordonChange}
+                                    onEdit={onEditNode}
+                                    onDelete={onDeleteNode}
                                 />
                             ))}
                         </div>
