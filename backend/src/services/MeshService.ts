@@ -1547,11 +1547,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
 
         if (target.nodeId !== sourceNodeId) {
+            // Use ensureBridge so proxy-mode remotes get a bridge dialed
+            // on demand. Pre-fix this called hasActiveTunnel + getBridge,
+            // which only checked the pilot-tunnel slot and returned
+            // tunnel_down for proxy-mode targets even when the regular
+            // dialMeshTcpStream path worked.
             const ptm = PilotTunnelManager.getInstance();
-            if (!ptm.hasActiveTunnel(target.nodeId)) {
-                return { ok: false, where: 'pilot_tunnel', code: 'tunnel_down', message: 'no pilot tunnel' };
-            }
-            const bridge = ptm.getBridge(target.nodeId);
+            const bridge = await ptm.ensureBridge(target.nodeId);
             if (!bridge) {
                 return { ok: false, where: 'pilot_tunnel', code: 'tunnel_down', message: 'no bridge' };
             }

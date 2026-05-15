@@ -239,6 +239,83 @@ describe('MeshService.testUpstream tunnel-down path', () => {
         expect(result.where).toBe('no_route');
         expect(result.code).toBe('no_route');
     });
+
+    it('probes a proxy-mode remote via PilotTunnelManager.ensureBridge (bridge dialed on demand)', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'edge', type: 'remote', is_default: false,
+            compose_dir: '/tmp', api_url: 'https://edge.example',
+            api_token: 'tok', mode: 'proxy',
+        });
+
+        (svc as unknown as { aliasCache: Map<string, unknown> }).aliasCache = new Map([
+            ['db.api.edge.sencho', {
+                host: 'db.api.edge.sencho',
+                nodeId: remoteNodeId,
+                nodeName: 'edge',
+                stackName: 'api',
+                serviceName: 'db',
+                port: 5432,
+            }],
+        ]);
+        db.insertMeshStack(remoteNodeId, 'api', 'tester');
+
+        const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
+        const fakeStream = new EventEmitter() as EventEmitter & { destroy: () => void };
+        fakeStream.destroy = vi.fn();
+        const fakeBridge = {
+            openTcpStream: vi.fn().mockReturnValue(fakeStream),
+            getActiveStreamCount: () => 0,
+            close: vi.fn(),
+        };
+        vi.spyOn(PilotTunnelManager.getInstance(), 'ensureBridge')
+            .mockResolvedValue(fakeBridge as unknown as Awaited<ReturnType<typeof PilotTunnelManager.prototype.ensureBridge>>);
+
+        const probe = svc.testUpstream('db.api.edge.sencho', localNodeId);
+        // Emit `open` so the probe resolves cleanly.
+        setImmediate(() => fakeStream.emit('open'));
+        const result = await probe;
+
+        expect(fakeBridge.openTcpStream).toHaveBeenCalledWith({ stack: 'api', service: 'db', port: 5432 });
+        expect(result.ok).toBe(true);
+
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('returns ok:false where=pilot_tunnel when ensureBridge yields null (no reachable bridge)', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'edge2', type: 'remote', is_default: false,
+            compose_dir: '/tmp', api_url: 'https://edge2.example',
+            api_token: 'tok', mode: 'proxy',
+        });
+
+        (svc as unknown as { aliasCache: Map<string, unknown> }).aliasCache = new Map([
+            ['db.api.edge2.sencho', {
+                host: 'db.api.edge2.sencho',
+                nodeId: remoteNodeId,
+                nodeName: 'edge2',
+                stackName: 'api',
+                serviceName: 'db',
+                port: 5432,
+            }],
+        ]);
+        db.insertMeshStack(remoteNodeId, 'api', 'tester');
+
+        const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
+        vi.spyOn(PilotTunnelManager.getInstance(), 'ensureBridge').mockResolvedValue(null);
+
+        const result = await svc.testUpstream('db.api.edge2.sencho', localNodeId);
+        expect(result.ok).toBe(false);
+        expect(result.where).toBe('pilot_tunnel');
+        expect(result.code).toBe('tunnel_down');
+
+        db.deleteNode(remoteNodeId);
+    });
 });
 
 describe('getSenchoIpFromSubnet', () => {
