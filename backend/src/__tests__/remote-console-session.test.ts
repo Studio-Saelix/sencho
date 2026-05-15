@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
-import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET, loginAsTestAdmin } from './helpers/setupTestDb';
+import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET, loginAsTestAdmin } from './helpers/setupTestDb';
 import { mintConsoleSession } from '../helpers/consoleSession';
 import { generateApiToken } from '../utils/apiTokenFormat';
 

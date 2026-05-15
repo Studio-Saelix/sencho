@@ -1,0 +1,6 @@
+extensions:
+  - addsTo:
+      pack: codeql/javascript-all
+      extensible: barrierModel
+    data:
+      - ["backend/src/utils/apiTokenFormat", "Member[generateApiToken].ReturnValue", "insufficient-password-hash"]

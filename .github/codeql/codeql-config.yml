@@ -1,2 +1,3 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
+  - .github/codeql/extensions/apiTokenFormat.model.yml
