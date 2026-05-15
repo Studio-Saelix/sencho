@@ -186,7 +186,12 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             console.log(`[MeshProxyDialer:diag] dialing node=${nodeId} url=${sanitizeForLog(target.apiUrl)}`.replace(/[\n\r]/g, ''));
         }
 
-        const wsUrl = httpUrlToWs(target.apiUrl) + '/api/mesh/proxy-tunnel';
+        // Pass the peer's nodeId in central's namespace as a query param so
+        // the remote MeshService can dispatch its own `handleAccept` correctly:
+        // overlay aliases carry central-namespace nodeIds, and without this
+        // the peer falls back to its local DB default (always 1) and treats
+        // cross-node aliases as same-node.
+        const wsUrl = httpUrlToWs(target.apiUrl) + `/api/mesh/proxy-tunnel?nodeId=${nodeId}`;
         let ws: WebSocket;
         try {
             ws = new WebSocket(wsUrl, {

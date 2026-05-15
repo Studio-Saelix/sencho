@@ -34,6 +34,7 @@ beforeEach(() => {
         meshSubnet: string;
         networkSetupError: string | null;
         selfCentralNodeId: number | null;
+        proxyTunnelSelfCentralNodeId: number | null;
     };
     svc.aliasCache = new Map();
     svc.aliasByPort = new Map();
@@ -45,6 +46,7 @@ beforeEach(() => {
     svc.meshSubnet = '172.30.0.0/24';
     svc.networkSetupError = null;
     svc.selfCentralNodeId = null;
+    svc.proxyTunnelSelfCentralNodeId = null;
     delete process.env.SENCHO_ENROLL_TOKEN;
     vi.restoreAllMocks();
 });
@@ -902,5 +904,75 @@ describe('MeshService pilot handleAccept dispatch', () => {
 
         expect(openCross).toHaveBeenCalledOnce();
         expect(openSame).not.toHaveBeenCalled();
+    });
+
+    it('handleAccept on a proxy peer uses proxyTunnelSelfCentralNodeId to route cross-node aliases correctly (R1)', async () => {
+        // Repro for the R1 bug: a proxy peer receives an overlay carrying
+        // central-namespace nodeIds (e.g., Local = 1, this peer = 14). Pre-R1
+        // the peer had no selfCentralNodeId source, fell back to its local DB
+        // default (always 1), and falsely matched alias.nodeId=1 to its own
+        // selfNodeId=1 — dispatching cross-node aliases as same-node.
+        const svc = MeshService.getInstance();
+        const internals = svc as unknown as {
+            proxyTunnelSelfCentralNodeId: number | null;
+            selfCentralNodeId: number | null;
+            aliasByPort: Map<number, unknown>;
+            openSameNode: (t: MeshTarget, s: unknown) => Promise<void>;
+            openCrossNode: (t: MeshTarget, s: unknown) => void;
+        };
+        // Proxy peer: selfCentralNodeId is null (no SENCHO_ENROLL_TOKEN),
+        // the proxy-tunnel handler installed central's view of this peer.
+        internals.selfCentralNodeId = null;
+        svc.setProxyTunnelSelfCentralNodeId(14);
+        // Overlay alias for central's own stack (Local = nodeId 1 in
+        // central's namespace).
+        internals.aliasByPort.set(9000, {
+            host: 'echo.audit-mesh-central.Local.sencho',
+            nodeId: 1,
+            nodeName: 'Local',
+            stackName: 'audit-mesh-central',
+            serviceName: 'echo',
+            port: 9000,
+        });
+
+        const openSame = vi.spyOn(internals, 'openSameNode').mockResolvedValue(undefined);
+        const openCross = vi.spyOn(internals, 'openCrossNode').mockImplementation(() => undefined);
+        const fakeSrc = { remoteAddress: '127.0.0.1', destroy: vi.fn() } as unknown as import('net').Socket;
+
+        await svc.handleAccept(9000, fakeSrc);
+
+        expect(openCross).toHaveBeenCalledOnce();
+        expect(openSame).not.toHaveBeenCalled();
+    });
+
+    it('handleAccept on a proxy peer routes same-node aliases (matching the proxy-tunnel nodeId) to openSameNode', async () => {
+        const svc = MeshService.getInstance();
+        const internals = svc as unknown as {
+            proxyTunnelSelfCentralNodeId: number | null;
+            selfCentralNodeId: number | null;
+            aliasByPort: Map<number, unknown>;
+            openSameNode: (t: MeshTarget, s: unknown) => Promise<void>;
+            openCrossNode: (t: MeshTarget, s: unknown) => void;
+        };
+        internals.selfCentralNodeId = null;
+        svc.setProxyTunnelSelfCentralNodeId(14);
+        // Alias for a stack on this peer (nodeId 14 in central's namespace).
+        internals.aliasByPort.set(9002, {
+            host: 'echo.audit-mesh-proxy.sencho-test-03.sencho',
+            nodeId: 14,
+            nodeName: 'sencho-test-03',
+            stackName: 'audit-mesh-proxy',
+            serviceName: 'echo',
+            port: 9002,
+        });
+
+        const openSame = vi.spyOn(internals, 'openSameNode').mockResolvedValue(undefined);
+        const openCross = vi.spyOn(internals, 'openCrossNode').mockImplementation(() => undefined);
+        const fakeSrc = { remoteAddress: '127.0.0.1', destroy: vi.fn() } as unknown as import('net').Socket;
+
+        await svc.handleAccept(9002, fakeSrc);
+
+        expect(openSame).toHaveBeenCalledOnce();
+        expect(openCross).not.toHaveBeenCalled();
     });
 });

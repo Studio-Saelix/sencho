@@ -71,7 +71,8 @@ export type MeshActivityType =
     | 'mesh.override.preserved'
     | 'probe.ok' | 'probe.fail'
     | 'forwarder.listen' | 'forwarder.unlisten' | 'forwarder.error'
-    | 'proxy-tunnel.open.ok' | 'proxy-tunnel.open.fail' | 'proxy-tunnel.close';
+    | 'proxy-tunnel.open.ok' | 'proxy-tunnel.open.fail' | 'proxy-tunnel.close'
+    | 'mesh.proxy_tunnel.identify';
 
 export interface MeshActivityEvent {
     ts: number;
@@ -232,6 +233,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     // pilot's own local DB id (always 1) inverts dispatch. Null on central
     // (fallback to getDefaultNodeId()). Populated from SENCHO_ENROLL_TOKEN.
     private selfCentralNodeId: number | null = null;
+    // On a proxy-mode peer, central's DB id for this node, communicated
+    // through the `?nodeId=` query param on the `/api/mesh/proxy-tunnel` WS
+    // upgrade. Same purpose as `selfCentralNodeId` but for proxy peers,
+    // where there is no SENCHO_ENROLL_TOKEN to read at boot. Takes
+    // precedence in `handleAccept`'s self-id resolution because the active
+    // upstream tunnel is the most authoritative source. Cleared on tunnel
+    // close.
+    private proxyTunnelSelfCentralNodeId: number | null = null;
 
     private constructor() {
         super();
@@ -1316,7 +1325,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             try { src.destroy(); } catch { /* ignore */ }
             return;
         }
-        const selfNodeId = this.selfCentralNodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+        // Resolution order: active proxy-tunnel install > boot-time enroll
+        // token > local DB default. The proxy-tunnel value is the most
+        // authoritative when present because the upstream central just told
+        // this peer how it sees it; the enroll token covers pilot mode; the
+        // default-node fallback covers central itself.
+        const selfNodeId =
+            this.proxyTunnelSelfCentralNodeId
+            ?? this.selfCentralNodeId
+            ?? NodeRegistry.getInstance().getDefaultNodeId();
         if (target.nodeId === selfNodeId) {
             await this.openSameNode(target, src);
         } else {
@@ -1416,6 +1433,40 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
         this.reverseDialer = dialer;
         return true;
+    }
+
+    /**
+     * Install (or clear) the central-namespace nodeId communicated by the
+     * upstream central at proxy-tunnel upgrade. Called by the proxy-tunnel
+     * WS handler; cleared on disconnect. Consumed by `handleAccept` to
+     * dispatch cross-node aliases correctly on proxy peers.
+     *
+     * The caller is implicitly single-tenant: it runs only after
+     * `setReverseDialer`'s CAS install succeeds (slot already guarded). A
+     * second non-null install while a different non-null value is present
+     * indicates a misconfigured deployment, so we warn loudly instead of
+     * silently overwriting.
+     */
+    public setProxyTunnelSelfCentralNodeId(nodeId: number | null): void {
+        if (
+            nodeId !== null
+            && this.proxyTunnelSelfCentralNodeId !== null
+            && this.proxyTunnelSelfCentralNodeId !== nodeId
+        ) {
+            console.warn(
+                `[MeshService] proxyTunnelSelfCentralNodeId overwritten ${this.proxyTunnelSelfCentralNodeId} -> ${nodeId}; concurrent proxy-tunnel install or misconfigured deployment`,
+            );
+        }
+        if (nodeId !== null && this.proxyTunnelSelfCentralNodeId !== nodeId) {
+            this.logActivity({
+                source: 'mesh', level: 'info', type: 'mesh.proxy_tunnel.identify',
+                message: `proxy-tunnel: this node is nodeId=${nodeId} in central's namespace`,
+            });
+        }
+        // Null-clear (tunnel teardown) is intentionally not logged: it
+        // would double the entries on every reconnect cycle without adding
+        // signal beyond the existing `proxy-tunnel.close` event.
+        this.proxyTunnelSelfCentralNodeId = nodeId;
     }
 
     private async dialMeshTcpStream(target: MeshTarget): Promise<MeshTcpStreamLike | null> {
