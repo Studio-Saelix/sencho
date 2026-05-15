@@ -1,5 +1,4 @@
 import { Router, type Request, type Response } from 'express';
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { DatabaseService, type ApiTokenScope } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
@@ -7,10 +6,8 @@ import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { isDebugEnabled } from '../utils/debug';
 import { parseIntParam } from '../utils/parseIntParam';
+import { generateApiToken } from '../utils/apiTokenFormat';
 
-// JWT ceiling exceeds the longest user-selectable expiry (365d) so the DB
-// check (expires_at) is always the tighter bound.
-const API_TOKEN_JWT_CEILING = '400d';
 const MAX_ACTIVE_TOKENS_PER_USER = 25;
 
 const API_TOKEN_SCOPE_MESSAGE = 'API tokens cannot manage other API tokens.';
@@ -43,13 +40,6 @@ apiTokensRouter.post('/', authMiddleware, async (req: Request, res: Response): P
     }
     const expiresAt = typeof expires_in === 'number' ? Date.now() + expires_in * 24 * 60 * 60 * 1000 : null;
 
-    const settings = DatabaseService.getInstance().getGlobalSettings();
-    const jwtSecret = settings.auth_jwt_secret;
-    if (!jwtSecret) {
-      res.status(500).json({ error: 'No JWT secret configured.' });
-      return;
-    }
-
     const db = DatabaseService.getInstance();
     const user = db.getUserByUsername(req.user!.username);
     if (!user) {
@@ -68,7 +58,7 @@ apiTokensRouter.post('/', authMiddleware, async (req: Request, res: Response): P
       return;
     }
 
-    const rawToken = jwt.sign({ scope: 'api_token', sub: user.username, jti: crypto.randomUUID() }, jwtSecret, { expiresIn: API_TOKEN_JWT_CEILING });
+    const rawToken = generateApiToken();
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
     const id = db.addApiToken({

@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
+import { generateApiToken } from '../utils/apiTokenFormat';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
 
 let tmpDir: string;
@@ -18,7 +19,7 @@ function userToken(username: string): string {
 }
 
 function createApiToken(scope: 'read-only' | 'deploy-only' | 'full-admin'): string {
-    const rawToken = jwt.sign({ scope: 'api_token', jti: crypto.randomUUID() }, TEST_JWT_SECRET, { expiresIn: '5m' });
+    const rawToken = generateApiToken();
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
     const admin = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME);
     if (!admin?.id) throw new Error('missing seeded admin');

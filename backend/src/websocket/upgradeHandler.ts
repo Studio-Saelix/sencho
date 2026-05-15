@@ -14,6 +14,7 @@ import { handleLogsWs } from './logs';
 import { handleHostConsoleWs } from './hostConsole';
 import { handleGenericWs, attachGenericConnectionHandlers } from './generic';
 import { rejectUpgrade as reject } from './reject';
+import { looksLikeApiToken, verifyApiTokenChecksum } from '../utils/apiTokenFormat';
 
 function parseCookies(req: IncomingMessage): Record<string, string> {
   const header = req.headers.cookie || '';
@@ -72,24 +73,29 @@ export function attachUpgrade(
     if (!token) return reject(socket, 401, 'Unauthorized');
 
     try {
-      const settings = DatabaseService.getInstance().getGlobalSettings();
-      const jwtSecret = settings.auth_jwt_secret;
-      if (!jwtSecret) throw new Error('No JWT secret');
-      const decoded = jwt.verify(token, jwtSecret) as { username?: string; scope?: string; role?: string; tv?: number };
-
-      // Node proxy tokens are machine-to-machine credentials and must never be
-      // granted interactive terminal access (host console or container exec).
-      const isProxyToken = decoded.scope === 'node_proxy';
-
+      // Opaque sen_sk_ API tokens: handled before jwt.verify. Prefix +
+      // length + checksum reject malformed keys without touching SQLite.
+      let decoded: { username?: string; scope?: string; role?: string; tv?: number };
       let wsApiTokenScope: string | null = null;
-      if (decoded.scope === 'api_token') {
+      if (looksLikeApiToken(token)) {
+        if (!verifyApiTokenChecksum(token)) return reject(socket, 401, 'Unauthorized');
         const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
         const apiToken = DatabaseService.getInstance().getApiTokenByHash(tokenHash);
         if (!apiToken || apiToken.revoked_at) return reject(socket, 401, 'Unauthorized');
         if (apiToken.expires_at && apiToken.expires_at < Date.now()) return reject(socket, 401, 'Unauthorized');
         DatabaseService.getInstance().updateApiTokenLastUsed(apiToken.id);
         wsApiTokenScope = apiToken.scope;
+        decoded = { scope: 'api_token' };
+      } else {
+        const settings = DatabaseService.getInstance().getGlobalSettings();
+        const jwtSecret = settings.auth_jwt_secret;
+        if (!jwtSecret) throw new Error('No JWT secret');
+        decoded = jwt.verify(token, jwtSecret) as { username?: string; scope?: string; role?: string; tv?: number };
       }
+
+      // Node proxy tokens are machine-to-machine credentials and must never be
+      // granted interactive terminal access (host console or container exec).
+      const isProxyToken = decoded.scope === 'node_proxy';
 
       // For user session tokens (no scope), resolve against DB for up-to-date
       // role and token_version checks. Scoped tokens (api_token, node_proxy,

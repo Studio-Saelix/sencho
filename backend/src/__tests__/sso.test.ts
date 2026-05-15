@@ -4,6 +4,7 @@ import supertest from 'supertest';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import type { Express } from 'express';
+import { generateApiToken } from '../utils/apiTokenFormat';
 
 let tmpDir: string;
 let app: Express;
@@ -583,7 +584,7 @@ describe('SSO Config - API Token Denied', () => {
   beforeAll(async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
-    apiRawToken = jwt.sign({ scope: 'api_token', jti: crypto.randomUUID() }, TEST_JWT_SECRET, { expiresIn: '1h' });
+    apiRawToken = generateApiToken();
     const tokenHash = crypto.createHash('sha256').update(apiRawToken).digest('hex');
     const admin = db.getUserByUsername('testadmin');
     db.addApiToken({ token_hash: tokenHash, name: `sso-scope-${Date.now()}`, scope: 'full-admin', user_id: admin!.id, created_at: Date.now(), expires_at: null });
