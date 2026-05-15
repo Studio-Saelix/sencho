@@ -157,12 +157,91 @@ describe('handleMeshProxyTunnel', () => {
             const ws = await dialTunnel(srv.port, '?nodeId=14');
             await new Promise((r) => setTimeout(r, 20));
             expect((MeshService.getInstance() as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBe(14);
-
             ws.close(1000, 'test cleanup');
             await new Promise((r) => setTimeout(r, 30));
-            // Tunnel close clears the value.
-            expect((MeshService.getInstance() as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBeNull();
         } finally {
+            await srv.close();
+        }
+    });
+
+    it('the install persists across WS close (enrollment-stable, not per-bridge)', async () => {
+        // Null-clearing on teardown previously caused handleAccept to fall
+        // back to getDefaultNodeId() after idle close, misdispatching
+        // cross-fleet aliases to the same-node path.
+        const srv = await startServer();
+        try {
+            const ws = await dialTunnel(srv.port, '?nodeId=14');
+            await new Promise((r) => setTimeout(r, 20));
+            ws.close(1000, 'test cleanup');
+            await new Promise((r) => setTimeout(r, 30));
+            expect((MeshService.getInstance() as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBe(14);
+        } finally {
+            await srv.close();
+        }
+    });
+
+    it('re-opening the tunnel with the same nodeId is idempotent (no second identify event)', async () => {
+        const srv = await startServer();
+        const svc = MeshService.getInstance();
+        const identifyCount = () => svc.getActivity({ limit: 200 })
+            .filter((e) => e.type === 'mesh.proxy_tunnel.identify').length;
+        const waitForCount = async (atLeast: number, timeoutMs = 500): Promise<void> => {
+            const start = Date.now();
+            while (Date.now() - start < timeoutMs && identifyCount() < atLeast) {
+                await new Promise((r) => setTimeout(r, 5));
+            }
+        };
+        try {
+            const wsA = await dialTunnel(srv.port, '?nodeId=14');
+            // Snapshot after the first identify event has deterministically
+            // landed, so the race window between WS-open and async install
+            // can't make beforeCount=0 on a slow CI.
+            await waitForCount(1);
+            const beforeCount = identifyCount();
+            expect(beforeCount).toBeGreaterThanOrEqual(1);
+
+            wsA.close(1000, 'test cleanup');
+            await new Promise((r) => setTimeout(r, 30));
+
+            const wsB = await dialTunnel(srv.port, '?nodeId=14');
+            // Settle window for any (incorrect) second identify; small but
+            // deterministic because the assertion below is "no new event"
+            // and a longer wait wouldn't change the answer.
+            await new Promise((r) => setTimeout(r, 50));
+            expect((svc as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBe(14);
+            expect(identifyCount()).toBe(beforeCount);
+
+            wsB.close(1000, 'test cleanup');
+            await new Promise((r) => setTimeout(r, 30));
+        } finally {
+            await srv.close();
+        }
+    });
+
+    it('re-opening the tunnel with a different nodeId emits the overwrite warn (re-enrollment signal)', async () => {
+        const srv = await startServer();
+        const warns: string[] = [];
+        const origWarn = console.warn;
+        console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(' ')); };
+        try {
+            const wsA = await dialTunnel(srv.port, '?nodeId=14');
+            await new Promise((r) => setTimeout(r, 20));
+            wsA.close(1000, 'test cleanup');
+            await new Promise((r) => setTimeout(r, 30));
+
+            const wsB = await dialTunnel(srv.port, '?nodeId=15');
+            await new Promise((r) => setTimeout(r, 20));
+            const svc = MeshService.getInstance();
+            expect((svc as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBe(15);
+
+            const overwriteWarns = warns.filter((w) => w.includes('proxyTunnelSelfCentralNodeId overwritten'));
+            expect(overwriteWarns.length).toBeGreaterThanOrEqual(1);
+            expect(overwriteWarns[overwriteWarns.length - 1]).toContain('14 -> 15');
+
+            wsB.close(1000, 'test cleanup');
+            await new Promise((r) => setTimeout(r, 30));
+        } finally {
+            console.warn = origWarn;
             await srv.close();
         }
     });
