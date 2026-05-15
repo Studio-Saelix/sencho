@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_PASSWORD, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { generateApiToken } from '../utils/apiTokenFormat';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -112,7 +113,7 @@ describe('POST /api/users', () => {
   });
 
   it('blocks API tokens (403 SCOPE_DENIED)', async () => {
-    const rawToken = jwt.sign({ scope: 'api_token', jti: crypto.randomUUID() }, TEST_JWT_SECRET, { expiresIn: '1h' });
+    const rawToken = generateApiToken();
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
     const db = DatabaseService.getInstance();
     const user = db.getUserByUsername(TEST_USERNAME);
@@ -473,7 +474,7 @@ describe('PUT /api/auth/password', () => {
   });
 
   it('blocks API tokens (403)', async () => {
-    const rawToken = jwt.sign({ scope: 'api_token', jti: crypto.randomUUID() }, TEST_JWT_SECRET, { expiresIn: '1h' });
+    const rawToken = generateApiToken();
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
     const db = DatabaseService.getInstance();
     const user = db.getUserByUsername(TEST_USERNAME);

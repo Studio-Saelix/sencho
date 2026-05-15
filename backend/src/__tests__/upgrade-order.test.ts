@@ -14,6 +14,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { generateApiToken } from '../utils/apiTokenFormat';
 
 describe('WebSocket upgrade dispatch order', () => {
   let tmpDir: string;
@@ -170,7 +171,7 @@ describe('WebSocket upgrade dispatch order', () => {
 
     it('accepts a full-admin api_token at the upgrade and reaches the handler', async () => {
       const { DatabaseService } = await import('../services/DatabaseService');
-      const rawToken = jwt.sign({ scope: 'api_token', jti: crypto.randomUUID() }, TEST_JWT_SECRET, { expiresIn: '1h' });
+      const rawToken = generateApiToken();
       const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
       const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
       DatabaseService.getInstance().addApiToken({
@@ -192,7 +193,7 @@ describe('WebSocket upgrade dispatch order', () => {
 
     it('rejects a read-only api_token at the upgrade with HTTP 403', async () => {
       const { DatabaseService } = await import('../services/DatabaseService');
-      const rawToken = jwt.sign({ scope: 'api_token', jti: crypto.randomUUID() }, TEST_JWT_SECRET, { expiresIn: '1h' });
+      const rawToken = generateApiToken();
       const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
       const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
       DatabaseService.getInstance().addApiToken({

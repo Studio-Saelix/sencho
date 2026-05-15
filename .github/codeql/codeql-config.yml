@@ -1,2 +1,15 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
+
+query-filters:
+  # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the
+  # correct construction. js/insufficient-password-hash exists to catch weak
+  # hashing of low-entropy human passwords, which is irrelevant for these
+  # high-entropy opaque keys. Scoped to the token-handling files only, so
+  # real user-password code (bcrypt-hashed elsewhere) is still analyzed.
+  - exclude:
+      id: js/insufficient-password-hash
+      paths:
+        - backend/src/utils/apiTokenFormat.ts
+        - backend/src/routes/apiTokens.ts
+        - backend/src/__tests__/**

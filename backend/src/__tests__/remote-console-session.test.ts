@@ -16,8 +16,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
-import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET, loginAsTestAdmin } from './helpers/setupTestDb';
+import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET, loginAsTestAdmin } from './helpers/setupTestDb';
 import { mintConsoleSession } from '../helpers/consoleSession';
+import { generateApiToken } from '../utils/apiTokenFormat';
 
 describe('console_session token parity (HTTP route vs mint helper)', () => {
   let tmpDir: string;
@@ -85,10 +86,11 @@ describe('console_session token parity (HTTP route vs mint helper)', () => {
 
   it('rejects API-token callers of POST /api/system/console-token (rejectApiTokenScope)', async () => {
     // Mint a JWT that claims the api_token scope but is not backed by a real
-    // row in the database. The authMiddleware rejects this at the api_token
-    // branch before the route handler runs, which is the behavior we want:
-    // an API token should never be allowed to mint a console session.
-    const fakeApiToken = jwt.sign({ scope: 'api_token', username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    // row in the database. authMiddleware accepts the sen_sk_ format and
+    // rejects at the row-lookup step before the route handler runs, which
+    // is the behavior we want: an API token should never be allowed to mint
+    // a console session.
+    const fakeApiToken = generateApiToken();
     const res = await request(app)
       .post('/api/system/console-token')
       .set('Authorization', `Bearer ${fakeApiToken}`);

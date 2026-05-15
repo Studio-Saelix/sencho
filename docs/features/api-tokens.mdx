@@ -105,8 +105,8 @@ Click the trash icon next to any token in the API Tokens settings tab. A confirm
 
 ## Security model
 
+- **Recognizable format**: Tokens are 56 characters and begin with the `sen_sk_` prefix, followed by 49 base62 (alphanumeric) characters. The last six characters are a checksum, so malformed or typoed values are rejected before any database lookup. The prefix makes Sencho tokens easy to spot in logs, code, and secret-scanning tools (GitHub, TruffleHog, GitGuardian).
 - **Hashed storage**: Only a SHA-256 hash of the token is stored in the database. The raw token is never persisted.
-- **JWT-level expiry ceiling**: Every token includes a built-in expiry at the JWT level as defense-in-depth, independent of the user-configured expiration. The database-level expiry is always the tighter constraint.
 - **Audit trail**: All actions performed via API tokens are recorded in the [Audit Log](/features/audit-log) under the creating user's username.
 - **Optional expiry**: Tokens can be created with an expiration period (30 days, 60 days, 90 days, or 1 year). Tokens without an expiry must be revoked manually when no longer needed.
 - **Per-user limits**: Each user can create up to 25 active tokens. Token names must be unique among active tokens for the same user.
