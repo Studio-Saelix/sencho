@@ -565,6 +565,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const newPorts = new Set<number>();
         for (const svc of services) for (const p of svc.ports) newPorts.add(p);
+        if (newPorts.size === 0) {
+            throw new MeshError(
+                'no_target',
+                `stack ${stackName} has no service ports to mesh (every service declared ports: [])`,
+            );
+        }
         if (newPorts.has(SENCHO_LISTEN_PORT)) {
             throw new MeshError(
                 'port_collision',

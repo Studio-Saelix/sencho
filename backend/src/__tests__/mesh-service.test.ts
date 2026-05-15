@@ -70,6 +70,26 @@ describe('MeshService.optInStack', () => {
             .rejects.toThrow(/port 5432 is already claimed/);
     });
 
+    it('rejects opt-in when every service declared empty ports (no routable target)', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([
+                { service: 'web', ports: [] },
+                { service: 'db', ports: [] },
+            ]);
+        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+            .mockResolvedValue(undefined);
+
+        await expect(svc.optInStack(localNodeId, 'silent', 'tester'))
+            .rejects.toThrow(/no service ports to mesh/);
+        // Pre-fix this wrote a row with no aliases and the stack appeared
+        // "online but doesn't route". Verify the row was not written.
+        expect(db.isMeshStackEnabled(localNodeId, 'silent')).toBe(false);
+    });
+
     it('opt-out removes the row and the override', async () => {
         const svc = MeshService.getInstance();
         vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
