@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { FleetTopology } from '../fleet/FleetTopology';
 import { NodeCard } from './NodeCard';
 import { OverviewToolbar } from './OverviewToolbar';
-import type { FleetTopologyNode } from '@/lib/fleet-topology-layout';
+import type { FleetTopologyNode, LayoutMode, SavedPositions } from '@/lib/fleet-topology-layout';
 import type { Label as StackLabel } from '../label-types';
 import type { FleetNode, NodeUpdateStatus, ViewMode, FleetPreferences, FleetPaletteEntry } from './types';
 
@@ -32,6 +32,11 @@ interface OverviewTabProps {
     onRetryUpdate?: (nodeId: number) => void;
     onDismissUpdate?: (nodeId: number) => void;
     onCordonChange?: () => void;
+    isPaid: boolean;
+    topologyMode: LayoutMode;
+    onTopologyModeChange: (mode: LayoutMode) => void;
+    topologyPositions: SavedPositions;
+    onTopologyPositionsChange: (positions: SavedPositions) => void;
 }
 
 export function OverviewTab({
@@ -58,6 +63,11 @@ export function OverviewTab({
     onRetryUpdate,
     onDismissUpdate,
     onCordonChange,
+    isPaid,
+    topologyMode,
+    onTopologyModeChange,
+    topologyPositions,
+    onTopologyPositionsChange,
 }: OverviewTabProps) {
     return (
         <>
@@ -106,6 +116,11 @@ export function OverviewTab({
                         <FleetTopology
                             nodes={topologyNodes}
                             onNodeClick={(id) => onNavigateToNode(id, '')}
+                            isPaid={isPaid}
+                            mode={topologyMode}
+                            onModeChange={onTopologyModeChange}
+                            savedPositions={topologyPositions}
+                            onPositionsChange={onTopologyPositionsChange}
                         />
                     ) : processedNodes.length > 0 ? (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 items-start">
