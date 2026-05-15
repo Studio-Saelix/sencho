@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.78.0](https://github.com/Studio-Saelix/sencho/compare/v0.77.1...v0.78.0) (2026-05-15)
+
+
+### Added
+
+* **fleet:** multi-mode topology with label grouping and persisted positions ([#1054](https://github.com/Studio-Saelix/sencho/issues/1054)) ([2e82eb4](https://github.com/Studio-Saelix/sencho/commit/2e82eb44fec48c33c73cd10e030c4b27010b4824))
+* **mesh:** add topology graph view and per-stack drill sheet ([#1052](https://github.com/Studio-Saelix/sencho/issues/1052)) ([9e4b969](https://github.com/Studio-Saelix/sencho/commit/9e4b969dfb3513947a76b37e9f05a750741e1def))
+
+
+### Fixed
+
+* **mesh:** poll topology data and tighten stack-membership equality ([#1059](https://github.com/Studio-Saelix/sencho/issues/1059)) ([3323a59](https://github.com/Studio-Saelix/sencho/commit/3323a59003eab4b067d61861a1f91d63e8f1101e))
+* **mesh:** proxy peer learns its central-namespace nodeId at tunnel upgrade ([#1055](https://github.com/Studio-Saelix/sencho/issues/1055)) ([6185206](https://github.com/Studio-Saelix/sencho/commit/6185206323c7f6b1b89c1c7f899d1e92518d0974))
+* **mesh:** reject opt-in when every service has empty ports ([#1056](https://github.com/Studio-Saelix/sencho/issues/1056)) ([3d5f0ff](https://github.com/Studio-Saelix/sencho/commit/3d5f0ffacdc3deecfecbea1e9766c68e27b2aa16))
+* **mesh:** testUpstream dials via ensureBridge so proxy-mode targets are probeable ([#1057](https://github.com/Studio-Saelix/sencho/issues/1057)) ([489aab4](https://github.com/Studio-Saelix/sencho/commit/489aab451691d95bdc1b2c4cd8f5f14a17b9aebb))
+* **ui:** close user dropdown after clicking menu actions ([#1058](https://github.com/Studio-Saelix/sencho/issues/1058)) ([13e4edc](https://github.com/Studio-Saelix/sencho/commit/13e4edc1e2537d944d6f5669d668d18a7de140b1))
+
 ## [0.77.1](https://github.com/Studio-Saelix/sencho/compare/v0.77.0...v0.77.1) (2026-05-15)
 
 
