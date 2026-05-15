@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.77.1](https://github.com/Studio-Saelix/sencho/compare/v0.77.0...v0.77.1) (2026-05-15)
+
+
+### Fixed
+
+* **mesh:** accept node_proxy at the proxy-tunnel WS upgrade ([#1050](https://github.com/Studio-Saelix/sencho/issues/1050)) ([946db9d](https://github.com/Studio-Saelix/sencho/commit/946db9df5251d4b437dec3847fce4f32ddc84283))
+
 ## [0.77.0](https://github.com/Studio-Saelix/sencho/compare/v0.76.9...v0.77.0) (2026-05-15)
 
 
