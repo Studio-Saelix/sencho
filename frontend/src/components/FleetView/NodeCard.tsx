@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
     Server, Cpu, MemoryStick, HardDrive, ChevronDown, ChevronRight,
     Layers, Wifi, WifiOff, AlertTriangle, Download, Loader2,
-    MoreVertical, Ban,
+    MoreVertical, Ban, Pencil, Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -19,6 +19,8 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
 import { useLicense } from '@/context/LicenseContext';
+import { useAuth } from '@/context/AuthContext';
+import { useNodes, type Node } from '@/context/NodeContext';
 import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import { StackSection } from './NodeCardStackList';
@@ -38,6 +40,8 @@ export interface NodeCardProps {
     onRetryUpdate?: (nodeId: number) => void;
     onDismissUpdate?: (nodeId: number) => void;
     onCordonChange?: () => void;
+    onEdit?: (node: Node) => void;
+    onDelete?: (node: Node) => void;
 }
 
 // --- Sub-Components ---
@@ -55,7 +59,7 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
@@ -64,7 +68,14 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
     const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
     const { isPaid, license } = useLicense();
+    const { isAdmin } = useAuth();
+    const { nodes: registryNodes } = useNodes();
     const isAdmiral = isPaid && license?.variant === 'admiral';
+    const registryNode = registryNodes.find(n => n.id === node.id);
+    const canEdit = Boolean(isAdmin && onEdit && registryNode);
+    const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default);
+    const canCordon = isAdmiral;
+    const showMenu = canEdit || canDelete || canCordon;
 
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
@@ -131,11 +142,11 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
             {/* Card Header */}
             <div className="relative p-4 pb-3">
                 {isLocal && (
-                    <span className={`absolute top-3 font-mono text-[9px] uppercase tracking-[0.22em] text-brand ${isAdmiral ? 'right-9' : 'right-3'}`}>
+                    <span className={`absolute top-3 font-mono text-[9px] uppercase tracking-[0.22em] text-brand ${showMenu ? 'right-9' : 'right-3'}`}>
                         ★ Local
                     </span>
                 )}
-                {isAdmiral && (
+                {showMenu && (
                     <div className="absolute top-2 right-2">
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
@@ -148,10 +159,27 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                 </button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" className="w-48">
-                                <DropdownMenuItem onSelect={openCordonModal}>
-                                    <Ban className="w-3.5 h-3.5 mr-2" />
-                                    {node.cordoned ? 'Uncordon node' : 'Cordon node'}
-                                </DropdownMenuItem>
+                                {canEdit && registryNode && (
+                                    <DropdownMenuItem onSelect={() => onEdit!(registryNode)}>
+                                        <Pencil className="w-3.5 h-3.5 mr-2" />
+                                        Edit node
+                                    </DropdownMenuItem>
+                                )}
+                                {canDelete && registryNode && (
+                                    <DropdownMenuItem
+                                        onSelect={() => onDelete!(registryNode)}
+                                        className="text-destructive focus:text-destructive"
+                                    >
+                                        <Trash2 className="w-3.5 h-3.5 mr-2" />
+                                        Delete node
+                                    </DropdownMenuItem>
+                                )}
+                                {canCordon && (
+                                    <DropdownMenuItem onSelect={openCordonModal}>
+                                        <Ban className="w-3.5 h-3.5 mr-2" />
+                                        {node.cordoned ? 'Uncordon node' : 'Cordon node'}
+                                    </DropdownMenuItem>
+                                )}
                             </DropdownMenuContent>
                         </DropdownMenu>
                     </div>
