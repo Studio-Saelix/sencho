@@ -192,6 +192,11 @@ export function MeshStackTopologySheet({
                     Aliases this stack publishes and the meshed nodes that can reach them. Edge styling
                     reflects each consumer's tunnel state.
                 </p>
+                <p className="text-xs text-stat-subtitle leading-snug">
+                    Consumer nodes are meshed peers that could reach this stack's aliases via DNS.
+                    Whether a container on a consumer actually dials an alias depends on that consumer's
+                    own opt-in stacks.
+                </p>
 
                 {stackAliasCount === 0 ? (
                     <div className="rounded border border-dashed border-card-border bg-card/50 p-8 text-center">

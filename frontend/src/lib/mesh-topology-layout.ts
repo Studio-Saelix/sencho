@@ -5,7 +5,35 @@ import type { MeshAlias, MeshNodeStatus } from '@/types/mesh';
 export interface MeshNodeData extends Record<string, unknown> {
     node: MeshNodeStatus;
     aliasCount: number;
-    isOwnerView: boolean;
+}
+
+// MiniMap colour literals. ReactFlow cannot resolve CSS vars inside inline
+// SVG fills, so the minimap takes raw oklch strings.
+export const MINIMAP_BRAND = 'oklch(0.78 0.11 195)';
+export const MINIMAP_WARNING = 'oklch(0.75 0.14 75)';
+export const MINIMAP_MUTED = 'oklch(0.55 0 0)';
+export const MINIMAP_DESTRUCTIVE = 'oklch(0.65 0.2 28)';
+
+export function miniMapColorFor(node: MeshNodeStatus | undefined): string {
+    if (!node) return MINIMAP_MUTED;
+    if (node.reachableMode === 'unreachable') return MINIMAP_DESTRUCTIVE;
+    if (node.reachableMode === 'pilot' && !node.pilotConnected) return MINIMAP_WARNING;
+    if (!node.enabled) return MINIMAP_MUTED;
+    return MINIMAP_BRAND;
+}
+
+export function stacksKey(stacks: readonly string[]): string {
+    return [...stacks].sort().join(' ');
+}
+
+export function meshNodeStateEqual(a: MeshNodeStatus, b: MeshNodeStatus): boolean {
+    return a.nodeId === b.nodeId
+        && a.enabled === b.enabled
+        && a.reachableMode === b.reachableMode
+        && a.pilotConnected === b.pilotConnected
+        && a.reachableReason === b.reachableReason
+        && a.activeStreamCount === b.activeStreamCount
+        && stacksKey(a.optedInStacks) === stacksKey(b.optedInStacks);
 }
 
 export interface MeshEdgeData extends Record<string, unknown> {
@@ -105,7 +133,7 @@ function makeNode(
         id: String(node.nodeId),
         type: 'meshNode',
         position,
-        data: { node, aliasCount, isOwnerView: false } satisfies MeshNodeData,
+        data: { node, aliasCount } satisfies MeshNodeData,
         draggable: true,
     };
 }
