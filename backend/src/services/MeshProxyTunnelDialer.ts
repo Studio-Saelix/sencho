@@ -183,7 +183,7 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         if (this.stopped) return null;
         const dialStartedAt = Date.now();
         if (isDebugEnabled()) {
-            console.log(`[MeshProxyDialer:diag] dialing node=${nodeId} url=${sanitizeForLog(target.apiUrl)}`);
+            console.log(`[MeshProxyDialer:diag] dialing node=${nodeId} url=${sanitizeForLog(target.apiUrl)}`.replace(/[\n\r]/g, ''));
         }
 
         const wsUrl = httpUrlToWs(target.apiUrl) + '/api/mesh/proxy-tunnel';
@@ -258,7 +258,7 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         void this.logActivity(nodeId, 'open.ok', {});
         this.emit('proxy-bridge-up', nodeId);
         if (isDebugEnabled()) {
-            console.log(`[MeshProxyDialer:diag] dial ok node=${nodeId} elapsedMs=${Date.now() - dialStartedAt}`);
+            console.log(`[MeshProxyDialer:diag] dial ok node=${nodeId} elapsedMs=${Date.now() - dialStartedAt}`.replace(/[\n\r]/g, ''));
         }
         return bridge;
     }
@@ -301,7 +301,7 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             void this.logActivity(nodeId, 'open.fail', message ? { reason, message } : { reason });
         }
         if (isDebugEnabled()) {
-            console.warn(`[MeshProxyDialer:diag] dial failure node=${nodeId} code=${code} reason=${reason}${message ? ` message=${message}` : ''}`);
+            console.warn(`[MeshProxyDialer:diag] dial failure node=${nodeId} code=${code} reason=${reason}${message ? ` message=${message}` : ''}`.replace(/[\n\r]/g, ''));
         }
     }
 

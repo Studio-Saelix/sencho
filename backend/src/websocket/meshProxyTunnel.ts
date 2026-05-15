@@ -54,7 +54,6 @@ export async function handleMeshProxyTunnel(req: IncomingMessage, socket: Duplex
 
 async function attachSwitchboard(ws: WebSocket): Promise<void> {
     let switchboard: TcpStreamSwitchboard | null = null;
-    let reverseDialer: SwitchboardReverseDialer | null = null;
     let meshServiceCleanup: (() => void) | null = null;
 
     try {
@@ -85,7 +84,6 @@ async function attachSwitchboard(ws: WebSocket): Promise<void> {
             switchboard = null;
             return;
         }
-        reverseDialer = localDialer;
         meshServiceCleanup = () => {
             meshService.setReverseDialer(null, localDialer);
         };
