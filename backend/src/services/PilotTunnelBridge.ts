@@ -203,6 +203,8 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
     public getLoopbackUrl(): string { return this.loopbackUrl; }
     public getConnectedAt(): number { return this.connectedAt; }
     public getBufferedAmount(): number { return this.tunnelWs.bufferedAmount; }
+    /** Total active stream count across HTTP, WebSocket, forward TCP, and reverse TCP. Used by the proxy-tunnel dialer to detect idle bridges eligible for teardown. */
+    public getActiveStreamCount(): number { return this.streams.size; }
     public isOpen(): boolean { return !this.closed && this.tunnelWs.readyState === WebSocket.OPEN; }
 
     /**
@@ -823,7 +825,10 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
 
     private async acceptReverseRelay(s: number, targetNodeId: number, target: { stack: string; service: string; port: number }): Promise<void> {
         const { PilotTunnelManager } = await import('./PilotTunnelManager');
-        const targetBridge = PilotTunnelManager.getInstance().getBridge(targetNodeId);
+        // ensureBridge resolves either an existing pilot tunnel or a fresh
+        // proxy-mode tunnel dialed on demand, so proxy <-> proxy relays
+        // succeed even when neither remote has a pilot agent.
+        const targetBridge = await PilotTunnelManager.getInstance().ensureBridge(targetNodeId);
         if (!targetBridge) {
             this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
             return;

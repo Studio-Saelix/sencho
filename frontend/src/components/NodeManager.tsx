@@ -356,7 +356,7 @@ export function NodeManager() {
             ]}
           />
           <p className="text-xs text-muted-foreground">
-            Pilot Agent requires only outbound HTTPS from the remote host. Distributed API Proxy requires the remote host to expose an inbound port.
+            Pilot Agent requires only outbound HTTPS from the remote host. Distributed API Proxy requires the remote host to expose an inbound port. Sencho Mesh works with both modes.
           </p>
         </div>
       )}

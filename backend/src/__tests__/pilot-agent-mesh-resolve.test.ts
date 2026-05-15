@@ -1,53 +1,36 @@
 /**
- * F7 regression: pilot agent's mesh dial path no longer denies based on the
- * pilot's local `mesh_stacks` table. Central is the sole authority for
- * mesh opt-in (state lives in central's SQLite); the pilot resolves the
- * target container by Compose labels and dials it directly. The tunnel JWT
- * authenticates the caller, so per-stack gating on the pilot would only
- * deny legitimate central-issued dials whenever Phase D's central-only
- * state model is in effect.
+ * Compose-label container resolver shared by the pilot agent and the
+ * proxy-mode WS handler. The resolver runs the conventional compose name
+ * fast path first (`<stack>-<service>-1`), then falls back to a
+ * label-filtered `listContainers` call. The deterministic IP preference
+ * lives in `pickContainerIp` and is exercised here through the wrapper.
+ *
+ * Central is the sole authority for mesh opt-in (state lives in central's
+ * SQLite); the tunnel WS authentication is the trust boundary, so this
+ * resolver has no per-stack gating.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 const listContainersMock = vi.fn();
+const inspectMock = vi.fn();
+const getContainerMock = vi.fn(() => ({ inspect: inspectMock }));
 
 vi.mock('dockerode', () => {
     function Docker(this: unknown) {
-        (this as { listContainers: typeof listContainersMock }).listContainers = listContainersMock;
+        const self = this as { listContainers: typeof listContainersMock; getContainer: typeof getContainerMock };
+        self.listContainers = listContainersMock;
+        self.getContainer = getContainerMock;
     }
     return { default: Docker };
 });
 
 let tmpDir: string;
-let PilotAgent: typeof import('../pilot/agent').PilotAgent;
-let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
-
-interface ResolveResult {
-    ok: boolean;
-    host?: string;
-    port?: number;
-    err?: string;
-}
-
-function makeAgent(): import('../pilot/agent').PilotAgent {
-    return new PilotAgent({
-        primaryUrl: 'http://primary.invalid',
-        loopbackPort: 1,
-        initialToken: 'irrelevant',
-        enrolling: false,
-    });
-}
-
-function callResolve(agent: import('../pilot/agent').PilotAgent, stack: string, service: string, port: number): Promise<ResolveResult> {
-    const fn = (agent as unknown as { resolveMeshTarget: (s: string, sv: string, p: number) => Promise<ResolveResult> }).resolveMeshTarget.bind(agent);
-    return fn(stack, service, port);
-}
+let resolveByComposeLabels: typeof import('../mesh/tcpStreamSwitchboard').resolveByComposeLabels;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
-    ({ PilotAgent } = await import('../pilot/agent'));
-    ({ DatabaseService } = await import('../services/DatabaseService'));
+    ({ resolveByComposeLabels } = await import('../mesh/tcpStreamSwitchboard'));
 });
 
 afterAll(() => {
@@ -56,32 +39,41 @@ afterAll(() => {
 
 afterEach(() => {
     listContainersMock.mockReset();
-    DatabaseService.getInstance().getDb().prepare('DELETE FROM mesh_stacks').run();
+    inspectMock.mockReset();
+    getContainerMock.mockClear();
 });
 
-describe('PilotAgent.resolveMeshTarget (F7: trust central)', () => {
-    it('returns the container IP when mesh_stacks is empty (central is the gate)', async () => {
-        listContainersMock.mockResolvedValue([
-            { NetworkSettings: { Networks: { sencho_mesh: { IPAddress: '172.30.0.5' } } } },
-        ]);
+describe('resolveByComposeLabels (mesh target resolver)', () => {
+    it('uses the conventional name fast path when it succeeds', async () => {
+        inspectMock.mockResolvedValueOnce({
+            NetworkSettings: { Networks: { sencho_mesh: { IPAddress: '172.30.0.5' } } },
+        });
 
-        const agent = makeAgent();
-        const result = await callResolve(agent, 'audit-mesh-pilot', 'echo', 9001);
+        const result = await resolveByComposeLabels('audit-mesh-pilot', 'echo', 9001);
 
-        expect(result.err).not.toBe('denied');
         expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error('narrowing');
         expect(result.host).toBe('172.30.0.5');
         expect(result.port).toBe(9001);
+        // Fast path hit; the label-filtered listContainers call was not needed.
+        expect(getContainerMock).toHaveBeenCalledWith('audit-mesh-pilot-echo-1');
+        expect(listContainersMock).not.toHaveBeenCalled();
     });
 
-    it('queries dockerode with the Compose project + service label filter', async () => {
-        listContainersMock.mockResolvedValue([
-            { NetworkSettings: { Networks: { bridge: { IPAddress: '10.0.0.7' } } } },
-        ]);
+    it('falls back to a label-filtered listContainers when the fast path returns no IP', async () => {
+        // Fast inspect returns a container with no usable IP.
+        inspectMock.mockResolvedValueOnce({ NetworkSettings: { Networks: {} } });
+        listContainersMock.mockResolvedValueOnce([{ Id: 'abc' }]);
+        // Fallback inspect resolves the IP.
+        inspectMock.mockResolvedValueOnce({
+            NetworkSettings: { Networks: { bridge: { IPAddress: '10.0.0.7' } } },
+        });
 
-        const agent = makeAgent();
-        await callResolve(agent, 'api', 'db', 5432);
+        const result = await resolveByComposeLabels('api', 'db', 5432);
 
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error('narrowing');
+        expect(result.host).toBe('10.0.0.7');
         expect(listContainersMock).toHaveBeenCalledTimes(1);
         const args = listContainersMock.mock.calls[0][0] as { filters: { label: string[] } };
         expect(args.filters.label).toEqual([
@@ -90,23 +82,44 @@ describe('PilotAgent.resolveMeshTarget (F7: trust central)', () => {
         ]);
     });
 
-    it('returns no_target (not denied) when dockerode finds no matching container', async () => {
-        listContainersMock.mockResolvedValue([]);
+    it('returns no_target when both the fast path and label fallback find nothing', async () => {
+        inspectMock.mockResolvedValueOnce(null);
+        listContainersMock.mockResolvedValueOnce([]);
 
-        const agent = makeAgent();
-        const result = await callResolve(agent, 'missing', 'svc', 8080);
+        const result = await resolveByComposeLabels('missing', 'svc', 8080);
 
         expect(result.ok).toBe(false);
+        if (result.ok) throw new Error('narrowing');
         expect(result.err).toBe('no_target');
     });
 
-    it('returns agent_error (not denied) when dockerode throws', async () => {
-        listContainersMock.mockRejectedValue(new Error('docker daemon unreachable'));
+    it('returns agent_error when dockerode rejects on the listContainers call', async () => {
+        inspectMock.mockResolvedValueOnce(null);
+        listContainersMock.mockRejectedValueOnce(new Error('docker daemon unreachable'));
 
-        const agent = makeAgent();
-        const result = await callResolve(agent, 'api', 'db', 5432);
+        const result = await resolveByComposeLabels('api', 'db', 5432);
 
         expect(result.ok).toBe(false);
+        if (result.ok) throw new Error('narrowing');
         expect(result.err).toBe('agent_error');
+    });
+
+    it('prefers the compose default network over any other attached network', async () => {
+        // Container is attached to both bridge and stack_default; pickContainerIp
+        // must return the stack_default IP regardless of object key order.
+        inspectMock.mockResolvedValueOnce({
+            NetworkSettings: {
+                Networks: {
+                    bridge: { IPAddress: '10.0.0.7' },
+                    api_default: { IPAddress: '172.30.0.42' },
+                },
+            },
+        });
+
+        const result = await resolveByComposeLabels('api', 'db', 5432);
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error('narrowing');
+        expect(result.host).toBe('172.30.0.42');
     });
 });

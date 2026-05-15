@@ -1,10 +1,12 @@
 /**
- * Phase B: PilotAgent's outbound reverse mesh stream. The agent's
- * MeshForwarder hands off cross-node connections to PilotAgent via
- * `openMeshTcpStream`, which sends a `tcp_open_reverse` frame and returns
- * a stream handle. The test exercises the wire shape and the lifecycle
- * dispatchers (open / data / close) without needing a real WebSocket or
- * the full Sencho boot.
+ * Reverse mesh streams: the switchboard's `openReverseStream` is the
+ * outbound side of the protocol. Exercises wire-shape (the JSON
+ * `tcp_open_reverse` frame and the binary `TcpData` envelope) and the
+ * stream-handle lifecycle dispatchers (open / data / close).
+ *
+ * Both the pilot agent and the proxy-mode WS handler delegate to the
+ * switchboard's `openReverseStream`; the lifecycle assertions here cover
+ * the shared logic both callers depend on.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -17,15 +19,19 @@ import {
 } from '../pilot/protocol';
 
 let tmpDir: string;
-let PilotAgent: typeof import('../pilot/agent').PilotAgent;
-let ReverseTcpStreamHandle: typeof import('../pilot/agent').ReverseTcpStreamHandle;
+let attachTcpStreamSwitchboard: typeof import('../mesh/tcpStreamSwitchboard').attachTcpStreamSwitchboard;
+let ReverseTcpStreamHandle: typeof import('../mesh/tcpStreamSwitchboard').ReverseTcpStreamHandle;
 
 interface CapturedSend {
     raw: string | Buffer;
     binary: boolean;
 }
 
-function makeMockAgent(): { agent: import('../pilot/agent').PilotAgent; sent: CapturedSend[]; mockWs: { readyState: number; send: (data: unknown, opts?: { binary?: boolean }) => void } } {
+function makeSwitchboard(): {
+    switchboard: ReturnType<typeof attachTcpStreamSwitchboard>;
+    sent: CapturedSend[];
+    mockWs: { readyState: number; send: (data: unknown, opts?: { binary?: boolean }) => void };
+} {
     const sent: CapturedSend[] = [];
     const mockWs = {
         readyState: 1, // WebSocket.OPEN
@@ -37,32 +43,29 @@ function makeMockAgent(): { agent: import('../pilot/agent').PilotAgent; sent: Ca
             });
         },
     };
-    const agent = new PilotAgent({
-        primaryUrl: 'http://primary.invalid',
-        loopbackPort: 1,
-        initialToken: 'irrelevant',
-        enrolling: false,
+    // The switchboard accepts the `ws` type structurally; the cast is
+    // narrow and only used in this test harness.
+    const switchboard = attachTcpStreamSwitchboard({
+        ws: mockWs as unknown as import('ws').WebSocket,
+        resolveTarget: async () => ({ ok: false, err: 'no_target' }),
+        logLabel: 'Test',
     });
-    // Inject the mock ws into the private slot. The agent's
-    // openMeshTcpStream checks readyState and calls send(); the mock
-    // captures both for assertions without needing real connect/handshake.
-    (agent as unknown as { ws: typeof mockWs }).ws = mockWs;
-    return { agent, sent, mockWs };
+    return { switchboard, sent, mockWs };
 }
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
-    ({ PilotAgent, ReverseTcpStreamHandle } = await import('../pilot/agent'));
+    ({ attachTcpStreamSwitchboard, ReverseTcpStreamHandle } = await import('../mesh/tcpStreamSwitchboard'));
 });
 
 afterAll(() => {
     cleanupTestDb(tmpDir);
 });
 
-describe('PilotAgent.openMeshTcpStream (Phase B)', () => {
+describe('TcpStreamSwitchboard.openReverseStream', () => {
     it('allocates an id in the agent-reverse range and emits a tcp_open_reverse frame with the target', () => {
-        const { agent, sent } = makeMockAgent();
-        const handle = agent.openMeshTcpStream({
+        const { switchboard, sent } = makeSwitchboard();
+        const handle = switchboard.openReverseStream({
             nodeId: 12,
             stack: 'api',
             service: 'db',
@@ -84,15 +87,15 @@ describe('PilotAgent.openMeshTcpStream (Phase B)', () => {
     });
 
     it('returns null when the tunnel is not OPEN', () => {
-        const { agent, mockWs } = makeMockAgent();
+        const { switchboard, mockWs } = makeSwitchboard();
         mockWs.readyState = 0; // CONNECTING
-        const handle = agent.openMeshTcpStream({ nodeId: 1, stack: 'a', service: 'b', port: 1 });
+        const handle = switchboard.openReverseStream({ nodeId: 1, stack: 'a', service: 'b', port: 1 });
         expect(handle).toBeNull();
     });
 
-    it('handle.write encodes a TcpData binary frame with the agent-allocated streamId', () => {
-        const { agent, sent } = makeMockAgent();
-        const handle = agent.openMeshTcpStream({ nodeId: 2, stack: 's', service: 'svc', port: 80 });
+    it('handle.write encodes a TcpData binary frame with the allocated streamId', () => {
+        const { switchboard, sent } = makeSwitchboard();
+        const handle = switchboard.openReverseStream({ nodeId: 2, stack: 's', service: 'svc', port: 80 });
         if (!handle) throw new Error('handle should exist');
         sent.length = 0; // clear the open frame
 
@@ -106,10 +109,11 @@ describe('PilotAgent.openMeshTcpStream (Phase B)', () => {
         expect(decoded.payload.toString()).toBe('hello');
     });
 
-    it('handle.end sends a tcp_close JSON frame and removes the stream from the agent map', () => {
-        const { agent, sent } = makeMockAgent();
-        const handle = agent.openMeshTcpStream({ nodeId: 3, stack: 's', service: 'svc', port: 80 });
+    it('handle.end sends a tcp_close JSON frame and drops the stream count', () => {
+        const { switchboard, sent } = makeSwitchboard();
+        const handle = switchboard.openReverseStream({ nodeId: 3, stack: 's', service: 'svc', port: 80 });
         if (!handle) throw new Error('handle should exist');
+        expect(switchboard.tcpStreamCount()).toBe(1);
         sent.length = 0;
 
         handle.end();
@@ -121,31 +125,25 @@ describe('PilotAgent.openMeshTcpStream (Phase B)', () => {
         if (decoded.t !== 'tcp_close') throw new Error('narrowing');
         expect(decoded.s).toBe(handle.streamId);
 
-        const internalMap = (agent as unknown as { reverseTcpStreams: Map<number, unknown> }).reverseTcpStreams;
-        expect(internalMap.has(handle.streamId)).toBe(false);
+        expect(switchboard.tcpStreamCount()).toBe(0);
     });
 
     it('inbound tcp_open_ack {ok: true} fires the open event on the matching handle', () => {
-        const { agent, mockWs } = makeMockAgent();
-        const handle = agent.openMeshTcpStream({ nodeId: 4, stack: 's', service: 'svc', port: 80 });
+        const { switchboard } = makeSwitchboard();
+        const handle = switchboard.openReverseStream({ nodeId: 4, stack: 's', service: 'svc', port: 80 });
         if (!handle) throw new Error('handle should exist');
 
         let opened = false;
         handle.on('open', () => { opened = true; });
 
-        // Simulate an inbound ack frame: invoke the agent's private json-
-        // dispatch path with a synthetic frame.
-        const onTcpOpenAckReverse = (agent as unknown as { onTcpOpenAckReverse: (frame: unknown) => void }).onTcpOpenAckReverse.bind(agent);
-        onTcpOpenAckReverse({ t: 'tcp_open_ack', s: handle.streamId, ok: true });
-
+        const consumed = switchboard.handleJsonFrame({ t: 'tcp_open_ack', s: handle.streamId, ok: true });
+        expect(consumed).toBe(true);
         expect(opened).toBe(true);
-        // Sanity: mockWs's readyState wasn't touched.
-        expect(mockWs.readyState).toBe(1);
     });
 
     it('inbound tcp_open_ack {ok: false} emits error and close, then drops the handle', () => {
-        const { agent } = makeMockAgent();
-        const handle = agent.openMeshTcpStream({ nodeId: 5, stack: 's', service: 'svc', port: 80 });
+        const { switchboard } = makeSwitchboard();
+        const handle = switchboard.openReverseStream({ nodeId: 5, stack: 's', service: 'svc', port: 80 });
         if (!handle) throw new Error('handle should exist');
 
         let errMessage: string | undefined;
@@ -153,46 +151,60 @@ describe('PilotAgent.openMeshTcpStream (Phase B)', () => {
         handle.on('error', (err: Error) => { errMessage = err.message; });
         handle.on('close', () => { closed = true; });
 
-        const onTcpOpenAckReverse = (agent as unknown as { onTcpOpenAckReverse: (frame: unknown) => void }).onTcpOpenAckReverse.bind(agent);
-        onTcpOpenAckReverse({ t: 'tcp_open_ack', s: handle.streamId, ok: false, err: 'unreachable' });
+        switchboard.handleJsonFrame({ t: 'tcp_open_ack', s: handle.streamId, ok: false, err: 'unreachable' });
 
         expect(errMessage).toBe('unreachable');
         expect(closed).toBe(true);
-        const internalMap = (agent as unknown as { reverseTcpStreams: Map<number, unknown> }).reverseTcpStreams;
-        expect(internalMap.has(handle.streamId)).toBe(false);
+        expect(switchboard.tcpStreamCount()).toBe(0);
     });
 
-    it('forward-direction tcp_open_ack ids (low half) do not match reverse handles', () => {
-        const { agent } = makeMockAgent();
-        const handle = agent.openMeshTcpStream({ nodeId: 6, stack: 's', service: 'svc', port: 80 });
+    it('forward-direction tcp_open_ack ids (low half) are not consumed by the switchboard', () => {
+        const { switchboard } = makeSwitchboard();
+        const handle = switchboard.openReverseStream({ nodeId: 6, stack: 's', service: 'svc', port: 80 });
         if (!handle) throw new Error('handle should exist');
 
         let opened = false;
         handle.on('open', () => { opened = true; });
 
-        // Primary-direction id (< AGENT_REVERSE_ID_BASE) must not bleed into
-        // the reverse map.
-        const onTcpOpenAckReverse = (agent as unknown as { onTcpOpenAckReverse: (frame: unknown) => void }).onTcpOpenAckReverse.bind(agent);
-        onTcpOpenAckReverse({ t: 'tcp_open_ack', s: 5, ok: true });
-
+        const consumed = switchboard.handleJsonFrame({ t: 'tcp_open_ack', s: 5, ok: true });
+        // Low-half ack is left for the caller to route (it's the
+        // primary-allocated forward-stream ack, irrelevant to the
+        // switchboard's reverse map).
+        expect(consumed).toBe(false);
         expect(opened).toBe(false);
     });
 
     it('inbound TcpData binary frame (encoded against the wire) emits data on the handle', () => {
-        const { agent } = makeMockAgent();
-        const handle = agent.openMeshTcpStream({ nodeId: 7, stack: 's', service: 'svc', port: 80 });
+        const { switchboard } = makeSwitchboard();
+        const handle = switchboard.openReverseStream({ nodeId: 7, stack: 's', service: 'svc', port: 80 });
         if (!handle) throw new Error('handle should exist');
 
         const received: Buffer[] = [];
         handle.on('data', (chunk: Buffer) => received.push(chunk));
 
-        // Drive the agent's binary-frame handler with a wire-encoded TcpData
-        // frame to also exercise the routing branch added in Phase B.
         const buf = encodeBinaryFrame(BinaryFrameType.TcpData, handle.streamId, Buffer.from('echo!'));
         const decoded = decodeBinaryFrame(buf);
-        const handleBinaryFrame = (agent as unknown as { handleBinaryFrame: (frame: unknown) => void }).handleBinaryFrame.bind(agent);
-        handleBinaryFrame(decoded);
-
+        const consumed = switchboard.handleBinaryFrame(decoded);
+        expect(consumed).toBe(true);
         expect(Buffer.concat(received).toString()).toBe('echo!');
+    });
+
+    it('cleanup() emits error + close on every outstanding reverse handle and resets the count', () => {
+        const { switchboard } = makeSwitchboard();
+        const h1 = switchboard.openReverseStream({ nodeId: 8, stack: 's', service: 'a', port: 1 })!;
+        const h2 = switchboard.openReverseStream({ nodeId: 9, stack: 's', service: 'b', port: 2 })!;
+        const closed: number[] = [];
+        const errors: string[] = [];
+        h1.on('close', () => closed.push(h1.streamId));
+        h2.on('close', () => closed.push(h2.streamId));
+        h1.on('error', (e: Error) => errors.push(e.message));
+        h2.on('error', (e: Error) => errors.push(e.message));
+
+        switchboard.cleanup('mock disconnect');
+
+        expect(closed).toContain(h1.streamId);
+        expect(closed).toContain(h2.streamId);
+        expect(errors).toEqual(expect.arrayContaining(['mock disconnect', 'mock disconnect']));
+        expect(switchboard.tcpStreamCount()).toBe(0);
     });
 });

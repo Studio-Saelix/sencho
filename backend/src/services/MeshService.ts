@@ -12,7 +12,9 @@ import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { MeshForwarder, type MeshForwarderHost } from './MeshForwarder';
 import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
+import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDialer';
 import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
+import { lookupContainerIp } from '../mesh/containerLookup';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
@@ -23,6 +25,14 @@ const ALIAS_REFRESH_INTERVAL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const SLOW_PROBE_THRESHOLD_MS = 500;
 const DEFAULT_MESH_SUBNET = '172.30.0.0/24';
+
+const REACHABLE_REASON: Record<DialFailureCode, string> = {
+    auth_failed: 'api token rejected (scope must be full-admin)',
+    endpoint_not_found: 'remote does not support proxy mesh',
+    tls_failed: 'TLS handshake failed',
+    no_target: 'proxy target missing',
+    network_error: 'remote unreachable',
+};
 
 /**
  * Returns the static IPv4 address Sencho will pin itself to on the mesh
@@ -60,7 +70,8 @@ export type MeshActivityType =
     | 'mesh.enable' | 'mesh.disable'
     | 'mesh.override.preserved'
     | 'probe.ok' | 'probe.fail'
-    | 'forwarder.listen' | 'forwarder.unlisten' | 'forwarder.error';
+    | 'forwarder.listen' | 'forwarder.unlisten' | 'forwarder.error'
+    | 'proxy-tunnel.open.ok' | 'proxy-tunnel.open.fail' | 'proxy-tunnel.close';
 
 export interface MeshActivityEvent {
     ts: number;
@@ -105,13 +116,38 @@ export interface MeshRegenSummary {
     reason?: string;
 }
 
+/**
+ * How a node participates in mesh routing right now:
+ *   - `local`: the Sencho serving this request.
+ *   - `pilot`: a remote with a pilot agent. Live-tunnel state is captured
+ *      separately in `pilotConnected`.
+ *   - `proxy`: a remote that central reaches via the long-lived api_token.
+ *      Mesh tunnels are opened on demand by `MeshProxyTunnelDialer`; the
+ *      operator sees no badge while the configuration is sound.
+ *   - `unreachable`: configuration or runtime problem keeps mesh traffic
+ *      from flowing. `reachableReason` carries an actionable hint.
+ */
+export type MeshReachableMode = 'local' | 'pilot' | 'proxy' | 'unreachable';
+
 export interface MeshNodeStatus {
     nodeId: number;
     nodeName: string;
     enabled: boolean;
     /** Forwarder state for the LOCAL node (the Sencho instance answering this request). Always `null` for any non-local node — fetching the remote forwarder state requires a cross-node call which lands in Phase B. */
     localForwarderListening: boolean | null;
+    /**
+     * True iff a pilot tunnel is currently registered for this node. Only
+     * meaningful when `reachableMode === 'pilot'`. Kept for diagnostic
+     * surfaces; the Routing tab badge logic consumes `reachableMode` and
+     * ignores this field for proxy / local nodes.
+     * TODO: collapse into `reachableMode` (introduce `pilot_offline` value)
+     * once no remaining caller reads `pilotConnected` directly.
+     */
     pilotConnected: boolean;
+    /** Canonical reachability classification consumed by the Routing tab. */
+    reachableMode: MeshReachableMode;
+    /** Short, operator-facing reason when `reachableMode === 'unreachable'`. Null otherwise. */
+    reachableReason: string | null;
     optedInStacks: string[];
     activeStreamCount: number;
 }
@@ -1284,7 +1320,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (target.nodeId === selfNodeId) {
             await this.openSameNode(target, src);
         } else {
-            this.openCrossNode(target, src);
+            await this.openCrossNode(target, src);
         }
     }
 
@@ -1340,28 +1376,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * central.
      */
     public async resolveContainerIp(target: { stack: string; service: string }): Promise<string | null> {
+        const docker = DockerController.getInstance().getDocker() as unknown as Parameters<typeof lookupContainerIp>[0];
         try {
-            const docker = DockerController.getInstance().getDocker();
-            // Compose default container name pattern; -1 is the first replica.
-            const conventionalName = `${target.stack}-${target.service}-1`;
-            const info = await docker.getContainer(conventionalName).inspect().catch(() => null);
-            const fromInspect = info ? this.extractContainerIp(target.stack, info) : null;
-            if (fromInspect) return fromInspect;
-            // Fallback: filter by compose labels in case of a non-conventional
-            // container name (operator overrode `container_name` or compose
-            // project).
-            const containers = await docker.listContainers({
-                all: true,
-                filters: {
-                    label: [
-                        `com.docker.compose.project=${target.stack}`,
-                        `com.docker.compose.service=${target.service}`,
-                    ],
-                },
-            });
-            if (containers.length === 0) return null;
-            const fallbackInfo = await docker.getContainer(containers[0].Id).inspect().catch(() => null);
-            return fallbackInfo ? this.extractContainerIp(target.stack, fallbackInfo) : null;
+            return await lookupContainerIp(docker, target.stack, target.service);
         } catch (err) {
             console.warn('[MeshService] container IP lookup failed:', sanitizeForLog((err as Error).message));
             return null;
@@ -1369,43 +1386,39 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     /**
-     * Pick a deterministic IP. Prefer the compose default network
-     * (`<stack>_default` or any network whose name starts with `<stack>_`),
-     * then any other declared network, then the legacy bridge `IPAddress`.
-     * Without this preference order, `Object.values(Networks)` ordering on
-     * containers attached to multiple networks varies across daemon
-     * versions and can make same-node forwarding flaky on a redeploy.
-     */
-    private extractContainerIp(
-        stackName: string,
-        info: { NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }>; IPAddress?: string } },
-    ): string | null {
-        const networks = info.NetworkSettings?.Networks ?? {};
-        const composeDefault = networks[`${stackName}_default`];
-        if (composeDefault?.IPAddress) return composeDefault.IPAddress;
-        for (const [name, net] of Object.entries(networks)) {
-            if (name.startsWith(`${stackName}_`) && net?.IPAddress) return net.IPAddress;
-        }
-        for (const net of Object.values(networks)) {
-            if (net?.IPAddress) return net.IPAddress;
-        }
-        return info.NetworkSettings?.IPAddress || null;
-    }
-
-    /**
-     * Pluggable reverse dialer. Set by `PilotAgent` on a pilot host; left
-     * null on a central host. When set, `openCrossNode` routes outbound
-     * mesh dials through the agent's `tcp_open_reverse` path; when unset,
-     * `openCrossNode` uses the central-side `PilotTunnelManager.getBridge`
-     * directly. Lets the same MeshService code work on both sides.
+     * Pluggable reverse dialer. Set by `PilotAgent` on a pilot host or by
+     * the proxy-mode WS handler when a `/api/mesh/proxy-tunnel` upgrade
+     * comes in; left null on a central host with no inbound mesh tunnel.
+     * When set, `openCrossNode` routes outbound mesh dials through the
+     * dialer's `tcp_open_reverse` path; when unset, `openCrossNode` uses
+     * the central-side `PilotTunnelManager.getBridge` directly. Lets the
+     * same MeshService code work on both sides.
      */
     private reverseDialer: ReverseMeshDialer | null = null;
 
-    public setReverseDialer(dialer: ReverseMeshDialer | null): void {
+    /**
+     * Install or clear the reverse dialer. Supports compare-and-swap via
+     * the optional `expected` argument so a caller (e.g., the proxy-mode
+     * WS handler) can install on a null slot and uninstall only if its
+     * own dialer is still the active one. Without the `expected` arg the
+     * operation is unconditional (used by the pilot agent at boot).
+     *
+     * Returns true when the swap happened, false when the CAS rejected
+     * because `expected` did not match the current dialer.
+     */
+    public setReverseDialer(dialer: ReverseMeshDialer | null, expected?: ReverseMeshDialer | null): boolean {
+        if (expected !== undefined && this.reverseDialer !== expected) return false;
+        // Loud warn instead of silent overwrite: pilot and proxy modes are
+        // mutually exclusive by topology, so this branch indicates a
+        // misconfigured deployment rather than an expected race.
+        if (expected === undefined && dialer !== null && this.reverseDialer !== null && this.reverseDialer !== dialer) {
+            console.warn('[MeshService] reverse dialer overwritten without CAS; pilot/proxy mode race or duplicate install');
+        }
         this.reverseDialer = dialer;
+        return true;
     }
 
-    private dialMeshTcpStream(target: MeshTarget): MeshTcpStreamLike | null {
+    private async dialMeshTcpStream(target: MeshTarget): Promise<MeshTcpStreamLike | null> {
         if (this.reverseDialer) {
             return this.reverseDialer.openMeshTcpStream({
                 nodeId: target.nodeId,
@@ -1415,13 +1428,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             });
         }
         const ptm = PilotTunnelManager.getInstance();
-        if (!ptm.hasActiveTunnel(target.nodeId)) return null;
-        const bridge = ptm.getBridge(target.nodeId);
+        // ensureBridge resolves an existing pilot tunnel, an existing
+        // proxy-mode tunnel, or dials a fresh proxy-mode tunnel on demand.
+        // Returns null for unreachable nodes (no api_url/api_token, scope
+        // insufficient, remote pre-Phase-C, network error).
+        const bridge = await ptm.ensureBridge(target.nodeId);
         if (!bridge) return null;
         return bridge.openTcpStream({ stack: target.stack, service: target.service, port: target.port });
     }
 
-    private openCrossNode(target: MeshTarget, src: net.Socket): void {
+    private async openCrossNode(target: MeshTarget, src: net.Socket): Promise<void> {
         // Log every dispatch entry. Same-node logs route.resolve.ok on
         // its TCP `connect` event; cross-node only logs route.resolve.ok
         // once tcp_open_ack arrives from the agent. Without this entry
@@ -1433,14 +1449,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             message: `cross-node dispatch to ${target.alias} on node ${target.nodeId}`,
         });
 
-        const tcpStream = this.dialMeshTcpStream(target);
+        const tcpStream = await this.dialMeshTcpStream(target);
         if (!tcpStream) {
             this.logActivity({
                 source: 'pilot', level: 'error', type: 'tunnel.fail',
                 nodeId: target.nodeId, alias: target.alias,
                 message: this.reverseDialer
                     ? `cannot open reverse mesh stream to node ${target.nodeId}`
-                    : `no active pilot tunnel to node ${target.nodeId}`,
+                    : `no mesh tunnel reachable for node ${target.nodeId}`,
             });
             try { src.destroy(); } catch { /* ignore */ }
             return;
@@ -1597,19 +1613,45 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     // --- Diagnostics ---
 
     /**
-     * Whether mesh traffic to this node can flow. Local nodes are always
-     * reachable because mesh uses the same-node fast path on localhost.
-     * Remote nodes are reachable only when a pilot tunnel is registered. The
-     * literal `hasActiveTunnel(localNodeId)` would always be false (local
-     * nodes do not establish tunnels to themselves), so a direct call would
-     * render every local alias as `tunnel down` in the UI even on a working
-     * route.
+     * Whether mesh CAN route to a node based on current configuration.
+     * Distinct from "live tunnel up right now": for proxy-mode remotes
+     * the tunnel is opened on demand, so a caller that demanded a
+     * current tunnel would misreport every idle proxy-mode route as
+     * `tunnel down`. Live pilot-tunnel state is surfaced separately.
      */
-    private isMeshReachable(nodeId: number): boolean {
-        const node = DatabaseService.getInstance().getNode(nodeId);
+    private isNodeMeshConfigured(node: ReturnType<typeof DatabaseService.prototype.getNode>): boolean {
         if (!node) return false;
         if (node.type !== 'remote') return true;
-        return PilotTunnelManager.getInstance().hasActiveTunnel(nodeId);
+        if (node.mode === 'pilot_agent') return true;
+        if (node.mode === 'proxy') return !!node.api_url && !!node.api_token;
+        return false;
+    }
+
+    /**
+     * Compute the reachability classification surfaced in `MeshNodeStatus`
+     * and consumed by the Routing tab. See `MeshReachableMode` for the
+     * meaning of each value. Callers pass in the already-fetched node row
+     * (and the local nodeId) so this helper is free of DB I/O when
+     * `getStatus` iterates the fleet.
+     */
+    private computeReachable(node: ReturnType<typeof DatabaseService.prototype.getNode>, localNodeId: number): { mode: MeshReachableMode; reason: string | null } {
+        if (!node) return { mode: 'unreachable', reason: 'unknown node' };
+        if (node.id === localNodeId || node.type !== 'remote') return { mode: 'local', reason: null };
+        if (node.mode === 'pilot_agent') return { mode: 'pilot', reason: null };
+        if (node.mode === 'proxy') {
+            if (!node.api_url) return { mode: 'unreachable', reason: 'api_url not set' };
+            if (!node.api_token) return { mode: 'unreachable', reason: 'api token missing' };
+            // Recent-failure cache surfaces the last failed dial so the
+            // operator sees a clear reason without triggering a redial
+            // storm.
+            const failure = MeshProxyTunnelDialer.getInstance().getRecentFailure(node.id);
+            if (failure) {
+                const reason = REACHABLE_REASON[failure.code] ?? failure.message ?? 'remote unreachable';
+                return { mode: 'unreachable', reason };
+            }
+            return { mode: 'proxy', reason: null };
+        }
+        return { mode: 'unreachable', reason: 'unknown node mode' };
     }
 
     public async getRouteDiagnostic(alias: string): Promise<MeshRouteDiagnostic> {
@@ -1621,14 +1663,20 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             return { alias, target: null, pilot: { connected: false, lastSeen: null }, lastError, lastProbeMs, state: 'not authorized' };
         }
 
-        const pilotConnected = this.isMeshReachable(target.nodeId);
         const node = DatabaseService.getInstance().getNode(target.nodeId);
+        const routable = this.isNodeMeshConfigured(node);
+        // Pilot-mode routes surface live tunnel state; proxy-mode routes
+        // fall back to `routable` because the tunnel is opened on demand
+        // and a quiescent state is normal.
+        const pilotLive = node?.type === 'remote' && node.mode === 'pilot_agent'
+            ? PilotTunnelManager.getInstance().hasActiveTunnel(target.nodeId)
+            : routable;
         const lastSeen = node?.pilot_last_seen ?? null;
         const optedIn = DatabaseService.getInstance().isMeshStackEnabled(target.nodeId, target.stackName);
 
         let state: MeshRouteDiagnostic['state'];
         if (!optedIn) state = 'not authorized';
-        else if (!pilotConnected) state = 'tunnel down';
+        else if (!routable || !pilotLive) state = 'tunnel down';
         else if (lastError && Date.now() - lastError.ts < 60_000) state = 'unreachable';
         else if (lastProbeMs !== null && lastProbeMs > SLOW_PROBE_THRESHOLD_MS) state = 'degraded';
         else state = 'healthy';
@@ -1642,7 +1690,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 port: target.port,
                 alias,
             },
-            pilot: { connected: pilotConnected, lastSeen },
+            pilot: { connected: pilotLive, lastSeen },
             lastError,
             lastProbeMs,
             state,
@@ -1689,15 +1737,26 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const nodes = db.getNodes();
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const localListening = this.isLocalForwarderActive();
-        return nodes.map((node) => ({
-            nodeId: node.id,
-            nodeName: node.name,
-            enabled: db.getNodeMeshEnabled(node.id),
-            localForwarderListening: node.id === localNodeId ? localListening : null,
-            pilotConnected: this.isMeshReachable(node.id),
-            optedInStacks: db.listMeshStacks(node.id).map((s) => s.stack_name),
-            activeStreamCount: this.activeStreams.size,
-        }));
+        const ptm = PilotTunnelManager.getInstance();
+        return nodes.map((node) => {
+            const reach = this.computeReachable(node, localNodeId);
+            return {
+                nodeId: node.id,
+                nodeName: node.name,
+                enabled: db.getNodeMeshEnabled(node.id),
+                localForwarderListening: node.id === localNodeId ? localListening : null,
+                // `pilotConnected` stays at its original meaning: a pilot
+                // tunnel is currently registered for this node. The
+                // Routing tab now derives badge state from `reachableMode`
+                // and reads `pilotConnected` only for the pilot-offline
+                // sub-state.
+                pilotConnected: node.type !== 'remote' || ptm.hasActiveTunnel(node.id),
+                reachableMode: reach.mode,
+                reachableReason: reach.reason,
+                optedInStacks: db.listMeshStacks(node.id).map((s) => s.stack_name),
+                activeStreamCount: this.activeStreams.size,
+            };
+        });
     }
 
     /** True when the local Sencho's forwarder is started and bound to at least one alias port. */
@@ -1731,7 +1790,7 @@ export class MeshError extends Error {
 /**
  * Common surface of an outbound mesh TCP stream as MeshService consumes
  * it. Both the central-side `PilotTunnelBridge.TcpStream` and the
- * pilot-side `ReverseTcpStreamHandle` (from `pilot/agent.ts`) implement
+ * pilot-side `ReverseTcpStreamHandle` (from `mesh/tcpStreamSwitchboard.ts`) implement
  * this shape structurally so MeshService.openCrossNode can splice bytes
  * against either without caring which side initiated the stream.
  */

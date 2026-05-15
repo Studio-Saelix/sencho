@@ -7,6 +7,7 @@ import { DatabaseService, type UserRole } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { COOKIE_NAME } from '../helpers/constants';
 import { handlePilotTunnel } from './pilotTunnel';
+import { handleMeshProxyTunnel } from './meshProxyTunnel';
 import { handleNotificationsWs } from './notifications';
 import { handleRemoteForwarder } from './remoteForwarder';
 import { handleLogsWs } from './logs';
@@ -32,11 +33,12 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
  *   1. `/api/pilot/tunnel`        -> handlePilotTunnel (own auth, own wss)
  *   2. shared cookie/Bearer auth + JWT verify (rejects unauthenticated)
  *   3. API token scope gate (read-only / deploy-only restricted to logs + notifications)
- *   4. `/ws/notifications` local -> handleNotificationsWs
- *   5. remote nodeId path         -> handleRemoteForwarder
- *   6. `/api/stacks/:name/logs`   -> handleLogsWs
- *   7. `/api/system/host-console` -> handleHostConsoleWs
- *   8. fallback                   -> handleGenericWs (`/ws` exec + stats)
+ *   4. `/api/mesh/proxy-tunnel`   -> handleMeshProxyTunnel (requires full-admin api_token scope)
+ *   5. `/ws/notifications` local -> handleNotificationsWs
+ *   6. remote nodeId path         -> handleRemoteForwarder
+ *   7. `/api/stacks/:name/logs`   -> handleLogsWs
+ *   8. `/api/system/host-console` -> handleHostConsoleWs
+ *   9. fallback                   -> handleGenericWs (`/ws` exec + stats)
  */
 export function attachUpgrade(
   server: http.Server,
@@ -118,6 +120,18 @@ export function attachUpgrade(
         if (wsApiTokenScope === 'read-only' || wsApiTokenScope === 'deploy-only') {
           if (!isLogPath && !isNotifPath) return reject(socket, 403, 'Forbidden');
         }
+      }
+
+      // Mesh proxy-tunnel ingress: a sibling Sencho is dialing this node
+      // to carry mesh TCP traffic. Require an api_token Bearer with the
+      // full-admin scope; mesh manipulates traffic and must not be
+      // reachable under a session cookie or a node_proxy JWT.
+      if (pathname === '/api/mesh/proxy-tunnel') {
+        if (wsApiTokenScope !== 'full-admin') {
+          return reject(socket, 403, 'Forbidden');
+        }
+        await handleMeshProxyTunnel(req, socket, head);
+        return;
       }
 
       const nodeIdParam = parsedUrl.searchParams.get('nodeId');
