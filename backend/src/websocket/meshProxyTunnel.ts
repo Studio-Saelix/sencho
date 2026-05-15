@@ -114,14 +114,19 @@ async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Prom
         // Install central's view of this peer's nodeId so handleAccept
         // dispatches cross-node aliases correctly. Done after setReverseDialer
         // succeeds so a CAS-rejected tunnel does not leak nodeId state.
+        //
+        // The install persists across bridge lifecycles: the peer's identity
+        // in central's namespace is stable for the enrollment, not per-WS.
+        // Null-clearing on teardown caused dispatch to fall back to
+        // getDefaultNodeId() after idle close, which collides with central's
+        // own nodeId for Local and misdispatches cross-fleet traffic to the
+        // same-node path. A subsequent install with a different nodeId
+        // (e.g. re-enrollment) is detected by the setter's overwrite-warn.
         if (peerNodeId !== null) {
             meshService.setProxyTunnelSelfCentralNodeId(peerNodeId);
         }
         meshServiceCleanup = () => {
             meshService.setReverseDialer(null, localDialer);
-            if (peerNodeId !== null) {
-                meshService.setProxyTunnelSelfCentralNodeId(null);
-            }
         };
     } catch (err) {
         if (isDebugEnabled()) {
