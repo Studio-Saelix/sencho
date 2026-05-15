@@ -38,7 +38,8 @@ interface ServerHandle {
 async function startServer(): Promise<ServerHandle> {
     const server = http.createServer();
     server.on('upgrade', (req, socket, head) => {
-        if (req.url === '/api/mesh/proxy-tunnel') {
+        const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+        if (pathname === '/api/mesh/proxy-tunnel') {
             void handleMeshProxyTunnel(req, socket, head);
         } else {
             socket.destroy();
@@ -53,9 +54,9 @@ async function startServer(): Promise<ServerHandle> {
     };
 }
 
-function dialTunnel(port: number): Promise<WebSocket> {
+function dialTunnel(port: number, query: string = ''): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/api/mesh/proxy-tunnel`);
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/api/mesh/proxy-tunnel${query}`);
         ws.once('open', () => resolve(ws));
         ws.once('error', reject);
     });
@@ -75,6 +76,7 @@ beforeEach(() => {
     delete process.env.SENCHO_MODE;
     // Defensive: clear any reverse dialer left over from a prior test.
     MeshService.getInstance().setReverseDialer(null);
+    MeshService.getInstance().setProxyTunnelSelfCentralNodeId(null);
 });
 
 describe('handleMeshProxyTunnel', () => {
@@ -146,6 +148,108 @@ describe('handleMeshProxyTunnel', () => {
             await new Promise((r) => setTimeout(r, 30));
         } finally {
             await srv.close();
+        }
+    });
+
+    it('installs the central-namespace nodeId from the ?nodeId= query param', async () => {
+        const srv = await startServer();
+        try {
+            const ws = await dialTunnel(srv.port, '?nodeId=14');
+            await new Promise((r) => setTimeout(r, 20));
+            expect((MeshService.getInstance() as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBe(14);
+
+            ws.close(1000, 'test cleanup');
+            await new Promise((r) => setTimeout(r, 30));
+            // Tunnel close clears the value.
+            expect((MeshService.getInstance() as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBeNull();
+        } finally {
+            await srv.close();
+        }
+    });
+
+    it('does not install or reject when the nodeId query param is missing (warns and proceeds)', async () => {
+        const srv = await startServer();
+        try {
+            const ws = await dialTunnel(srv.port);
+            await new Promise((r) => setTimeout(r, 20));
+            // Upgrade succeeded (reverse dialer installed), but no nodeId
+            // is recorded because central did not pass it.
+            const dialer = (MeshService.getInstance() as unknown as { reverseDialer: unknown }).reverseDialer;
+            expect(dialer).not.toBeNull();
+            expect((MeshService.getInstance() as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBeNull();
+
+            ws.close(1000, 'test cleanup');
+            await new Promise((r) => setTimeout(r, 30));
+        } finally {
+            await srv.close();
+        }
+    });
+
+    it('ignores malformed nodeId query params (non-numeric, zero, negative, decimal, leading zeros, exponent, whitespace)', async () => {
+        const srv = await startServer();
+        try {
+            // Strict regex rejects everything that is not a positive
+            // decimal integer with no leading zero. parseInt would have
+            // silently truncated `14.5` to `14`, accepted `00014`, etc.
+            const cases = [
+                '?nodeId=abc', '?nodeId=0', '?nodeId=-3',
+                '?nodeId=14.5', '?nodeId=00014', '?nodeId=1e2',
+                '?nodeId=%2014', '?nodeId=14abc', '?nodeId=',
+            ];
+            for (const bogus of cases) {
+                const ws = await dialTunnel(srv.port, bogus);
+                await new Promise((r) => setTimeout(r, 20));
+                expect((MeshService.getInstance() as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBeNull();
+                ws.close(1000, 'test cleanup');
+                await new Promise((r) => setTimeout(r, 30));
+            }
+        } finally {
+            await srv.close();
+        }
+    });
+
+    it('setProxyTunnelSelfCentralNodeId warns on a non-null overwrite to a different value', () => {
+        const svc = MeshService.getInstance();
+        const warns: string[] = [];
+        const origWarn = console.warn;
+        console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(' ')); };
+        try {
+            svc.setProxyTunnelSelfCentralNodeId(14);
+            svc.setProxyTunnelSelfCentralNodeId(14); // same value: no warn
+            svc.setProxyTunnelSelfCentralNodeId(15); // different value: warn
+            svc.setProxyTunnelSelfCentralNodeId(null); // clear: no warn
+            svc.setProxyTunnelSelfCentralNodeId(20); // install after clear: no warn
+        } finally {
+            console.warn = origWarn;
+        }
+        const overwriteWarns = warns.filter((w) => w.includes('proxyTunnelSelfCentralNodeId overwritten'));
+        expect(overwriteWarns).toHaveLength(1);
+        expect(overwriteWarns[0]).toContain('14 -> 15');
+    });
+
+    it('a CAS-rejected reverse-dialer install does not leak the nodeId into MeshService', async () => {
+        const svc = MeshService.getInstance();
+        // Pre-seed the reverse-dialer slot so the handler's CAS install
+        // fails. The contract: the nodeId installer runs ONLY after the
+        // CAS install succeeds; a rejected upgrade must leave the
+        // identity slot unchanged.
+        const blockingDialer = { openMeshTcpStream: () => null };
+        svc.setReverseDialer(blockingDialer as unknown as Parameters<typeof svc.setReverseDialer>[0]);
+        try {
+            const srv = await startServer();
+            try {
+                const ws = new WebSocket(`ws://127.0.0.1:${srv.port}/api/mesh/proxy-tunnel?nodeId=14`);
+                const closeInfo = await new Promise<{ code: number }>((resolve, reject) => {
+                    ws.once('close', (code) => resolve({ code }));
+                    ws.once('error', reject);
+                });
+                expect(closeInfo.code).toBe(1013);
+                expect((svc as unknown as { proxyTunnelSelfCentralNodeId: number | null }).proxyTunnelSelfCentralNodeId).toBeNull();
+            } finally {
+                await srv.close();
+            }
+        } finally {
+            svc.setReverseDialer(null);
         }
     });
 

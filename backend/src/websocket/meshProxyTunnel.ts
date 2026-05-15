@@ -48,14 +48,38 @@ export async function handleMeshProxyTunnel(req: IncomingMessage, socket: Duplex
         return reject(socket, 404, 'Not Found');
     }
 
+    // Central appends `?nodeId=<central-namespace-id>` so this peer can tag
+    // its own MeshService with the right nodeId for `handleAccept` dispatch.
+    // The value is unsigned, but the Bearer credential at the upgrade has
+    // already proven the caller is the upstream central (auth + scope gate
+    // in `upgradeHandler.ts`); the query param's trust ceiling is the
+    // token's trust ceiling.
+    // Strict regex (no parseInt) so `?nodeId=14.5`, `?nodeId=00014`,
+    // `?nodeId=1e2`, leading whitespace, etc. are rejected rather than
+    // silently truncated.
+    let peerNodeId: number | null = null;
+    try {
+        const parsed = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`);
+        const raw = parsed.searchParams.get('nodeId');
+        if (raw != null && /^[1-9][0-9]*$/.test(raw)) {
+            const n = Number(raw);
+            if (Number.isSafeInteger(n)) peerNodeId = n;
+        }
+    } catch {
+        // Malformed URL; treat as missing param.
+    }
+    if (peerNodeId === null) {
+        console.warn('[MeshProxy] proxy-tunnel upgrade missing or malformed nodeId query param; reverse-direction mesh dispatch will be undefined until central upgrades');
+    }
+
     await new Promise<void>((resolve) => {
         wss.handleUpgrade(req, socket as Parameters<typeof wss.handleUpgrade>[1], head, (ws) => {
-            void attachSwitchboard(ws).finally(resolve);
+            void attachSwitchboard(ws, peerNodeId).finally(resolve);
         });
     });
 }
 
-async function attachSwitchboard(ws: WebSocket): Promise<void> {
+async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Promise<void> {
     let switchboard: TcpStreamSwitchboard | null = null;
     let meshServiceCleanup: (() => void) | null = null;
 
@@ -87,8 +111,17 @@ async function attachSwitchboard(ws: WebSocket): Promise<void> {
             switchboard = null;
             return;
         }
+        // Install central's view of this peer's nodeId so handleAccept
+        // dispatches cross-node aliases correctly. Done after setReverseDialer
+        // succeeds so a CAS-rejected tunnel does not leak nodeId state.
+        if (peerNodeId !== null) {
+            meshService.setProxyTunnelSelfCentralNodeId(peerNodeId);
+        }
         meshServiceCleanup = () => {
             meshService.setReverseDialer(null, localDialer);
+            if (peerNodeId !== null) {
+                meshService.setProxyTunnelSelfCentralNodeId(null);
+            }
         };
     } catch (err) {
         if (isDebugEnabled()) {
