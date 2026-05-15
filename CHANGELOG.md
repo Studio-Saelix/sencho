@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.78.1](https://github.com/Studio-Saelix/sencho/compare/v0.78.0...v0.78.1) (2026-05-15)
+
+
+### Fixed
+
+* **mesh:** persist proxy-tunnel self-id across bridge teardown ([#1060](https://github.com/Studio-Saelix/sencho/issues/1060)) ([f63ffdd](https://github.com/Studio-Saelix/sencho/commit/f63ffdd0989e5cce985869b653523d5e6d832897))
+
 ## [0.78.0](https://github.com/Studio-Saelix/sencho/compare/v0.77.1...v0.78.0) (2026-05-15)
 
 
