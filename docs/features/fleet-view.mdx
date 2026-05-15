@@ -61,12 +61,13 @@ The Fleet page has three tabs:
 
 ### Action buttons
 
-Two buttons sit in the top-right corner:
+Three buttons sit in the top-right corner:
 
 | Button | What it does |
 |--------|--------------|
 | **Check Updates** | Opens the Node Updates modal to view and apply Sencho version updates across your fleet (Skipper+) |
 | **Refresh** | Re-fetches data from all nodes. Shows a spinner while loading |
+| **Add node** | Opens the same Add Node dialog as Settings → Nodes so you can register a new node without leaving the Fleet page. Admin-only. After saving a remote proxy node, a connection test runs automatically and the result toasts in (success or saved-but-unreachable). |
 
 ## Community features
 
@@ -93,6 +94,18 @@ Each node appears as a card showing:
 Nodes with an available Sencho update also show an **Update to vX.Y.Z** button at the bottom of the card.
 
 Offline nodes are visually dimmed and show a "Node unreachable" placeholder instead of stats.
+
+### Node actions menu (admin)
+
+The kebab menu in the top-right of each card surfaces the same lifecycle actions you'd find in Settings → Nodes:
+
+| Action | Notes |
+|--------|-------|
+| **Edit node** | Opens the Edit dialog prefilled with the node's connection details. For proxy-mode remotes, saving with a changed API URL or token re-runs the connection test automatically. |
+| **Delete node** | Opens a destructive confirmation. The local (default) node has no Delete option. Deleting a remote only removes it from this console; the remote instance and its containers are untouched. |
+| **Cordon node** / **Uncordon node** | Marks the node unschedulable so new blueprint deployments skip it (Admiral). Existing deployments keep running. |
+
+The menu is admin-only. Non-admin users see no kebab on the card.
 
 ### Manual refresh
 
