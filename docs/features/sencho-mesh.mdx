@@ -105,7 +105,11 @@ A second toggle picks what the edges encode:
 
 Click any node card to open the opt-in sheet for that node. On each opted-in stack row the sheet shows a **Topology** button that opens a focused diagram for that one stack: the stack at the centre, every alias it publishes branching out, and a column of meshed consumer nodes with their tunnel state. Use it to confirm what a stack exposes and which peers can reach it.
 
-The graph reads the same `/mesh/status` and `/mesh/aliases` data the Table view does, so any opt-in or opt-out refreshes both views.
+In the stack diagram, *consumer nodes* are meshed peers that could reach this stack's aliases via DNS. Whether a container on a consumer actually dials an alias depends on the consumer's own opt-in stacks.
+
+The graph reads the same `/mesh/status` and `/mesh/aliases` data the Table view does, so any opt-in or opt-out refreshes both views. The Routing tab also refreshes both feeds every 30 seconds while the browser tab is in the foreground, so tunnel state changes and alias additions appear without a manual reload. Polling pauses automatically when the tab is hidden.
+
+The graph is designed for fleet sizes typical of self-hosted Compose setups (up to roughly 50 nodes). Larger fleets render but become visually dense; the Table view is the more readable surface for inventory at scale.
 
 ## V1 limitations
 
@@ -159,5 +163,17 @@ A few things are deliberately out of scope for the first release:
     - `remote does not support proxy mesh` — the remote Sencho is on a version that predates proxy-mode mesh. Update the remote and the badge clears on the next refresh.
     - `TLS handshake failed` — the remote serves a certificate Node's default trust store does not accept. Use a certificate issued by a trusted authority on the remote.
     - `api_url not set` or `api token missing` — the node was added without credentials. Edit the node in **Settings → Nodes** and supply the URL and token.
+  </Accordion>
+
+  <Accordion title="Stack topology sheet says 'No published mesh services'">
+    The stack is opted into the mesh but exposes no service ports that became aliases. The stack joins `sencho_mesh` (other meshed containers can talk to it directly by container name) but no fleet-wide hostname is published. To publish an alias, declare a port on a service in the stack's compose file and redeploy.
+  </Accordion>
+
+  <Accordion title="Graph reflects a stale node state">
+    The Routing tab polls `/mesh/status` and `/mesh/aliases` every 30 seconds while the browser tab is focused. To force an immediate refresh, leave and return to the Routing tab, or toggle any stack's mesh state to trigger an action-driven refresh. Polling pauses when the tab is hidden, so a long-dormant tab catches up on the first poll after it regains focus.
+  </Accordion>
+
+  <Accordion title="Graph mode is hard to read with a large fleet">
+    The diagram suits typical fleet sizes of up to roughly 50 nodes. Larger fleets render but the layout becomes dense. Use the Table view for inventory at scale and reach for Graph mode for spot checks of tunnel state and alias publication.
   </Accordion>
 </AccordionGroup>

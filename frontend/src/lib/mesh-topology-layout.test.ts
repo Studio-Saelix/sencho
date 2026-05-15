@@ -3,6 +3,13 @@ import {
     buildTunnelsGraph,
     buildAliasesGraph,
     buildStackTopologyGraph,
+    meshNodeStateEqual,
+    miniMapColorFor,
+    stacksKey,
+    MINIMAP_BRAND,
+    MINIMAP_WARNING,
+    MINIMAP_MUTED,
+    MINIMAP_DESTRUCTIVE,
 } from './mesh-topology-layout';
 import type { MeshAlias, MeshNodeStatus } from '@/types/mesh';
 
@@ -30,6 +37,74 @@ function makeAlias(over: Partial<MeshAlias> & Pick<MeshAlias, 'host' | 'nodeId'>
         port: over.port ?? 80,
     };
 }
+
+describe('stacksKey', () => {
+    it('returns the same key for the same membership regardless of order', () => {
+        expect(stacksKey(['a', 'b', 'c'])).toBe(stacksKey(['c', 'a', 'b']));
+    });
+
+    it('differs when membership differs even with the same count', () => {
+        expect(stacksKey(['a', 'b'])).not.toBe(stacksKey(['a', 'c']));
+    });
+
+    it('returns empty string for empty list', () => {
+        expect(stacksKey([])).toBe('');
+    });
+});
+
+describe('meshNodeStateEqual', () => {
+    const base = makeNode({ nodeId: 1, nodeName: 'n', reachableMode: 'pilot', enabled: true, pilotConnected: true, optedInStacks: ['a', 'b'] });
+
+    it('returns true when scalar fields and stack membership match', () => {
+        const a = { ...base };
+        const b = { ...base, optedInStacks: ['b', 'a'] };
+        expect(meshNodeStateEqual(a, b)).toBe(true);
+    });
+
+    it('detects a stack swap that preserves the count', () => {
+        const a = { ...base };
+        const b = { ...base, optedInStacks: ['a', 'c'] };
+        expect(meshNodeStateEqual(a, b)).toBe(false);
+    });
+
+    it('detects a reachable-mode flip', () => {
+        const a = { ...base };
+        const b = { ...base, reachableMode: 'unreachable' as const };
+        expect(meshNodeStateEqual(a, b)).toBe(false);
+    });
+
+    it('detects a pilot disconnect', () => {
+        const a = { ...base };
+        const b = { ...base, pilotConnected: false };
+        expect(meshNodeStateEqual(a, b)).toBe(false);
+    });
+});
+
+describe('miniMapColorFor', () => {
+    it('returns destructive for unreachable', () => {
+        const node = makeNode({ nodeId: 1, nodeName: 'n', reachableMode: 'unreachable' });
+        expect(miniMapColorFor(node)).toBe(MINIMAP_DESTRUCTIVE);
+    });
+
+    it('returns warning for pilot that is not connected', () => {
+        const node = makeNode({ nodeId: 1, nodeName: 'n', reachableMode: 'pilot', enabled: true, pilotConnected: false });
+        expect(miniMapColorFor(node)).toBe(MINIMAP_WARNING);
+    });
+
+    it('returns muted for an enabled-false pilot that is connected', () => {
+        const node = makeNode({ nodeId: 1, nodeName: 'n', reachableMode: 'pilot', enabled: false, pilotConnected: true });
+        expect(miniMapColorFor(node)).toBe(MINIMAP_MUTED);
+    });
+
+    it('returns brand for a healthy meshed remote', () => {
+        const node = makeNode({ nodeId: 1, nodeName: 'n', reachableMode: 'pilot', enabled: true, pilotConnected: true });
+        expect(miniMapColorFor(node)).toBe(MINIMAP_BRAND);
+    });
+
+    it('returns muted when node is undefined', () => {
+        expect(miniMapColorFor(undefined)).toBe(MINIMAP_MUTED);
+    });
+});
 
 describe('buildTunnelsGraph', () => {
     it('returns empty result when no nodes', () => {

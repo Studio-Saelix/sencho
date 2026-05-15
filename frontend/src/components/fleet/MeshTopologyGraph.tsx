@@ -18,14 +18,11 @@ import { cn } from '@/lib/utils';
 import {
     buildTunnelsGraph,
     buildAliasesGraph,
+    meshNodeStateEqual,
+    miniMapColorFor,
     type MeshNodeData,
 } from '@/lib/mesh-topology-layout';
 import type { MeshAlias, MeshNodeStatus, MeshReachableMode } from '@/types/mesh';
-
-const MINIMAP_BRAND = 'oklch(0.78 0.11 195)';
-const MINIMAP_WARNING = 'oklch(0.75 0.14 75)';
-const MINIMAP_MUTED = 'oklch(0.55 0 0)';
-const MINIMAP_DESTRUCTIVE = 'oklch(0.65 0.2 28)';
 
 export type MeshGraphEdgeMode = 'tunnels' | 'aliases';
 
@@ -120,7 +117,7 @@ function MeshNodeCard({ data, selected }: { data: MeshNodeData; selected?: boole
             <div className="px-3 py-1.5 font-mono text-[10px] tabular-nums text-muted-foreground">
                 {node.activeStreamCount} {streamLabel}
                 {node.reachableMode === 'unreachable' && node.reachableReason ? (
-                    <span className="ml-2 text-destructive truncate">· {node.reachableReason}</span>
+                    <span className="ml-2 text-destructive truncate">{' · '}{node.reachableReason}</span>
                 ) : null}
             </div>
 
@@ -133,24 +130,10 @@ const nodeTypes: NodeTypes = {
     meshNode: MeshNodeCard,
 };
 
-function nodeStateEqual(a: MeshNodeStatus, b: MeshNodeStatus): boolean {
-    return a.nodeId === b.nodeId
-        && a.enabled === b.enabled
-        && a.reachableMode === b.reachableMode
-        && a.pilotConnected === b.pilotConnected
-        && a.reachableReason === b.reachableReason
-        && a.activeStreamCount === b.activeStreamCount
-        && a.optedInStacks.length === b.optedInStacks.length;
-}
-
 export function MeshTopologyGraph({ status, aliases, edgeMode, onNodeClick }: MeshTopologyGraphProps) {
-    // Mirror FleetTopology's onNodeClick ref pattern: handlers may change on every
-    // parent render, but ReactFlow's onNodeClick is stable, so route through a ref
-    // to avoid recreating the callback (and thus rebuilding the flow) on every render.
     const onNodeClickRef = useRef(onNodeClick);
     onNodeClickRef.current = onNodeClick;
 
-    // Shape key: relayout only when nodes are added/removed or reachability flips.
     const shapeKey = useMemo(
         () => status
             .map((n) => `${n.nodeId}:${n.reachableMode}:${n.enabled ? 1 : 0}:${n.pilotConnected ? 1 : 0}`)
@@ -168,15 +151,12 @@ export function MeshTopologyGraph({ status, aliases, edgeMode, onNodeClick }: Me
             : buildAliasesGraph(status, aliases);
         setFlowNodes(result.nodes);
         setFlowEdges(result.edges);
-        // Intentionally exclude `status` and `aliases` raw refs so we only relayout when
-        // the shape (or selected edgeMode) changes; per-poll metric tweaks fall through
-        // the live-update effect below without resetting user-dragged positions.
+        // Intentionally exclude status/aliases raw refs so we only relayout when
+        // shape (or edgeMode) changes; per-poll metric tweaks fall through the
+        // live-update effect below without resetting user-dragged positions.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [shapeKey, edgeMode, setFlowNodes, setFlowEdges]);
 
-    // Refresh node card data on prop change without touching positions. The /mesh/status
-    // poll yields fresh JSON objects every cycle, so a reference equality check would
-    // replace data on every poll and defeat the purpose. Compare by value instead.
     useEffect(() => {
         setFlowNodes((current) => current.map((flowNode) => {
             const next = status.find((n) => String(n.nodeId) === flowNode.id);
@@ -188,11 +168,11 @@ export function MeshTopologyGraph({ status, aliases, edgeMode, onNodeClick }: Me
             if (
                 existing
                 && existing.aliasCount === aliasCount
-                && nodeStateEqual(existing.node, next)
+                && meshNodeStateEqual(existing.node, next)
             ) {
                 return flowNode;
             }
-            return { ...flowNode, data: { node: next, aliasCount, isOwnerView: false } satisfies MeshNodeData };
+            return { ...flowNode, data: { node: next, aliasCount } satisfies MeshNodeData };
         }));
     }, [status, aliases, edgeMode, setFlowNodes]);
 
@@ -205,12 +185,7 @@ export function MeshTopologyGraph({ status, aliases, edgeMode, onNodeClick }: Me
 
     const miniMapNodeColor = useCallback((n: Node) => {
         const data = n.data as MeshNodeData | undefined;
-        const topo = data?.node;
-        if (!topo) return MINIMAP_MUTED;
-        if (topo.reachableMode === 'unreachable') return MINIMAP_DESTRUCTIVE;
-        if (topo.reachableMode === 'pilot' && !topo.pilotConnected) return MINIMAP_WARNING;
-        if (!topo.enabled) return MINIMAP_MUTED;
-        return MINIMAP_BRAND;
+        return miniMapColorFor(data?.node);
     }, []);
 
     return (
