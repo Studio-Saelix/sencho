@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.77.0](https://github.com/Studio-Saelix/sencho/compare/v0.76.9...v0.77.0) (2026-05-15)
+
+
+### Added
+
+* **mesh:** route mesh traffic over Distributed API remotes ([#1048](https://github.com/Studio-Saelix/sencho/issues/1048)) ([a38a3e0](https://github.com/Studio-Saelix/sencho/commit/a38a3e022696019e6aa529f10fbffc27b1347c53))
+
 ## [0.76.9](https://github.com/Studio-Saelix/sencho/compare/v0.76.8...v0.76.9) (2026-05-14)
 
 
