@@ -13,17 +13,26 @@ import {
     type NodeTypes,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Server, Zap } from 'lucide-react';
+import { Server, Zap, Network, Layers, Move, Ban, Clock, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
     layoutFleetGraph,
     type FleetNodeData,
     type FleetTopologyNode,
+    type LayoutMode,
+    type SavedPositions,
 } from '@/lib/fleet-topology-layout';
+import { NodeLabelPill } from '@/components/blueprints/NodeLabelPill';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 interface FleetTopologyProps {
     nodes: FleetTopologyNode[];
     onNodeClick?: (nodeId: number) => void;
+    isPaid: boolean;
+    mode: LayoutMode;
+    onModeChange: (mode: LayoutMode) => void;
+    savedPositions: SavedPositions;
+    onPositionsChange: (positions: SavedPositions) => void;
 }
 
 // Raw oklch values for MiniMap coloring (ReactFlow cannot resolve CSS vars
@@ -31,6 +40,9 @@ interface FleetTopologyProps {
 const MINIMAP_BRAND = 'oklch(0.78 0.11 195)';
 const MINIMAP_WARNING = 'oklch(0.75 0.14 75)';
 const MINIMAP_MUTED = 'oklch(0.55 0 0)';
+
+const MAX_INLINE_LABELS = 3;
+const PILOT_STALE_MS = 60_000;
 
 function dotClass(node: FleetTopologyNode): string {
     if (node.status !== 'online') return 'bg-destructive';
@@ -64,16 +76,33 @@ function MetricBar({ label, value, muted }: { label: string; value: number; mute
     );
 }
 
+function formatRelative(timestamp: number): string {
+    const diff = Date.now() - timestamp;
+    if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
+    if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
+    if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
+    return `${Math.round(diff / 86_400_000)}d ago`;
+}
+
 function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boolean }) {
     const node = data.node;
     const isLocal = node.type === 'local';
     const isOffline = node.status !== 'online';
     const stackLabel = node.stackCount === 1 ? 'stack' : 'stacks';
+    const labels = node.labels ?? [];
+    const visibleLabels = labels.slice(0, MAX_INLINE_LABELS);
+    const overflowLabels = labels.length - visibleLabels.length;
+    const cordoned = Boolean(node.cordoned);
+    const pilotStale = !isOffline
+        && node.nodeMode === 'pilot_agent'
+        && typeof node.pilotLastSeen === 'number'
+        && Date.now() - node.pilotLastSeen > PILOT_STALE_MS;
+    const showLatency = !isLocal && !isOffline && typeof node.latencyMs === 'number';
 
     return (
         <div
             className={cn(
-                'w-[240px] rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel transition-colors',
+                'w-[240px] rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel transition-colors overflow-hidden',
                 'hover:border-t-card-border-hover cursor-pointer',
                 isLocal && 'ring-1 ring-brand/40',
                 isOffline && 'opacity-70',
@@ -82,12 +111,44 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
         >
             <Handle type="target" position={Position.Left} className="!bg-muted-foreground !w-1.5 !h-1.5 !border-0" />
 
+            {cordoned && (
+                <TooltipProvider>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <div className="flex items-center gap-1.5 px-3 py-1 bg-warning/15 border-b border-warning/30">
+                                <Ban className="h-3 w-3 text-warning" strokeWidth={2} />
+                                <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-warning">
+                                    Cordoned
+                                </span>
+                            </div>
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                            {node.cordonedReason || 'Cordoned: scheduling paused.'}
+                        </TooltipContent>
+                    </Tooltip>
+                </TooltipProvider>
+            )}
+
             <div className="flex items-center gap-2 px-3 py-1.5 border-b border-card-border">
                 <span aria-hidden="true" className={cn('h-2 w-2 rounded-full shrink-0', dotClass(node))} />
                 <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground">
                     {isOffline ? 'Offline' : node.critical ? 'Critical' : 'Online'}
                 </span>
                 <span className="ml-auto flex items-center gap-1.5">
+                    {pilotStale && (
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Clock className="h-3 w-3 text-warning" strokeWidth={2} aria-label="Pilot heartbeat stale" />
+                                </TooltipTrigger>
+                                <TooltipContent side="top">
+                                    {node.pilotLastSeen
+                                        ? `Pilot heartbeat ${formatRelative(node.pilotLastSeen)}`
+                                        : 'Pilot heartbeat stale'}
+                                </TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
+                    )}
                     {node.critical && !isOffline ? (
                         <Zap className="h-3 w-3 text-warning" strokeWidth={2} aria-label="Critical" />
                     ) : null}
@@ -105,14 +166,42 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
                 <span className="text-xs font-medium text-stat-value truncate">{node.name}</span>
             </div>
 
+            {labels.length > 0 && (
+                <div className="flex flex-wrap gap-1 px-3 py-1.5 border-b border-card-border">
+                    {visibleLabels.map(l => (
+                        <NodeLabelPill key={l} label={l} size="sm" />
+                    ))}
+                    {overflowLabels > 0 && (
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <span className="inline-flex items-center rounded-md border border-card-border bg-muted/40 px-1.5 py-0 font-mono text-[10px] text-muted-foreground">
+                                        +{overflowLabels}
+                                    </span>
+                                </TooltipTrigger>
+                                <TooltipContent side="top">
+                                    {labels.slice(MAX_INLINE_LABELS).join(', ')}
+                                </TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
+                    )}
+                </div>
+            )}
+
             <div className="px-3 py-2 space-y-1 border-b border-card-border">
                 <MetricBar label="CPU" value={node.cpuPercent} muted={isOffline} />
                 <MetricBar label="MEM" value={node.memPercent} muted={isOffline} />
                 <MetricBar label="DISK" value={node.diskPercent} muted={isOffline} />
             </div>
 
-            <div className="px-3 py-1.5 font-mono text-[10px] tabular-nums text-muted-foreground">
-                {node.stackCount} {stackLabel} · {node.runningCount} running
+            <div className="flex items-center justify-between px-3 py-1.5 font-mono text-[10px] tabular-nums text-muted-foreground">
+                <span>{node.stackCount} {stackLabel} · {node.runningCount} running</span>
+                {showLatency && (
+                    <span className="inline-flex items-center gap-1">
+                        <Activity className="h-2.5 w-2.5" strokeWidth={2} />
+                        {Math.round(node.latencyMs!)}ms
+                    </span>
+                )}
             </div>
 
             <Handle type="source" position={Position.Right} className="!bg-muted-foreground !w-1.5 !h-1.5 !border-0" />
@@ -124,26 +213,114 @@ const nodeTypes: NodeTypes = {
     fleetNode: FleetNodeCard,
 };
 
-export function FleetTopology({ nodes: fleetNodes, onNodeClick }: FleetTopologyProps) {
+interface ModeButtonSpec {
+    mode: LayoutMode;
+    label: string;
+    description: string;
+    icon: typeof Network;
+}
+
+const MODE_BUTTONS: ModeButtonSpec[] = [
+    { mode: 'hub', label: 'Hub', description: 'Local node at the centre, remotes radiating out.', icon: Network },
+    { mode: 'grouped', label: 'Grouped', description: 'Cluster nodes by their primary label.', icon: Layers },
+    { mode: 'free', label: 'Free', description: 'Drag nodes anywhere; positions persist in this browser.', icon: Move },
+];
+
+function TopologyToolbar({
+    mode,
+    onModeChange,
+}: {
+    mode: LayoutMode;
+    onModeChange: (mode: LayoutMode) => void;
+}) {
+    return (
+        <div className="flex items-center gap-1.5 px-3 py-2 border-b border-card-border bg-card/60">
+            <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground mr-1">
+                Layout
+            </span>
+            {MODE_BUTTONS.map(spec => {
+                const Icon = spec.icon;
+                const active = mode === spec.mode;
+                return (
+                    <TooltipProvider key={spec.mode}>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <button
+                                    type="button"
+                                    onClick={() => onModeChange(spec.mode)}
+                                    aria-pressed={active}
+                                    className={cn(
+                                        'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-mono uppercase tracking-[0.12em] transition-colors',
+                                        active
+                                            ? 'border-brand/60 bg-brand/15 text-brand'
+                                            : 'border-card-border text-muted-foreground hover:text-foreground hover:bg-muted/40',
+                                    )}
+                                >
+                                    <Icon className="h-3 w-3" strokeWidth={2} />
+                                    {spec.label}
+                                </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="bottom">
+                                {spec.description}
+                            </TooltipContent>
+                        </Tooltip>
+                    </TooltipProvider>
+                );
+            })}
+        </div>
+    );
+}
+
+export function FleetTopology({
+    nodes: fleetNodes,
+    onNodeClick,
+    isPaid,
+    mode,
+    onModeChange,
+    savedPositions,
+    onPositionsChange,
+}: FleetTopologyProps) {
     const onNodeClickRef = useRef(onNodeClick);
     onNodeClickRef.current = onNodeClick;
 
+    const onPositionsChangeRef = useRef(onPositionsChange);
+    onPositionsChangeRef.current = onPositionsChange;
+
+    const savedPositionsRef = useRef(savedPositions);
+    savedPositionsRef.current = savedPositions;
+
+    // Defensive: a Community user who somehow lands in a paid mode (older
+    // localStorage value, manual edit) gets snapped back to Hub. The toolbar
+    // also hides these modes for them, so this is a belt-and-suspenders guard.
+    const effectiveMode: LayoutMode = useMemo(() => {
+        if ((mode === 'grouped' || mode === 'free') && !isPaid) return 'hub';
+        return mode;
+    }, [mode, isPaid]);
+
     // Only re-layout when the topology *shape* changes (nodes added/removed,
-    // type or status flips). Metric value changes alone must not snap
-    // user-dragged nodes back to the dagre-computed positions on every poll.
+    // type/status/label flips, mode flips). Metric value changes alone must
+    // not snap user-dragged nodes back to dagre-computed positions on every
+    // poll.
     const shapeKey = useMemo(
-        () => fleetNodes.map(n => `${n.id}:${n.type}:${n.status}`).sort().join('|'),
-        [fleetNodes],
+        () => effectiveMode + '|' + fleetNodes
+            .map(n => `${n.id}:${n.type}:${n.status}:${(n.labels ?? []).slice().sort().join(',')}`)
+            .sort()
+            .join('|'),
+        [fleetNodes, effectiveMode],
     );
 
     const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<Node>([]);
     const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
     useEffect(() => {
-        const { nodes: nextNodes, edges: nextEdges } = layoutFleetGraph(fleetNodes);
+        const { nodes: nextNodes, edges: nextEdges } = layoutFleetGraph(fleetNodes, {
+            mode: effectiveMode,
+            savedPositions: savedPositionsRef.current,
+        });
         setFlowNodes(nextNodes);
         setFlowEdges(nextEdges);
-        // fleetNodes is intentionally excluded: we only relayout on shape changes.
+        // fleetNodes is referenced via shapeKey; savedPositions is read from
+        // a ref so persisted drags don't trigger a relayout cycle.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [shapeKey, setFlowNodes, setFlowEdges]);
 
@@ -152,16 +329,24 @@ export function FleetTopology({ nodes: fleetNodes, onNodeClick }: FleetTopologyP
         setFlowNodes(current => current.map(flowNode => {
             const next = fleetNodes.find(n => String(n.id) === flowNode.id);
             if (!next) return flowNode;
-            const existing = (flowNode.data as FleetNodeData | undefined)?.node;
+            const existingData = flowNode.data as FleetNodeData | undefined;
+            const existing = existingData?.node;
             if (existing && existing.cpuPercent === next.cpuPercent
                 && existing.memPercent === next.memPercent
                 && existing.diskPercent === next.diskPercent
                 && existing.stackCount === next.stackCount
                 && existing.runningCount === next.runningCount
-                && existing.critical === next.critical) {
+                && existing.critical === next.critical
+                && existing.cordoned === next.cordoned
+                && existing.cordonedReason === next.cordonedReason
+                && existing.latencyMs === next.latencyMs
+                && existing.pilotLastSeen === next.pilotLastSeen) {
                 return flowNode;
             }
-            return { ...flowNode, data: { node: next } satisfies FleetNodeData };
+            return {
+                ...flowNode,
+                data: { node: next, clusterLabel: existingData?.clusterLabel } satisfies FleetNodeData,
+            };
         }));
     }, [fleetNodes, setFlowNodes]);
 
@@ -171,6 +356,25 @@ export function FleetTopology({ nodes: fleetNodes, onNodeClick }: FleetTopologyP
             onNodeClickRef.current?.(id);
         }
     }, []);
+
+    const handleNodeDragStop = useCallback((_event: React.MouseEvent, _node: Node, allDragged: Node[]) => {
+        if (effectiveMode !== 'free') return;
+        setFlowNodes(current => {
+            const dragged = new Map(allDragged.map(n => [n.id, n.position]));
+            const validIds = new Set(current.map(n => n.id));
+            const merged: SavedPositions = {};
+            for (const n of current) {
+                const pos = dragged.get(n.id) ?? n.position;
+                merged[n.id] = { x: pos.x, y: pos.y };
+            }
+            // Drop any stale saved entries for nodes no longer present.
+            for (const key of Object.keys(savedPositionsRef.current)) {
+                if (!validIds.has(key)) delete merged[key];
+            }
+            onPositionsChangeRef.current(merged);
+            return current;
+        });
+    }, [effectiveMode, setFlowNodes]);
 
     const miniMapNodeColor = useCallback((n: Node) => {
         const data = n.data as FleetNodeData | undefined;
@@ -188,8 +392,17 @@ export function FleetTopology({ nodes: fleetNodes, onNodeClick }: FleetTopologyP
         );
     }
 
+    const allRemotesUnlabeled = effectiveMode === 'grouped'
+        && fleetNodes.filter(n => n.type !== 'local').every(n => (n.labels ?? []).length === 0);
+
     return (
         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+            {isPaid && <TopologyToolbar mode={effectiveMode} onModeChange={onModeChange} />}
+            {isPaid && allRemotesUnlabeled && (
+                <div className="px-3 py-1.5 text-[11px] text-muted-foreground bg-muted/30 border-b border-card-border">
+                    No node labels assigned. Add labels in Settings · Nodes to see remotes cluster.
+                </div>
+            )}
             <div className="h-[560px] w-full">
                 <ReactFlow
                     nodes={flowNodes}
@@ -197,6 +410,7 @@ export function FleetTopology({ nodes: fleetNodes, onNodeClick }: FleetTopologyP
                     onNodesChange={onNodesChange}
                     onEdgesChange={onEdgesChange}
                     onNodeClick={handleNodeClick}
+                    onNodeDragStop={handleNodeDragStop}
                     nodeTypes={nodeTypes}
                     fitView
                     fitViewOptions={{ padding: 0.2 }}

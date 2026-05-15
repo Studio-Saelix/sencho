@@ -33,11 +33,23 @@ The top of the page is a status masthead that summarises the state of the entire
 Below the masthead, switch between two layouts:
 
 - **Grid** (default): one card per node. The local node is pinned at the top with a cyan accent rail and a ★ Local badge so it is never confused with a remote.
-- **Topology**: an interactive hub-and-spoke diagram with the local node on the left and remotes radiating to the right. Each node renders as a rack card with a status pill (Online, Critical, or Offline), a Local or Remote badge, CPU, memory, and disk bars, and a stack and running-container summary. The local node is framed with a cyan ring; critical nodes show a lightning icon; offline nodes are muted. Connector lines colour by link health (cyan when online, amber when critical, dashed when offline). Pan, zoom, drag nodes, and use the minimap to navigate large fleets. Click a node to jump to its details.
+- **Topology**: an interactive node-map view. Each node renders as a rack card with a status pill (Online, Critical, or Offline), a Local or Remote badge, CPU, memory, and disk bars, and a stack and running-container summary. Online remotes also show their gateway round-trip latency; cordoned nodes carry an amber **Cordoned** banner; pilot-agent nodes whose heartbeat has gone stale flag a small clock glyph. The local node is framed with a cyan ring. Connector lines colour by link health (cyan when online, amber when critical, dashed when offline). Pan, zoom, and use the minimap to navigate large fleets. Click a node to jump to its details.
 
 <Frame>
   <img src="/images/fleet-view/fleet-topology.png" alt="Fleet Topology view showing the local node connected to a remote, each rendered as a rack card with CPU, memory, and disk bars" />
 </Frame>
+
+#### Topology layout modes (Skipper+)
+
+A toolbar at the top of the topology canvas offers three layouts. Pick the one that matches how you reason about your fleet.
+
+| Mode | What it does |
+|------|--------------|
+| **Hub** | Local node on the left; remotes radiate to the right. Best when you have a handful of nodes and want the gateway anchored. |
+| **Grouped** | Remotes cluster by their primary node label (alphabetically first when a node has multiple). The local node sits in its own cluster. Use this to read environment, region, or role groupings at a glance. Nodes without any label fall into an Unlabeled cluster. |
+| **Free** | Drag any node anywhere on the canvas. Positions persist in this browser, so the arrangement is there when you come back. |
+
+Assign labels in **Settings → Nodes** to drive Grouped mode. Each node accepts multiple labels; the alphabetically first one is its cluster.
 
 ### Tabs
 
@@ -262,3 +274,17 @@ This means the gateway could not connect to the remote node's `/api/meta` endpoi
 ### Update button returns "Admin access required"
 
 Fleet update operations (individual updates, Update All) require an admin account. If you see a 403 error when clicking **Update**, ask your Sencho administrator to either grant you admin privileges or perform the update on your behalf.
+
+### Free-mode topology positions don't persist
+
+Free mode stores node positions in your browser's local storage. The arrangement is per-browser, not synced across devices or users. If positions reset on reload, common causes are:
+
+- **Browser local storage is disabled** (private/incognito windows, strict tracking-prevention modes). Sencho falls back to in-memory state for the session, but nothing carries over.
+- **Storage was cleared** by browser cleanup tools, profile reset, or by manually clearing site data.
+- **A different browser or profile** is being used. Each browser keeps its own arrangement.
+
+To verify storage is writable, open DevTools → Application → Local Storage on the Sencho origin and confirm the `sencho-topology-preferences` key exists after switching modes or dragging a node.
+
+### Grouped topology shows everything in one Unlabeled cluster
+
+Grouped mode clusters remote nodes by their primary node label. When no remotes carry any labels, every remote falls into the **Unlabeled** cluster and the canvas looks similar to Hub mode. A hint banner above the canvas points to **Settings → Nodes** where labels are managed. Add at least one label to two or more remotes and reopen the topology to see the clusters split.

@@ -12,6 +12,7 @@ import { useFleetPreferences } from './FleetView/hooks/useFleetPreferences';
 import { useFleetUpdateStatus } from './FleetView/hooks/useFleetUpdateStatus';
 import { useFleetPolling } from './FleetView/hooks/useFleetPolling';
 import { useFleetOverview } from './FleetView/hooks/useFleetOverview';
+import { useTopologyPreferences } from '@/hooks/useTopologyPreferences';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { springs } from '@/lib/motion';
@@ -36,6 +37,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
     const overview = useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses: updateStatus.updateStatuses });
+    const topology = useTopologyPreferences();
 
     useFleetPolling({
         fetchOverview: overview.fetchOverview,
@@ -162,6 +164,11 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         onRetryUpdate={updateStatus.retryNodeUpdate}
                         onDismissUpdate={updateStatus.dismissNodeUpdate}
                         onCordonChange={() => { void overview.fetchOverview(true); }}
+                        isPaid={isPaid}
+                        topologyMode={topology.prefs.mode}
+                        onTopologyModeChange={topology.setMode}
+                        topologyPositions={topology.prefs.positions}
+                        onTopologyPositionsChange={topology.setPositions}
                     />
                 </TabsContent>
 

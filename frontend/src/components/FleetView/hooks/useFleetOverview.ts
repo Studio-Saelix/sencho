@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
 import { useFleetLabels, labelPaletteKey } from './useFleetLabels';
+import { useNodeLabels } from './useNodeLabels';
 import { isCritical, getNodeCpu, getNodeMem, getNodeDisk } from '../nodeUtils';
 import type { FleetNode, ViewMode, FleetPreferences, NodeUpdateStatus } from '../types';
 
@@ -34,6 +35,7 @@ export function useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses }:
     const abortRef = useRef<AbortController | null>(null);
 
     const { fleetPalette, fleetStackLabelMap } = useFleetLabels({ isPaid, nodes });
+    const { labelsByNodeId, distinctLabels, isAvailable: nodeLabelsAvailable } = useNodeLabels({ isPaid, nodes });
 
     const fetchOverview = useCallback(async (showRefresh = false) => {
         abortRef.current?.abort();
@@ -164,8 +166,14 @@ export function useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses }:
             stackCount: n.stacks?.length ?? 0,
             runningCount: n.stats?.active ?? 0,
             critical: n.status === 'online' && isCritical(n),
+            labels: labelsByNodeId[n.id] ?? [],
+            cordoned: n.cordoned,
+            cordonedReason: n.cordoned_reason,
+            latencyMs: n.latency_ms ?? null,
+            pilotLastSeen: n.pilot_last_seen ?? null,
+            nodeMode: n.mode ?? null,
         })),
-        [processedNodes]
+        [processedNodes, labelsByNodeId]
     );
     const allNodes = useMemo(
         () => (localNode ? [localNode, ...remoteNodes] : remoteNodes),
@@ -207,6 +215,9 @@ export function useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses }:
         updateStatusMap,
         fleetPalette,
         fleetStackLabelMap,
+        labelsByNodeId,
+        distinctNodeLabels: distinctLabels,
+        nodeLabelsAvailable,
         activeFilterCount,
         clearFilters,
     };
