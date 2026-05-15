@@ -2,13 +2,24 @@ import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { Button } from '@/components/ui/button';
-import { ArrowLeftRight, Loader2, ScrollText } from 'lucide-react';
+import { ArrowLeftRight, Loader2, ScrollText, Table2, Network } from 'lucide-react';
 import { RoutingNodeCard } from './RoutingNodeCard';
 import { MeshOptInSheet } from './MeshOptInSheet';
 import { MeshRouteDetailSheet } from './MeshRouteDetailSheet';
 import { MeshDiagnosticsSheet } from './MeshDiagnosticsSheet';
 import { MeshActivitySheet } from './MeshActivitySheet';
+import { MeshTopologyGraph, type MeshGraphEdgeMode } from './MeshTopologyGraph';
+import { MeshStackTopologySheet } from './MeshStackTopologySheet';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import type { MeshAlias, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
+
+type RoutingViewMode = 'table' | 'graph';
+
+interface TopologyStackTarget {
+    nodeId: number;
+    nodeName: string;
+    stack: string;
+}
 
 export function RoutingTab() {
     const [status, setStatus] = useState<MeshNodeStatus[]>([]);
@@ -18,6 +29,9 @@ export function RoutingTab() {
     const [diagnosticsNode, setDiagnosticsNode] = useState<{ id: number; name: string } | null>(null);
     const [routeDetailAlias, setRouteDetailAlias] = useState<string | null>(null);
     const [activityOpen, setActivityOpen] = useState(false);
+    const [viewMode, setViewMode] = useState<RoutingViewMode>('table');
+    const [edgeMode, setEdgeMode] = useState<MeshGraphEdgeMode>('tunnels');
+    const [topologyStack, setTopologyStack] = useState<TopologyStackTarget | null>(null);
 
     const refresh = useCallback(async () => {
         try {
@@ -57,6 +71,12 @@ export function RoutingTab() {
             toast.error(`Probe failed: ${(err as Error).message}`);
         }
     }, []);
+
+    const handleGraphNodeClick = useCallback((nodeId: number) => {
+        const target = status.find((s) => s.nodeId === nodeId);
+        if (!target) return;
+        setOptInNode({ id: target.nodeId, name: target.nodeName });
+    }, [status]);
 
     const totalAliases = aliases.length;
     const meshedNodes = status.filter((s) => s.enabled).length;
@@ -121,6 +141,10 @@ export function RoutingTab() {
                     diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                     routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
                     activityOpen={activityOpen} setActivityOpen={setActivityOpen}
+                    topologyStack={topologyStack}
+                    setTopologyStack={setTopologyStack}
+                    status={status}
+                    aliases={aliases}
                     onChanged={() => { void refresh(); }}
                 />
             </div>
@@ -130,25 +154,60 @@ export function RoutingTab() {
     return (
         <div className="space-y-4">
             <RoutingMasthead meshedNodes={meshedNodes} reachableNodes={reachableNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {status.map((s) => (
-                    <RoutingNodeCard
-                        key={s.nodeId}
-                        status={s}
-                        aliases={aliases}
-                        onAddStack={() => setOptInNode({ id: s.nodeId, name: s.nodeName })}
-                        onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
-                        onShowAlias={(alias) => setRouteDetailAlias(alias)}
-                        onTestUpstream={testUpstream}
-                        onChanged={() => { void refresh(); }}
+            <div className="flex flex-wrap items-center gap-3">
+                <SegmentedControl<RoutingViewMode>
+                    value={viewMode}
+                    onChange={setViewMode}
+                    ariaLabel="Routing view mode"
+                    options={[
+                        { value: 'table', label: 'Table', icon: Table2 },
+                        { value: 'graph', label: 'Graph', icon: Network },
+                    ]}
+                />
+                {viewMode === 'graph' && (
+                    <SegmentedControl<MeshGraphEdgeMode>
+                        value={edgeMode}
+                        onChange={setEdgeMode}
+                        ariaLabel="Mesh graph edge mode"
+                        options={[
+                            { value: 'tunnels', label: 'Tunnels' },
+                            { value: 'aliases', label: 'Aliases', badge: totalAliases },
+                        ]}
                     />
-                ))}
+                )}
             </div>
+            {viewMode === 'table' ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {status.map((s) => (
+                        <RoutingNodeCard
+                            key={s.nodeId}
+                            status={s}
+                            aliases={aliases}
+                            onAddStack={() => setOptInNode({ id: s.nodeId, name: s.nodeName })}
+                            onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
+                            onShowAlias={(alias) => setRouteDetailAlias(alias)}
+                            onTestUpstream={testUpstream}
+                            onChanged={() => { void refresh(); }}
+                        />
+                    ))}
+                </div>
+            ) : (
+                <MeshTopologyGraph
+                    status={status}
+                    aliases={aliases}
+                    edgeMode={edgeMode}
+                    onNodeClick={handleGraphNodeClick}
+                />
+            )}
             <SheetsRoot
                 optInNode={optInNode} setOptInNode={setOptInNode}
                 diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                 routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
                 activityOpen={activityOpen} setActivityOpen={setActivityOpen}
+                topologyStack={topologyStack}
+                setTopologyStack={setTopologyStack}
+                status={status}
+                aliases={aliases}
                 onChanged={() => { void refresh(); }}
             />
         </div>
@@ -190,17 +249,26 @@ function SheetsRoot(props: {
     setRouteDetailAlias: (v: string | null) => void;
     activityOpen: boolean;
     setActivityOpen: (v: boolean) => void;
+    topologyStack: TopologyStackTarget | null;
+    setTopologyStack: (v: TopologyStackTarget | null) => void;
+    status: MeshNodeStatus[];
+    aliases: MeshAlias[];
     onChanged: () => void;
 }) {
+    const optInNode = props.optInNode;
     return (
         <>
-            {props.optInNode && (
+            {optInNode && (
                 <MeshOptInSheet
-                    open={!!props.optInNode}
+                    open={!!optInNode}
                     onOpenChange={(open) => { if (!open) props.setOptInNode(null); }}
-                    nodeId={props.optInNode.id}
-                    nodeName={props.optInNode.name}
+                    nodeId={optInNode.id}
+                    nodeName={optInNode.name}
                     onChanged={props.onChanged}
+                    onViewTopology={(stack) => {
+                        props.setTopologyStack({ nodeId: optInNode.id, nodeName: optInNode.name, stack });
+                        props.setOptInNode(null);
+                    }}
                 />
             )}
             <MeshDiagnosticsSheet
@@ -217,6 +285,15 @@ function SheetsRoot(props: {
             <MeshActivitySheet
                 open={props.activityOpen}
                 onOpenChange={props.setActivityOpen}
+            />
+            <MeshStackTopologySheet
+                open={!!props.topologyStack}
+                onOpenChange={(open) => { if (!open) props.setTopologyStack(null); }}
+                nodeId={props.topologyStack?.nodeId ?? null}
+                nodeName={props.topologyStack?.nodeName ?? null}
+                stackName={props.topologyStack?.stack ?? null}
+                status={props.status}
+                aliases={props.aliases}
             />
         </>
     );

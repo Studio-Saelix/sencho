@@ -5,7 +5,7 @@ import { SystemSheet } from '@/components/ui/system-sheet';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
 import type { MeshStackEntry } from '@/types/mesh';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Workflow } from 'lucide-react';
 
 interface Props {
     open: boolean;
@@ -13,9 +13,10 @@ interface Props {
     nodeId: number;
     nodeName: string;
     onChanged: () => void;
+    onViewTopology?: (stack: string) => void;
 }
 
-export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged }: Props) {
+export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged, onViewTopology }: Props) {
     const [stacks, setStacks] = useState<MeshStackEntry[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -120,13 +121,25 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                                 {pendingStack === stack.name ? (
                                     <Loader2 className="w-4 h-4 animate-spin text-stat-subtitle" />
                                 ) : (
-                                    <Button
-                                        size="sm"
-                                        variant={stack.optedIn ? 'outline' : 'default'}
-                                        onClick={() => setConfirmStack(stack)}
-                                    >
-                                        {stack.optedIn ? 'Remove from mesh' : 'Add to mesh'}
-                                    </Button>
+                                    <div className="flex items-center gap-2">
+                                        {stack.optedIn && onViewTopology && (
+                                            <Button
+                                                size="sm"
+                                                variant="ghost"
+                                                onClick={() => onViewTopology(stack.name)}
+                                                aria-label={`View topology for ${stack.name}`}
+                                            >
+                                                <Workflow className="w-3 h-3 mr-1" /> Topology
+                                            </Button>
+                                        )}
+                                        <Button
+                                            size="sm"
+                                            variant={stack.optedIn ? 'outline' : 'default'}
+                                            onClick={() => setConfirmStack(stack)}
+                                        >
+                                            {stack.optedIn ? 'Remove from mesh' : 'Add to mesh'}
+                                        </Button>
+                                    </div>
                                 )}
                             </div>
                         ))}

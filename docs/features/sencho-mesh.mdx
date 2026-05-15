@@ -94,6 +94,19 @@ This is the first place to look when a connection isn't behaving as expected.
 
 The masthead has a **Mesh activity** button that opens the fleet-wide event log. Every route resolution, tunnel state change, opt-in, opt-out, and probe is recorded there. Filter by alias, source, type, or message. Useful for understanding what just happened when something flips state.
 
+## Topology view
+
+The Routing tab has a **Table** / **Graph** toggle in its header. Graph mode draws the fleet as a node-and-edge diagram so it is clear at a glance which nodes are meshed, which tunnels are live, and where aliases are published.
+
+A second toggle picks what the edges encode:
+
+- **Tunnels** shows one edge per remote node, coloured by tunnel state. A solid brand edge labelled `pilot · ok` or `proxy` means traffic is ready to flow. A dashed muted edge labelled `pilot · idle` means the Pilot agent is offline. A dashed red edge labelled `unreachable` means the credentials or remote build cannot carry mesh traffic; the node card shows the specific reason.
+- **Aliases** keeps the same node layout and labels each edge with the number of aliases the remote node publishes. A remote that publishes nothing reads `no aliases`.
+
+Click any node card to open the opt-in sheet for that node. On each opted-in stack row the sheet shows a **Topology** button that opens a focused diagram for that one stack: the stack at the centre, every alias it publishes branching out, and a column of meshed consumer nodes with their tunnel state. Use it to confirm what a stack exposes and which peers can reach it.
+
+The graph reads the same `/mesh/status` and `/mesh/aliases` data the Table view does, so any opt-in or opt-out refreshes both views.
+
 ## V1 limitations
 
 A few things are deliberately out of scope for the first release:
