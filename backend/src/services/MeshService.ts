@@ -1589,36 +1589,48 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             message: `cross-node dispatch to ${target.alias} on node ${target.nodeId}`,
         });
 
-        // Peer-side recovery: when no reverseDialer is installed, kick the
-        // symmetric-dial path so central learns about this peer. The
-        // proactive back-dial from central (registered as a side effect via
-        // the proxy-tunnel WS upgrade) is what actually installs the
-        // reverseDialer on this peer. If the session cannot be established
-        // (cache miss, central down, auth rejected), log route.resolve.fail
-        // and drop the inbound socket.
+        // Peer-side recovery: when this Sencho is acting as a proxy-mode peer
+        // (mesh_centrals has a row from a prior bootstrap) and the
+        // reverseDialer is not currently installed, the inbound bridge from
+        // central is either cold-start (peer just rebooted) or has been torn
+        // down (idle close, central restart). Kick the symmetric-dial path
+        // so the peer re-opens its callback WS to central before attempting
+        // the cross-node dispatch.
+        //
+        // Central instances never have a mesh_centrals row (central is not a
+        // peer of itself), so this branch is correctly skipped on central.
+        // Central falls straight through to dialMeshTcpStream which uses its
+        // own PilotTunnelManager + MeshProxyTunnelDialer to reach the target
+        // peer. Without this gate, central enters the branch on every
+        // forward dispatch, finds no session, and destroys the inbound
+        // socket with route.resolve.fail forward-from-peer no_session.
         if (!this.reverseDialer) {
-            try {
-                const { PeerToCentralMeshSessionDialer } = await import('./PeerToCentralMeshSessionDialer');
-                const session = await PeerToCentralMeshSessionDialer.getInstance().ensureSession();
-                if (!session) {
+            const { MeshCentralRegistry } = await import('./MeshCentralRegistry');
+            const isProxyPeer = MeshCentralRegistry.getInstance().getActive() !== null;
+            if (isProxyPeer) {
+                try {
+                    const { PeerToCentralMeshSessionDialer } = await import('./PeerToCentralMeshSessionDialer');
+                    const session = await PeerToCentralMeshSessionDialer.getInstance().ensureSession();
+                    if (!session) {
+                        this.logActivity({
+                            source: 'mesh', level: 'warn', type: 'route.resolve.fail',
+                            nodeId: target.nodeId, alias: target.alias,
+                            message: `peer cross-node dispatch failed: no central callback session available`,
+                            details: { direction: 'forward-from-peer', reason: 'no_session' },
+                        });
+                        try { src.destroy(); } catch { /* ignore */ }
+                        return;
+                    }
+                } catch (err) {
                     this.logActivity({
                         source: 'mesh', level: 'warn', type: 'route.resolve.fail',
                         nodeId: target.nodeId, alias: target.alias,
-                        message: `peer cross-node dispatch failed: no central callback session available`,
-                        details: { direction: 'forward-from-peer', reason: 'no_session' },
+                        message: `peer cross-node dispatch failed: bootstrap threw`,
+                        details: { direction: 'forward-from-peer', reason: 'bootstrap_threw' },
                     });
                     try { src.destroy(); } catch { /* ignore */ }
                     return;
                 }
-            } catch (err) {
-                this.logActivity({
-                    source: 'mesh', level: 'warn', type: 'route.resolve.fail',
-                    nodeId: target.nodeId, alias: target.alias,
-                    message: `peer cross-node dispatch failed: bootstrap threw`,
-                    details: { direction: 'forward-from-peer', reason: 'bootstrap_threw' },
-                });
-                try { src.destroy(); } catch { /* ignore */ }
-                return;
             }
         }
 
