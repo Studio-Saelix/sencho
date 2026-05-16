@@ -11,7 +11,6 @@ import { meshRouteStateFor, meshRouteStateTokens } from './meshRouteState';
 interface Props {
     status: MeshNodeStatus;
     aliases: MeshAlias[];
-    isLocal: boolean;
     onAddStack: () => void;
     onShowDiagnostics: () => void;
     onShowAlias: (alias: string) => void;
@@ -20,7 +19,7 @@ interface Props {
 }
 
 export function RoutingNodeCard({
-    status, aliases, isLocal, onAddStack, onShowDiagnostics, onShowAlias, onTestUpstream, onChanged,
+    status, aliases, onAddStack, onShowDiagnostics, onShowAlias, onTestUpstream, onChanged,
 }: Props) {
     const [toggling, setToggling] = useState(false);
     const [testingAlias, setTestingAlias] = useState<string | null>(null);
@@ -55,21 +54,29 @@ export function RoutingNodeCard({
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <span className="font-mono text-sm">{status.nodeName}</span>
-                        {isLocal && (
+                        {status.reachableMode === 'local' && (
                             <span className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-brand/40 bg-brand/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-brand">
                                 ★ Local
                             </span>
                         )}
-                        {!status.pilotConnected && status.nodeId !== -1 && !isLocal && (
+                        {status.reachableMode === 'pilot' && !status.pilotConnected && (
                             <span className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-destructive/40 bg-destructive/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-destructive">
                                 pilot offline
+                            </span>
+                        )}
+                        {status.reachableMode === 'unreachable' && (
+                            <span
+                                title={status.reachableReason ?? undefined}
+                                className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-destructive/40 bg-destructive/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-destructive"
+                            >
+                                unreachable
                             </span>
                         )}
                     </div>
                     <div className="flex items-center gap-2">
                         <TogglePill
                             checked={status.enabled}
-                            disabled={toggling || (!status.pilotConnected && !isLocal)}
+                            disabled={toggling || status.reachableMode === 'unreachable'}
                             onChange={(next) => { void toggleEnabled(next); }}
                         />
                         <Button variant="outline" size="sm" onClick={onShowDiagnostics}>
@@ -78,9 +85,14 @@ export function RoutingNodeCard({
                     </div>
                 </div>
 
-                {!status.pilotConnected && !isLocal && (
+                {status.reachableMode === 'unreachable' && status.reachableReason && (
+                    <div className="text-[11px] text-destructive">
+                        {status.reachableReason}
+                    </div>
+                )}
+                {status.reachableMode === 'pilot' && !status.pilotConnected && (
                     <div className="text-[11px] text-stat-subtitle">
-                        Sencho Mesh requires the pilot agent on this node.
+                        Pilot tunnel is not connected. Mesh traffic resumes when the agent reconnects.
                     </div>
                 )}
 
@@ -129,7 +141,11 @@ export function RoutingNodeCard({
                                 );
                             })}
                         </div>
-                        <Button variant="outline" size="sm" className="w-full" onClick={onAddStack}>
+                        <Button
+                            variant="outline" size="sm" className="w-full"
+                            onClick={onAddStack}
+                            disabled={status.reachableMode === 'unreachable'}
+                        >
                             <Plus className="w-3 h-3 mr-1" /> Add stack to mesh
                         </Button>
                     </>

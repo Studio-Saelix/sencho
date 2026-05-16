@@ -4,23 +4,23 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { generateApiToken } from '../utils/apiTokenFormat';
 
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let authCookie: string;
 
-/** Create an API token directly in the DB and return its raw JWT string. */
+/** Create an API token directly in the DB and return its raw value. */
 function createTestApiToken(
   scope: 'read-only' | 'deploy-only' | 'full-admin',
   expiresAt: number | null = null,
   userId?: number,
 ): string {
-  const rawToken = jwt.sign({ scope: 'api_token', jti: crypto.randomUUID() }, TEST_JWT_SECRET, { expiresIn: '1h' });
+  const rawToken = generateApiToken();
   const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
   const db = DatabaseService.getInstance();
   const resolvedUserId = userId ?? db.getUserByUsername('testadmin')!.id;

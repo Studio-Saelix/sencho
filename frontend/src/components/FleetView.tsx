@@ -1,5 +1,5 @@
 import {
-    RefreshCw, Search, Camera,
+    RefreshCw, Search, Camera, Plus,
     Network, SlidersHorizontal,
     Send, KeyRound, ArrowLeftRight, Wrench,
 } from 'lucide-react';
@@ -12,10 +12,12 @@ import { useFleetPreferences } from './FleetView/hooks/useFleetPreferences';
 import { useFleetUpdateStatus } from './FleetView/hooks/useFleetUpdateStatus';
 import { useFleetPolling } from './FleetView/hooks/useFleetPolling';
 import { useFleetOverview } from './FleetView/hooks/useFleetOverview';
+import { useTopologyPreferences } from '@/hooks/useTopologyPreferences';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { springs } from '@/lib/motion';
 import { useLicense } from '@/context/LicenseContext';
+import { useAuth } from '@/context/AuthContext';
 import { AdmiralGate } from './AdmiralGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetConfiguration } from './fleet/FleetConfiguration';
@@ -24,6 +26,8 @@ import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
 import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 import { SecretsTab } from './fleet/secrets/SecretsTab';
+import { useNodeActions } from './nodes/useNodeActions';
+import { SettingsPrimaryButton } from './settings/SettingsActions';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
@@ -31,11 +35,13 @@ interface FleetViewProps {
 
 export function FleetView({ onNavigateToNode }: FleetViewProps) {
     const { isPaid, license } = useLicense();
+    const { isAdmin } = useAuth();
     const isAdmiral = isPaid && license?.variant === 'admiral';
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
     const overview = useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses: updateStatus.updateStatuses });
+    const topology = useTopologyPreferences();
 
     useFleetPolling({
         fetchOverview: overview.fetchOverview,
@@ -44,6 +50,10 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
     });
 
     const { mastheadStats, lastSyncAt, loading, refreshing } = overview;
+
+    const { openCreate, openEdit, openDelete, NodeActionModals } = useNodeActions({
+        onNodeChange: () => { void overview.fetchOverview(true); },
+    });
 
     return (
         <div className="h-full overflow-auto p-6">
@@ -134,6 +144,16 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                             Refresh
                         </Button>
+                        {isAdmin && (
+                            <SettingsPrimaryButton
+                                size="sm"
+                                onClick={openCreate}
+                                className="gap-1"
+                            >
+                                <Plus className="w-4 h-4" />
+                                Add node
+                            </SettingsPrimaryButton>
+                        )}
                     </div>
                 </div>
 
@@ -162,6 +182,13 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         onRetryUpdate={updateStatus.retryNodeUpdate}
                         onDismissUpdate={updateStatus.dismissNodeUpdate}
                         onCordonChange={() => { void overview.fetchOverview(true); }}
+                        onEditNode={isAdmin ? openEdit : undefined}
+                        onDeleteNode={isAdmin ? openDelete : undefined}
+                        isPaid={isPaid}
+                        topologyMode={topology.prefs.mode}
+                        onTopologyModeChange={topology.setMode}
+                        topologyPositions={topology.prefs.positions}
+                        onTopologyPositionsChange={topology.setPositions}
                     />
                 </TabsContent>
 
@@ -223,6 +250,8 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 onOpenChange={(open) => { if (!open) updateStatus.setLocalUpdateConfirm(null); }}
                 onConfirm={updateStatus.confirmLocalUpdate}
             />
+
+            {NodeActionModals}
         </div>
     );
 }

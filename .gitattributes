@@ -1,3 +1,8 @@
 # Force LF line endings for shell scripts regardless of the developer's OS.
 # Shell scripts with CRLF endings will fail with "exec format error" in Linux containers.
 *.sh text eol=lf
+
+# Husky git hooks are POSIX shell scripts without the .sh extension. They run
+# via /usr/bin/env sh, so the same eol=lf rule must apply or autocrlf=true
+# breaks commit/push on Windows shells that exec the file directly.
+.husky/* text eol=lf

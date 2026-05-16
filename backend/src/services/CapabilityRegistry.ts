@@ -79,7 +79,7 @@ export interface RemoteMeta {
   online: boolean;
 }
 
-// Runtime capability overrides — services call disableCapability() during init
+// Runtime capability overrides; services call disableCapability() during init.
 const disabledCapabilities = new Set<Capability>();
 
 export function disableCapability(c: Capability): void {
@@ -96,11 +96,36 @@ export function getActiveCapabilities(): readonly string[] {
   return CAPABILITIES.filter(c => !disabledCapabilities.has(c));
 }
 
+/**
+ * Capabilities a pilot-agent process should hide from its own /api/meta because
+ * the central->pilot path for them is not yet wired through the reverse tunnel.
+ * Surfacing them would let the frontend offer a tab whose click silently falls
+ * through to central's local handler.
+ */
+const PILOT_DISABLED_CAPABILITIES: readonly Capability[] = [
+  'host-console',
+  'self-update',
+];
+
+/** Disable capabilities that require a central->pilot path that is not yet wired. */
+export function applyPilotModeCapabilityFilter(): void {
+  for (const cap of PILOT_DISABLED_CAPABILITIES) disableCapability(cap);
+}
+
+/** Shared offline shape returned when a remote node is unreachable. */
+export const OFFLINE_META: RemoteMeta = {
+  version: null,
+  capabilities: [],
+  startedAt: null,
+  updateError: null,
+  online: false,
+};
+
 /** Fetch /api/meta from a remote Sencho instance. Returns empty data on failure. */
 export async function fetchRemoteMeta(baseUrl: string, apiToken: string): Promise<RemoteMeta> {
   try {
     const res = await axios.get(`${baseUrl.replace(/\/$/, '')}/api/meta`, {
-      headers: { Authorization: `Bearer ${apiToken}` },
+      headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : {},
       timeout: 5000,
     });
     const rawVersion: string | undefined = res.data.version;
@@ -113,6 +138,6 @@ export async function fetchRemoteMeta(baseUrl: string, apiToken: string): Promis
     };
   } catch (err) {
     console.warn(`[CapabilityRegistry] Failed to fetch meta from ${baseUrl}:`, (err as Error).message);
-    return { version: null, capabilities: [], startedAt: null, updateError: null, online: false };
+    return { ...OFFLINE_META };
   }
 }

@@ -4,12 +4,13 @@ services:
     build: .
     container_name: sencho
     restart: unless-stopped
-    # Sencho Mesh listens on host ports for cross-stack alias traffic. Host
-    # network mode is required for mesh to function. If you do not use mesh,
-    # comment `network_mode: host` out and uncomment the `ports` block below.
-    network_mode: host
-    # ports:
-    #   - "1852:1852"
+    # Publish only the Sencho UI / API port. Sencho Mesh runs on an internal
+    # `sencho_mesh` Docker network that Sencho creates and joins on boot,
+    # so cross-stack mesh routing does not require any extra host ports or
+    # firewall rules. Override the mesh subnet (default 172.30.0.0/24) with
+    # SENCHO_MESH_SUBNET if it conflicts with your network.
+    ports:
+      - "1852:1852"
     volumes:
       # Required: Docker Socket for container orchestration
       - /var/run/docker.sock:/var/run/docker.sock

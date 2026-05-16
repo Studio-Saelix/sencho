@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import type WebSocket from 'ws';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -31,7 +32,7 @@ const {
   mockRmdirSync: vi.fn(),
 }));
 
-vi.mock('child_process', () => ({ spawn: mockSpawn }));
+vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
 
 vi.mock('fs', () => ({
   default: {
@@ -100,7 +101,9 @@ vi.mock('../services/LogFormatter', () => ({
   LogFormatter: { formatLine: (line: string) => line },
 }));
 
-import { ComposeService } from '../services/ComposeService';
+import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
+
+const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
 
 /** Creates an EventEmitter that mimics a child_process spawn result */
 function createMockProcess() {
@@ -108,10 +111,15 @@ function createMockProcess() {
     stdout: EventEmitter;
     stderr: EventEmitter;
     kill: ReturnType<typeof vi.fn>;
+    killed: boolean;
   };
   proc.stdout = new EventEmitter();
   proc.stderr = new EventEmitter();
-  proc.kill = vi.fn();
+  proc.killed = false;
+  proc.kill = vi.fn(() => {
+    proc.killed = true;
+    return true;
+  });
   return proc;
 }
 
@@ -125,14 +133,22 @@ function setupAutoCloseSpawn(exitCode = 0) {
   });
 }
 
-function createMockWs() {
-  return {
+type MockWebSocket = EventEmitter & {
+  readyState: number;
+  send: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+  OPEN: number;
+} & WebSocket;
+
+function createMockWs(): MockWebSocket {
+  const ws = new EventEmitter() as MockWebSocket;
+  Object.assign(ws, {
     readyState: 1,
     send: vi.fn(),
-    on: vi.fn(),
     close: vi.fn(),
     OPEN: 1,
-  };
+  });
+  return ws;
 }
 
 beforeEach(() => {
@@ -142,6 +158,11 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  if (originalComposeTimeout === undefined) {
+    delete process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
+  } else {
+    process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS = originalComposeTimeout;
+  }
 });
 
 // ── runCommand ─────────────────────────────────────────────────────────
@@ -186,18 +207,68 @@ describe('ComposeService - runCommand', () => {
     await expect(promise).rejects.toThrow('service not found');
   });
 
+  it('redacts secrets from command failure errors', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'stop');
+    proc.stderr.emit('data', Buffer.from('token=abc123SECRET password=hunter2 Authorization: Bearer abc.def.ghi'));
+    proc.emit('close', 1);
+
+    await expect(promise).rejects.toThrow('token=[redacted]');
+    await expect(promise).rejects.toThrow('password=[redacted]');
+    await expect(promise).rejects.not.toThrow('abc.def.ghi');
+  });
+
   it('sends output to WebSocket when provided', async () => {
     const proc = createMockProcess();
     mockSpawn.mockReturnValue(proc);
     const ws = createMockWs();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.runCommand('my-stack', 'restart', ws as any);
+    const promise = svc.runCommand('my-stack', 'restart', ws);
     proc.stdout.emit('data', Buffer.from('Restarting...'));
     proc.emit('close', 0);
     await promise;
 
     expect(ws.send).toHaveBeenCalledWith('Restarting...');
+  });
+
+  it('kills and rejects commands that exceed the compose timeout', async () => {
+    process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS = '1000';
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart');
+    const expectation = expect(promise).rejects.toThrow('Command timed out after 1s');
+    let settled = false;
+    promise.finally(() => { settled = true; }).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(settled).toBe(false);
+    proc.emit('close', null);
+    await expectation;
+  });
+
+  it('kills and rejects running commands when the WebSocket disconnects', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const ws = createMockWs();
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart', ws);
+    const expectation = expect(promise).rejects.toThrow('client disconnected');
+    let settled = false;
+    promise.finally(() => { settled = true; }).catch(() => undefined);
+    ws.emit('close');
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(settled).toBe(false);
+    proc.emit('close', null);
+    await expectation;
   });
 });
 
@@ -235,7 +306,19 @@ describe('ComposeService - deployStack', () => {
     expect(mockBackupStackFiles).toHaveBeenCalledWith('my-stack');
   });
 
-  it('throws CONTAINER_CRASHED when exited container has non-zero exit code', async () => {
+  it('aborts atomic deploy before docker side effects when backup fails', async () => {
+    mockBackupStackFiles.mockRejectedValueOnce(new Error('disk full'));
+
+    const svc = ComposeService.getInstance(1);
+
+    await expect(svc.deployStack('my-stack', undefined, true)).rejects.toThrow(
+      'Atomic deployment backup failed',
+    );
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+  });
+
+  it('throws sanitized CONTAINER_CRASHED when exited container has non-zero exit code', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([{
       Id: 'crashed-c1',
@@ -243,7 +326,7 @@ describe('ComposeService - deployStack', () => {
       Labels: { 'com.docker.compose.project': 'my-stack' },
     }]);
     mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
-    mockContainerLogs.mockResolvedValue(Buffer.from('Error: something failed'));
+    mockContainerLogs.mockResolvedValue(Buffer.from('SECRET_TOKEN=leaked'));
 
     const svc = ComposeService.getInstance(1);
     // Attach catch handler immediately so rejection is never "unhandled"
@@ -253,6 +336,8 @@ describe('ComposeService - deployStack', () => {
     const error = await result;
     expect(error).not.toBeNull();
     expect(error!.message).toContain('CONTAINER_CRASHED');
+    expect(error!.message).not.toContain('SECRET_TOKEN');
+    expect(mockContainerLogs).not.toHaveBeenCalled();
   });
 
   it('rolls back on failure when atomic=true', async () => {
@@ -272,7 +357,27 @@ describe('ComposeService - deployStack', () => {
     const error = await result;
     expect(error).not.toBeNull();
     expect(error!.message).toContain('CONTAINER_CRASHED');
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: true });
     expect(mockRestoreStackFiles).toHaveBeenCalledWith('my-stack');
+  });
+
+  it('reports rollback failure when atomic restore fails', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockRestoreStackFiles.mockRejectedValueOnce(new Error('restore denied'));
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
   });
 
   it('does not roll back when atomic=false', async () => {
@@ -341,7 +446,7 @@ describe('ComposeService - withRegistryAuth', () => {
     const ws = createMockWs();
 
     const svc = ComposeService.getInstance(1);
-    const promise = svc.deployStack('my-stack', ws as any);
+    const promise = svc.deployStack('my-stack', ws);
 
     await vi.advanceTimersByTimeAsync(3100);
     await promise;

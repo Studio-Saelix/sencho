@@ -2,6 +2,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService } from './DatabaseService';
 import type { ScheduledTask } from './DatabaseService';
 import { LicenseService } from './LicenseService';
+import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
@@ -17,6 +18,7 @@ import TrivyService from './TrivyService';
 import type { ScanAllNodeImagesResult } from './TrivyService';
 import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
 const TRIVY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TRIVY_UPDATE_CHECK_STARTUP_DELAY_MS = 5 * 60 * 1000;
@@ -440,6 +442,13 @@ export class SchedulerService {
 
     private async executeAutoStart(task: ScheduledTask): Promise<string> {
         this.assertStackTarget(task, 'Auto-start');
+        await assertPolicyGateAllows(
+            task.target_id,
+            task.node_id,
+            buildSystemPolicyGateOptions('scheduler:auto-start', {
+                auditPath: `/api/scheduled-tasks/${task.id}/run`,
+            }),
+        );
         await ComposeService.getInstance(task.node_id).deployStack(task.target_id);
         return `Started stack "${task.target_id}"`;
     }
@@ -625,6 +634,7 @@ export class SchedulerService {
         }
 
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         if (isDebugEnabled()) {
             console.log(`[SchedulerService] executeUpdateRemote: node=${nodeId} target=${target}`);
         }
@@ -634,6 +644,8 @@ export class SchedulerService {
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
             },
             body: JSON.stringify({ target }),
             signal: AbortSignal.timeout(300_000), // 5 minute timeout for long updates
@@ -713,6 +725,13 @@ export class SchedulerService {
             return `Stack "${stackName}": all images up to date.`;
         }
 
+        await assertPolicyGateAllows(
+            stackName,
+            nodeId,
+            buildSystemPolicyGateOptions('scheduler:auto-update', {
+                auditPath: `/api/scheduled-tasks/auto-update/${stackName}`,
+            }),
+        );
         await compose.updateStack(stackName, undefined, true);
         db.clearStackUpdateStatus(nodeId, stackName);
 
@@ -735,6 +754,13 @@ export class SchedulerService {
         const nodeId = task.node_id ?? NodeRegistry.getInstance().getDefaultNodeId();
         if (task.node_id == null && isDebugEnabled()) {
             console.log(`[SchedulerService:debug] Scan task ${task.id}: no node_id specified, using default node ${nodeId}`);
+        }
+        const node = NodeRegistry.getInstance().getNode(nodeId);
+        if (!node) {
+            throw new Error('Scheduled vulnerability scans require an existing local node.');
+        }
+        if (node?.type === 'remote') {
+            throw new Error('Scheduled vulnerability scans currently require a local node.');
         }
 
         const scanStart = Date.now();
@@ -783,6 +809,13 @@ export function formatScanOutput(summary: ScanAllNodeImagesResult): string {
         if (skipped > 0) parts.push(`${skipped} skipped (cached)`);
         if (failed > 0) parts.push(`${failed} failed`);
         header = parts.join('; ');
+    }
+
+    if (summary.truncated) {
+        const total = summary.totalImages ?? scanned + skipped + failed;
+        const processed = summary.processedImages ?? scanned + skipped + failed;
+        header += `. Scan limited after ${processed} of ${total} image(s)`;
+        if (summary.limitReason) header += ` (${summary.limitReason})`;
     }
 
     const severityTiers: Array<[string, number]> = [

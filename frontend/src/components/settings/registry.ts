@@ -87,7 +87,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         id: 'api-tokens',
         group: 'identity',
         label: 'API Tokens',
-        description: 'Long-lived bearer tokens for CI, scripts, and remote nodes.',
+        description: 'Long-lived bearer tokens for CI and scripts.',
         keywords: ['bearer', 'automation', 'ci', 'scripts', 'scopes'],
         tier: 'admiral',
         scope: 'global',

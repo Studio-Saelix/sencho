@@ -22,6 +22,8 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" \
   https://your-sencho-instance:1852/api/stacks
 ```
 
+API tokens are 56-character opaque strings that begin with `sen_sk_`, for example `sen_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`. The prefix makes them easy to identify in logs and is recognized by secret-scanning tools (GitHub, TruffleHog, GitGuardian).
+
 <Note>
   API Tokens require a Sencho **Admiral** license. Community and Skipper editions do not include this feature.
 </Note>

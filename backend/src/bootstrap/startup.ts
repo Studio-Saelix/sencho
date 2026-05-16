@@ -15,8 +15,15 @@ import { SchedulerService } from '../services/SchedulerService';
 import { MfaService } from '../services/MfaService';
 import { MeshService } from '../services/MeshService';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { applyPilotModeCapabilityFilter } from '../services/CapabilityRegistry';
+import { PilotTunnelManager } from '../services/PilotTunnelManager';
+import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs } from '../services/GitSourceService';
 import { PORT } from '../helpers/constants';
+
+function isPilotMode(): boolean {
+  return process.env.SENCHO_MODE === 'pilot';
+}
 
 /**
  * Pilot-agent hosts never run the first-run setup wizard, so the wizard
@@ -32,7 +39,7 @@ import { PORT } from '../helpers/constants';
  * Returns true when a fresh secret was written, false otherwise.
  */
 export function ensurePilotJwtSecret(): boolean {
-  if (process.env.SENCHO_MODE !== 'pilot') return false;
+  if (!isPilotMode()) return false;
   const dbSvc = DatabaseService.getInstance();
   if (dbSvc.getGlobalSettings().auth_jwt_secret) return false;
   const generated = crypto.randomBytes(64).toString('hex');
@@ -59,6 +66,10 @@ export async function startServer(server: Server): Promise<void> {
 
   ensurePilotJwtSecret();
 
+  if (isPilotMode()) {
+    applyPilotModeCapabilityFilter();
+  }
+
   // Initialize the license service before any tier-gated code can run.
   LicenseService.getInstance().initialize();
 
@@ -76,6 +87,11 @@ export async function startServer(server: Server): Promise<void> {
   });
   BlueprintReconciler.getInstance().start();
 
+  // Drop the cached /api/meta entry on tunnel reconnect so the next
+  // /api/nodes/:id/meta refetches fresh capabilities and version through
+  // the live loopback bridge instead of waiting for the 3-minute TTL.
+  PilotTunnelManager.getInstance().on('tunnel-up', invalidateRemoteMetaCache);
+
   // Async initializers are independent of each other; run in parallel
   // so total boot time is the slowest one rather than the sum.
   await Promise.all([
@@ -92,7 +108,7 @@ export async function startServer(server: Server): Promise<void> {
     console.warn('[Trivy] Temp dir sweep failed:', (err as Error).message);
   });
 
-  const isPilotAgent = process.env.SENCHO_MODE === 'pilot';
+  const isPilotAgent = isPilotMode();
   const listenHost = isPilotAgent ? '127.0.0.1' : undefined;
 
   server.listen(PORT, listenHost, () => {

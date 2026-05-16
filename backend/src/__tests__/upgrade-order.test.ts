@@ -11,8 +11,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { generateApiToken } from '../utils/apiTokenFormat';
 
 describe('WebSocket upgrade dispatch order', () => {
   let tmpDir: string;
@@ -50,9 +52,10 @@ describe('WebSocket upgrade dispatch order', () => {
     cleanupTestDb(tmpDir);
   });
 
-  function connect(pathAndQuery: string, opts: { cookie?: string } = {}): WebSocket {
+  function connect(pathAndQuery: string, opts: { cookie?: string; bearer?: string } = {}): WebSocket {
     const headers: Record<string, string> = {};
     if (opts.cookie) headers['cookie'] = opts.cookie;
+    if (opts.bearer) headers['authorization'] = `Bearer ${opts.bearer}`;
     return new WebSocket(`ws://127.0.0.1:${port}${pathAndQuery}`, { headers });
   }
 
@@ -141,6 +144,78 @@ describe('WebSocket upgrade dispatch order', () => {
 
     expect(firstMessage).toContain('Invalid stack name');
     try { ws.terminate(); } catch { /* ignore */ }
+  });
+
+  describe('/api/mesh/proxy-tunnel scope gating', () => {
+    // The mesh proxy-tunnel ingress is machine-to-machine. The dispatch
+    // ladder must accept the credentials that fleet enrollment produces
+    // (node_proxy JWTs) AND the full-admin api_token scope, while rejecting
+    // session cookies and restricted api_token scopes. These cases pin the
+    // scope contract so a future re-tightening cannot silently regress to
+    // the "full-admin only" behaviour that trapped operators following the
+    // Add Remote Node dialog's Node Token instructions.
+
+    it('accepts a node_proxy Bearer (fleet enrollment token) at the upgrade and reaches the handler', async () => {
+      const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+      const ws = connect('/api/mesh/proxy-tunnel', { bearer: nodeProxyToken });
+      const outcome = await waitForOutcome(ws);
+      // Pilot-mode rejection (404) or normal open both indicate the upgrade
+      // passed the scope gate and was handed to handleMeshProxyTunnel.
+      // The pre-fix behaviour was unequivocal: HTTP 403 from the dispatcher.
+      expect(outcome.kind).not.toBe('unexpected');
+      if (outcome.kind === 'unexpected') {
+        expect(outcome.status).not.toBe(403);
+      }
+      try { ws.terminate(); } catch { /* ignore */ }
+    });
+
+    it('accepts a full-admin api_token at the upgrade and reaches the handler', async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const rawToken = generateApiToken();
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
+      DatabaseService.getInstance().addApiToken({
+        token_hash: tokenHash,
+        name: `mesh-scope-gate-${Date.now()}`,
+        scope: 'full-admin',
+        user_id: adminId,
+        created_at: Date.now(),
+        expires_at: null,
+      });
+      const ws = connect('/api/mesh/proxy-tunnel', { bearer: rawToken });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).not.toBe('unexpected');
+      if (outcome.kind === 'unexpected') {
+        expect(outcome.status).not.toBe(403);
+      }
+      try { ws.terminate(); } catch { /* ignore */ }
+    });
+
+    it('rejects a read-only api_token at the upgrade with HTTP 403', async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const rawToken = generateApiToken();
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
+      DatabaseService.getInstance().addApiToken({
+        token_hash: tokenHash,
+        name: `mesh-scope-readonly-${Date.now()}`,
+        scope: 'read-only',
+        user_id: adminId,
+        created_at: Date.now(),
+        expires_at: null,
+      });
+      const ws = connect('/api/mesh/proxy-tunnel', { bearer: rawToken });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('rejects a session cookie at the upgrade with HTTP 403 (mesh is not a UI surface)', async () => {
+      const ws = connect('/api/mesh/proxy-tunnel', { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
   });
 
   it('dispatches /api/pilot/tunnel to the pilot handler (rejects non-pilot bearer before path-based dispatch)', async () => {

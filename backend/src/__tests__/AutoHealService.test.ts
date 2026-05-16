@@ -20,6 +20,8 @@ describe('AutoHealService.shouldHeal', () => {
 
     const basePolicy = {
         id: 1,
+        node_id: 1,
+        proxy_entitled_until: 0,
         stack_name: 'mystack',
         service_name: null,
         unhealthy_duration_mins: 5,

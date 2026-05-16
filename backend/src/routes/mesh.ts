@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { MeshError, MeshService } from '../services/MeshService';
+import { MeshError, MeshService, type MeshGlobalAlias, type MeshRegenSummary } from '../services/MeshService';
 import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
@@ -21,6 +21,47 @@ meshRouter.get('/status', async (_req: Request, res: Response): Promise<void> =>
     } catch (err) {
         console.warn('[mesh] /status failed:', sanitizeForLog((err as Error).message));
         res.status(500).json({ error: 'Failed to load mesh status' });
+    }
+});
+
+/**
+ * Operator-triggered rerun of the boot-time override regeneration. Walks
+ * every `mesh_stacks` row across the fleet and re-pushes each override to
+ * its owning node. Useful when a remote node was offline at central boot
+ * and the override files there are stale; previously the only recovery
+ * path was opt-out + opt-in for every meshed stack on that node.
+ */
+meshRouter.post('/regen-overrides', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    const actor = actorFor(req);
+    let summary: MeshRegenSummary | null = null;
+    let outcome: 'success' | 'skipped' | 'partial' | 'error' = 'error';
+    try {
+        summary = await MeshService.getInstance().regenerateAllOverrides();
+        outcome = summary.skipped ? 'skipped' : (summary.failures.length === 0 ? 'success' : 'partial');
+        res.json(summary);
+    } catch (err) {
+        outcome = 'error';
+        console.warn('[mesh] /regen-overrides failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to regenerate mesh overrides' });
+    } finally {
+        try {
+            DatabaseService.getInstance().insertAuditLog({
+                timestamp: Date.now(),
+                username: actor,
+                method: 'POST',
+                path: req.path,
+                status_code: res.statusCode,
+                node_id: null,
+                ip_address: req.ip ?? 'unknown',
+                summary: summary
+                    ? `Mesh override regen ${outcome}: ${summary.regenerated} regenerated, ${summary.failures.length} failed`
+                    : `Mesh override regen ${outcome}`,
+            });
+        } catch (auditErr) {
+            console.error('[mesh] Audit log insert failed:', auditErr);
+        }
     }
 });
 
@@ -70,6 +111,113 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
     }
 });
 
+/**
+ * Returns the LOCAL Sencho's compose stacks. Always queries this
+ * instance's own filesystem regardless of `x-node-id`. Central calls this
+ * endpoint against each remote node via the existing proxy chain
+ * (`NodeRegistry.getProxyTarget`) so the mesh opt-in sheet can show the
+ * stacks deployed on the remote pilot rather than central's own list.
+ */
+meshRouter.get('/local-stacks', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    try {
+        const stacks = await MeshService.getInstance().listLocalStacks();
+        res.json({ stacks });
+    } catch (err) {
+        console.warn('[mesh] /local-stacks failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to list local stacks' });
+    }
+});
+
+const MAX_ALIASES_PER_PUSH = 1024;
+
+function parsePortAlias(entry: unknown): MeshGlobalAlias | null {
+    const e = entry as Record<string, unknown>;
+    const { host, nodeId, nodeName, stackName, serviceName, port } = e ?? {};
+    if (
+        typeof host !== 'string' || host.length === 0 || host.length > 253 ||
+        typeof nodeId !== 'number' ||
+        typeof nodeName !== 'string' || nodeName.length === 0 ||
+        typeof stackName !== 'string' || stackName.length === 0 ||
+        typeof serviceName !== 'string' || serviceName.length === 0 ||
+        typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535
+    ) return null;
+    return { host, nodeId, nodeName, stackName, serviceName, port };
+}
+
+/**
+ * Accepts a fleet-wide alias list from central and writes a mesh override
+ * for the named stack onto THIS Sencho's local DATA_DIR. The pilot looks
+ * up its own service names and uses its own static IP on `sencho_mesh`,
+ * so alias hostnames in user containers always resolve to the LOCAL
+ * Sencho IP on the deploying node. Always writes against the LOCAL
+ * Sencho's default node id.
+ */
+meshRouter.put('/local-override/:stackName', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    const stackName = req.params.stackName as string;
+    if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    const body = req.body as { aliases?: unknown; portAliases?: unknown };
+    if (!Array.isArray(body?.aliases)) { res.status(400).json({ error: 'Missing aliases array in body' }); return; }
+    if (body.aliases.length > MAX_ALIASES_PER_PUSH) {
+        res.status(413).json({ error: `Alias list exceeds ${MAX_ALIASES_PER_PUSH} entries` });
+        return;
+    }
+    const aliases: { host: string }[] = [];
+    for (const entry of body.aliases) {
+        const host = (entry as { host?: unknown } | null | undefined)?.host;
+        if (typeof host !== 'string' || host.length === 0 || host.length > 253) {
+            // 253 octets is the DNS hostname ceiling. Defensive against a
+            // malicious or buggy central sending a multi-KB host string.
+            res.status(400).json({ error: 'Invalid alias entry' });
+            return;
+        }
+        aliases.push({ host });
+    }
+    const portAliases: MeshGlobalAlias[] = [];
+    if (Array.isArray(body?.portAliases)) {
+        if (body.portAliases.length > MAX_ALIASES_PER_PUSH) {
+            res.status(413).json({ error: `portAliases list exceeds ${MAX_ALIASES_PER_PUSH} entries` });
+            return;
+        }
+        for (const entry of body.portAliases) {
+            const parsed = parsePortAlias(entry);
+            if (!parsed) { res.status(400).json({ error: 'Invalid portAliases entry' }); return; }
+            portAliases.push(parsed);
+        }
+    }
+    try {
+        const written = await MeshService.getInstance().applyLocalOverride(stackName, aliases, portAliases);
+        if (!written) { res.status(400).json({ error: 'Refused to write override (path validation failed)' }); return; }
+        res.json({ ok: true, path: written });
+    } catch (err) {
+        if (err instanceof MeshError && err.code === 'push_failed') {
+            res.status(503).json({ error: err.message, code: err.code });
+            return;
+        }
+        console.warn('[mesh] /local-override failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to write local override' });
+    }
+});
+
+/**
+ * Delete a previously written local override. Mirror of the PUT endpoint;
+ * called by central when a stack is opted out so stale overrides do not
+ * linger on the deploying node.
+ */
+meshRouter.delete('/local-override/:stackName', async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmiral(req, res)) return;
+    const stackName = req.params.stackName as string;
+    if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    try {
+        await MeshService.getInstance().removeLocalOverride(stackName);
+        res.json({ ok: true });
+    } catch (err) {
+        console.warn('[mesh] DELETE /local-override failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to remove local override' });
+    }
+});
+
 meshRouter.get('/nodes/:nodeId/stacks', async (req: Request, res: Response): Promise<void> => {
     if (!requireAdmiral(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
@@ -77,10 +225,9 @@ meshRouter.get('/nodes/:nodeId/stacks', async (req: Request, res: Response): Pro
     try {
         const db = DatabaseService.getInstance();
         const optedIn = new Set(db.listMeshStacks(nodeId).map((s) => s.stack_name));
-        const fsSvc = (await import('../services/FileSystemService')).FileSystemService.getInstance(nodeId);
-        const stacks = await fsSvc.getStacks();
+        const stacks = await MeshService.getInstance().listStacksOnNode(nodeId);
         res.json({
-            stacks: stacks.map((stackName: string) => ({
+            stacks: stacks.map((stackName) => ({
                 name: stackName,
                 optedIn: optedIn.has(stackName),
             })),
@@ -103,6 +250,10 @@ meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-in', async (req: Request, 
     } catch (err) {
         if (err instanceof MeshError && err.code === 'port_collision') {
             res.status(409).json({ error: err.message, code: err.code });
+            return;
+        }
+        if (err instanceof MeshError && err.code === 'push_failed') {
+            res.status(503).json({ error: err.message, code: err.code });
             return;
         }
         if (err instanceof MeshError) {

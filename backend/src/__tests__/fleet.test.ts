@@ -205,6 +205,22 @@ describe('Fleet tier gating', () => {
       .set('Authorization', authHeader);
     expect(res.body.code).not.toBe('PAID_REQUIRED');
   });
+
+  it('GET /api/fleet/node/:nodeId/stacks is accessible on community tier', async () => {
+    mockTier('community');
+    const res = await request(app)
+      .get('/api/fleet/node/1/stacks')
+      .set('Authorization', authHeader);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+  });
+
+  it('GET /api/fleet/node/:nodeId/stacks/:stackName/containers is accessible on community tier', async () => {
+    mockTier('community');
+    const res = await request(app)
+      .get('/api/fleet/node/1/stacks/db-compose/containers')
+      .set('Authorization', authHeader);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+  });
 });
 
 // ─── Update Endpoint Input Validation ───

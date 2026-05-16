@@ -5,6 +5,7 @@ import { ComposeService } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission } from '../middleware/permissions';
 import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -36,6 +37,7 @@ labelsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promi
 });
 
 labelsRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (!requireBody(req, res)) return;
   try {
     const nodeId = req.nodeId ?? 0;
@@ -105,6 +107,7 @@ labelsRouter.get('/assignments', authMiddleware, async (req: Request, res: Respo
 });
 
 labelsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (!requireBody(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'label ID');
@@ -148,6 +151,7 @@ labelsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Pr
 });
 
 labelsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:edit')) return;
   try {
     const id = parseIntParam(req, res, 'id', 'label ID');
     if (id === null) return;
@@ -255,13 +259,14 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
 export const stackLabelsRouter = Router();
 
 stackLabelsRouter.put('/:stackName/labels', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireBody(req, res)) return;
   try {
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) {
       res.status(400).json({ error: 'Invalid stack name' });
       return;
     }
+    if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+    if (!requireBody(req, res)) return;
     const nodeId = req.nodeId ?? 0;
     const { labelIds } = req.body;
 

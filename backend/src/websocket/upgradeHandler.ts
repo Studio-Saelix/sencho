@@ -7,12 +7,14 @@ import { DatabaseService, type UserRole } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { COOKIE_NAME } from '../helpers/constants';
 import { handlePilotTunnel } from './pilotTunnel';
+import { handleMeshProxyTunnel } from './meshProxyTunnel';
 import { handleNotificationsWs } from './notifications';
 import { handleRemoteForwarder } from './remoteForwarder';
 import { handleLogsWs } from './logs';
 import { handleHostConsoleWs } from './hostConsole';
 import { handleGenericWs, attachGenericConnectionHandlers } from './generic';
 import { rejectUpgrade as reject } from './reject';
+import { looksLikeApiToken, verifyApiTokenChecksum } from '../utils/apiTokenFormat';
 
 function parseCookies(req: IncomingMessage): Record<string, string> {
   const header = req.headers.cookie || '';
@@ -32,11 +34,12 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
  *   1. `/api/pilot/tunnel`        -> handlePilotTunnel (own auth, own wss)
  *   2. shared cookie/Bearer auth + JWT verify (rejects unauthenticated)
  *   3. API token scope gate (read-only / deploy-only restricted to logs + notifications)
- *   4. `/ws/notifications` local -> handleNotificationsWs
- *   5. remote nodeId path         -> handleRemoteForwarder
- *   6. `/api/stacks/:name/logs`   -> handleLogsWs
- *   7. `/api/system/host-console` -> handleHostConsoleWs
- *   8. fallback                   -> handleGenericWs (`/ws` exec + stats)
+ *   4. `/api/mesh/proxy-tunnel`   -> handleMeshProxyTunnel (machine-to-machine: node_proxy or full-admin api_token)
+ *   5. `/ws/notifications` local -> handleNotificationsWs
+ *   6. remote nodeId path         -> handleRemoteForwarder
+ *   7. `/api/stacks/:name/logs`   -> handleLogsWs
+ *   8. `/api/system/host-console` -> handleHostConsoleWs
+ *   9. fallback                   -> handleGenericWs (`/ws` exec + stats)
  */
 export function attachUpgrade(
   server: http.Server,
@@ -70,24 +73,29 @@ export function attachUpgrade(
     if (!token) return reject(socket, 401, 'Unauthorized');
 
     try {
-      const settings = DatabaseService.getInstance().getGlobalSettings();
-      const jwtSecret = settings.auth_jwt_secret;
-      if (!jwtSecret) throw new Error('No JWT secret');
-      const decoded = jwt.verify(token, jwtSecret) as { username?: string; scope?: string; role?: string; tv?: number };
-
-      // Node proxy tokens are machine-to-machine credentials and must never be
-      // granted interactive terminal access (host console or container exec).
-      const isProxyToken = decoded.scope === 'node_proxy';
-
+      // Opaque sen_sk_ API tokens: handled before jwt.verify. Prefix +
+      // length + checksum reject malformed keys without touching SQLite.
+      let decoded: { username?: string; scope?: string; role?: string; tv?: number };
       let wsApiTokenScope: string | null = null;
-      if (decoded.scope === 'api_token') {
+      if (looksLikeApiToken(token)) {
+        if (!verifyApiTokenChecksum(token)) return reject(socket, 401, 'Unauthorized');
         const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
         const apiToken = DatabaseService.getInstance().getApiTokenByHash(tokenHash);
         if (!apiToken || apiToken.revoked_at) return reject(socket, 401, 'Unauthorized');
         if (apiToken.expires_at && apiToken.expires_at < Date.now()) return reject(socket, 401, 'Unauthorized');
         DatabaseService.getInstance().updateApiTokenLastUsed(apiToken.id);
         wsApiTokenScope = apiToken.scope;
+        decoded = { scope: 'api_token' };
+      } else {
+        const settings = DatabaseService.getInstance().getGlobalSettings();
+        const jwtSecret = settings.auth_jwt_secret;
+        if (!jwtSecret) throw new Error('No JWT secret');
+        decoded = jwt.verify(token, jwtSecret) as { username?: string; scope?: string; role?: string; tv?: number };
       }
+
+      // Node proxy tokens are machine-to-machine credentials and must never be
+      // granted interactive terminal access (host console or container exec).
+      const isProxyToken = decoded.scope === 'node_proxy';
 
       // For user session tokens (no scope), resolve against DB for up-to-date
       // role and token_version checks. Scoped tokens (api_token, node_proxy,
@@ -118,6 +126,21 @@ export function attachUpgrade(
         if (wsApiTokenScope === 'read-only' || wsApiTokenScope === 'deploy-only') {
           if (!isLogPath && !isNotifPath) return reject(socket, 403, 'Forbidden');
         }
+      }
+
+      // Mesh proxy-tunnel ingress: a sibling Sencho is dialing this node
+      // to carry mesh TCP traffic. Accept any machine-to-machine credential:
+      // node_proxy JWT (the token enrolled nodes carry) or a full-admin
+      // api_token. Session cookies fall through to a 403 here because their
+      // decoded scope is undefined (isProxyToken=false, wsApiTokenScope=null).
+      // Restricted api_token scopes (read-only, deploy-only) are blocked
+      // earlier by the scope gate above before this branch is reached.
+      if (pathname === '/api/mesh/proxy-tunnel') {
+        if (!isProxyToken && wsApiTokenScope !== 'full-admin') {
+          return reject(socket, 403, 'Forbidden');
+        }
+        await handleMeshProxyTunnel(req, socket, head);
+        return;
       }
 
       const nodeIdParam = parsedUrl.searchParams.get('nodeId');

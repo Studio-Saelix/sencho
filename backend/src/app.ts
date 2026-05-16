@@ -11,7 +11,7 @@ import './types/express';
 /**
  * Build an Express app with the full middleware pipeline installed.
  *
- * Canonical middleware order (16 steps). Do not reorder without re-running the
+ * Canonical middleware order (17 steps). Do not reorder without re-running the
  * regression checklist in `docs/internal/architecture/middleware-order.md`.
  *
  *   1.  trust proxy
@@ -26,12 +26,13 @@ import './types/express';
  *   10. authGate (at /api)                -- registered in index.ts
  *   11. auditLog (at /api)                -- registered in index.ts
  *   12. enforceApiTokenScope (at /api)    -- registered in index.ts
- *   13. createRemoteProxyMiddleware       -- proxy/remoteNodeProxy.ts, registered in index.ts
- *   14. routes                            -- registered in index.ts from routes/*
- *   15. static serving + SPA fallback     -- registered in index.ts
- *   16. errorHandler                      -- registered in index.ts
+ *   13. hubOnlyGuard (at /api)            -- middleware/hubOnlyGuard.ts, registered in index.ts
+ *   14. createRemoteProxyMiddleware       -- proxy/remoteNodeProxy.ts, registered in index.ts
+ *   15. routes                            -- registered in index.ts from routes/*
+ *   16. static serving + SPA fallback     -- registered in index.ts
+ *   17. errorHandler                      -- registered in index.ts
  *
- * Steps 10 to 12 and 14 must run after the public auth routers (meta, auth,
+ * Steps 10 to 13 and 15 must run after the public auth routers (meta, auth,
  * mfa, sso) are registered so those routes stay reachable without a session
  * cookie. index.ts mounts those public routers before step 10 to preserve
  * that invariant.

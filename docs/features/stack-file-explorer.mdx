@@ -93,7 +93,7 @@ Click **Save** to write the file to disk. Navigating away from the file before s
 
 The toolbar **New folder** button at the top of the tree creates a folder in the currently selected directory (the parent of the file you have open, or the stack root if nothing is open). The button is hidden on Community.
 
-Right-click any folder for **New File** and **New Folder** entries that scope to the right-clicked folder.
+Right-click any folder for **New File** and **New Folder** entries that scope to the right-clicked folder. These write controls appear only when your account has stack edit permission and the active tier is Skipper or Admiral.
 
 <Frame>
   <img src="/images/stack-file-explorer/new-file-dialog.png" alt="New file modal scoped to the nginx folder, with the file name field populated and a Create button" />
@@ -111,7 +111,7 @@ The dashed **Upload file** affordance at the top of the tree opens a file picker
 | Target directory | The currently selected directory, or the stack root if no file is open. |
 | Same-name files | Overwritten without prompt. |
 
-On Community the upload affordance is hidden entirely.
+On Community, and for users without stack edit permission, the upload affordance is hidden entirely.
 
 <Tip>
   For bulk transfers or files above 25 MB, use `scp` or `rsync` from your workstation directly to the stack directory on the host.
@@ -125,7 +125,7 @@ When a file is selected on Skipper+, the right pane action bar shows **Download*
 
 Right-click any file or folder and choose **Rename**. The dialog accepts a new name following the same rules as creation.
 
-The rename is in-place; cross-directory moves are not supported. To move an entry between directories, copy it via the host shell or upload to the new location and delete the original.
+Rename appears only when your account has stack edit permission and the active tier is Skipper or Admiral. The rename is in-place; cross-directory moves are not supported. To move an entry between directories, copy it via the host shell or upload to the new location and delete the original.
 
 ## Permissions (chmod)
 
@@ -143,7 +143,7 @@ On Community the dialog opens read-only: the toggles render the current state an
 
 ## Deleting (Skipper+)
 
-There are three delete entry points. All three open the same confirmation modal.
+There are three delete entry points. All three require stack edit permission and a Skipper or Admiral tier, and all three open the same confirmation modal.
 
 - **Toolbar delete.** With a file open in the viewer, click **Delete** in the right-pane action bar.
 - **Context-menu delete.** Right-click any file or folder in the tree and choose **Delete**.
@@ -171,10 +171,10 @@ When the entry is one of the five protected names, the modal asks you to type th
 
 | Right-click target | Skipper+ entries | Community admin entries |
 |---|---|---|
-| Folder | New File, New Folder, Rename, Delete | Rename, Delete |
-| File | Rename, Permissions, Delete | Rename, Permissions, Delete |
+| Folder | New File, New Folder, Rename, Delete | No write entries |
+| File | Rename, Permissions, Delete | Permissions |
 
-On Community, the New File and New Folder entries on a folder are hidden. Rename and Delete are gated by the `stack:edit` permission, so admins still see them, but the underlying API rejects the call with a 403 toast on a non-paid tier. Use Skipper+ for any write action; the Permissions dialog opens for everyone but only Skipper+ can save changes.
+On Community, write actions are hidden in the file explorer. The Permissions dialog opens for everyone, but only Skipper and Admiral users can save changes.
 
 ## Troubleshooting
 
@@ -197,7 +197,7 @@ On Community, the New File and New Folder entries on a folder are hidden. Rename
   <Accordion title="The tree shows 'Showing 500 of N - refine in shell'">
     Each directory render is capped at 500 entries to keep the tree responsive. The first 500 entries alphabetically are shown. To work with the entries past the cap, drop into a host shell with `cd` into the stack directory.
   </Accordion>
-  <Accordion title="Rename or Delete returned a 403">
-    Rename and Delete in the file context menu are write operations that require Skipper+. The menu items appear for any user with the `stack:edit` permission so a Community admin can see them, but the API rejects the call. Upgrade to Skipper+ to enable these actions, or perform the rename or delete from a host shell.
+  <Accordion title="Write controls are missing">
+    Upload, create, rename, chmod save, and delete require stack edit permission and a Skipper or Admiral tier. Community users can browse, preview text files, and inspect permissions in read-only mode.
   </Accordion>
 </AccordionGroup>

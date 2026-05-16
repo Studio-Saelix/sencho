@@ -1,21 +1,30 @@
 ---
 title: Sencho Mesh
-description: Connect containers across nodes by hostname over the Pilot tunnel — no VPN, no firewall changes, no extra ports.
+description: Connect containers across nodes by hostname over an authenticated WebSocket tunnel, no VPN, no firewall changes, no extra ports.
 ---
 
 <Note>
   Sencho Mesh requires a Sencho **Admiral** license. Skipper and Community Edition do not include this feature.
 </Note>
 
-Sencho Mesh makes a multi-node fleet feel like one machine. Opt a stack into the mesh and its services become reachable from any other meshed stack on the fleet by a stable hostname. Traffic rides the existing Pilot tunnel, so there are no new ports to open and no separate VPN to manage.
+Sencho Mesh makes a multi-node fleet feel like one machine. Opt a stack into the mesh and its services become reachable from any other meshed stack on the fleet by a stable hostname. Traffic rides an authenticated WebSocket tunnel between Sencho instances, so there are no new ports to open and no separate VPN to manage.
+
+Mesh works with any remote mode:
+
+- **Pilot Agent** nodes carry mesh traffic over the long-lived agent tunnel.
+- **Distributed API** nodes carry mesh traffic over a short-lived tunnel that central opens on demand using the node's API token. Central tears the tunnel down after five minutes of idle, so a node that sees no mesh traffic costs nothing extra to keep configured.
+
+<Card title="Pilot Agent" icon="link" href="/features/pilot-agent">
+  Pilot Agent is the easiest remote mode for nodes that cannot expose an inbound port. See Pilot Agent for how to enroll a node into your fleet.
+</Card>
 
 ## How it works
 
-Each node runs a small `sencho-mesh` sidecar container that listens on the host's network. When you opt a stack into the mesh, Sencho:
+Each Sencho instance creates an internal Docker bridge network called `sencho_mesh` (default subnet `172.30.0.0/24`) on first boot and pins itself to a static IP on that network. When you opt a stack into the mesh, Sencho:
 
-1. Generates a Compose override file that injects `extra_hosts` for every cross-node alias the fleet currently exposes.
-2. Redeploys the stack with the override applied so its containers pick up the new entries.
-3. Routes incoming traffic on the alias's port through the local sidecar, then over the Pilot tunnel to the destination node, where the sidecar dials the target container.
+1. Generates a Compose override file that injects `extra_hosts` for every cross-node alias the fleet currently exposes, pointing each one at the local Sencho's static IP.
+2. Attaches every service in the stack to the `sencho_mesh` network so the alias IP is reachable from inside the user's containers.
+3. Redeploys the stack with the override applied so its containers pick up the new entries and the network attachment.
 
 Aliases follow a predictable scheme:
 
@@ -23,23 +32,23 @@ Aliases follow a predictable scheme:
 <service>.<stack>.<node>.sencho
 ```
 
-For example, a Postgres `db` service in a stack named `api` on a node named `opsix` is reachable as `db.api.opsix.sencho` from any other meshed stack.
+A Postgres `db` service in a stack named `api` on a node named `opsix` is reachable as `db.api.opsix.sencho` from any other meshed stack.
 
 ## Enable the mesh
 
-1. Open **Fleet → Traffic**.
+1. Open **Fleet → Routing**.
 2. Toggle **mesh** on for each node you want to participate.
 3. Click **Add stack to mesh** on any node and tick the stacks whose services should be reachable cross-node.
 
-Each opt-in triggers an automatic redeploy of every other meshed stack on that node so the new alias is added to their hosts files. The opt-in sheet warns you before it does.
+Each opt-in or opt-out triggers an automatic redeploy of the affected stack so its `/etc/hosts` and network attachments refresh. The opt-in sheet shows a confirmation prompt before it starts the redeploy.
 
 ## What's exposed and what isn't
 
 Four guarantees:
 
 1. **Only opted-in services are reachable.** A stack reaches another stack's services through the mesh only if both stacks have explicitly opted in. The Pilot agent on the target node refuses any request for a non-opted service.
-2. **Aliases are not internet-reachable.** Sidecars listen only on the host network of each node. Nothing about the mesh exposes new ports beyond the host's existing firewall posture.
-3. **Traffic is encrypted in transit.** Cross-node bytes ride the existing Pilot WSS tunnel.
+2. **Aliases are not internet-reachable.** Sencho listens on an internal Docker network; nothing about the mesh exposes new ports beyond the host's existing firewall posture.
+3. **Traffic is encrypted in transit.** Cross-node bytes ride an authenticated WSS tunnel between Sencho instances. The Node Token generated during fleet enrollment is the credential that authorizes the mesh tunnel; restricted API token scopes (read-only, deploy-only) cannot carry mesh traffic.
 4. **Tier-gated and audit-logged.** Only Admiral users can configure the mesh. Enable, disable, opt-in, and opt-out events write durable rows to the audit log with the actor's identity.
 
 What the mesh does **not** do:
@@ -49,12 +58,25 @@ What the mesh does **not** do:
 - No rate limiting or quotas.
 - No persistent traffic metrics. Live diagnostics only.
 
+## Customizing the mesh subnet
+
+Each Sencho creates `sencho_mesh` as a `/24` bridge network at `172.30.0.0/24` by default. If that range collides with an existing network on a host, override it with the `SENCHO_MESH_SUBNET` environment variable on that node:
+
+```yaml
+services:
+  sencho:
+    environment:
+      - SENCHO_MESH_SUBNET=10.42.0.0/24
+```
+
+Sencho's static IP on the network is `<network address> + 2` (so `10.42.0.2` for the example above). Operators can configure each node independently; the override generator pushes alias hostnames that resolve to whichever IP the deploying node uses locally.
+
 ## Test upstream
 
 Every alias row has a one-click **Test** button that runs a real probe across the same code path traffic uses. Result is shown inline:
 
 - **Green tick** with round-trip time when the path is healthy.
-- **Red badge** with the failing stage (`sidecar`, `pilot_tunnel`, `agent_resolve`, `agent_dial`, or `target_port`) when something is wrong.
+- **Red badge** with the failing stage (`pilot_tunnel`, `agent_resolve`, `agent_dial`, or `target_port`) when something is wrong.
 
 Use the Test button before assuming an issue is your application's fault. It tells you whether the mesh path itself is the problem.
 
@@ -62,10 +84,9 @@ Use the Test button before assuming an issue is your application's fault. It tel
 
 Every node card has a **Diagnostics** button that opens a live view of:
 
-- Sidecar liveness and pilot tunnel state on this node.
+- Forwarder liveness and pilot tunnel state on this node.
 - Active TCP streams with byte counters and open age.
 - The resolver cache showing which aliases are registered.
-- A **Restart sidecar** action.
 
 This is the first place to look when a connection isn't behaving as expected.
 
@@ -73,22 +94,86 @@ This is the first place to look when a connection isn't behaving as expected.
 
 The masthead has a **Mesh activity** button that opens the fleet-wide event log. Every route resolution, tunnel state change, opt-in, opt-out, and probe is recorded there. Filter by alias, source, type, or message. Useful for understanding what just happened when something flips state.
 
+## Topology view
+
+The Routing tab has a **Table** / **Graph** toggle in its header. Graph mode draws the fleet as a node-and-edge diagram so it is clear at a glance which nodes are meshed, which tunnels are live, and where aliases are published.
+
+A second toggle picks what the edges encode:
+
+- **Tunnels** shows one edge per remote node, coloured by tunnel state. A solid brand edge labelled `pilot · ok` or `proxy` means traffic is ready to flow. A dashed muted edge labelled `pilot · idle` means the Pilot agent is offline. A dashed red edge labelled `unreachable` means the credentials or remote build cannot carry mesh traffic; the node card shows the specific reason.
+- **Aliases** keeps the same node layout and labels each edge with the number of aliases the remote node publishes. A remote that publishes nothing reads `no aliases`.
+
+Click any node card to open the opt-in sheet for that node. On each opted-in stack row the sheet shows a **Topology** button that opens a focused diagram for that one stack: the stack at the centre, every alias it publishes branching out, and a column of meshed consumer nodes with their tunnel state. Use it to confirm what a stack exposes and which peers can reach it.
+
+In the stack diagram, *consumer nodes* are meshed peers that could reach this stack's aliases via DNS. Whether a container on a consumer actually dials an alias depends on the consumer's own opt-in stacks.
+
+The graph reads the same `/mesh/status` and `/mesh/aliases` data the Table view does, so any opt-in or opt-out refreshes both views. The Routing tab also refreshes both feeds every 30 seconds while the browser tab is in the foreground, so tunnel state changes and alias additions appear without a manual reload. Polling pauses automatically when the tab is hidden.
+
+The graph is designed for fleet sizes typical of self-hosted Compose setups (up to roughly 50 nodes). Larger fleets render but become visually dense; the Table view is the more readable surface for inventory at scale.
+
 ## V1 limitations
 
 A few things are deliberately out of scope for the first release:
 
-- **One alias per TCP port across the fleet.** If two stacks expose the same port (e.g. two Postgres instances on 5432), only the first can be added to the mesh. The opt-in sheet shows a clear inline error if the second tries.
-- **Pilot-to-pilot routing is not supported.** Mesh works for traffic between the central node and its pilots in either direction. Two pilot nodes cannot reach each other through the mesh.
+- **One alias per TCP port across the fleet.** If two stacks expose the same port (for example two Postgres instances on 5432), only the first can be added to the mesh. The opt-in sheet shows a clear inline error if the second tries.
+- **Sencho's API port is reserved.** A meshed service exposing port 1852 is rejected at opt-in to prevent collision with the Sencho UI / API listener.
+- **Remote-to-remote routing rides through central.** Mesh works for traffic between central and any remote in either direction, and between two remotes via central relay. Direct peer-to-peer tunnels between remotes are not supported.
+- **Stream pool shared with the Pilot tunnel.** Each Pilot tunnel multiplexes up to 1024 concurrent streams covering HTTP, WebSocket, and mesh TCP traffic. A heavy mesh workload counts against the same ceiling as ordinary fleet API traffic. See the [Pilot Agent](/features/pilot-agent) resource-limit notes for the full picture.
 - **No TLS termination, no blue/green cutover.** Layer 7 features land in a follow-up.
 
 ## Troubleshooting
 
-**A route shows `tunnel down`.** The Pilot tunnel to the target node is gone. Check **Fleet → Overview** for the node's status. Mesh recovers automatically when the tunnel reconnects.
+<AccordionGroup>
+  <Accordion title="Adding a stack rejects with 'mesh data plane unavailable'">
+    The Sencho instance failed to set up its `sencho_mesh` Docker network at boot. Check the Sencho container's logs for `[Mesh]` messages. Common causes: Sencho is running outside Docker (dev mode, mesh routing skipped); the Docker socket is not mounted; `sencho_mesh` already exists with a different subnet from a previous install. The mesh status surface on the Routing tab shows the specific reason.
+  </Accordion>
 
-**A route shows `unreachable`.** The tunnel is up but the destination port did not answer. Check that the target stack is running and that its service is listening on the declared port. Click **Test** to see the exact failing stage.
+  <Accordion title="`sencho_mesh` exists with a different subnet">
+    Sencho refuses to start the mesh data plane if a network named `sencho_mesh` exists with a subnet different from the one this Sencho is configured for. Either remove the existing network (`docker network rm sencho_mesh` on the affected host, after detaching any containers) or set `SENCHO_MESH_SUBNET` on this node to match the existing subnet. Restart the Sencho container so the setup runs again.
+  </Accordion>
 
-**A route shows `not authorized`.** The destination stack is not opted into the mesh on its home node. Open Routing on that node and add the stack.
+  <Accordion title="Opt-in rejects with 'host-network service'">
+    Stacks whose services declare `network_mode: host` cannot join `sencho_mesh` and therefore cannot participate in the mesh. Switch the affected service to bridge networking and redeploy, or accept that the stack stays out of the mesh.
+  </Accordion>
 
-**Adding a stack hangs.** Mesh redeploys peers on opt-in to refresh hostnames. A stuck redeploy usually means the stack itself failed to come back up. Check the stack's deploy logs.
+  <Accordion title="A route shows `tunnel down`">
+    The Pilot tunnel to the target node is gone. Check **Fleet → Overview** for the node's status. Mesh recovers automatically when the tunnel reconnects.
+  </Accordion>
 
-**The sidecar shows `off` for a node.** Click **Diagnostics → Restart sidecar** on the node card. If the sidecar still does not come up, check the node's `docker ps -a` output for `sencho-mesh-<id>` and inspect its logs.
+  <Accordion title="A route shows `unreachable`">
+    The tunnel is up but the destination port did not answer. Check that the target stack is running and that its service is listening on the declared port. Click **Test** to see the exact failing stage.
+  </Accordion>
+
+  <Accordion title="A route shows `not authorized`">
+    The destination stack is not opted into the mesh on its home node. Open Routing on that node and add the stack.
+  </Accordion>
+
+  <Accordion title="Adding a stack hangs on redeploy">
+    Mesh redeploys the stack on opt-in to refresh hostnames and network attachments. A stuck redeploy usually means the stack itself failed to come back up. Check the stack's deploy logs.
+  </Accordion>
+
+  <Accordion title="Subnet conflict with another network on the host">
+    `172.30.0.0/24` is the default range for the `sencho_mesh` network and is rare in most setups. If it collides with an existing VPN, VLAN, or Docker network, set `SENCHO_MESH_SUBNET` on the Sencho service to a free `/24` and restart the container. Each node can be configured independently.
+  </Accordion>
+
+  <Accordion title="A Distributed API node shows `unreachable` on the Routing tab">
+    Central could not open a mesh tunnel to this node. The badge tooltip shows the specific reason. While a node is in this state the **mesh toggle and Add stack to mesh action on the node card are disabled** so a redeploy is not triggered against an unreachable target. Common causes:
+
+    - `api token rejected by remote` — the credential central uses to dial this node is not accepted. Open the remote Sencho, generate a fresh Node Token via **Settings → Nodes → Generate Token**, and paste it back into the node's credentials in central's **Settings → Nodes**.
+    - `remote does not support proxy mesh` — the remote Sencho is on a version that predates proxy-mode mesh. Update the remote and the badge clears on the next refresh.
+    - `TLS handshake failed` — the remote serves a certificate Node's default trust store does not accept. Use a certificate issued by a trusted authority on the remote.
+    - `api_url not set` or `api token missing` — the node was added without credentials. Edit the node in **Settings → Nodes** and supply the URL and token.
+  </Accordion>
+
+  <Accordion title="Stack topology sheet says 'No published mesh services'">
+    The stack is opted into the mesh but exposes no service ports that became aliases. The stack joins `sencho_mesh` (other meshed containers can talk to it directly by container name) but no fleet-wide hostname is published. To publish an alias, declare a port on a service in the stack's compose file and redeploy.
+  </Accordion>
+
+  <Accordion title="Graph reflects a stale node state">
+    The Routing tab polls `/mesh/status` and `/mesh/aliases` every 30 seconds while the browser tab is focused. To force an immediate refresh, leave and return to the Routing tab, or toggle any stack's mesh state to trigger an action-driven refresh. Polling pauses when the tab is hidden, so a long-dormant tab catches up on the first poll after it regains focus.
+  </Accordion>
+
+  <Accordion title="Graph mode is hard to read with a large fleet">
+    The diagram suits typical fleet sizes of up to roughly 50 nodes. Larger fleets render but the layout becomes dense. Use the Table view for inventory at scale and reach for Graph mode for spot checks of tunnel state and alias publication.
+  </Accordion>
+</AccordionGroup>

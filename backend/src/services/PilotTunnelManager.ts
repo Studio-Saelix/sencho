@@ -34,17 +34,36 @@ export class PilotTunnelCapacityError extends Error {
 }
 
 /**
- * PilotTunnelManager: singleton registry of active pilot tunnels.
+ * PilotTunnelManager: singleton registry of active mesh-capable bridges.
  *
- * Each enrolled pilot-agent node holds one outbound WebSocket to the primary.
- * For every such tunnel we spin up a local loopback HTTP server that demuxes
- * requests into frames. Remote-proxy code paths (http-proxy-middleware and the
- * WebSocket upgrade handler) can then treat pilot nodes identically to standard
- * proxy nodes by pointing at the loopback URL.
+ * Two flavors of bridge live in the same `bridges` map, keyed by nodeId:
+ *
+ *   - **Pilot-agent tunnels** (the original use case): long-lived,
+ *     agent-initiated. The pilot dials central; `registerTunnel` accepts
+ *     the WS, starts a loopback HTTP server, and emits `tunnel-up` so
+ *     downstream observers (capability cache, status badges) refresh. A
+ *     pilot-agent bridge stays open for the agent's lifetime and supports
+ *     HTTP, WebSocket, and TCP multiplexing.
+ *
+ *   - **Proxy-mode tunnels** (Phase C): short-lived, central-initiated.
+ *     `ensureBridge` delegates to `MeshProxyTunnelDialer`, which opens a
+ *     WebSocket to the remote's `/api/mesh/proxy-tunnel` endpoint using
+ *     the long-lived `api_token`. Carries only TCP mesh frames; the
+ *     loopback HTTP server is left running on the bridge but unused
+ *     because proxy-mode HTTP traffic flows through the existing
+ *     `remoteNodeProxy`. Idle close after a configurable TTL.
+ *
+ * Mesh dispatch is mode-agnostic: `MeshService.dialMeshTcpStream` awaits
+ * `ensureBridge(nodeId)` and consumes the resulting `MeshTunnelHandle`.
  *
  * Events:
- *   - 'tunnel-up'   (nodeId: number) after a tunnel is accepted
- *   - 'tunnel-down' (nodeId: number) after a tunnel closes (for any reason)
+ *   - 'tunnel-up'   (nodeId) when a pilot-agent tunnel is accepted (NOT
+ *     emitted for proxy-mode bridges, which are opened on demand and
+ *     should not trigger pilot-specific listeners like the F9 capability
+ *     cache invalidation).
+ *   - 'tunnel-down' (nodeId) when a pilot-agent tunnel closes.
+ *   - 'proxy-bridge-up' / 'proxy-bridge-down' (nodeId) for observability
+ *     on proxy-mode bridge lifecycle. No current consumer.
  */
 export class PilotTunnelManager extends EventEmitter {
     private static instance: PilotTunnelManager;
@@ -166,6 +185,60 @@ export class PilotTunnelManager extends EventEmitter {
      */
     public getBridge(nodeId: number): MeshTunnelHandle | null {
         return this.bridges.get(nodeId) ?? null;
+    }
+
+    /**
+     * Dial-if-needed: return the existing pilot or proxy bridge, or open
+     * a new proxy-mode bridge on demand. Used by `MeshService` so cross-
+     * node TCP dispatch works for both pilot-agent remotes (long-lived
+     * tunnel) and proxy-mode remotes (on-demand tunnel) without any
+     * mode-specific branching at the call site.
+     *
+     * Returns null if the node has no active pilot tunnel AND cannot be
+     * dialed as a proxy-mode remote (missing api_url / api_token, scope
+     * insufficient, remote offline, or remote pre-Phase-C).
+     */
+    public async ensureBridge(nodeId: number): Promise<MeshTunnelHandle | null> {
+        const existing = this.bridges.get(nodeId);
+        if (existing) return existing;
+        // Lazy import to avoid a cycle: MeshProxyTunnelDialer imports
+        // PilotTunnelBridge, which imports PilotTunnelManager via the
+        // existing tcp_open_reverse relay path.
+        const { MeshProxyTunnelDialer } = await import('./MeshProxyTunnelDialer');
+        return MeshProxyTunnelDialer.getInstance().ensureBridge(nodeId);
+    }
+
+    /**
+     * Register a central-initiated proxy-mode bridge for an existing
+     * remote. Distinct from `registerTunnel`: skips the pilot-only side
+     * effects (DB node-status update, `pilot_last_seen` write,
+     * `tunnel-up` event, replacement of any prior pilot tunnel). Still
+     * honors the hard tunnel cap so a dial storm cannot exhaust gateway
+     * memory.
+     *
+     * Throws `PilotTunnelCapacityError` when the cap is reached.
+     */
+    public registerProxyBridge(nodeId: number, bridge: PilotTunnelBridge): void {
+        const existing = this.bridges.get(nodeId);
+        if (existing) {
+            // A pilot tunnel for this node already exists. Proxy bridges
+            // should not silently shadow them; refuse the registration so
+            // the dialer can surface a clear error.
+            throw new Error(`pilot tunnel already registered for node ${nodeId}; proxy bridge refused`);
+        }
+        if (this.bridges.size >= PILOT_TUNNEL_HARD_LIMIT) {
+            PilotMetrics.increment('tunnels_rejected_capacity');
+            throw new PilotTunnelCapacityError(PILOT_TUNNEL_HARD_LIMIT);
+        }
+        bridge.once('closed', () => {
+            if (this.bridges.get(nodeId) === bridge) {
+                this.bridges.delete(nodeId);
+                this.emit('proxy-bridge-down', nodeId);
+            }
+        });
+        this.bridges.set(nodeId, bridge);
+        PilotMetrics.increment('proxy_bridges_total');
+        this.emit('proxy-bridge-up', nodeId);
     }
 
     /**

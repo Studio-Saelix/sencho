@@ -1,8 +1,10 @@
 import type { Request } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
+import { createHash } from 'crypto';
 import { COOKIE_NAME } from '../helpers/constants';
 import { WEBHOOK_TRIGGER_RE } from '../helpers/routePatterns';
+import { looksLikeApiToken } from '../utils/apiTokenFormat';
 
 // ── Rate Limiting ─────────────────────────────────────────────────────────────
 //
@@ -42,8 +44,15 @@ function isNodeProxyRequest(req: Request): boolean {
     cached._isNodeProxy = false;
     return false;
   }
+  const bearer = auth.slice(7);
+  // Opaque API tokens are never node_proxy credentials, and they are not
+  // JWTs — short-circuit so `jwt.decode` is never invoked on them.
+  if (looksLikeApiToken(bearer)) {
+    cached._isNodeProxy = false;
+    return false;
+  }
   try {
-    const decoded = jwt.decode(auth.slice(7)) as { scope?: string } | null;
+    const decoded = jwt.decode(bearer) as { scope?: string } | null;
     const result = decoded?.scope === 'node_proxy';
     cached._isNodeProxy = result;
     return result;
@@ -68,8 +77,16 @@ function rateLimitKeyGenerator(req: Request): string {
   }
   const auth = req.headers.authorization;
   if (auth?.startsWith('Bearer ')) {
+    const bearer = auth.slice(7);
+    // Opaque API tokens key by a non-reversible hash slice of the token
+    // itself: each token gets its own rate-limit budget without a DB hit on
+    // the hot path (this runs before authMiddleware).
+    if (looksLikeApiToken(bearer)) {
+      const slice = createHash('sha256').update(bearer).digest('hex').slice(0, 16);
+      return `user:sk:${slice}`;
+    }
     try {
-      const decoded = jwt.decode(auth.slice(7)) as { username?: string; sub?: string } | null;
+      const decoded = jwt.decode(bearer) as { username?: string; sub?: string } | null;
       if (decoded?.username) return `user:${decoded.username}`;
       if (decoded?.sub) return `user:${decoded.sub}`;
     } catch { /* fall through to IP */ }

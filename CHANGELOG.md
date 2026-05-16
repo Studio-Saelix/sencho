@@ -4,6 +4,161 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.80.0](https://github.com/Studio-Saelix/sencho/compare/v0.79.0...v0.80.0) (2026-05-15)
+
+
+### Added
+
+* **fleet:** add node management actions to Fleet Overview ([#1064](https://github.com/Studio-Saelix/sencho/issues/1064)) ([16774ae](https://github.com/Studio-Saelix/sencho/commit/16774ae51518bbfd545aeaff2eba3f0b0fac7b4f))
+
+## [0.79.0](https://github.com/Studio-Saelix/sencho/compare/v0.78.1...v0.79.0) (2026-05-15)
+
+
+### Added
+
+* **api-tokens:** switch to sen_sk_ prefixed opaque keys ([#1062](https://github.com/Studio-Saelix/sencho/issues/1062)) ([d882f22](https://github.com/Studio-Saelix/sencho/commit/d882f223f4ad1cad37ffda24d697e02351ba5b1f))
+
+## [0.78.1](https://github.com/Studio-Saelix/sencho/compare/v0.78.0...v0.78.1) (2026-05-15)
+
+
+### Fixed
+
+* **mesh:** persist proxy-tunnel self-id across bridge teardown ([#1060](https://github.com/Studio-Saelix/sencho/issues/1060)) ([f63ffdd](https://github.com/Studio-Saelix/sencho/commit/f63ffdd0989e5cce985869b653523d5e6d832897))
+
+## [0.78.0](https://github.com/Studio-Saelix/sencho/compare/v0.77.1...v0.78.0) (2026-05-15)
+
+
+### Added
+
+* **fleet:** multi-mode topology with label grouping and persisted positions ([#1054](https://github.com/Studio-Saelix/sencho/issues/1054)) ([2e82eb4](https://github.com/Studio-Saelix/sencho/commit/2e82eb44fec48c33c73cd10e030c4b27010b4824))
+* **mesh:** add topology graph view and per-stack drill sheet ([#1052](https://github.com/Studio-Saelix/sencho/issues/1052)) ([9e4b969](https://github.com/Studio-Saelix/sencho/commit/9e4b969dfb3513947a76b37e9f05a750741e1def))
+
+
+### Fixed
+
+* **mesh:** poll topology data and tighten stack-membership equality ([#1059](https://github.com/Studio-Saelix/sencho/issues/1059)) ([3323a59](https://github.com/Studio-Saelix/sencho/commit/3323a59003eab4b067d61861a1f91d63e8f1101e))
+* **mesh:** proxy peer learns its central-namespace nodeId at tunnel upgrade ([#1055](https://github.com/Studio-Saelix/sencho/issues/1055)) ([6185206](https://github.com/Studio-Saelix/sencho/commit/6185206323c7f6b1b89c1c7f899d1e92518d0974))
+* **mesh:** reject opt-in when every service has empty ports ([#1056](https://github.com/Studio-Saelix/sencho/issues/1056)) ([3d5f0ff](https://github.com/Studio-Saelix/sencho/commit/3d5f0ffacdc3deecfecbea1e9766c68e27b2aa16))
+* **mesh:** testUpstream dials via ensureBridge so proxy-mode targets are probeable ([#1057](https://github.com/Studio-Saelix/sencho/issues/1057)) ([489aab4](https://github.com/Studio-Saelix/sencho/commit/489aab451691d95bdc1b2c4cd8f5f14a17b9aebb))
+* **ui:** close user dropdown after clicking menu actions ([#1058](https://github.com/Studio-Saelix/sencho/issues/1058)) ([13e4edc](https://github.com/Studio-Saelix/sencho/commit/13e4edc1e2537d944d6f5669d668d18a7de140b1))
+
+## [0.77.1](https://github.com/Studio-Saelix/sencho/compare/v0.77.0...v0.77.1) (2026-05-15)
+
+
+### Fixed
+
+* **mesh:** accept node_proxy at the proxy-tunnel WS upgrade ([#1050](https://github.com/Studio-Saelix/sencho/issues/1050)) ([946db9d](https://github.com/Studio-Saelix/sencho/commit/946db9df5251d4b437dec3847fce4f32ddc84283))
+
+## [0.77.0](https://github.com/Studio-Saelix/sencho/compare/v0.76.9...v0.77.0) (2026-05-15)
+
+
+### Added
+
+* **mesh:** route mesh traffic over Distributed API remotes ([#1048](https://github.com/Studio-Saelix/sencho/issues/1048)) ([a38a3e0](https://github.com/Studio-Saelix/sencho/commit/a38a3e022696019e6aa529f10fbffc27b1347c53))
+
+## [0.76.9](https://github.com/Studio-Saelix/sencho/compare/v0.76.8...v0.76.9) (2026-05-14)
+
+
+### Fixed
+
+* **fleet:** show capabilities, version, metrics, and stacks for pilot-agent nodes ([#1044](https://github.com/Studio-Saelix/sencho/issues/1044)) ([8dd0fce](https://github.com/Studio-Saelix/sencho/commit/8dd0fce621496be788f14242a4dab9cd478b0082))
+* harden auto-heal policies ([#1042](https://github.com/Studio-Saelix/sencho/issues/1042)) ([e7a3b54](https://github.com/Studio-Saelix/sencho/commit/e7a3b544c0964362649054c5625430a9a9c5c370))
+* harden git source webhooks ([#1033](https://github.com/Studio-Saelix/sencho/issues/1033)) ([c31d48b](https://github.com/Studio-Saelix/sencho/commit/c31d48b93349e1500f1669112cf21885a38aa28d))
+* harden stack label permissions ([#1036](https://github.com/Studio-Saelix/sencho/issues/1036)) ([b523230](https://github.com/Studio-Saelix/sencho/commit/b52323036b6d399d81d3a5c4cf519368c627a9ab))
+* harden stack management operations ([#1046](https://github.com/Studio-Saelix/sencho/issues/1046)) ([5461bc3](https://github.com/Studio-Saelix/sencho/commit/5461bc316bdb993f2cf0efb6897091cf15320501))
+* harden vulnerability scan scheduling ([#1035](https://github.com/Studio-Saelix/sencho/issues/1035)) ([328a984](https://github.com/Studio-Saelix/sencho/commit/328a98439dd75134ac13402599ee3ea9ec2f756b))
+* **monitor:** parallelize per-container stats fetch in evaluation cycle ([#1045](https://github.com/Studio-Saelix/sencho/issues/1045)) ([2dda1be](https://github.com/Studio-Saelix/sencho/commit/2dda1bee1fb46e6a0adc83a23f8cb415f7871f9b))
+* **schedules:** align Schedules surface with backend tier gate for Skipper admins ([#1047](https://github.com/Studio-Saelix/sencho/issues/1047)) ([44e40af](https://github.com/Studio-Saelix/sencho/commit/44e40afb6205b0cce42b5998ef0488e51411f533))
+
+## [0.76.8](https://github.com/Studio-Saelix/sencho/compare/v0.76.7...v0.76.8) (2026-05-12)
+
+
+### Fixed
+
+* bump protobufjs to clear npm audit high-severity advisories ([#1031](https://github.com/Studio-Saelix/sencho/issues/1031)) ([668474e](https://github.com/Studio-Saelix/sencho/commit/668474e9a8110626ca1cb0dd82f707af9689af08))
+* harden atomic deployment rollback ([#1029](https://github.com/Studio-Saelix/sencho/issues/1029)) ([74ae2ce](https://github.com/Studio-Saelix/sencho/commit/74ae2ce0c698ee506a0b4c835aecc1eeb40518a2))
+* harden blueprint deployment guardrails ([#1027](https://github.com/Studio-Saelix/sencho/issues/1027)) ([19cdb36](https://github.com/Studio-Saelix/sencho/commit/19cdb3681df2803d50be628f30258768f7639a56))
+* harden deploy enforcement paths ([#1030](https://github.com/Studio-Saelix/sencho/issues/1030)) ([b1c5fe8](https://github.com/Studio-Saelix/sencho/commit/b1c5fe8391b8415283130d9451ba138fff7569eb))
+* harden stack file explorer operations ([#1028](https://github.com/Studio-Saelix/sencho/issues/1028)) ([69b6ac1](https://github.com/Studio-Saelix/sencho/commit/69b6ac1f3bc172b0d636cc443460acec521a23e2))
+
+## [0.76.7](https://github.com/Studio-Saelix/sencho/compare/v0.76.6...v0.76.7) (2026-05-10)
+
+
+### Fixed
+
+* **mesh:** enumerate stacks on remote pilot nodes for opt-in sheet ([#1025](https://github.com/Studio-Saelix/sencho/issues/1025)) ([b8af40d](https://github.com/Studio-Saelix/sencho/commit/b8af40d2b4f8d3e8f8b7ad79b764cc5d76846e5b))
+
+## [0.76.6](https://github.com/Studio-Saelix/sencho/compare/v0.76.5...v0.76.6) (2026-05-10)
+
+
+### Fixed
+
+* **mesh:** fix pilot handleAccept dispatch by deriving self nodeId from enrollment token ([#1023](https://github.com/Studio-Saelix/sencho/issues/1023)) ([41a1df2](https://github.com/Studio-Saelix/sencho/commit/41a1df279d2fbc64637ac05c50141f60b7fb791c))
+
+## [0.76.5](https://github.com/Studio-Saelix/sencho/compare/v0.76.4...v0.76.5) (2026-05-10)
+
+
+### Fixed
+
+* **mesh:** push alias port map to pilot so reverse-direction forwarder binds listeners ([#1021](https://github.com/Studio-Saelix/sencho/issues/1021)) ([6ac7da9](https://github.com/Studio-Saelix/sencho/commit/6ac7da978c05e93b1239034b6f4ccdcfeb0f5256))
+
+## [0.76.4](https://github.com/Studio-Saelix/sencho/compare/v0.76.3...v0.76.4) (2026-05-10)
+
+
+### Fixed
+
+* **mesh:** apply D-1 pushed override on pilot deploys via file-presence fallback ([#1019](https://github.com/Studio-Saelix/sencho/issues/1019)) ([c12b3ba](https://github.com/Studio-Saelix/sencho/commit/c12b3ba995a425cc3ba375432a32f7a0a1a4b0b6))
+
+## [0.76.3](https://github.com/Studio-Saelix/sencho/compare/v0.76.2...v0.76.3) (2026-05-09)
+
+
+### Fixed
+
+* **mesh:** derive override services from compose file and surface cross-node dispatch ([#1017](https://github.com/Studio-Saelix/sencho/issues/1017)) ([2d9e4d0](https://github.com/Studio-Saelix/sencho/commit/2d9e4d0480328a18629a577542439d978ecd0484))
+
+## [0.76.2](https://github.com/Studio-Saelix/sencho/compare/v0.76.1...v0.76.2) (2026-05-09)
+
+
+### Fixed
+
+* **mesh:** operator-triggered override regen and boot lifecycle hardening ([#1016](https://github.com/Studio-Saelix/sencho/issues/1016)) ([7cca68f](https://github.com/Studio-Saelix/sencho/commit/7cca68f84a1b92c8c972f6c55ce2b215ec882f17))
+* **mesh:** trust central for cross-node dial auth and regenerate overrides at boot ([#1014](https://github.com/Studio-Saelix/sencho/issues/1014)) ([0947a80](https://github.com/Studio-Saelix/sencho/commit/0947a80cda8d1767c74fdc94f49b06eaa6a07496))
+
+## [0.76.1](https://github.com/Studio-Saelix/sencho/compare/v0.76.0...v0.76.1) (2026-05-09)
+
+
+### Fixed
+
+* **fleet:** drop tier gate from stack and container list endpoints ([#1012](https://github.com/Studio-Saelix/sencho/issues/1012)) ([693f9b4](https://github.com/Studio-Saelix/sencho/commit/693f9b4495bf7bffa805b6d2f0459aa4fdc70908))
+
+## [0.76.0](https://github.com/Studio-Saelix/sencho/compare/v0.75.1...v0.76.0) (2026-05-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mesh:** the operator's `docker-compose.yml` no longer uses `network_mode: host`. After upgrading, redeploy any meshed stacks once so they pick up the new IP-based override and join `sencho_mesh`.
+
+### Added
+
+* **mesh:** replace host-mode with shared sencho_mesh Docker network ([#1009](https://github.com/Studio-Saelix/sencho/issues/1009)) ([23bbee4](https://github.com/Studio-Saelix/sencho/commit/23bbee4f45ea08d133b5249a537e978fb94ad1b4))
+* **nodes:** hide hub-only views when active node is remote ([#1007](https://github.com/Studio-Saelix/sencho/issues/1007)) ([ccad5c9](https://github.com/Studio-Saelix/sencho/commit/ccad5c925b419d1d3915fccb53bdd3fad580b657))
+
+## [0.75.1](https://github.com/Studio-Saelix/sencho/compare/v0.75.0...v0.75.1) (2026-05-08)
+
+
+### Fixed
+
+* **mesh:** bind every alias port on every node, not just local-owned ([#1004](https://github.com/Studio-Saelix/sencho/issues/1004)) ([10a469e](https://github.com/Studio-Saelix/sencho/commit/10a469ecb4c208e2b0b3aacf66e04772fa0d4aa9))
+
+## [0.75.0](https://github.com/Studio-Saelix/sencho/compare/v0.74.4...v0.75.0) (2026-05-08)
+
+
+### Added
+
+* drop stack labels and network topology to Community tier ([#995](https://github.com/Studio-Saelix/sencho/issues/995)) ([1803512](https://github.com/Studio-Saelix/sencho/commit/1803512f706cde7d46dc12e5173ece3d1355880c))
+* **mesh:** bidirectional routing via tcp_open_reverse and central relay ([#1003](https://github.com/Studio-Saelix/sencho/issues/1003)) ([567e524](https://github.com/Studio-Saelix/sencho/commit/567e52445099cbd8e13b8386ed94c14e37cb1fc9))
+* **mesh:** collapse sidecar into Sencho process via in-process forwarder ([#1000](https://github.com/Studio-Saelix/sencho/issues/1000)) ([f599110](https://github.com/Studio-Saelix/sencho/commit/f599110386e744c4329887237a210a2f6597addd))
+
 ## [0.74.4](https://github.com/Studio-Saelix/sencho/compare/v0.74.3...v0.74.4) (2026-05-08)
 
 

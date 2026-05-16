@@ -1,14 +1,48 @@
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
+import { visibilityInterval } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { Button } from '@/components/ui/button';
-import { ArrowLeftRight, Loader2, ScrollText } from 'lucide-react';
+import { ArrowLeftRight, Loader2, ScrollText, Table2, Network } from 'lucide-react';
 import { RoutingNodeCard } from './RoutingNodeCard';
 import { MeshOptInSheet } from './MeshOptInSheet';
 import { MeshRouteDetailSheet } from './MeshRouteDetailSheet';
 import { MeshDiagnosticsSheet } from './MeshDiagnosticsSheet';
 import { MeshActivitySheet } from './MeshActivitySheet';
+import { MeshTopologyGraph, type MeshGraphEdgeMode } from './MeshTopologyGraph';
+import { MeshStackTopologySheet } from './MeshStackTopologySheet';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import type { MeshAlias, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
+
+type RoutingViewMode = 'table' | 'graph';
+
+interface TopologyStackTarget {
+    nodeId: number;
+    nodeName: string;
+    stack: string;
+}
+
+const MESH_REFRESH_INTERVAL_MS = 30000;
+const VIEW_MODE_KEY = 'sencho-routing-view-mode';
+const EDGE_MODE_KEY = 'sencho-routing-edge-mode';
+
+function readStoredViewMode(): RoutingViewMode {
+    try {
+        const v = localStorage.getItem(VIEW_MODE_KEY);
+        return v === 'graph' ? 'graph' : 'table';
+    } catch {
+        return 'table';
+    }
+}
+
+function readStoredEdgeMode(): MeshGraphEdgeMode {
+    try {
+        const v = localStorage.getItem(EDGE_MODE_KEY);
+        return v === 'aliases' ? 'aliases' : 'tunnels';
+    } catch {
+        return 'tunnels';
+    }
+}
 
 export function RoutingTab() {
     const [status, setStatus] = useState<MeshNodeStatus[]>([]);
@@ -18,8 +52,11 @@ export function RoutingTab() {
     const [diagnosticsNode, setDiagnosticsNode] = useState<{ id: number; name: string } | null>(null);
     const [routeDetailAlias, setRouteDetailAlias] = useState<string | null>(null);
     const [activityOpen, setActivityOpen] = useState(false);
+    const [viewMode, setViewMode] = useState<RoutingViewMode>(readStoredViewMode);
+    const [edgeMode, setEdgeMode] = useState<MeshGraphEdgeMode>(readStoredEdgeMode);
+    const [topologyStack, setTopologyStack] = useState<TopologyStackTarget | null>(null);
 
-    const refresh = useCallback(async () => {
+    const refresh = useCallback(async (opts: { silent?: boolean } = {}) => {
         try {
             const [statusRes, aliasesRes] = await Promise.all([
                 apiFetch('/mesh/status', { localOnly: true }),
@@ -34,13 +71,32 @@ export function RoutingTab() {
                 setAliases(body.aliases);
             }
         } catch (err) {
-            toast.error(`Failed to load mesh state: ${(err as Error).message}`);
+            if (opts.silent) {
+                console.warn('[mesh] background refresh failed:', (err as Error).message);
+            } else {
+                toast.error(`Failed to load mesh state: ${(err as Error).message}`);
+            }
         } finally {
             setLoading(false);
         }
     }, []);
 
     useEffect(() => { void refresh(); }, [refresh]);
+
+    useEffect(
+        () => visibilityInterval(() => { void refresh({ silent: true }); }, MESH_REFRESH_INTERVAL_MS),
+        [refresh],
+    );
+
+    const setViewModePersisted = useCallback((mode: RoutingViewMode) => {
+        setViewMode(mode);
+        try { localStorage.setItem(VIEW_MODE_KEY, mode); } catch { /* localStorage unavailable */ }
+    }, []);
+
+    const setEdgeModePersisted = useCallback((mode: MeshGraphEdgeMode) => {
+        setEdgeMode(mode);
+        try { localStorage.setItem(EDGE_MODE_KEY, mode); } catch { /* localStorage unavailable */ }
+    }, []);
 
     const testUpstream = useCallback(async (alias: string): Promise<void> => {
         try {
@@ -58,9 +114,22 @@ export function RoutingTab() {
         }
     }, []);
 
+    const handleGraphNodeClick = useCallback((nodeId: number) => {
+        const target = status.find((s) => s.nodeId === nodeId);
+        if (!target) return;
+        setOptInNode({ id: target.nodeId, name: target.nodeName });
+    }, [status]);
+
     const totalAliases = aliases.length;
     const meshedNodes = status.filter((s) => s.enabled).length;
-    const onlineNodes = status.filter((s) => s.pilotConnected).length;
+    // A node is "reachable for mesh" when it is local, a pilot with an
+    // active tunnel, or a Distributed API remote with valid credentials
+    // (central can dial the on-demand proxy tunnel as needed).
+    const reachableNodes = status.filter((s) => (
+        s.reachableMode === 'local'
+        || (s.reachableMode === 'pilot' && s.pilotConnected)
+        || s.reachableMode === 'proxy'
+    )).length;
 
     if (loading) {
         return (
@@ -86,7 +155,7 @@ export function RoutingTab() {
     if (meshedNodes === 0) {
         return (
             <div className="space-y-4">
-                <RoutingMasthead meshedNodes={meshedNodes} onlineNodes={onlineNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
+                <RoutingMasthead meshedNodes={meshedNodes} reachableNodes={reachableNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
                 <div className="flex flex-col items-center justify-center py-12 rounded border border-dashed border-card-border bg-card/50">
                     <ArrowLeftRight className="w-12 h-12 text-stat-subtitle mb-4" />
                     <div className="text-lg font-display italic mb-2">Mesh containers across nodes</div>
@@ -100,7 +169,6 @@ export function RoutingTab() {
                                 key={s.nodeId}
                                 status={s}
                                 aliases={aliases}
-                                isLocal={s.nodeId === status[0]?.nodeId && s.pilotConnected}
                                 onAddStack={() => setOptInNode({ id: s.nodeId, name: s.nodeName })}
                                 onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
                                 onShowAlias={(alias) => setRouteDetailAlias(alias)}
@@ -115,6 +183,10 @@ export function RoutingTab() {
                     diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                     routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
                     activityOpen={activityOpen} setActivityOpen={setActivityOpen}
+                    topologyStack={topologyStack}
+                    setTopologyStack={setTopologyStack}
+                    status={status}
+                    aliases={aliases}
                     onChanged={() => { void refresh(); }}
                 />
             </div>
@@ -123,37 +195,71 @@ export function RoutingTab() {
 
     return (
         <div className="space-y-4">
-            <RoutingMasthead meshedNodes={meshedNodes} onlineNodes={onlineNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {status.map((s) => (
-                    <RoutingNodeCard
-                        key={s.nodeId}
-                        status={s}
-                        aliases={aliases}
-                        isLocal={s.nodeId === status[0]?.nodeId && s.pilotConnected}
-                        onAddStack={() => setOptInNode({ id: s.nodeId, name: s.nodeName })}
-                        onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
-                        onShowAlias={(alias) => setRouteDetailAlias(alias)}
-                        onTestUpstream={testUpstream}
-                        onChanged={() => { void refresh(); }}
+            <RoutingMasthead meshedNodes={meshedNodes} reachableNodes={reachableNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
+            <div className="flex flex-wrap items-center gap-3">
+                <SegmentedControl<RoutingViewMode>
+                    value={viewMode}
+                    onChange={setViewModePersisted}
+                    ariaLabel="Routing view mode"
+                    options={[
+                        { value: 'table', label: 'Table', icon: Table2 },
+                        { value: 'graph', label: 'Graph', icon: Network },
+                    ]}
+                />
+                {viewMode === 'graph' && (
+                    <SegmentedControl<MeshGraphEdgeMode>
+                        value={edgeMode}
+                        onChange={setEdgeModePersisted}
+                        ariaLabel="Mesh graph edge mode"
+                        options={[
+                            { value: 'tunnels', label: 'Tunnels' },
+                            { value: 'aliases', label: 'Aliases', badge: totalAliases },
+                        ]}
                     />
-                ))}
+                )}
             </div>
+            {viewMode === 'table' ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {status.map((s) => (
+                        <RoutingNodeCard
+                            key={s.nodeId}
+                            status={s}
+                            aliases={aliases}
+                            onAddStack={() => setOptInNode({ id: s.nodeId, name: s.nodeName })}
+                            onShowDiagnostics={() => setDiagnosticsNode({ id: s.nodeId, name: s.nodeName })}
+                            onShowAlias={(alias) => setRouteDetailAlias(alias)}
+                            onTestUpstream={testUpstream}
+                            onChanged={() => { void refresh(); }}
+                        />
+                    ))}
+                </div>
+            ) : (
+                <MeshTopologyGraph
+                    status={status}
+                    aliases={aliases}
+                    edgeMode={edgeMode}
+                    onNodeClick={handleGraphNodeClick}
+                />
+            )}
             <SheetsRoot
                 optInNode={optInNode} setOptInNode={setOptInNode}
                 diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                 routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
                 activityOpen={activityOpen} setActivityOpen={setActivityOpen}
+                topologyStack={topologyStack}
+                setTopologyStack={setTopologyStack}
+                status={status}
+                aliases={aliases}
                 onChanged={() => { void refresh(); }}
             />
         </div>
     );
 }
 
-function RoutingMasthead({ meshedNodes, onlineNodes, totalAliases, onShowActivity }: {
-    meshedNodes: number; onlineNodes: number; totalAliases: number; onShowActivity: () => void;
+function RoutingMasthead({ meshedNodes, reachableNodes, totalAliases, onShowActivity }: {
+    meshedNodes: number; reachableNodes: number; totalAliases: number; onShowActivity: () => void;
 }) {
-    const stateWord = meshedNodes === 0 ? 'unmeshed' : meshedNodes < onlineNodes ? 'partial' : 'meshed';
+    const stateWord = meshedNodes === 0 ? 'unmeshed' : meshedNodes < reachableNodes ? 'partial' : 'meshed';
     return (
         <div className="flex items-center justify-between rounded-lg border border-card-border bg-card p-4 shadow-card-bevel">
             <div className="flex items-center gap-4">
@@ -161,7 +267,7 @@ function RoutingMasthead({ meshedNodes, onlineNodes, totalAliases, onShowActivit
                 <div className="grid grid-cols-3 gap-4 text-xs">
                     <div>
                         <div className="text-[10px] leading-3 tracking-[0.18em] uppercase text-stat-subtitle font-mono">meshed</div>
-                        <div className="font-mono text-stat-value">{meshedNodes}/{onlineNodes}</div>
+                        <div className="font-mono text-stat-value">{meshedNodes}/{reachableNodes}</div>
                     </div>
                     <div>
                         <div className="text-[10px] leading-3 tracking-[0.18em] uppercase text-stat-subtitle font-mono">aliases</div>
@@ -185,17 +291,26 @@ function SheetsRoot(props: {
     setRouteDetailAlias: (v: string | null) => void;
     activityOpen: boolean;
     setActivityOpen: (v: boolean) => void;
+    topologyStack: TopologyStackTarget | null;
+    setTopologyStack: (v: TopologyStackTarget | null) => void;
+    status: MeshNodeStatus[];
+    aliases: MeshAlias[];
     onChanged: () => void;
 }) {
+    const optInNode = props.optInNode;
     return (
         <>
-            {props.optInNode && (
+            {optInNode && (
                 <MeshOptInSheet
-                    open={!!props.optInNode}
+                    open={!!optInNode}
                     onOpenChange={(open) => { if (!open) props.setOptInNode(null); }}
-                    nodeId={props.optInNode.id}
-                    nodeName={props.optInNode.name}
+                    nodeId={optInNode.id}
+                    nodeName={optInNode.name}
                     onChanged={props.onChanged}
+                    onViewTopology={(stack) => {
+                        props.setTopologyStack({ nodeId: optInNode.id, nodeName: optInNode.name, stack });
+                        props.setOptInNode(null);
+                    }}
                 />
             )}
             <MeshDiagnosticsSheet
@@ -212,6 +327,15 @@ function SheetsRoot(props: {
             <MeshActivitySheet
                 open={props.activityOpen}
                 onOpenChange={props.setActivityOpen}
+            />
+            <MeshStackTopologySheet
+                open={!!props.topologyStack}
+                onOpenChange={(open) => { if (!open) props.setTopologyStack(null); }}
+                nodeId={props.topologyStack?.nodeId ?? null}
+                nodeName={props.topologyStack?.nodeName ?? null}
+                stackName={props.topologyStack?.stack ?? null}
+                status={props.status}
+                aliases={props.aliases}
             />
         </>
     );

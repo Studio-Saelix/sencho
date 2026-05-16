@@ -5,6 +5,10 @@ description: Monitor every node in your Sencho deployment from one screen, drill
 
 The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Status, Deployments, Traffic, Federation, Fleet Actions, Secrets), each linking out to its own dedicated page.
 
+<Note>
+  Fleet is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
+</Note>
+
 <Frame>
   <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '8 nodes · 8 online · last sync 12s', a '1 critical' reasons line, and CPU / MEM / CONTAINERS stat tiles next to a 1-alert counter. Below, the eight-tab strip starts at Overview and ends at Secrets. Under that, the toolbar (search, sort, filters, Grid/Topology toggle) sits above a grid of node cards: a pinned Local card with a cyan ★ Local rail and an Online badge plus version chip, then Opsix, Pitt-Moba, sencho-pilot-test (with an Update available badge and Update to v0.76.3 button), and four more remote cards." />
 </Frame>
@@ -49,12 +53,13 @@ The Fleet view is a tab strip. Four tab triggers are visible to every tier; the 
 
 ### Action buttons
 
-Two buttons sit next to the tab strip in the top-right corner. They are visible from every tab, not just Overview.
+Three buttons sit next to the tab strip in the top-right corner. They are visible from every tab, not just Overview.
 
 | Button | What it does |
 |--------|--------------|
 | **Check Updates** | Opens the [Node Updates sheet](#node-updates) where you can manage Sencho version updates across the fleet. |
 | **Refresh** | Forces an immediate re-fetch of fleet data. The icon spins while the refresh is in flight; the button is disabled until it completes. |
+| **Add node** | Opens the same Add Node dialog as **Settings · System · Nodes** so you can register a new node without leaving the Fleet page. Admin-only. After saving a remote proxy node, a connection test runs automatically and the result toasts in (success or saved-but-unreachable). |
 
 ## The Overview tab
 
@@ -93,7 +98,17 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 
 Offline nodes render dimmed, with no stats grid, no usage bars, and no update affordance.
 
-On Admiral, every card shows a three-dot **Node actions** button in the top-right corner. The current action is **Cordon node** / **Uncordon node**.
+### Node actions menu (admin)
+
+Every card carries a three-dot **Node actions** kebab in the top-right corner. The menu surfaces the same lifecycle actions you would find in **Settings · System · Nodes**:
+
+| Action | Notes |
+|--------|-------|
+| **Edit node** | Opens the Edit dialog prefilled with the node's connection details. For proxy-mode remotes, saving with a changed API URL or token re-runs the connection test automatically. |
+| **Delete node** | Opens a destructive confirmation. The local (default) node has no Delete option. Deleting a remote only removes it from this console; the remote instance and its containers are untouched. |
+| **Cordon node** / **Uncordon node** | Marks the node unschedulable so new blueprint deployments skip it (Admiral). Existing deployments keep running. |
+
+The menu is admin-only. Non-admin users see no kebab on the card.
 
 ### Topology view
 
@@ -117,6 +132,18 @@ Each node card in the topology graph carries:
 The graph is interactive: drag the canvas to pan, scroll to zoom, drag a node to reposition it, and use the **navigator minimap** in the bottom-right corner to jump around large fleets. The ReactFlow controls in the bottom-left expose explicit zoom in / zoom out / fit-to-view buttons. Click any node card to navigate into its node detail.
 
 The graph re-lays out only when nodes are added, removed, or change type. Live metric updates on existing nodes do not move the layout, so an operator who has dragged nodes into a custom arrangement keeps it.
+
+#### Topology layout modes (Skipper+)
+
+A toolbar at the top of the topology canvas offers three layouts. Pick the one that matches how you reason about your fleet.
+
+| Mode | What it does |
+|------|--------------|
+| **Hub** | Local node on the left; remotes radiate to the right. Best when you have a handful of nodes and want the gateway anchored. |
+| **Grouped** | Remotes cluster by their primary node label (alphabetically first when a node has multiple). The local node sits in its own cluster. Use this to read environment, region, or role groupings at a glance. Nodes without any label fall into an Unlabeled cluster. |
+| **Free** | Drag any node anywhere on the canvas. Positions persist in this browser, so the arrangement is there when you come back. |
+
+Assign labels in **Settings · System · Nodes** to drive Grouped mode. Each node accepts multiple labels; the alphabetically first one is its cluster.
 
 ### Stack drill-down
 
@@ -247,5 +274,11 @@ Fleet View queries every registered node in parallel. Each node responds indepen
   </Accordion>
   <Accordion title="The Update button returns 'Admin access required'">
     Fleet update operations (per-row and **Update all**) are admin-only. Viewer and operator roles can see the table and the badges but the button returns a 403 when clicked. Ask a Sencho administrator either to run the update for you or to grant your account the admin role.
+  </Accordion>
+  <Accordion title="Free-mode topology positions don't persist">
+    Free mode stores node positions in your browser's local storage. The arrangement is per-browser; it does not sync across devices or users. If positions reset on reload, the most common causes are a browser session that has local storage disabled (private or incognito windows, strict tracking-prevention modes, which fall back to in-memory state for the session only), storage cleared by browser cleanup tools or a profile reset, or simply a different browser or profile. To verify storage is writable, open DevTools → Application → Local Storage on the Sencho origin and confirm the `sencho-topology-preferences` key exists after switching modes or dragging a node.
+  </Accordion>
+  <Accordion title="Grouped topology shows everything in one Unlabeled cluster">
+    Grouped mode clusters remote nodes by their primary node label. When no remotes carry any labels, every remote falls into the **Unlabeled** cluster and the canvas looks similar to Hub mode. A hint banner above the canvas points to **Settings · System · Nodes** where labels are managed. Add at least one label to two or more remotes and reopen the topology to see the clusters split.
   </Accordion>
 </AccordionGroup>

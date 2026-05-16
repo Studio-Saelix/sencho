@@ -52,6 +52,19 @@ export function UserProfileDropdown({ theme, setTheme, onOpenSettings }: UserPro
     const { logout, user, isAdmin } = useAuth();
     const { license } = useLicense();
     const [billingLoading, setBillingLoading] = useState(false);
+    const [open, setOpen] = useState(false);
+
+    const closeMenu = () => setOpen(false);
+
+    const handleOpenSettings = () => {
+        closeMenu();
+        onOpenSettings();
+    };
+
+    const handleLogout = () => {
+        closeMenu();
+        logout();
+    };
 
     const openBillingPortal = async () => {
         setBillingLoading(true);
@@ -67,6 +80,7 @@ export function UserProfileDropdown({ theme, setTheme, onOpenSettings }: UserPro
             toast.error('Failed to open billing portal.');
         } finally {
             setBillingLoading(false);
+            closeMenu();
         }
     };
 
@@ -75,7 +89,7 @@ export function UserProfileDropdown({ theme, setTheme, onOpenSettings }: UserPro
     const roleLabel = user?.role;
 
     return (
-        <Popover>
+        <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger asChild>
                 <Button
                     variant="outline"
@@ -131,7 +145,7 @@ export function UserProfileDropdown({ theme, setTheme, onOpenSettings }: UserPro
 
                 {/* Navigation strip */}
                 <div className="border-t border-card-border/60">
-                    <MenuRow icon={Settings} label="Settings" onClick={onOpenSettings} />
+                    <MenuRow icon={Settings} label="Settings" onClick={handleOpenSettings} />
                     {showBilling ? (
                         <MenuRow
                             icon={CreditCard}
@@ -147,12 +161,14 @@ export function UserProfileDropdown({ theme, setTheme, onOpenSettings }: UserPro
                         label="Documentation"
                         href="https://docs.sencho.io"
                         external
+                        onClick={closeMenu}
                     />
                     <MenuRow
                         icon={MessageSquare}
                         label="Feedback"
                         href="https://github.com/studio-saelix/sencho/issues"
                         external
+                        onClick={closeMenu}
                     />
                 </div>
 
@@ -174,7 +190,7 @@ export function UserProfileDropdown({ theme, setTheme, onOpenSettings }: UserPro
                 <div className="border-t border-card-border/60">
                     <button
                         type="button"
-                        onClick={logout}
+                        onClick={handleLogout}
                         className="flex w-full items-center gap-2.5 px-[var(--density-row-x)] py-[var(--density-row-y)] text-left text-sm text-destructive transition-colors hover:bg-destructive/5 focus-visible:bg-destructive/5 focus-visible:outline-none"
                     >
                         <LogOut className="h-4 w-4" strokeWidth={1.5} />
@@ -235,6 +251,7 @@ function MenuRow({
                 href={href}
                 target={external ? '_blank' : undefined}
                 rel={external ? 'noopener noreferrer' : undefined}
+                onClick={onClick}
                 className={classes}
             >
                 {body}

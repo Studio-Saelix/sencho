@@ -1,5 +1,4 @@
 import fs from 'fs';
-import net from 'net';
 import path from 'path';
 import http from 'http';
 import jwt from 'jsonwebtoken';
@@ -11,7 +10,6 @@ import {
     BinaryFrameType,
     MAX_FRAME_SIZE_BYTES,
     MAX_STREAMS_PER_TUNNEL,
-    MeshErrCode,
     PROTOCOL_VERSION,
     STREAM_IDLE_TIMEOUT_MS,
     decodeBinaryFrame,
@@ -21,7 +19,14 @@ import {
     wsDataToBuffer,
     wsDataToString,
 } from './protocol';
+import {
+    ReverseTcpStreamHandle,
+    TcpStreamSwitchboard,
+    attachTcpStreamSwitchboard,
+    resolveByComposeLabels,
+} from '../mesh/tcpStreamSwitchboard';
 import { sanitizeForLog } from '../utils/safeLog';
+import { httpUrlToWs } from '../utils/wsUrl';
 import { isDebugEnabled } from '../utils/debug';
 
 const RECONNECT_MIN_MS = 1_000;
@@ -58,6 +63,16 @@ export function startPilotAgent(loopbackPort: number): void {
         initialToken: persistedToken || enrollToken!,
         enrolling: !persistedToken,
     });
+    // Register the agent as MeshService's reverse dialer so outbound
+    // cross-node mesh traffic from this pilot's MeshForwarder routes via
+    // `tcp_open_reverse` over the existing pilot tunnel instead of trying
+    // to use the central-only `PilotTunnelManager.getBridge` path. Lazy
+    // import keeps `MeshService` outside the cold-boot critical path.
+    void import('../services/MeshService').then(({ MeshService }) => {
+        MeshService.getInstance().setReverseDialer(agent);
+    }).catch((err) => {
+        console.warn('[Pilot] reverse dialer registration failed:', sanitizeForLog((err as Error).message));
+    });
     agent.start();
 }
 
@@ -77,7 +92,9 @@ export class PilotAgent {
     private reconnectTimer?: NodeJS.Timeout;
     private readonly httpStreams = new Map<number, { req: http.ClientRequest }>();
     private readonly wsStreams = new Map<number, WebSocket>();
-    private readonly tcpStreams = new Map<number, MeshTcpStream>();
+    /** Per-connection mesh frame handler. Created on `connect()`, cleaned up on disconnect. */
+    private switchboard: TcpStreamSwitchboard | null = null;
+    /** Idle timers for HTTP and WebSocket streams only; mesh streams keep their own timers inside the switchboard. */
     private readonly idleTimers = new Map<number, NodeJS.Timeout>();
     private shuttingDown = false;
     private readonly agentVersion: string;
@@ -153,7 +170,7 @@ export class PilotAgent {
     private connect(): void {
         if (this.shuttingDown) return;
 
-        const wsUrl = this.options.primaryUrl.replace(/^http/, 'ws').replace(/\/$/, '') + '/api/pilot/tunnel';
+        const wsUrl = httpUrlToWs(this.options.primaryUrl) + '/api/pilot/tunnel';
         const ws = new WebSocket(wsUrl, {
             headers: {
                 Authorization: `Bearer ${this.token}`,
@@ -163,13 +180,19 @@ export class PilotAgent {
             maxPayload: MAX_FRAME_SIZE_BYTES,
             // Self-signed deployments can supply an internal CA bundle via
             // SENCHO_PILOT_CA_FILE; rejectUnauthorized stays true. There is
-            // intentionally no env var to disable TLS verification — that
+            // intentionally no env var to disable TLS verification, which
             // would defeat the entire trust model of the tunnel credential.
             // The bundle is read once at agent construction (this.customCa);
             // rotate by restarting the container.
             ...(this.customCa ? { ca: this.customCa } : {}),
         });
         this.ws = ws;
+        this.switchboard = attachTcpStreamSwitchboard({
+            ws,
+            resolveTarget: resolveByComposeLabels,
+            extraStreamCount: () => this.httpStreams.size + this.wsStreams.size,
+            logLabel: 'Pilot',
+        });
 
         ws.on('open', () => {
             // Backoff intentionally NOT reset here: a TCP-level connect that
@@ -217,16 +240,16 @@ export class PilotAgent {
             try { ws.close(1006, 'tunnel closed'); } catch { /* ignore */ }
         }
         this.wsStreams.clear();
-        for (const [, stream] of this.tcpStreams) {
-            try { stream.socket.destroy(); } catch { /* ignore */ }
+        if (this.switchboard) {
+            this.switchboard.cleanup('pilot tunnel closed');
+            this.switchboard = null;
         }
-        this.tcpStreams.clear();
         for (const [, timer] of this.idleTimers) clearTimeout(timer);
         this.idleTimers.clear();
     }
 
     private streamCount(): number {
-        return this.httpStreams.size + this.wsStreams.size + this.tcpStreams.size;
+        return this.httpStreams.size + this.wsStreams.size + (this.switchboard?.tcpStreamCount() ?? 0);
     }
 
     private refreshIdleTimer(streamId: number): void {
@@ -262,15 +285,6 @@ export class PilotAgent {
             this.wsStreams.delete(streamId);
             if (ws) {
                 try { ws.send(encodeJsonFrame({ t: 'ws_close', s: streamId, code: 1001, reason: 'idle' })); } catch { /* ignore */ }
-            }
-            return;
-        }
-        const tcpEntry = this.tcpStreams.get(streamId);
-        if (tcpEntry) {
-            try { tcpEntry.socket.destroy(); } catch { /* ignore */ }
-            this.tcpStreams.delete(streamId);
-            if (ws) {
-                try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: streamId })); } catch { /* ignore */ }
             }
         }
     }
@@ -308,6 +322,7 @@ export class PilotAgent {
     private handleJsonFrame(frame: ReturnType<typeof decodeJsonFrame>): void {
         const ws = this.ws;
         if (!ws) return;
+        if (this.switchboard?.handleJsonFrame(frame)) return;
         switch (frame.t) {
             case 'hello': {
                 if (frame.version !== PROTOCOL_VERSION) {
@@ -336,8 +351,6 @@ export class PilotAgent {
             case 'ws_open': this.onWsOpen(frame); break;
             case 'ws_msg_text': this.onWsMsgText(frame.s, frame.data); break;
             case 'ws_close': this.onWsClose(frame.s, frame.code, frame.reason); break;
-            case 'tcp_open': this.onTcpOpen(frame); break;
-            case 'tcp_close': this.onTcpClose(frame.s); break;
             default:
                 // Other frame types are primary-bound only; agent ignores.
                 break;
@@ -345,6 +358,7 @@ export class PilotAgent {
     }
 
     private handleBinaryFrame(frame: ReturnType<typeof decodeBinaryFrame>): void {
+        if (this.switchboard?.handleBinaryFrame(frame)) return;
         switch (frame.type) {
             case BinaryFrameType.HttpReqBody: {
                 const entry = this.httpStreams.get(frame.streamId);
@@ -357,13 +371,6 @@ export class PilotAgent {
                 const ws = this.wsStreams.get(frame.streamId);
                 if (!ws) return;
                 try { ws.send(frame.payload, { binary: true }); } catch { /* ignore */ }
-                this.refreshIdleTimer(frame.streamId);
-                break;
-            }
-            case BinaryFrameType.TcpData: {
-                const stream = this.tcpStreams.get(frame.streamId);
-                if (!stream) return;
-                try { stream.socket.write(frame.payload); } catch { /* ignore */ }
                 this.refreshIdleTimer(frame.streamId);
                 break;
             }
@@ -514,140 +521,26 @@ export class PilotAgent {
         this.clearIdleTimer(streamId);
     }
 
-    // --- Sencho Mesh TCP dispatch (tunnel -> Compose service container) ---
+    // --- Sencho Mesh TCP dispatch ---
     //
-    // PR 1 rejects every tcp_open with mesh_not_enabled; the dial path is
-    // exercised by tests via setMeshResolver but never lit in production until
-    // PR 2 wires Dockerode resolution gated by the local mesh_stacks table.
-
-    private async onTcpOpen(frame: Extract<ReturnType<typeof decodeJsonFrame>, { t: 'tcp_open' }>): Promise<void> {
-        const ws = this.ws;
-        if (!ws) return;
-        if (this.streamCount() >= MAX_STREAMS_PER_TUNNEL) {
-            try {
-                ws.send(encodeJsonFrame({ t: 'tcp_open_ack', s: frame.s, ok: false, err: 'agent_error' }));
-            } catch { /* ignore */ }
-            return;
-        }
-
-        const target = await this.resolveMeshTarget(frame.stack, frame.service, frame.port);
-        if (!target.ok) {
-            try {
-                ws.send(encodeJsonFrame({ t: 'tcp_open_ack', s: frame.s, ok: false, err: target.err }));
-            } catch { /* ignore */ }
-            return;
-        }
-
-        const socket = net.createConnection({ host: target.host, port: target.port });
-        socket.setTimeout(MESH_CONNECT_TIMEOUT_MS);
-        const entry: MeshTcpStream = { socket, accepted: false };
-        this.tcpStreams.set(frame.s, entry);
-        this.refreshIdleTimer(frame.s);
-
-        const sendAck = (ok: boolean, err?: MeshErrCode) => {
-            try { ws.send(encodeJsonFrame({ t: 'tcp_open_ack', s: frame.s, ok, err })); } catch { /* ignore */ }
-        };
-
-        socket.once('connect', () => {
-            entry.accepted = true;
-            socket.setTimeout(0);
-            sendAck(true);
-            this.refreshIdleTimer(frame.s);
-        });
-        socket.on('data', (chunk: Buffer) => {
-            try {
-                ws.send(encodeBinaryFrame(BinaryFrameType.TcpData, frame.s, chunk), { binary: true });
-            } catch { /* ignore */ }
-            this.refreshIdleTimer(frame.s);
-        });
-        socket.on('timeout', () => {
-            if (entry.accepted) return;
-            entry.accepted = true;
-            sendAck(false, 'unreachable');
-            this.tcpStreams.delete(frame.s);
-            this.clearIdleTimer(frame.s);
-            try { socket.destroy(); } catch { /* ignore */ }
-        });
-        socket.on('error', (err) => {
-            if (!entry.accepted) {
-                entry.accepted = true;
-                sendAck(false, 'unreachable');
-                this.tcpStreams.delete(frame.s);
-                this.clearIdleTimer(frame.s);
-                return;
-            }
-            console.warn('[Pilot] tcp stream error:', sanitizeForLog(err.message));
-            if (this.tcpStreams.delete(frame.s)) {
-                this.clearIdleTimer(frame.s);
-                try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: frame.s })); } catch { /* ignore */ }
-            }
-        });
-        socket.on('close', () => {
-            if (this.tcpStreams.delete(frame.s)) {
-                this.clearIdleTimer(frame.s);
-                try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: frame.s })); } catch { /* ignore */ }
-            }
-        });
-    }
-
-    private onTcpClose(streamId: number): void {
-        const entry = this.tcpStreams.get(streamId);
-        if (!entry) return;
-        this.tcpStreams.delete(streamId);
-        this.clearIdleTimer(streamId);
-        try { entry.socket.destroy(); } catch { /* ignore */ }
-    }
+    // Mesh frame handling lives in `backend/src/mesh/tcpStreamSwitchboard.ts`
+    // and is shared with the proxy-mode WS handler. The agent owns a
+    // switchboard per WS connection and delegates the public reverse-dial
+    // surface used by MeshService.
 
     /**
-     * Resolves a mesh target by consulting the local mesh_stacks opt-in table
-     * and Compose container labels. Refuses if the target stack is not opted
-     * in on this node (defense-in-depth: the primary is trusted, but we also
-     * gate at the agent so a leaked tunnel token cannot reach unauthorized
-     * services).
+     * Allocates a reverse stream id, sends `tcp_open_reverse`, and returns
+     * a handle MeshService can splice bytes through. Returns null if the
+     * tunnel is not currently open or the per-tunnel stream cap is
+     * reached. Delegates to the per-connection switchboard.
      */
-    private async resolveMeshTarget(
-        stack: string,
-        service: string,
-        port: number,
-    ): Promise<MeshResolveResult> {
-        try {
-            const { DatabaseService } = await import('../services/DatabaseService');
-            const { NodeRegistry } = await import('../services/NodeRegistry');
-            const dockerodeMod = await import('dockerode');
-            const Docker = (dockerodeMod as { default: new (opts?: unknown) => { listContainers: (opts?: unknown) => Promise<unknown[]> } }).default;
-            const db = DatabaseService.getInstance();
-            const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
-            if (!db.isMeshStackEnabled(localNodeId, stack)) {
-                return { ok: false, err: 'denied' };
-            }
-            const docker = new Docker();
-            const containers = (await docker.listContainers({
-                filters: { label: [`com.docker.compose.project=${stack}`, `com.docker.compose.service=${service}`] },
-            })) as Array<{ NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> } }>;
-            for (const c of containers) {
-                const networks = c.NetworkSettings?.Networks ?? {};
-                for (const net of Object.values(networks)) {
-                    if (net.IPAddress) return { ok: true, host: net.IPAddress, port };
-                }
-            }
-            return { ok: false, err: 'no_target' };
-        } catch (err) {
-            console.warn('[Pilot] resolveMeshTarget failed:', sanitizeForLog((err as Error).message));
-            return { ok: false, err: 'agent_error' };
-        }
+    public openMeshTcpStream(target: { nodeId: number; stack: string; service: string; port: number }): ReverseTcpStreamHandle | null {
+        const ws = this.ws;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return null;
+        if (this.streamCount() >= MAX_STREAMS_PER_TUNNEL) return null;
+        return this.switchboard?.openReverseStream(target) ?? null;
     }
 }
-
-const MESH_CONNECT_TIMEOUT_MS = 10_000;
-
-interface MeshTcpStream {
-    socket: net.Socket;
-    accepted: boolean;
-}
-
-type MeshResolveResult =
-    | { ok: true; host: string; port: number }
-    | { ok: false; err: MeshErrCode };
 
 /**
  * Read the persisted long-lived tunnel token from disk if present. ENOENT is

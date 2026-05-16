@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SystemSheet } from '@/components/ui/system-sheet';
-import { Checkbox } from '@/components/ui/checkbox';
+import { Button } from '@/components/ui/button';
+import { ConfirmModal } from '@/components/ui/modal';
 import type { MeshStackEntry } from '@/types/mesh';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Workflow } from 'lucide-react';
 
 interface Props {
     open: boolean;
@@ -12,13 +13,15 @@ interface Props {
     nodeId: number;
     nodeName: string;
     onChanged: () => void;
+    onViewTopology?: (stack: string) => void;
 }
 
-export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged }: Props) {
+export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged, onViewTopology }: Props) {
     const [stacks, setStacks] = useState<MeshStackEntry[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [pendingStack, setPendingStack] = useState<string | null>(null);
+    const [confirmStack, setConfirmStack] = useState<MeshStackEntry | null>(null);
 
     useEffect(() => {
         if (!open) return;
@@ -40,7 +43,7 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
         return () => { cancelled = true; };
     }, [open, nodeId]);
 
-    const toggle = async (stack: MeshStackEntry) => {
+    const performToggle = async (stack: MeshStackEntry) => {
         setPendingStack(stack.name);
         setError(null);
         try {
@@ -54,10 +57,17 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                 setError(body.error || 'Port already claimed by another mesh stack');
                 return;
             }
+            if (res.status === 503) {
+                const body = await res.json().catch(() => ({})) as { error?: string };
+                setError(body.error || 'Mesh data plane unavailable on this node');
+                return;
+            }
             if (!res.ok) throw new Error(`status ${res.status}`);
             setStacks((prev) => prev.map((s) => s.name === stack.name ? { ...s, optedIn: !stack.optedIn } : s));
             onChanged();
-            toast.success(stack.optedIn ? 'Stack removed from mesh' : 'Stack added to mesh');
+            toast.success(stack.optedIn
+                ? `${stack.name} removed from mesh, redeploying`
+                : `${stack.name} added to mesh, redeploying`);
         } catch (err) {
             setError((err as Error).message);
             toast.error('Mesh update failed');
@@ -70,54 +80,97 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
     const meta = `${inMeshCount} of ${stacks.length} in mesh`;
 
     return (
-        <SystemSheet
-            open={open}
-            onOpenChange={onOpenChange}
-            crumb={['Fleet', 'Mesh', nodeName]}
-            name={nodeName}
-            meta={meta}
-            size="sm"
-        >
-            <div className="space-y-4">
-                <p className="text-sm text-stat-subtitle leading-snug">
-                    Adding a stack lets its services be reached from other meshed stacks by hostname.
-                    Toggling a stack redeploys it to refresh hostnames.
-                </p>
+        <>
+            <SystemSheet
+                open={open}
+                onOpenChange={onOpenChange}
+                crumb={['Fleet', 'Mesh', nodeName]}
+                name={nodeName}
+                meta={meta}
+                size="sm"
+            >
+                <div className="space-y-4">
+                    <p className="text-sm text-stat-subtitle leading-snug">
+                        Adding a stack lets its services be reached from other meshed stacks by hostname.
+                        Toggling a stack triggers a redeploy on its node so the routing override applies.
+                    </p>
 
-                {loading && (
-                    <div className="flex items-center gap-2 text-stat-subtitle text-sm">
-                        <Loader2 className="w-4 h-4 animate-spin" /> Loading stacks…
-                    </div>
-                )}
-                {error && (
-                    <div className="rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
-                        {error}
-                    </div>
-                )}
-                {!loading && stacks.length === 0 && (
-                    <div className="text-sm text-stat-subtitle">No stacks deployed on this node yet.</div>
-                )}
-
-                <div className="space-y-2">
-                    {stacks.map((stack) => (
-                        <div key={stack.name} className="flex items-center justify-between rounded border border-card-border bg-card px-3 py-2">
-                            <div className="flex items-center gap-3">
-                                <Checkbox
-                                    id={`mesh-stack-${stack.name}`}
-                                    checked={stack.optedIn}
-                                    disabled={pendingStack === stack.name}
-                                    onCheckedChange={() => { void toggle(stack); }}
-                                />
-                                <label htmlFor={`mesh-stack-${stack.name}`} className="text-sm font-mono">{stack.name}</label>
-                            </div>
-                            {pendingStack === stack.name && <Loader2 className="w-3 h-3 animate-spin text-stat-subtitle" />}
-                            {stack.optedIn && pendingStack !== stack.name && (
-                                <span className="text-[10px] leading-3 tracking-[0.18em] uppercase text-success/80 font-mono">in mesh</span>
-                            )}
+                    {loading && (
+                        <div className="flex items-center gap-2 text-stat-subtitle text-sm">
+                            <Loader2 className="w-4 h-4 animate-spin" /> Loading stacks…
                         </div>
-                    ))}
+                    )}
+                    {error && (
+                        <div className="rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
+                            {error}
+                        </div>
+                    )}
+                    {!loading && stacks.length === 0 && (
+                        <div className="text-sm text-stat-subtitle">No stacks deployed on this node yet.</div>
+                    )}
+
+                    <div className="space-y-2">
+                        {stacks.map((stack) => (
+                            <div key={stack.name} className="flex items-center justify-between rounded border border-card-border bg-card px-3 py-2">
+                                <div className="flex items-center gap-3">
+                                    <span className="text-sm font-mono">{stack.name}</span>
+                                    {stack.optedIn && pendingStack !== stack.name && (
+                                        <span className="text-[10px] leading-3 tracking-[0.18em] uppercase text-success/80 font-mono">in mesh</span>
+                                    )}
+                                </div>
+                                {pendingStack === stack.name ? (
+                                    <Loader2 className="w-4 h-4 animate-spin text-stat-subtitle" />
+                                ) : (
+                                    <div className="flex items-center gap-2">
+                                        {stack.optedIn && onViewTopology && (
+                                            <Button
+                                                size="sm"
+                                                variant="ghost"
+                                                onClick={() => onViewTopology(stack.name)}
+                                                aria-label={`View topology for ${stack.name}`}
+                                            >
+                                                <Workflow className="w-3 h-3 mr-1" /> Topology
+                                            </Button>
+                                        )}
+                                        <Button
+                                            size="sm"
+                                            variant={stack.optedIn ? 'outline' : 'default'}
+                                            onClick={() => setConfirmStack(stack)}
+                                        >
+                                            {stack.optedIn ? 'Remove from mesh' : 'Add to mesh'}
+                                        </Button>
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
                 </div>
-            </div>
-        </SystemSheet>
+            </SystemSheet>
+
+            <ConfirmModal
+                open={!!confirmStack}
+                onOpenChange={(o) => { if (!o) setConfirmStack(null); }}
+                variant={confirmStack?.optedIn ? 'destructive' : 'default'}
+                kicker={`Mesh / ${nodeName}`}
+                title={
+                    confirmStack?.optedIn
+                        ? `Remove ${confirmStack.name} from mesh?`
+                        : `Add ${confirmStack?.name ?? ''} to mesh?`
+                }
+                description={
+                    confirmStack?.optedIn
+                        ? `${confirmStack.name} will be redeployed on ${nodeName} so its containers drop the mesh routing entries from /etc/hosts.`
+                        : confirmStack
+                            ? `${confirmStack.name} will be redeployed on ${nodeName} so its containers pick up the mesh routing entries.`
+                            : undefined
+                }
+                confirmLabel={confirmStack?.optedIn ? 'Remove and redeploy' : 'Add and redeploy'}
+                onConfirm={() => {
+                    if (confirmStack) void performToggle(confirmStack);
+                    setConfirmStack(null);
+                }}
+                onCancel={() => setConfirmStack(null)}
+            />
+        </>
     );
 }

@@ -6,7 +6,7 @@ FROM --platform=$BUILDPLATFORM tonistiigi/xx@sha256:c64defb9ed5a91eacb37f96ccc3d
 # Stage 1: Build Frontend
 # Runs on the BUILD platform (amd64) - frontend has no native modules so the
 # compiled output (JS/CSS/HTML) is entirely platform-agnostic.
-FROM --platform=$BUILDPLATFORM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS frontend-builder
 
 WORKDIR /app/frontend
 
@@ -22,7 +22,7 @@ RUN npm run build
 
 # Stage 2: Compile TypeScript
 # Runs on the BUILD platform (amd64) - tsc output is platform-agnostic JS.
-FROM --platform=$BUILDPLATFORM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS backend-builder
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS backend-builder
 
 WORKDIR /app/backend
 
@@ -44,7 +44,7 @@ RUN npm run build
 # tonistiigi/xx + clang as the cross-compiler.
 # This avoids the Node.js v20 SIGILL crash that occurs when npm runs
 # under QEMU because QEMU lacks ARMv8.1 LSE atomic instruction support.
-FROM --platform=$BUILDPLATFORM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS prod-deps
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS prod-deps
 
 # Copy xx cross-compilation tools into this stage
 COPY --from=xx / /
@@ -90,12 +90,12 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
         npm ci --omit=dev; \
     fi
 
-# Stage 4a: Build Docker CLI from source against Go 1.26.2
+# Stage 4a: Build Docker CLI from source against Go 1.26.3
 #
 # CLI v29.4.1 ships otel/sdk v1.43.0, resolving CVE-2026-39883 (BSD kenv) and
 # CVE-2026-39882 (OTLP response OOM). It also carries the CVE-2025-15558 fix
 # (Windows plugin search path LPE, fixed since v29.2.0). Building from source
-# with Go 1.26.2 additionally eliminates Go stdlib CVEs present in the upstream
+# with Go 1.26.3 additionally eliminates Go stdlib CVEs present in the upstream
 # static binary.
 #
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for TARGET.
@@ -103,7 +103,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid SemVer
 # compliance requirements. We copy vendor.mod -> go.mod and build with -mod=vendor
 # so all deps come from the vendored tree (no network access needed).
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS cli-builder
 
 ARG TARGETARCH
 
@@ -120,11 +120,11 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
       -mod=vendor \
       -ldflags "-extldflags=-static \
         -X github.com/docker/cli/cli/version.Version=29.4.1 \
-        -X github.com/docker/cli/cli/version.GitCommit=source-go1.26.2" \
+        -X github.com/docker/cli/cli/version.GitCommit=source-go1.26.3" \
       -o /build/docker \
       ./cmd/docker
 
-# Stage 4b: Build Docker Compose from source against Go 1.26.2
+# Stage 4b: Build Docker Compose from source against Go 1.26.3
 #
 # Compose v5.1.3 removed the direct dependency on github.com/docker/docker
 # (replaced by moby/moby/api + moby/moby/client), eliminating CVE-2026-34040
@@ -135,7 +135,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # v0.29.0. The go get step below bumps otel to v1.43.0 to resolve
 # CVE-2026-39883 (BSD kenv) and CVE-2026-39882 (OTLP response OOM) so that
 # the compose binary scans completely clean.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS compose-builder
 
 ARG TARGETARCH
 
@@ -193,7 +193,7 @@ RUN test -f /build/docker-compose \
 # in this image; operators who want the feature install Trivy on the host
 # and mount the binary into the container, or run a sidecar. See
 # docs/operations/trivy-setup.mdx for the supported integration paths.
-FROM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4
+FROM node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea
 
 # Daily cache-bust for the apk upgrade layer. CI passes the current date
 # (YYYY-MM-DD) as a build-arg, so this RUN layer's hash changes at most
@@ -215,7 +215,7 @@ RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
-# These binaries were compiled with Go 1.26.2, resolving all Go stdlib CVEs that
+# These binaries were compiled with Go 1.26.3, resolving all Go stdlib CVEs that
 # were present in the upstream static release binaries.
 COPY --from=cli-builder /build/docker /usr/local/bin/docker
 COPY --from=compose-builder /build/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose

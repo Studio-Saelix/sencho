@@ -11,6 +11,10 @@ Blueprints live under **Fleet · Deployments**.
   Blueprints require a Sencho **Skipper** or **Admiral** license. Community Edition hides the **Deployments** tab. Creating, editing, and withdrawing blueprints requires an admin role; operators and viewers see the catalog read-only. Pinning a blueprint to a node from the Federation tab is Admiral-only.
 </Note>
 
+<Frame>
+  <img src="/images/blueprint-model/catalog.png" alt="Blueprint catalog in Fleet Deployments showing blueprint cards, deployment counts, drift policy, and the New Blueprint action" />
+</Frame>
+
 ## What problem this solves
 
 Without Blueprints, running the same stack on multiple nodes means clicking through each node's stack manager and keeping them in sync by hand. When something drifts (someone restarts a container, edits the compose file, or a node forgets to pull a new image) you find out when it breaks.
@@ -41,12 +45,14 @@ The first time you visit the tab, the catalog is empty and a three-step explaine
 |---|---|
 | **Name** | Used as the stack directory on every targeted node (`<COMPOSE_DIR>/<blueprint-name>/`). Lowercase letters, digits, hyphens, and underscores only. |
 | **Description** | Short prose for the catalog tile and detail header. |
-| **Compose** | Standard `docker-compose.yml`. The same file ships to every targeted node. Sencho parses it on save and classifies the blueprint as stateless, stateful, or unknown. |
+| **Compose** | Standard `docker-compose.yml`. The same file ships to every targeted node. Sencho parses it on save and classifies the blueprint as stateless, stateful, or unknown. The YAML must parse successfully and stay under 96 KiB. |
 | **Selector** | Either label expressions (any-of plus all-of) or a list of node IDs picked by hand. |
 | **Drift policy** | Observe, Suggest, or Enforce. Drift detection always runs; only the response differs. |
 | **Reconciler enabled** | Toggle the reconciliation loop without deleting the blueprint. The **Disable** button on the detail sheet flips this toggle off; **Enable** turns it back on. Useful when you want to pause auto-deploys without losing the configuration. |
 
 Sencho writes a `.blueprint.json` marker into each targeted node's stack directory. The marker carries the blueprint ID, revision, and the timestamp of the last apply. The reconciler refuses to touch any directory that does not carry a matching marker, so a Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node. When the directory exists without a matching marker, the deployment row enters the `Name conflict` status until you rename one of the two.
+
+Before a local Blueprint deploy starts, Sencho applies the same pre-deploy vulnerability policy gate used by standard stack deploys. If an enabled policy blocks one of the Blueprint's image references, the deployment row moves to **Failed** and the stack is not written to disk. Successful local Blueprint deploys also trigger the normal post-deploy scan. Remote Blueprint deploys are routed through the remote node's stack deploy endpoint, so policy enforcement runs on the remote instance with that node's credentials and scanner state.
 
 ## The editor
 
@@ -122,6 +128,10 @@ Possible status values:
 | **Evict blocked** | A node left the selector while a stateful deployment was active. The reconciler refuses to evict until you choose an explicit mode. |
 | **Name conflict** | A directory by the blueprint's name already exists on the node and does not carry our marker file. The reconciler will not touch it. |
 
+<Frame>
+  <img src="/images/blueprint-model/detail-state-review.png" alt="Blueprint detail sheet with a deployment row waiting for state review confirmation" />
+</Frame>
+
 ## Working with Blueprints
 
 ### Create
@@ -131,6 +141,8 @@ Possible status values:
 3. Fill in the name, description, compose YAML, selector, and drift policy.
 4. Watch the classification banner update as you type. It tells you whether the blueprint is portable or pinned to data.
 5. Click **Create blueprint**. Sencho immediately runs one reconciliation tick.
+
+If the YAML is malformed or larger than 96 KiB, Sencho rejects the save before creating a Blueprint row.
 
 ### Apply on demand
 
@@ -146,6 +158,12 @@ The first time a stateful blueprint reaches a node, the deployment row enters **
 
 <Frame>
   <img src="/images/blueprint-model/state-review-dialog.png" alt="State review dialog titled 'Deploy pg-fleet to Local?'. The kicker reads 'PG-FLEET · DEPLOY' and the body explains the blueprint is stateful and has never run on this node. Two option cards follow: 'Deploy fresh' with a play icon (active), and 'Restore from snapshot' marked as coming with the future Volume Migration feature (disabled). A Cancel button sits at the bottom right." />
+</Frame>
+
+For stateful or state-unknown Blueprints, a compose edit does not redeploy automatically. Each existing deployment enters **Awaiting confirmation** so you can decide whether the new revision is safe for that node's local data.
+
+<Frame>
+  <img src="/images/blueprint-model/detail-sheet.png" alt="Blueprint detail sheet showing deployment rows, Apply now, Edit, Delete, and the current compose content" />
 </Frame>
 
 ### Withdraw a single deployment
@@ -206,6 +224,18 @@ A future Volume Migration feature will automate this with app-aware backup tooli
   <Accordion title="A stateful deployment is stuck in 'Awaiting confirmation'">
     The reconciler will not auto-deploy a stateful blueprint to a node it has never run on. Click **Confirm deploy** on the row, then choose **Deploy fresh** in the dialog. Sencho will create empty named volumes and start the stack.
   </Accordion>
+  <Accordion title="A deploy was blocked by vulnerability policy">
+    Open **Settings · Security** and review the active scan policies for the target node. The Blueprint deployment row records the blocking policy and affected image count. Either fix the image, relax the policy, or deploy through an explicit admin-approved bypass on the stack surface. Blueprints do not silently bypass deploy enforcement.
+  </Accordion>
+  <Accordion title="Compose content was rejected on save">
+    Sencho accepts valid YAML up to 96 KiB. Split very large compose files into smaller stacks or move generated content out of the Blueprint. Do not paste secrets into the compose body; use environment files or fleet secrets where appropriate.
+  </Accordion>
+  <Accordion title="A remote node disconnected during apply">
+    The row moves to **Failed** with the remote error. Reconnect the node, verify whether the stack directory contains `docker-compose.yml` and `.blueprint.json`, then click **Apply now**. If the directory exists without a matching marker, Sencho treats it as a name conflict until you rename or remove the remote stack manually.
+  </Accordion>
+  <Accordion title="A Docker daemon or registry failure surfaced during apply">
+    The deployment row moves to **Failed** and records the Docker or registry error. Resolve the daemon, socket, registry credentials, rate limit, disk, or volume-permission issue on the affected node, then click **Apply now**. Watch that node's stack activity and security scan status after retry.
+  </Accordion>
   <Accordion title="Drift is reported but never gets corrected">
     Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the drift was caused by a compose change that would destroy named volumes, Enforce intentionally downgrades to Suggest semantics for that event. Either change the compose to one that preserves the volumes, or withdraw the deployment with explicit operator confirmation and let the new revision deploy fresh.
   </Accordion>
@@ -237,3 +267,18 @@ By design, Blueprints do not include:
 - Versioning history with one-click rollback. To revert, paste the prior compose into the editor and save.
 
 These omissions keep Blueprints honest: a compose-native fleet primitive that distributes the file you already have to the nodes you choose.
+
+## Rollback and watch plan
+
+To roll back a Blueprint hardening change, revert the application build, restart the Sencho backend and frontend, and re-paste the prior compose revision into any affected Blueprint. No database migration rollback is required for the validation and reconciliation guards described here.
+
+For the first 24 to 48 hours after deployment, watch:
+
+- Backend logs tagged `[BlueprintReconciler]`, `[BlueprintService]`, and `[BlueprintService:diag]` when Developer Mode is on.
+- Deployment-row counts by node: `failed`, `pending_state_review`, `name_conflict`, and `drifted`.
+- Vulnerability policy blocks and post-deploy scan failures on each node.
+- Docker daemon errors, registry timeouts, image pull failures, volume permission errors, and out-of-disk errors on the affected node.
+
+Rollback if failed Blueprint deploys exceed 5 percent of apply attempts for 30 minutes, if a single node repeatedly fails all Blueprint deploys after Docker recovers, or if stateful deployments leave `pending_state_review` without an operator action path.
+
+In a fleet, roll back the controlling instance first so it stops issuing new Blueprint actions. Then roll back remote nodes. During version skew, older remote nodes can still receive stack deploy requests, but they may lack matching validation or diagnostic logs. Inspect per-node logs rather than relying only on aggregate fleet counts.

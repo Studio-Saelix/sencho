@@ -133,6 +133,20 @@ When two or more nodes are registered, clicking the switcher opens a popover lis
 
 Click any row to switch. All views (dashboard, stack list, editor, resources, logs) immediately reflect the selected node. The **Manage nodes** link at the bottom of the popover opens the Settings → Nodes panel to add, edit, or remove nodes.
 
+## What top-level views show when a remote node is active
+
+Top-level views that manage fleet-wide state are scoped to the local hub and are hidden from the nav strip when a remote node is the active selection. They reappear automatically when you switch back to your local node.
+
+| View | Why it is hub-only |
+|------|--------------------|
+| **Fleet** | Manages your node registry and cross-node topology; only meaningful from the hub. |
+| **Schedules** | Schedules are dispatched from the hub to target nodes. |
+| **Audit** | Audit history is centralized on the hub. |
+| **Logs** | Aggregates logs across the fleet. |
+| **Auto-Update** | Compares image versions across all nodes in your fleet. |
+
+Node-level views (Home, Resources, App Store, Console, the editor) work as expected against whichever node you have selected.
+
 ## The Nodes table
 
 The Nodes table surfaces routing, status, and per-node automation at a glance for every node:

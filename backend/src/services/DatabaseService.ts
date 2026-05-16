@@ -31,6 +31,8 @@ export type NodeMode = 'proxy' | 'pilot_agent';
 
 export interface AutoHealPolicy {
     id?: number;
+    node_id: number;
+    proxy_entitled_until: number;
     stack_name: string;
     service_name: string | null;
     unhealthy_duration_mins: number;
@@ -51,7 +53,7 @@ export interface AutoHealHistoryEntry {
     service_name: string | null;
     container_name: string;
     container_id: string;
-    action: 'restarted' | 'skipped_user_action' | 'skipped_cooldown' | 'skipped_rate_limit' | 'failed' | 'policy_auto_disabled';
+    action: 'restarted' | 'skipped_user_action' | 'skipped_cooldown' | 'skipped_rate_limit' | 'failed' | 'policy_auto_disabled' | 'docker_unavailable';
     reason: string;
     success: number;
     error: string | null;
@@ -103,6 +105,7 @@ export type WebhookAction = 'deploy' | 'restart' | 'stop' | 'start' | 'pull' | '
 
 export interface Webhook {
     id?: number;
+    node_id: number;
     name: string;
     stack_name: string;
     action: WebhookAction;
@@ -649,6 +652,7 @@ export class DatabaseService {
         this.migrateAddNodeLastContact();
         this.migrateAddNodeCordonFields();
         this.migrateAddBlueprintPinnedNode();
+        this.migrateAutoHealNodeId();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -757,6 +761,7 @@ export class DatabaseService {
 
       CREATE TABLE IF NOT EXISTS webhooks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER,
         name TEXT NOT NULL,
         stack_name TEXT NOT NULL,
         action TEXT NOT NULL DEFAULT 'deploy',
@@ -1072,6 +1077,8 @@ export class DatabaseService {
 
       CREATE TABLE IF NOT EXISTS auto_heal_policies (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL DEFAULT 1,
+        proxy_entitled_until INTEGER NOT NULL DEFAULT 0,
         stack_name TEXT NOT NULL,
         service_name TEXT,
         unhealthy_duration_mins INTEGER NOT NULL,
@@ -1157,6 +1164,12 @@ export class DatabaseService {
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
         maybeAddCol('nodes', 'api_token', "TEXT DEFAULT ''");
+        maybeAddCol('webhooks', 'node_id', 'INTEGER');
+        this.db.prepare(`
+          UPDATE webhooks
+          SET node_id = COALESCE((SELECT id FROM nodes WHERE is_default = 1 LIMIT 1), 1)
+          WHERE node_id IS NULL
+        `).run();
 
         // Pilot Agent outbound-mode columns
         maybeAddCol('nodes', 'mode', "TEXT NOT NULL DEFAULT 'proxy'");
@@ -1364,11 +1377,14 @@ export class DatabaseService {
         this.db.prepare('CREATE INDEX IF NOT EXISTS idx_notification_routes_node_priority ON notification_routes(node_id, enabled, priority)').run();
     }
 
-    private tryAddColumn(table: string, col: string, def: string): void {
+    private tryAddColumn(table: string, col: string, def: string): boolean {
         try {
             this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run();
-        } catch {
-            /* column already present */
+            return true;
+        } catch (err) {
+            const message = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+            if (!message.includes('duplicate column name')) throw err;
+            return false;
         }
     }
 
@@ -1542,6 +1558,24 @@ export class DatabaseService {
 
     private migrateAddBlueprintPinnedNode(): void {
         this.tryAddColumn('blueprints', 'pinned_node_id', 'INTEGER');
+    }
+
+    private migrateAutoHealNodeId(): void {
+        const markerKey = 'migration_auto_heal_node_scope_v1';
+        const markerDone = this.getGlobalSettings()[markerKey] === '1';
+        this.tryAddColumn('auto_heal_policies', 'node_id', 'INTEGER NOT NULL DEFAULT 1');
+        this.tryAddColumn('auto_heal_policies', 'proxy_entitled_until', 'INTEGER NOT NULL DEFAULT 0');
+        if (!markerDone) {
+            const defaultNode = this.getDefaultNode();
+            if (defaultNode?.id) {
+                this.db.transaction(() => {
+                    this.db.prepare('UPDATE auto_heal_policies SET node_id = ? WHERE node_id IS NULL OR node_id = 1').run(defaultNode.id);
+                    this.updateGlobalSetting(markerKey, '1');
+                })();
+            } else {
+                this.updateGlobalSetting(markerKey, '1');
+            }
+        }
     }
 
     // --- Sencho Mesh ---
@@ -1778,9 +1812,15 @@ export class DatabaseService {
 
     // --- Auto-Heal Policies ---
 
-    public getAutoHealPolicies(stackName?: string): AutoHealPolicy[] {
+    public getAutoHealPolicies(stackName?: string, nodeId?: number): AutoHealPolicy[] {
+        if (stackName && nodeId !== undefined) {
+            return this.db.prepare('SELECT * FROM auto_heal_policies WHERE stack_name = ? AND node_id = ?').all(stackName, nodeId) as AutoHealPolicy[];
+        }
         if (stackName) {
             return this.db.prepare('SELECT * FROM auto_heal_policies WHERE stack_name = ?').all(stackName) as AutoHealPolicy[];
+        }
+        if (nodeId !== undefined) {
+            return this.db.prepare('SELECT * FROM auto_heal_policies WHERE node_id = ?').all(nodeId) as AutoHealPolicy[];
         }
         return this.db.prepare('SELECT * FROM auto_heal_policies').all() as AutoHealPolicy[];
     }
@@ -1791,9 +1831,11 @@ export class DatabaseService {
 
     public addAutoHealPolicy(policy: Omit<AutoHealPolicy, 'id'>): AutoHealPolicy {
         const stmt = this.db.prepare(
-            'INSERT INTO auto_heal_policies (stack_name, service_name, unhealthy_duration_mins, cooldown_mins, max_restarts_per_hour, auto_disable_after_failures, enabled, consecutive_failures, last_fired_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO auto_heal_policies (node_id, proxy_entitled_until, stack_name, service_name, unhealthy_duration_mins, cooldown_mins, max_restarts_per_hour, auto_disable_after_failures, enabled, consecutive_failures, last_fired_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
         const result = stmt.run(
+            policy.node_id,
+            policy.proxy_entitled_until,
             policy.stack_name,
             policy.service_name ?? null,
             policy.unhealthy_duration_mins,
@@ -1813,7 +1855,7 @@ export class DatabaseService {
         const ALLOWED_KEYS = new Set([
             'service_name', 'unhealthy_duration_mins', 'cooldown_mins',
             'max_restarts_per_hour', 'auto_disable_after_failures',
-            'enabled', 'consecutive_failures', 'last_fired_at',
+            'enabled', 'consecutive_failures', 'last_fired_at', 'proxy_entitled_until',
         ]);
         const entries = Object.entries(patch).filter(([k, v]) => ALLOWED_KEYS.has(k) && v !== undefined);
         if (entries.length === 0) return;
@@ -1844,12 +1886,28 @@ export class DatabaseService {
             entry.error ?? null,
             entry.timestamp
         );
+        this.pruneAutoHealHistory(entry.policy_id);
     }
 
     public getAutoHealHistory(policyId: number, limit = 50): AutoHealHistoryEntry[] {
         return this.db.prepare(
             'SELECT * FROM auto_heal_history WHERE policy_id = ? ORDER BY timestamp DESC LIMIT ?'
         ).all(policyId, limit) as AutoHealHistoryEntry[];
+    }
+
+    public pruneAutoHealHistory(policyId: number, maxRows = 500, maxAgeMs = 30 * 24 * 60 * 60_000): void {
+        const cutoff = Date.now() - maxAgeMs;
+        this.db.prepare('DELETE FROM auto_heal_history WHERE policy_id = ? AND timestamp < ?').run(policyId, cutoff);
+        this.db.prepare(`
+            DELETE FROM auto_heal_history
+            WHERE policy_id = ?
+              AND id NOT IN (
+                SELECT id FROM auto_heal_history
+                WHERE policy_id = ?
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+              )
+        `).run(policyId, policyId, maxRows);
     }
 
     public incrementConsecutiveFailures(policyId: number): void {
@@ -2286,6 +2344,7 @@ export class DatabaseService {
     public getWebhooks(): Webhook[] {
         return this.db.prepare('SELECT * FROM webhooks ORDER BY created_at DESC').all().map((row: any) => ({
             ...row,
+            node_id: Number(row.node_id ?? this.getDefaultNode()?.id ?? 1),
             enabled: row.enabled === 1,
         }));
     }
@@ -2293,21 +2352,26 @@ export class DatabaseService {
     public getWebhook(id: number): Webhook | undefined {
         const row = this.db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id) as any;
         if (!row) return undefined;
-        return { ...row, enabled: row.enabled === 1 };
+        return {
+            ...row,
+            node_id: Number(row.node_id ?? this.getDefaultNode()?.id ?? 1),
+            enabled: row.enabled === 1,
+        };
     }
 
     public addWebhook(webhook: Omit<Webhook, 'id' | 'created_at' | 'updated_at'>): number {
         const now = Date.now();
         const result = this.db.prepare(
-            'INSERT INTO webhooks (name, stack_name, action, secret, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(webhook.name, webhook.stack_name, webhook.action, webhook.secret, webhook.enabled ? 1 : 0, now, now);
+            'INSERT INTO webhooks (node_id, name, stack_name, action, secret, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        ).run(webhook.node_id, webhook.name, webhook.stack_name, webhook.action, webhook.secret, webhook.enabled ? 1 : 0, now, now);
         return result.lastInsertRowid as number;
     }
 
-    public updateWebhook(id: number, updates: Partial<Pick<Webhook, 'name' | 'stack_name' | 'action' | 'enabled'>>): void {
+    public updateWebhook(id: number, updates: Partial<Pick<Webhook, 'node_id' | 'name' | 'stack_name' | 'action' | 'enabled'>>): void {
         const fields: string[] = [];
         const values: (string | number)[] = [];
 
+        if (updates.node_id !== undefined) { fields.push('node_id = ?'); values.push(updates.node_id); }
         if (updates.name !== undefined) { fields.push('name = ?'); values.push(updates.name); }
         if (updates.stack_name !== undefined) { fields.push('stack_name = ?'); values.push(updates.stack_name); }
         if (updates.action !== undefined) { fields.push('action = ?'); values.push(updates.action); }

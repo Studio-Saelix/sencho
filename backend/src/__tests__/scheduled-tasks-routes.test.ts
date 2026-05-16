@@ -13,6 +13,7 @@ let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let adminCookie: string;
 let viewerCookie: string;
+let variantSpy: ReturnType<typeof vi.spyOn>;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -20,7 +21,7 @@ beforeAll(async () => {
 
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
+  variantSpy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
   vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
@@ -39,6 +40,7 @@ beforeEach(() => {
   // Start each test with an empty scheduled_tasks table.
   const db = DatabaseService.getInstance().getDb();
   db.prepare('DELETE FROM scheduled_tasks').run();
+  variantSpy.mockReturnValue('admiral');
 });
 
 describe('GET /api/scheduled-tasks', () => {
@@ -86,6 +88,73 @@ describe('GET /api/scheduled-tasks', () => {
     expect(res.body.length).toBe(1);
     expect(res.body[0].name).toBe('nightly-scan');
     expect(Array.isArray(res.body[0].next_runs)).toBe(true);
+  });
+
+  it('shows scan and snapshot tasks to Skipper users', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    db.createScheduledTask({
+      name: 'nightly-scan',
+      target_type: 'system',
+      target_id: null,
+      node_id: 1,
+      action: 'scan',
+      cron_expression: '0 0 * * *',
+      enabled: 1,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      last_status: null,
+      last_error: null,
+      prune_targets: null,
+      target_services: null,
+      prune_label_filter: null,
+    });
+    db.createScheduledTask({
+      name: 'daily-snapshot',
+      target_type: 'fleet',
+      target_id: null,
+      node_id: 1,
+      action: 'snapshot',
+      cron_expression: '0 1 * * *',
+      enabled: 1,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      last_status: null,
+      last_error: null,
+      prune_targets: null,
+      target_services: null,
+      prune_label_filter: null,
+    });
+    db.createScheduledTask({
+      name: 'system-prune',
+      target_type: 'system',
+      target_id: null,
+      node_id: 1,
+      action: 'prune',
+      cron_expression: '0 2 * * *',
+      enabled: 1,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      last_status: null,
+      last_error: null,
+      prune_targets: JSON.stringify(['images']),
+      target_services: null,
+      prune_label_filter: null,
+    });
+    variantSpy.mockReturnValue('individual');
+
+    const res = await request(app).get('/api/scheduled-tasks').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.map((t: { action: string }) => t.action).sort()).toEqual(['scan', 'snapshot']);
   });
 });
 
@@ -149,12 +218,57 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.body.error).toMatch(/Scan action requires node_id/);
   });
 
+  it('rejects scheduled scans on remote nodes', async () => {
+    const remoteNodeId = DatabaseService.getInstance().addNode({
+      name: 'remote-scan-node',
+      type: 'remote',
+      api_url: 'http://remote.local:1852',
+      api_token: 'token',
+      compose_dir: '/srv/compose',
+      is_default: false,
+    });
+
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'remote-scan',
+      target_type: 'system',
+      node_id: remoteNodeId,
+      action: 'scan',
+      cron_expression: '0 0 * * *',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/local node/i);
+  });
+
   it('rejects target_services with wrong action', async () => {
     const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
       ...basePayload, action: 'update', target_services: ['web'],
     });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/target_services can only be used with restart/);
+  });
+
+  it('rejects invalid stack target_id values', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, target_id: '../etc/passwd',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid stack name/);
+  });
+
+  it('rejects stack target_id values with surrounding whitespace', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, target_id: ' my-stack ',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid stack name/);
+  });
+
+  it('rejects invalid stack node_id values', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, node_id: 'not-a-node',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid node_id/);
   });
 });
 
@@ -295,6 +409,50 @@ describe('POST /api/scheduled-tasks - new lifecycle actions', () => {
   });
 });
 
+describe('POST /api/scheduled-tasks - Skipper tier gating', () => {
+  beforeEach(() => {
+    variantSpy.mockReturnValue('skipper');
+  });
+
+  it('allows Skipper admins to create update tasks', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'skipper-update', target_type: 'stack', target_id: 'my-stack', node_id: 1,
+      action: 'update', cron_expression: '0 3 * * *', enabled: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.action).toBe('update');
+  });
+
+  it('allows Skipper admins to create scan tasks', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'skipper-scan', target_type: 'system', node_id: 1,
+      action: 'scan', cron_expression: '0 0 * * *', enabled: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.action).toBe('scan');
+  });
+
+  it('allows Skipper admins to create snapshot tasks', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'skipper-snapshot', target_type: 'fleet', node_id: 1,
+      action: 'snapshot', cron_expression: '0 1 * * *', enabled: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.action).toBe('snapshot');
+  });
+
+  for (const action of ['restart', 'prune', 'auto_backup', 'auto_stop', 'auto_down', 'auto_start']) {
+    it(`rejects Skipper admins from creating ${action} tasks with 403`, async () => {
+      const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+        name: `skipper-${action}`, target_type: 'stack', target_id: 'my-stack', node_id: 1,
+        action, cron_expression: '0 3 * * *', enabled: true,
+      });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
+    });
+  }
+});
+
 describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
   it('can toggle delete_after_run via update', async () => {
     const now = Date.now();
@@ -318,5 +476,69 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       .send({ delete_after_run: false });
     expect(res2.status).toBe(200);
     expect(res2.body.delete_after_run).toBe(0);
+  });
+});
+
+describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
+  let taskId: number;
+
+  beforeEach(() => {
+    const now = Date.now();
+    taskId = DatabaseService.getInstance().createScheduledTask({
+      name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
+      cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: null, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 0,
+    });
+  });
+
+  it('rejects updates that introduce path traversal in stack target_id', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ target_id: '../bad' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid stack name/);
+  });
+
+  it('rejects updates that introduce whitespace in stack target_id', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ target_id: ' s ' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid stack name/);
+  });
+
+  it('rejects updates that clear node_id for a stack target', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ node_id: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/node_id/);
+  });
+
+  it('rejects updates that clear target_type', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ target_type: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid target_type/);
+  });
+
+  it('rejects updates that clear action', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ action: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid action/);
   });
 });
