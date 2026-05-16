@@ -14,7 +14,7 @@
  * refactor that moves the capability check to a different layer does not
  * silently regress.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { MeshProxyTunnelDialer } from '../services/MeshProxyTunnelDialer';
@@ -22,17 +22,21 @@ import { OFFLINE_META } from '../services/CapabilityRegistry';
 import { MeshCentralRegistry } from '../services/MeshCentralRegistry';
 import { DatabaseService } from '../services/DatabaseService';
 
+let tmpDir: string;
+beforeAll(async () => { tmpDir = await setupTestDb(); });
+afterAll(() => cleanupTestDb(tmpDir));
+
 describe('Version skew: peer without mesh_proxy_callback_bootstrap', () => {
-    let tmpDir: string;
-    beforeEach(async () => {
-        tmpDir = await setupTestDb();
+    beforeEach(() => {
+        // Per-test reset of dialer + registry singletons + env. The DB lives
+        // once per file (beforeAll above); resetting setupTestDb per test
+        // would invalidate the DatabaseService singleton on Linux.
         MeshProxyTunnelDialer.resetForTest();
         MeshCentralRegistry.resetForTest();
         process.env.SENCHO_PRIMARY_URL = 'https://central.example.com';
         DatabaseService.getInstance().setSystemState('instance_id', 'test-central-instance');
     });
     afterEach(() => {
-        cleanupTestDb(tmpDir);
         delete process.env.SENCHO_PRIMARY_URL;
         vi.restoreAllMocks();
     });

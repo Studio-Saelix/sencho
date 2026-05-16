@@ -7,9 +7,15 @@ query-filters:
   # hashing of low-entropy human passwords, which is irrelevant for these
   # high-entropy opaque keys. Scoped to the token-handling files only, so
   # real user-password code (bcrypt-hashed elsewhere) is still analyzed.
+  # MeshProxyTunnelDialer / meshProxyTunnelFromPeer use sha256(api_token).slice(0,16)
+  # to fingerprint the peer's bearer in the mesh_tunnel JWT.
   - exclude:
       id: js/insufficient-password-hash
       paths:
         - backend/src/utils/apiTokenFormat.ts
         - backend/src/routes/apiTokens.ts
+        - backend/src/services/MeshProxyTunnelDialer.ts
+        - backend/src/websocket/meshProxyTunnelFromPeer.ts
         - backend/src/__tests__/**
+        - backend/src/__tests__/mesh-bootstrap-integration.test.ts
+        - backend/src/__tests__/mesh-proxy-tunnel-from-peer.test.ts

@@ -13,20 +13,23 @@
  * Failing this invariant means the peer would keep dialing back with the
  * old JWT (rejected with `instance_mismatch`) without anyone noticing.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { MeshCentralRegistry } from '../services/MeshCentralRegistry';
 import { DatabaseService } from '../services/DatabaseService';
 
+let tmpDir: string;
+beforeAll(async () => { tmpDir = await setupTestDb(); });
+afterAll(() => cleanupTestDb(tmpDir));
+
 describe('Central instance id change', () => {
-    let tmpDir: string;
-    beforeEach(async () => {
-        tmpDir = await setupTestDb();
+    beforeEach(() => {
         MeshCentralRegistry.resetForTest();
-        // Defensive: the per-file DB copy may carry rows from a prior baseline.
+        // Per-test cleanup of the mesh_centrals table. The DB lives once per
+        // file (beforeAll); resetting setupTestDb per test would invalidate
+        // the DatabaseService singleton's connection on Linux.
         DatabaseService.getInstance().getDb().prepare('DELETE FROM mesh_centrals').run();
     });
-    afterEach(() => cleanupTestDb(tmpDir));
 
     it('drops the old row and accepts the new one with a central-instance-changed event', () => {
         const reg = MeshCentralRegistry.getInstance();

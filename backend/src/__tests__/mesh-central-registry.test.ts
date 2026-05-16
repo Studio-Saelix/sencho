@@ -3,11 +3,11 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { MeshCentralRegistry } from '../services/MeshCentralRegistry';
 
-describe('mesh_centrals schema', () => {
-  let tmpDir: string;
-  beforeAll(async () => { tmpDir = await setupTestDb(); });
-  afterAll(() => cleanupTestDb(tmpDir));
+let sharedTmpDir: string;
+beforeAll(async () => { sharedTmpDir = await setupTestDb(); });
+afterAll(() => cleanupTestDb(sharedTmpDir));
 
+describe('mesh_centrals schema', () => {
   it('creates the mesh_centrals table on initSchema', () => {
     const db = DatabaseService.getInstance();
     const row = db.getDb().prepare(
@@ -35,16 +35,14 @@ describe('mesh_centrals schema', () => {
 });
 
 describe('MeshCentralRegistry', () => {
-  let tmpDir: string;
-  beforeEach(async () => {
-    tmpDir = await setupTestDb();
+  beforeEach(() => {
     MeshCentralRegistry.resetForTest();
-    // Ensure a clean mesh_centrals table even if the baseline DB carried rows
-    // from a prior test file (the helper's per-file copy isolates by path,
-    // but resetting the table inside the file keeps tests order-independent).
+    // Per-test cleanup of the mesh_centrals table so tests are order-independent.
+    // The DB itself is created once per file in the file-scope beforeAll above;
+    // resetting setupTestDb per test would invalidate the DatabaseService
+    // singleton's open connection (SQLITE_READONLY_DBMOVED on Linux CI).
     DatabaseService.getInstance().getDb().prepare('DELETE FROM mesh_centrals').run();
   });
-  afterEach(() => cleanupTestDb(tmpDir));
 
   const sampleMaterial = (overrides: Partial<{
     centralInstanceId: string;

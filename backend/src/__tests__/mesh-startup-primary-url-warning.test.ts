@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { MeshService } from '../services/MeshService';
 import { DatabaseService } from '../services/DatabaseService';
@@ -17,15 +17,19 @@ function seedMeshedProxyNode(): void {
     db.setNodeMeshEnabled(id, true);
 }
 
+let tmpDir: string;
+beforeAll(async () => { tmpDir = await setupTestDb(); });
+afterAll(() => cleanupTestDb(tmpDir));
+
 describe('SENCHO_PRIMARY_URL preflight warning', () => {
-    let tmpDir: string;
     let originalPrimaryUrl: string | undefined;
 
-    beforeEach(async () => {
-        tmpDir = await setupTestDb();
+    beforeEach(() => {
         originalPrimaryUrl = process.env.SENCHO_PRIMARY_URL;
         // The DB singleton persists across tests in the same process; wipe any
         // non-default nodes seeded by a prior test so each case starts clean.
+        // setupTestDb itself runs once per file (beforeAll above) to avoid
+        // invalidating the DatabaseService singleton's open connection.
         DatabaseService.getInstance().getDb().prepare('DELETE FROM nodes WHERE is_default = 0').run();
     });
 
@@ -35,7 +39,6 @@ describe('SENCHO_PRIMARY_URL preflight warning', () => {
         } else {
             process.env.SENCHO_PRIMARY_URL = originalPrimaryUrl;
         }
-        cleanupTestDb(tmpDir);
     });
 
     it('warns when SENCHO_PRIMARY_URL is unset and a mesh-enabled proxy node exists', () => {
