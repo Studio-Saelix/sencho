@@ -21,12 +21,27 @@
  */
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import { MAX_FRAME_SIZE_BYTES } from '../pilot/protocol';
+import {
+    MAX_FRAME_SIZE_BYTES,
+    decodeBinaryFrame,
+    decodeJsonFrame,
+    wsDataToBuffer,
+    wsDataToString,
+} from '../pilot/protocol';
 import { MeshCentralRegistry } from './MeshCentralRegistry';
-import { PilotTunnelBridge } from './PilotTunnelBridge';
+import {
+    attachTcpStreamSwitchboard,
+    resolveByComposeLabels,
+    type TcpStreamSwitchboard,
+    type ReverseTcpStreamHandle,
+} from '../mesh/tcpStreamSwitchboard';
 import { PilotMetrics } from './PilotMetrics';
 import { httpUrlToWs } from '../utils/wsUrl';
 import { sanitizeForLog } from '../utils/safeLog';
+
+interface CallbackReverseDialer {
+    openMeshTcpStream(target: { nodeId: number; stack: string; service: string; port: number }): ReverseTcpStreamHandle | null;
+}
 
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -59,8 +74,9 @@ interface DialError extends Error {
 
 export class PeerToCentralMeshSessionDialer extends EventEmitter {
     private static instance: PeerToCentralMeshSessionDialer | null = null;
-    private currentSession: PilotTunnelBridge | null = null;
-    private inflight: Promise<PilotTunnelBridge | null> | null = null;
+    private currentSession: TcpStreamSwitchboard | null = null;
+    private currentWs: WebSocket | null = null;
+    private inflight: Promise<TcpStreamSwitchboard | null> | null = null;
     private recentDials: number[] = [];
     private endpointUnavailableUntil = 0;
 
@@ -73,7 +89,8 @@ export class PeerToCentralMeshSessionDialer extends EventEmitter {
 
     public static resetForTest(): void {
         if (this.instance) {
-            try { this.instance.currentSession?.close(1000, 'test reset'); } catch { /* ignore */ }
+            try { this.instance.currentSession?.cleanup('test reset'); } catch { /* ignore */ }
+            try { this.instance.currentWs?.close(1000, 'test reset'); } catch { /* ignore */ }
         }
         this.instance = null;
     }
@@ -82,7 +99,7 @@ export class PeerToCentralMeshSessionDialer extends EventEmitter {
         return this.currentSession !== null;
     }
 
-    public async ensureSession(): Promise<PilotTunnelBridge | null> {
+    public async ensureSession(): Promise<TcpStreamSwitchboard | null> {
         if (this.currentSession) return this.currentSession;
         if (Date.now() < this.endpointUnavailableUntil) return null;
         if (this.isRateLimited()) return null;
@@ -97,7 +114,7 @@ export class PeerToCentralMeshSessionDialer extends EventEmitter {
         return this.recentDials.length >= RATE_LIMIT_MAX;
     }
 
-    private async dial(): Promise<PilotTunnelBridge | null> {
+    private async dial(): Promise<TcpStreamSwitchboard | null> {
         const material = MeshCentralRegistry.getInstance().getActive();
         if (!material) return null;
         this.recentDials.push(Date.now());
@@ -115,25 +132,100 @@ export class PeerToCentralMeshSessionDialer extends EventEmitter {
             this.handleDialFailure(err, material.centralInstanceId);
             return null;
         }
-        return this.attachBridge(ws, material.centralInstanceId);
+        return this.attachSwitchboard(ws, material.centralInstanceId);
     }
 
-    private async attachBridge(ws: WebSocket, instanceId: string): Promise<PilotTunnelBridge | null> {
-        const bridge = new PilotTunnelBridge(0, ws);
+    /**
+     * Wire the peer-initiated callback WS into the local MeshService. The
+     * R1-A2 design puts the peer end of the bridge in TcpStreamSwitchboard
+     * mode (peer multiplexes streams; central side runs PilotTunnelBridge).
+     * Without this wiring the WS opens cleanly but MeshService.reverseDialer
+     * stays null, so MeshService.dialMeshTcpStream falls through to
+     * PilotTunnelManager.ensureBridge(centralNodeId), which has no record
+     * for central on a proxy-mode peer (peers do not enroll central) and
+     * fails with proxy-tunnel.open.fail reason=no_target. End state matches
+     * the v0.78.1 reverse-direction failure even though the callback bridge
+     * is alive.
+     *
+     * Wiring symmetric to the central-initiated handler at
+     * `meshProxyTunnel.ts:115-163`:
+     *   - attachTcpStreamSwitchboard with the same compose-label resolver
+     *   - SwitchboardReverseDialer that delegates to switchboard.openReverseStream
+     *   - setReverseDialer(localDialer, null) with CAS so a concurrent
+     *     central-initiated tunnel does not get silently overwritten
+     *   - ws.on('message') dispatches JSON/binary frames to the switchboard
+     *   - ws.on('close'/'error') tears down switchboard + clears reverseDialer
+     */
+    private async attachSwitchboard(ws: WebSocket, instanceId: string): Promise<TcpStreamSwitchboard | null> {
+        let switchboard: TcpStreamSwitchboard;
         try {
-            await bridge.start();
-        } catch {
-            try { bridge.close(1011, 'bridge start failed'); } catch { /* ignore */ }
+            switchboard = attachTcpStreamSwitchboard({
+                ws,
+                resolveTarget: resolveByComposeLabels,
+                logLabel: 'MeshCallback',
+            });
+        } catch (err) {
+            try { ws.close(1011, 'switchboard attach failed'); } catch { /* ignore */ }
+            PilotMetrics.increment('mesh_callback_dials_failed_total');
+            console.warn(`[PeerToCentralMeshSessionDialer] attach failed: ${sanitizeForLog((err as Error).message)}`);
+            return null;
+        }
+
+        const { MeshService } = await import('./MeshService');
+        const meshService = MeshService.getInstance();
+        const localDialer: CallbackReverseDialer = {
+            openMeshTcpStream(target) {
+                return switchboard.openReverseStream(target);
+            },
+        };
+        const installed = meshService.setReverseDialer(localDialer, null);
+        if (!installed) {
+            console.warn('[PeerToCentralMeshSessionDialer] reverse dialer already installed; rejecting concurrent callback bridge');
+            switchboard.cleanup('reverse dialer already installed');
+            try { ws.close(1013, 'reverse dialer already installed'); } catch { /* ignore */ }
             PilotMetrics.increment('mesh_callback_dials_failed_total');
             return null;
         }
-        bridge.once('closed', () => {
-            if (this.currentSession === bridge) this.currentSession = null;
+
+        const onMessage = (data: unknown, isBinary: boolean): void => {
+            try {
+                if (isBinary) {
+                    const buf = wsDataToBuffer(data);
+                    if (!buf) return;
+                    switchboard.handleBinaryFrame(decodeBinaryFrame(buf));
+                    return;
+                }
+                const text = wsDataToString(data);
+                if (text == null) return;
+                switchboard.handleJsonFrame(decodeJsonFrame(text));
+            } catch (err) {
+                console.warn(`[PeerToCentralMeshSessionDialer] malformed frame: ${sanitizeForLog((err as Error).message)}`);
+            }
+        };
+
+        let tornDown = false;
+        const teardown = (): void => {
+            if (tornDown) return;
+            tornDown = true;
+            ws.off('message', onMessage);
+            try { switchboard.cleanup('mesh callback bridge closed'); } catch { /* ignore */ }
+            meshService.setReverseDialer(null, localDialer);
+            if (this.currentSession === switchboard) this.currentSession = null;
+            if (this.currentWs === ws) this.currentWs = null;
+        };
+
+        ws.on('message', onMessage);
+        ws.once('close', teardown);
+        ws.once('error', (err) => {
+            console.warn(`[PeerToCentralMeshSessionDialer] ws error: ${sanitizeForLog(err.message)}`);
+            teardown();
         });
-        this.currentSession = bridge;
+
+        this.currentSession = switchboard;
+        this.currentWs = ws;
         PilotMetrics.increment('mesh_central_bootstraps_total');
         MeshCentralRegistry.getInstance().markUsed(instanceId);
-        return bridge;
+        return switchboard;
     }
 
     private awaitOpen(ws: WebSocket): Promise<void> {
