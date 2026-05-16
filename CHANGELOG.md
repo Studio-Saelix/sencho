@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.0](https://github.com/Studio-Saelix/sencho/compare/v0.80.0...v0.81.0) (2026-05-16)
+
+
+### Added
+
+* **mesh:** symmetric WS dial for proxy-mode mesh peers ([#1066](https://github.com/Studio-Saelix/sencho/issues/1066)) ([cf618dd](https://github.com/Studio-Saelix/sencho/commit/cf618dd866e5fe48d6dce8db2c18b54a6b089618))
+
 ## [0.80.0](https://github.com/Studio-Saelix/sencho/compare/v0.79.0...v0.80.0) (2026-05-15)
 
 
