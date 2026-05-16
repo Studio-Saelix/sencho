@@ -47,6 +47,31 @@ export type DialFailureCode =
     | 'network_error';
 
 /**
+ * Reason union for `proxy-bridge-down` events. Centralizes the categories
+ * the dialer emits so subscribers (reactive redial, metrics, UI) can branch
+ * deterministically without parsing free-form strings.
+ *   - `idle`: idle sweeper closed the bridge after no streams for `idleTtlMs`.
+ *   - `remote_closed`: peer closed the WS cleanly (1000/1001) or with an
+ *     unclassified non-error code.
+ *   - `network_error`: WS dropped abnormally (1006).
+ *   - `protocol_error`: WS closed for protocol/policy reasons (1007/1008/1009).
+ *   - `auth_failed`: dial-time auth rejection (terminal, no redial).
+ */
+export type BridgeDownReason =
+    | 'idle'
+    | 'remote_closed'
+    | 'network_error'
+    | 'protocol_error'
+    | 'auth_failed';
+
+function classifyCloseCode(code?: number): BridgeDownReason {
+    if (code === 1000 || code === 1001) return 'remote_closed';
+    if (code === 1006) return 'network_error';
+    if (code === 1007 || code === 1008 || code === 1009) return 'protocol_error';
+    return 'remote_closed';
+}
+
+/**
  * Activity-log reason. Wider than `DialFailureCode` because some failures
  * share a wire-level code (e.g., `network_error`) but deserve a more
  * specific label in the operator-facing log to distinguish a network-
@@ -76,12 +101,20 @@ export class MeshProxyTunnelDialer extends EventEmitter {
     private readonly inflight = new Map<number, Promise<MeshTunnelHandle | null>>();
     private readonly idleSince = new Map<number, number>();
     private readonly recentFailures = new Map<number, DialFailure>();
+    private readonly redialAttempts = new Map<number, number>();
+    private readonly redialTimers = new Map<number, NodeJS.Timeout>();
     private readonly idleTtlMs: number;
     private idleCheckTimer: NodeJS.Timeout | null = null;
     private stopped = false;
 
     private constructor(idleTtlOverrideMs?: number) {
         super();
+        // Reactive redial: any non-terminal teardown triggers a backoff redial.
+        // `idle` is intentional and `auth_failed` is terminal, so both skip.
+        this.on('proxy-bridge-down', (nodeId: number, reason: BridgeDownReason) => {
+            if (reason === 'idle' || reason === 'auth_failed') return;
+            this.scheduleReactiveRedial(nodeId);
+        });
         if (typeof idleTtlOverrideMs === 'number') {
             this.idleTtlMs = idleTtlOverrideMs;
         } else {
@@ -163,6 +196,9 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             this.bridges.delete(nodeId);
             try { bridge.close(1000, 'dialer shutdown'); } catch { /* ignore */ }
         }
+        for (const t of this.redialTimers.values()) clearTimeout(t);
+        this.redialTimers.clear();
+        this.redialAttempts.clear();
         this.idleSince.clear();
         this.recentFailures.clear();
         this.inflight.clear();
@@ -249,17 +285,13 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         // Mirror the registration in the dialer's own map so the idle
         // sweeper can call `getActiveStreamCount()` (not on the narrow
         // MeshTunnelHandle interface) without poking into the manager.
-        bridge.once('closed', () => {
-            if (this.bridges.get(nodeId) === bridge) {
-                this.bridges.delete(nodeId);
-                this.idleSince.delete(nodeId);
-                void this.logActivity(nodeId, 'close', { reason: 'remote-closed' });
-                this.emit('proxy-bridge-down', nodeId);
-            }
-        });
         this.bridges.set(nodeId, bridge);
+        this.attachBridgeCloseListener(nodeId, bridge);
         this.idleSince.set(nodeId, Date.now());
         this.recentFailures.delete(nodeId);
+        // A successful open clears any prior reactive-redial backoff so the
+        // next failure starts fresh from attempt #1.
+        this.redialAttempts.delete(nodeId);
         void this.logActivity(nodeId, 'open.ok', {});
         this.emit('proxy-bridge-up', nodeId);
         if (isDebugEnabled()) {
@@ -326,17 +358,82 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             }
             const last = this.idleSince.get(nodeId) ?? now;
             if (now - last >= this.idleTtlMs) {
-                this.bridges.delete(nodeId);
-                this.idleSince.delete(nodeId);
-                try { bridge.close(1000, 'idle timeout'); } catch { /* ignore */ }
-                PilotMetrics.increment('proxy_idle_closes');
-                void this.logActivity(nodeId, 'close', { reason: 'idle' });
-                this.emit('proxy-bridge-down', nodeId);
+                this.tearDownBridge(nodeId, 'idle', { code: 1000, message: 'idle timeout' });
                 if (isDebugEnabled()) {
                     console.log(`[MeshProxyDialer:diag] idle close node=${nodeId} idleMs=${now - last}`);
                 }
             }
         }
+    }
+
+    /**
+     * Single teardown path for any bridge close. Removes the bridge from
+     * the map, optionally invokes `bridge.close()` (skipped when the close
+     * originated from the bridge itself), records the activity log entry,
+     * bumps the idle-close metric when applicable, and emits a reason-tagged
+     * `proxy-bridge-down`. The self-listener installed in the constructor
+     * decides whether to schedule a reactive redial.
+     */
+    private tearDownBridge(
+        nodeId: number,
+        reason: BridgeDownReason,
+        closeArgs?: { code: number; message: string },
+    ): void {
+        const bridge = this.bridges.get(nodeId);
+        if (!bridge) return;
+        this.bridges.delete(nodeId);
+        this.idleSince.delete(nodeId);
+        if (closeArgs) {
+            // Best-effort: closing an already-closed WS is idempotent and
+            // can throw on edge states; we never want teardown to propagate.
+            try { bridge.close(closeArgs.code, closeArgs.message); } catch { /* best-effort */ }
+        }
+        if (reason === 'idle') PilotMetrics.increment('proxy_idle_closes');
+        void this.logActivity(nodeId, 'close', { reason });
+        this.emit('proxy-bridge-down', nodeId, reason);
+    }
+
+    /**
+     * Wire the `closed` listener that classifies the WS close code and
+     * routes through `tearDownBridge` without re-closing the bridge. Called
+     * from `dial()` after registration; also reachable from tests via a
+     * private cast so they can exercise the close-code mapping without
+     * spinning up a real WebSocket.
+     */
+    private attachBridgeCloseListener(nodeId: number, bridge: EventEmitter): void {
+        bridge.once('closed', (info?: { code?: number }) => {
+            if (this.bridges.get(nodeId) !== bridge) return;
+            const reason = classifyCloseCode(info?.code);
+            this.tearDownBridge(nodeId, reason);
+        });
+    }
+
+    /**
+     * Schedule a reactive redial with exponential backoff + jitter. Caps at
+     * 8 attempts (~5 minutes between the last few). A successful `dial()`
+     * clears `redialAttempts[nodeId]`, so the counter only grows during a
+     * sustained outage.
+     */
+    private scheduleReactiveRedial(nodeId: number): void {
+        if (this.stopped) return;
+        const attempt = (this.redialAttempts.get(nodeId) ?? 0) + 1;
+        if (attempt > 8) {
+            this.redialAttempts.delete(nodeId);
+            void this.logActivity(nodeId, 'open.fail', { reason: 'redial_exhausted', attempts: 8 });
+            return;
+        }
+        this.redialAttempts.set(nodeId, attempt);
+        const baseMs = Math.min(5_000 * 2 ** (attempt - 1), 5 * 60_000);
+        const jitter = Math.floor(Math.random() * baseMs * 0.3);
+        const delay = baseMs + jitter;
+        const existing = this.redialTimers.get(nodeId);
+        if (existing) clearTimeout(existing);
+        const timer = setTimeout(() => {
+            this.redialTimers.delete(nodeId);
+            void this.ensureBridge(nodeId);
+        }, delay);
+        timer.unref?.();
+        this.redialTimers.set(nodeId, timer);
     }
 
     private async logActivity(

@@ -34,6 +34,7 @@ export const CAPABILITIES = [
   'registries',
   'self-update',
   'vulnerability-scanning',
+  'mesh_proxy_callback_bootstrap',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

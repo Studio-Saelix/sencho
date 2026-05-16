@@ -68,6 +68,15 @@ export class PilotTunnelCapacityError extends Error {
 export class PilotTunnelManager extends EventEmitter {
     private static instance: PilotTunnelManager;
     private bridges: Map<number, PilotTunnelBridge> = new Map();
+    /**
+     * Parallel kind index for the `bridges` map. `'pilot'` is set by
+     * `registerTunnel` (agent-initiated long-lived tunnel); `'proxy'` is
+     * set by `registerProxyBridge` and `replaceOrRegisterProxyBridge`
+     * (central-initiated short-lived bridge). Used by
+     * `replaceOrRegisterProxyBridge` so a peer-initiated dial can supersede
+     * a previous proxy bridge but never shadow a live pilot tunnel.
+     */
+    private bridgeKinds: Map<number, 'pilot' | 'proxy'> = new Map();
     private softWarned = false;
 
     private constructor() {
@@ -83,6 +92,31 @@ export class PilotTunnelManager extends EventEmitter {
     }
 
     /**
+     * Test-only: drop the singleton and any held bridges so every test
+     * starts from a clean registry. Closes outstanding bridges best-effort.
+     */
+    public static resetForTest(): void {
+        if (PilotTunnelManager.instance) {
+            for (const [, b] of PilotTunnelManager.instance.bridges) {
+                try { b.close(1000, 'test reset'); } catch { /* ignore */ }
+            }
+            PilotTunnelManager.instance.bridges.clear();
+            PilotTunnelManager.instance.bridgeKinds.clear();
+        }
+        PilotTunnelManager.instance = undefined as unknown as PilotTunnelManager;
+    }
+
+    /**
+     * Test-only: inject a pre-constructed bridge with an explicit kind.
+     * Bypasses capacity / lifecycle hooks so unit tests can prime the
+     * registry without owning a real WebSocket.
+     */
+    public injectBridgeForTest(nodeId: number, bridge: PilotTunnelBridge, kind: 'pilot' | 'proxy'): void {
+        this.bridges.set(nodeId, bridge);
+        this.bridgeKinds.set(nodeId, kind);
+    }
+
+    /**
      * Accept a newly handshaked pilot tunnel. Replaces any prior tunnel for the
      * same node (split-brain prevention): the previous bridge is closed
      * before the new one is installed.
@@ -95,6 +129,7 @@ export class PilotTunnelManager extends EventEmitter {
         if (existing) {
             existing.close(PilotCloseCode.Replaced, 'replaced by newer tunnel');
             this.bridges.delete(nodeId);
+            this.bridgeKinds.delete(nodeId);
         }
 
         // Hard cap: only counts tunnels for *other* nodes since we just
@@ -120,6 +155,7 @@ export class PilotTunnelManager extends EventEmitter {
         bridge.once('closed', () => {
             if (this.bridges.get(nodeId) === bridge) {
                 this.bridges.delete(nodeId);
+                this.bridgeKinds.delete(nodeId);
                 DatabaseService.getInstance().updateNodeStatus(nodeId, 'offline');
                 this.emit('tunnel-down', nodeId);
             }
@@ -127,6 +163,7 @@ export class PilotTunnelManager extends EventEmitter {
         await bridge.start();
 
         this.bridges.set(nodeId, bridge);
+        this.bridgeKinds.set(nodeId, 'pilot');
         const db = DatabaseService.getInstance();
         db.updateNodeStatus(nodeId, 'online');
         db.updateNode(nodeId, {
@@ -233,12 +270,46 @@ export class PilotTunnelManager extends EventEmitter {
         bridge.once('closed', () => {
             if (this.bridges.get(nodeId) === bridge) {
                 this.bridges.delete(nodeId);
+                this.bridgeKinds.delete(nodeId);
                 this.emit('proxy-bridge-down', nodeId);
             }
         });
         this.bridges.set(nodeId, bridge);
+        this.bridgeKinds.set(nodeId, 'proxy');
         PilotMetrics.increment('proxy_bridges_total');
         this.emit('proxy-bridge-up', nodeId);
+    }
+
+    /**
+     * Register a peer-initiated proxy bridge for an existing remote. If a proxy
+     * bridge already exists for this nodeId, close it (the new dial is the source
+     * of truth) and replace. If a pilot tunnel exists, refuse: pilot tunnels
+     * always win over peer-initiated proxy bridges.
+     */
+    public replaceOrRegisterProxyBridge(nodeId: number, bridge: PilotTunnelBridge): void {
+        const existingKind = this.bridgeKinds.get(nodeId);
+        if (existingKind === 'pilot') {
+            throw new Error(`pilot tunnel already registered for node ${nodeId}; proxy bridge refused`);
+        }
+        if (existingKind === 'proxy') {
+            const old = this.bridges.get(nodeId);
+            this.bridges.delete(nodeId);
+            this.bridgeKinds.delete(nodeId);
+            try { old?.close(1000, 'replaced-by-newer-proxy'); } catch { /* best-effort cleanup */ }
+        }
+        if (this.bridges.size >= PILOT_TUNNEL_HARD_LIMIT) {
+            PilotMetrics.increment('tunnels_rejected_capacity');
+            throw new PilotTunnelCapacityError(PILOT_TUNNEL_HARD_LIMIT);
+        }
+        bridge.once('closed', () => {
+            if (this.bridges.get(nodeId) === bridge) {
+                this.bridges.delete(nodeId);
+                this.bridgeKinds.delete(nodeId);
+                this.emit('proxy-bridge-down', nodeId, 'remote_closed');
+            }
+        });
+        this.bridges.set(nodeId, bridge);
+        this.bridgeKinds.set(nodeId, 'proxy');
     }
 
     /**
@@ -249,6 +320,7 @@ export class PilotTunnelManager extends EventEmitter {
         if (!bridge) return;
         bridge.close(code, reason);
         this.bridges.delete(nodeId);
+        this.bridgeKinds.delete(nodeId);
     }
 
 }
