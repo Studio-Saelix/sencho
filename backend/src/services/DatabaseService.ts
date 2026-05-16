@@ -1475,6 +1475,23 @@ export class DatabaseService {
         } catch (e) {
             console.warn('[DatabaseService] Could not create mesh_stacks:', (e as Error).message);
         }
+        try {
+            this.db.prepare(`
+                CREATE TABLE IF NOT EXISTS mesh_centrals (
+                    central_instance_id  TEXT    PRIMARY KEY,
+                    central_api_url      TEXT    NOT NULL,
+                    callback_jwt         TEXT    NOT NULL,
+                    jwt_issued_at        INTEGER NOT NULL,
+                    jwt_expires_at       INTEGER NOT NULL,
+                    last_bootstrap_at    INTEGER NOT NULL,
+                    last_used_at         INTEGER,
+                    last_rejected_at     INTEGER,
+                    last_reject_reason   TEXT
+                )
+            `).run();
+        } catch (e) {
+            console.warn('[DatabaseService] Could not create mesh_centrals:', (e as Error).message);
+        }
         this.tryAddColumn('nodes', 'mesh_enabled', 'INTEGER NOT NULL DEFAULT 0');
     }
 

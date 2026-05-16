@@ -64,7 +64,7 @@ export function getSenchoIpFromSubnet(subnet: string): string {
 export type MeshActivitySource = 'pilot' | 'mesh';
 export type MeshActivityLevel = 'info' | 'warn' | 'error';
 export type MeshActivityType =
-    | 'route.dispatch' | 'route.resolve.ok' | 'route.resolve.denied'
+    | 'route.dispatch' | 'route.resolve.ok' | 'route.resolve.denied' | 'route.resolve.fail'
     | 'tunnel.open' | 'tunnel.fail' | 'tunnel.backpressure'
     | 'opt_in' | 'opt_out'
     | 'mesh.enable' | 'mesh.disable'
@@ -72,7 +72,8 @@ export type MeshActivityType =
     | 'probe.ok' | 'probe.fail'
     | 'forwarder.listen' | 'forwarder.unlisten' | 'forwarder.error'
     | 'proxy-tunnel.open.ok' | 'proxy-tunnel.open.fail' | 'proxy-tunnel.close'
-    | 'mesh.proxy_tunnel.identify';
+    | 'mesh.proxy_tunnel.identify'
+    | 'mesh_handshake.received';
 
 export interface MeshActivityEvent {
     ts: number;
@@ -299,6 +300,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         this.selfCentralNodeId = this.resolveSelfCentralNodeId();
 
+        this.maybeWarnUnsetPrimaryUrl();
+
         await this.setupMeshNetwork();
         try {
             await this.refreshAliasCache();
@@ -317,6 +320,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             });
         }
         await this.regenerateAllOverrides();
+        // Trigger 3: proactively re-establish central->peer bridges so any
+        // peer that is online and capable receives bootstrap material on
+        // startup. Fire-and-forget so start() does not block on remote I/O.
+        void this.proactiveBootstrapFanout();
         this.aliasRefreshTimer = setInterval(() => {
             void (async () => {
                 try {
@@ -343,6 +350,71 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             this.aliasRefreshTimer = undefined;
         }
         await this.forwarder.shutdown();
+    }
+
+    /**
+     * Operator-facing preflight: if `SENCHO_PRIMARY_URL` is unset at
+     * startup and the central has at least one mesh-enabled proxy-mode
+     * node, warn that the Task 8 capability-gated handshake will fall
+     * back to an inferred origin for the callback bootstrap. The matching
+     * fail-safe in `MeshProxyTunnelDialer` silently skips the bootstrap
+     * when the env is unset; this warn makes the consequence visible.
+     */
+    private maybeWarnUnsetPrimaryUrl(): void {
+        if (process.env.SENCHO_PRIMARY_URL) return;
+        const row = DatabaseService.getInstance().getDb().prepare(`
+            SELECT COUNT(*) as n FROM nodes
+            WHERE type='remote' AND mode='proxy' AND mesh_enabled=1
+        `).get() as { n: number };
+        if (row.n > 0) {
+            console.warn(
+                '[Mesh] SENCHO_PRIMARY_URL is unset; mesh callback bootstrap will use ' +
+                'inferred origin. Set SENCHO_PRIMARY_URL to make peer-initiated mesh ' +
+                'callbacks robust against reverse-proxy edge cases.'
+            );
+        }
+    }
+
+    /**
+     * Trigger 3: at central startup, walk every mesh-enabled proxy-mode
+     * peer that already has at least one `mesh_stacks` row and call
+     * `MeshProxyTunnelDialer.ensureBridge(nodeId)`. The dialer's
+     * capability-gated handshake then mints and ships bootstrap material
+     * to peers that just came online or just got upgraded to a build that
+     * advertises `mesh_proxy_callback_bootstrap`. Bounded concurrency 4
+     * with a 250ms stagger; failures are logged and never abort the
+     * fan-out.
+     */
+    private async proactiveBootstrapFanout(): Promise<void> {
+        const rows = DatabaseService.getInstance().getDb().prepare(`
+            SELECT DISTINCT n.id AS id
+            FROM nodes n
+            INNER JOIN mesh_stacks ms ON ms.node_id = n.id
+            WHERE n.type = 'remote' AND n.mode = 'proxy' AND n.mesh_enabled = 1
+            ORDER BY n.id
+        `).all() as Array<{ id: number }>;
+
+        const queue = rows.map((r) => r.id);
+        const dialer = MeshProxyTunnelDialer.getInstance();
+        const worker = async (): Promise<void> => {
+            for (;;) {
+                const nodeId = queue.shift();
+                if (nodeId === undefined) return;
+                try {
+                    await dialer.ensureBridge(nodeId);
+                } catch (err) {
+                    this.logActivity({
+                        source: 'mesh', level: 'warn', type: 'proxy-tunnel.open.fail',
+                        nodeId,
+                        message: `boot proactive bootstrap failed: ${sanitizeForLog((err as Error).message)}`,
+                        details: { trigger: 'startup_fanout' },
+                    });
+                }
+                await new Promise((r) => setTimeout(r, 250));
+            }
+        };
+        const workerCount = Math.min(4, Math.max(1, queue.length));
+        await Promise.all(Array.from({ length: workerCount }, () => worker()));
     }
 
     public getSenchoIp(): string | null {
@@ -653,6 +725,17 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             source: 'mesh', level: 'info', type: 'mesh.enable',
             nodeId, message: `mesh enabled on node ${nodeId}`,
         });
+        // Trigger 1: proactive bootstrap. If the peer is a proxy-mode remote,
+        // dial the mesh callback bridge immediately so the capability-gated
+        // handshake can ship `mesh_handshake` material without waiting for
+        // the next forwarder dial. Fire-and-forget; failures are logged by
+        // the dialer.
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (node && node.type === 'remote' && node.mode === 'proxy') {
+            void MeshProxyTunnelDialer.getInstance().ensureBridge(nodeId).catch((err) => {
+                console.warn(`[Mesh] proactive bootstrap on mesh-enable failed for node ${nodeId}: ${(err as Error).message}`);
+            });
+        }
     }
 
     public async disableForNode(nodeId: number): Promise<void> {
@@ -1505,6 +1588,39 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             nodeId: target.nodeId, alias: target.alias,
             message: `cross-node dispatch to ${target.alias} on node ${target.nodeId}`,
         });
+
+        // Peer-side recovery: when no reverseDialer is installed, kick the
+        // symmetric-dial path so central learns about this peer. The
+        // proactive back-dial from central (registered as a side effect via
+        // the proxy-tunnel WS upgrade) is what actually installs the
+        // reverseDialer on this peer. If the session cannot be established
+        // (cache miss, central down, auth rejected), log route.resolve.fail
+        // and drop the inbound socket.
+        if (!this.reverseDialer) {
+            try {
+                const { PeerToCentralMeshSessionDialer } = await import('./PeerToCentralMeshSessionDialer');
+                const session = await PeerToCentralMeshSessionDialer.getInstance().ensureSession();
+                if (!session) {
+                    this.logActivity({
+                        source: 'mesh', level: 'warn', type: 'route.resolve.fail',
+                        nodeId: target.nodeId, alias: target.alias,
+                        message: `peer cross-node dispatch failed: no central callback session available`,
+                        details: { direction: 'forward-from-peer', reason: 'no_session' },
+                    });
+                    try { src.destroy(); } catch { /* ignore */ }
+                    return;
+                }
+            } catch (err) {
+                this.logActivity({
+                    source: 'mesh', level: 'warn', type: 'route.resolve.fail',
+                    nodeId: target.nodeId, alias: target.alias,
+                    message: `peer cross-node dispatch failed: bootstrap threw`,
+                    details: { direction: 'forward-from-peer', reason: 'bootstrap_threw' },
+                });
+                try { src.destroy(); } catch { /* ignore */ }
+                return;
+            }
+        }
 
         const tcpStream = await this.dialMeshTcpStream(target);
         if (!tcpStream) {

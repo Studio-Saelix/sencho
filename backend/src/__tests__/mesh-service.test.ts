@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import fsSync from 'fs';
 import path from 'path';
@@ -848,6 +848,14 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
             write: vi.fn(),
         };
     }
+
+    // Install a stub reverseDialer so openCrossNode skips the peer-side
+    // bootstrap path (PeerToCentralMeshSessionDialer.ensureSession). The
+    // dispatch behavior under test relies on dialMeshTcpStream being called
+    // directly; the bootstrap kick would short-circuit before that mock fires.
+    const stubDialer = { openMeshTcpStream: vi.fn() };
+    beforeEach(() => { MeshService.getInstance().setReverseDialer(stubDialer); });
+    afterEach(() => { MeshService.getInstance().setReverseDialer(null); });
 
     it('emits route.dispatch immediately on cross-node entry', async () => {
         const svc = MeshService.getInstance();

@@ -13,6 +13,7 @@ import { REMOTE_META_NAMESPACE } from '../helpers/cacheInvalidation';
 import { CAPABILITIES, getSenchoVersion, type RemoteMeta } from '../services/CapabilityRegistry';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotCloseCode } from '../pilot/protocol';
+import { MeshProxyTunnelDialer } from '../services/MeshProxyTunnelDialer';
 import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
 import { FleetSyncService } from '../services/FleetSyncService';
 import { isValidRemoteUrl } from '../utils/validation';
@@ -234,6 +235,21 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
 
     NodeRegistry.getInstance().evictConnection(id);
     NodeRegistry.getInstance().notifyNodeUpdated(id);
+
+    // Trigger 2: if the api_token was rotated on a mesh-enabled proxy-mode
+    // remote, close the existing callback bridge and re-dial. The next
+    // ensureBridge mints a JWT with the fresh token fingerprint so the
+    // remote's tunnel auth gate accepts the upgrade.
+    if (typeof updates.api_token === 'string') {
+      const node = DatabaseService.getInstance().getNode(id);
+      const meshEnabled = DatabaseService.getInstance().getNodeMeshEnabled(id);
+      if (node && node.type === 'remote' && node.mode === 'proxy' && meshEnabled) {
+        MeshProxyTunnelDialer.getInstance().closeBridge(id, 'peer token rotated');
+        void MeshProxyTunnelDialer.getInstance().ensureBridge(id).catch((err) => {
+          console.warn(`[Mesh] proactive re-bootstrap on token rotation failed for node ${id}: ${(err as Error).message}`);
+        });
+      }
+    }
 
     const isPlainHttp = updates.api_url && updates.api_url.startsWith('http://');
     res.json({
