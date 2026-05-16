@@ -64,7 +64,7 @@ export function getSenchoIpFromSubnet(subnet: string): string {
 export type MeshActivitySource = 'pilot' | 'mesh';
 export type MeshActivityLevel = 'info' | 'warn' | 'error';
 export type MeshActivityType =
-    | 'route.dispatch' | 'route.resolve.ok' | 'route.resolve.denied'
+    | 'route.dispatch' | 'route.resolve.ok' | 'route.resolve.denied' | 'route.resolve.fail'
     | 'tunnel.open' | 'tunnel.fail' | 'tunnel.backpressure'
     | 'opt_in' | 'opt_out'
     | 'mesh.enable' | 'mesh.disable'

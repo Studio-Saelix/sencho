@@ -149,6 +149,7 @@ export interface MeshTunnelHandle {
  * stripping/injection, and license-tier propagation all work unchanged.
  */
 export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle {
+    private readonly nodeId: number;
     private readonly tunnelWs: WebSocket;
     private readonly loopback: HttpServer;
     private readonly wsUpgradeServer: WebSocketServer;
@@ -162,8 +163,9 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
     private drainTimer?: NodeJS.Timeout;
     private closed = false;
 
-    constructor(_nodeId: number, tunnelWs: WebSocket) {
+    constructor(nodeId: number, tunnelWs: WebSocket) {
         super();
+        this.nodeId = nodeId;
         this.tunnelWs = tunnelWs;
         this.loopback = http.createServer();
         this.wsUpgradeServer = new WebSocketServer({ noServer: true });
@@ -782,8 +784,26 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
 
     private async acceptReverseLocal(s: number, target: { stack: string; service: string; port: number }): Promise<void> {
         const { MeshService } = await import('./MeshService');
-        const ip = await MeshService.getInstance().resolveContainerIp({ stack: target.stack, service: target.service });
+        const meshSvc = MeshService.getInstance();
+        // Shared discriminator + target metadata so the Routing tab can
+        // separate peer-to-central (reverse) dispatch from central-to-peer
+        // (forward) dispatch when both flow through the same activity feed.
+        const baseDetails = {
+            direction: 'reverse' as const,
+            streamId: s,
+            targetStack: target.stack,
+            targetService: target.service,
+            targetPort: target.port,
+            peerNodeId: this.nodeId,
+        };
+        const ip = await meshSvc.resolveContainerIp({ stack: target.stack, service: target.service });
         if (!ip) {
+            meshSvc.logActivity({
+                source: 'mesh', level: 'error', type: 'route.resolve.fail',
+                nodeId: this.nodeId,
+                message: `reverse dial failed: container ${target.stack}/${target.service} not found`,
+                details: { ...baseDetails, reason: 'container_not_found' },
+            });
             this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'no_target' });
             return;
         }
@@ -802,14 +822,26 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         // Pre-connect failure: ack-fail and drop. The handler is removed in
         // 'connect' below so post-connect errors fall through to the
         // mid-stream teardown path instead of double-firing.
-        const onPreConnectError = () => {
+        const onPreConnectError = (err?: Error) => {
             if (!this.streams.has(s)) return;
             this.streams.delete(s);
+            meshSvc.logActivity({
+                source: 'mesh', level: 'error', type: 'route.resolve.fail',
+                nodeId: this.nodeId,
+                message: `reverse dial failed pre-connect: ${err?.message ?? 'socket error'}`,
+                details: { ...baseDetails, reason: 'connect_error' },
+            });
             this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
         };
         socket.once('error', onPreConnectError);
         socket.once('connect', () => {
             socket.off('error', onPreConnectError);
+            meshSvc.logActivity({
+                source: 'mesh', level: 'info', type: 'route.resolve.ok',
+                nodeId: this.nodeId,
+                message: `reverse dial ok: ${target.stack}/${target.service}:${target.port}`,
+                details: baseDetails,
+            });
             this.sendJson({ t: 'tcp_open_ack', s, ok: true });
             socket.on('data', (chunk: Buffer) => {
                 const cur = this.streams.get(s);
