@@ -1,9 +1,12 @@
 import { EventEmitter } from 'events';
+import { createHash } from 'crypto';
+import jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
 import { MAX_FRAME_SIZE_BYTES } from '../pilot/protocol';
 import { PilotTunnelBridge, type MeshTunnelHandle } from './PilotTunnelBridge';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { NodeRegistry } from './NodeRegistry';
+import { DatabaseService } from './DatabaseService';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { httpUrlToWs } from '../utils/wsUrl';
 import { isDebugEnabled } from '../utils/debug';
@@ -259,6 +262,18 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             return null;
         }
 
+        // Capability-gated mesh_handshake: pushes a signed `mesh_tunnel` JWT
+        // and the central origin so the peer can dial central back for
+        // reverse cross-fleet TCP streams (R2). Skipped silently when the
+        // peer lacks the capability or `SENCHO_PRIMARY_URL` is unset so
+        // legacy peers keep their forward-only TCP path untouched.
+        await this.maybeSendBootstrap(nodeId, ws);
+
+        if (this.stopped) {
+            try { ws.close(1001, 'dialer shutdown'); } catch { /* ignore */ }
+            return null;
+        }
+
         const bridge = new PilotTunnelBridge(nodeId, ws);
         try {
             await bridge.start();
@@ -436,6 +451,47 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         this.redialTimers.set(nodeId, timer);
     }
 
+    /**
+     * If the peer advertises `mesh_proxy_callback_bootstrap` and central has
+     * a canonical origin (`SENCHO_PRIMARY_URL`), mint a `mesh_tunnel`-scoped
+     * JWT bound to the peer's `api_token` fingerprint and push it as the
+     * first text frame on the freshly-opened WS. The peer's
+     * `meshProxyTunnel` first-frame state machine persists the bootstrap
+     * material before yielding to TCP traffic. Every other path is a silent
+     * skip so legacy peers continue to receive raw TCP frames immediately.
+     */
+    private async maybeSendBootstrap(nodeId: number, ws: WebSocket): Promise<void> {
+        const canonicalOrigin = (process.env.SENCHO_PRIMARY_URL ?? '').replace(/\/+$/, '');
+        if (!canonicalOrigin) return;
+
+        let meta;
+        try { meta = await NodeRegistry.getInstance().fetchMetaForNode(nodeId); }
+        catch { return; }
+        if (!meta?.online) return;
+        if (!meta.capabilities?.includes('mesh_proxy_callback_bootstrap')) return;
+
+        const db = DatabaseService.getInstance();
+        const node = db.getNode(nodeId);
+        if (!node || node.type !== 'remote' || node.mode !== 'proxy' || !node.api_token) return;
+
+        const authSecret = db.getGlobalSettings().auth_jwt_secret;
+        const centralInstanceId = db.getSystemState('instance_id');
+        if (!authSecret || !centralInstanceId) return;
+
+        const built = buildHandshakeFrame(nodeId, node.api_token, canonicalOrigin, centralInstanceId, authSecret);
+        try {
+            ws.send(JSON.stringify(built.frame));
+            void this.logActivity(nodeId, 'open.ok', {
+                bootstrapSent: true,
+                centralApiUrl: redactSensitiveText(canonicalOrigin),
+                kid: 'v1',
+                jwtExpiresAt: built.expSec,
+            });
+        } catch (err) {
+            console.warn(`[MeshProxyDialer] mesh_handshake send failed for node ${nodeId}: ${(err as Error).message}`.replace(/[\n\r]/g, ''));
+        }
+    }
+
     private async logActivity(
         nodeId: number,
         event: ProxyTunnelEvent,
@@ -459,6 +515,58 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             // Activity logging is best-effort; never let it propagate.
         }
     }
+}
+
+interface HandshakeFrame {
+    t: 'mesh_handshake';
+    v: 1;
+    peerNodeId: number;
+    centralInstanceId: string;
+    centralApiUrl: string;
+    meshTunnelJwt: string;
+    jwtExpiresAt: number;
+}
+
+/**
+ * Build the mesh_handshake frame and the associated JWT. Pure helper so the
+ * dialer's `maybeSendBootstrap` stays under the 30-line ceiling.
+ */
+function buildHandshakeFrame(
+    nodeId: number,
+    apiToken: string,
+    canonicalOrigin: string,
+    centralInstanceId: string,
+    authSecret: string,
+): { frame: HandshakeFrame; expSec: number } {
+    const peerTokenFp = createHash('sha256').update(apiToken).digest('hex').slice(0, 16);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expSec = nowSec + 365 * 24 * 3600;
+    const meshTunnelJwt = jwt.sign(
+        {
+            sub: String(nodeId),
+            iss: centralInstanceId,
+            aud: canonicalOrigin,
+            scope: 'mesh_tunnel',
+            iat: nowSec,
+            exp: expSec,
+            kid: 'v1',
+            peer_token_fp: peerTokenFp,
+        },
+        authSecret,
+        { algorithm: 'HS256' },
+    );
+    return {
+        frame: {
+            t: 'mesh_handshake',
+            v: 1,
+            peerNodeId: nodeId,
+            centralInstanceId,
+            centralApiUrl: canonicalOrigin,
+            meshTunnelJwt,
+            jwtExpiresAt: expSec,
+        },
+        expSec,
+    };
 }
 
 function classifyDialError(err: unknown): { code: DialFailureCode; message: string } {

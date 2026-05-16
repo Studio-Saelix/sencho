@@ -11,6 +11,39 @@ import {
 import { sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
 import { rejectUpgrade as reject } from './reject';
+import { MeshCentralRegistry, type MeshCentralMaterial } from '../services/MeshCentralRegistry';
+
+/**
+ * Bootstrap phase for the first-frame state machine.
+ *
+ * Central MAY send a `mesh_handshake` JSON frame as the FIRST text frame
+ * after upgrade. If it arrives we persist the callback material via
+ * MeshCentralRegistry and transition to `consumed`. Any frame other than
+ * the handshake (or no frame at all) moves us to `past`, after which a
+ * later handshake is a protocol error.
+ */
+type BootstrapPhase = 'awaiting' | 'consumed' | 'past';
+
+interface MeshHandshakeFrame {
+    t: 'mesh_handshake';
+    v: number;
+    peerNodeId: number;
+    centralInstanceId: string;
+    centralApiUrl: string;
+    meshTunnelJwt: string;
+    jwtExpiresAt: number;
+}
+
+function isMeshHandshakeFrame(parsed: unknown): parsed is MeshHandshakeFrame {
+    return typeof parsed === 'object' && parsed !== null
+        && (parsed as { t?: unknown }).t === 'mesh_handshake'
+        && typeof (parsed as { v?: unknown }).v === 'number'
+        && typeof (parsed as { peerNodeId?: unknown }).peerNodeId === 'number'
+        && typeof (parsed as { centralInstanceId?: unknown }).centralInstanceId === 'string'
+        && typeof (parsed as { centralApiUrl?: unknown }).centralApiUrl === 'string'
+        && typeof (parsed as { meshTunnelJwt?: unknown }).meshTunnelJwt === 'string'
+        && typeof (parsed as { jwtExpiresAt?: unknown }).jwtExpiresAt === 'number';
+}
 
 /**
  * Mesh proxy-tunnel ingress.
@@ -136,18 +169,75 @@ async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Prom
         return;
     }
 
+    let phase: BootstrapPhase = 'awaiting';
+
     const onMessage = (data: unknown, isBinary: boolean): void => {
         if (!switchboard) return;
         try {
             if (isBinary) {
+                if (phase === 'awaiting') phase = 'past';
                 const buf = wsDataToBuffer(data);
                 if (!buf) return;
                 switchboard.handleBinaryFrame(decodeBinaryFrame(buf));
-            } else {
-                const text = wsDataToString(data);
-                if (text == null) return;
-                switchboard.handleJsonFrame(decodeJsonFrame(text));
+                return;
             }
+            const text = wsDataToString(data);
+            if (text == null) {
+                if (phase === 'awaiting') phase = 'past';
+                return;
+            }
+            let parsedForBootstrap: unknown = null;
+            let parseSucceeded = false;
+            try {
+                parsedForBootstrap = JSON.parse(text);
+                parseSucceeded = true;
+            } catch {
+                // Not valid JSON; defer to decodeJsonFrame's stricter error path below.
+            }
+
+            if (parseSucceeded && typeof parsedForBootstrap === 'object'
+                && parsedForBootstrap !== null
+                && (parsedForBootstrap as { t?: unknown }).t === 'mesh_handshake') {
+                if (phase !== 'awaiting') {
+                    ws.close(1008, 'mesh_handshake out of order');
+                    return;
+                }
+                if (!isMeshHandshakeFrame(parsedForBootstrap)) {
+                    ws.close(1008, 'malformed mesh_handshake');
+                    return;
+                }
+                const material: MeshCentralMaterial = {
+                    centralInstanceId: parsedForBootstrap.centralInstanceId,
+                    centralApiUrl: parsedForBootstrap.centralApiUrl.replace(/\/+$/, ''),
+                    callbackJwt: parsedForBootstrap.meshTunnelJwt,
+                    jwtIssuedAt: Math.floor(Date.now() / 1000),
+                    jwtExpiresAt: parsedForBootstrap.jwtExpiresAt,
+                };
+                try {
+                    MeshCentralRegistry.getInstance().upsert(material);
+                    phase = 'consumed';
+                    const centralInstanceId = parsedForBootstrap.centralInstanceId;
+                    const jwtExpiresAt = parsedForBootstrap.jwtExpiresAt;
+                    void (async () => {
+                        try {
+                            const { MeshService: MeshSvc } = await import('../services/MeshService');
+                            MeshSvc.getInstance().logActivity({
+                                source: 'mesh', level: 'info',
+                                type: 'mesh_handshake.received',
+                                message: `mesh callback bootstrap received from central ${centralInstanceId}`,
+                                details: { centralInstanceId, jwtExpiresAt },
+                            });
+                        } catch { /* best-effort log; bootstrap success path must not depend on it */ }
+                    })();
+                } catch (err) {
+                    console.warn(`[meshProxyTunnel] mesh_handshake persist failed: ${sanitizeForLog((err as Error).message)}`);
+                    try { ws.close(1011, 'bootstrap persist failed'); } catch { /* ignore */ }
+                }
+                return;
+            }
+
+            if (phase === 'awaiting') phase = 'past';
+            switchboard.handleJsonFrame(decodeJsonFrame(text));
         } catch (err) {
             if (isDebugEnabled()) {
                 console.warn('[MeshProxy:diag] malformed frame:', sanitizeForLog((err as Error).message));
