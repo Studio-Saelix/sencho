@@ -1,129 +1,245 @@
 ---
 title: RBAC & User Management
-description: Role-based access control for Sencho - manage admin, viewer, deployer, node admin, and auditor accounts with scoped permissions.
+description: Role-based access control for Sencho. Manage admin, viewer, deployer, node admin, and auditor accounts with scoped permissions, MFA, and SSO.
 ---
 
 <Note>
-  Multi-user support requires a **Sencho Skipper** or **Admiral** license. Community Edition supports a single admin account only. Intermediate roles (Deployer, Node Admin, Auditor) and scoped permissions require **Admiral**.
+  Multi-user support requires a Sencho **Skipper** or **Admiral** license. Community Edition runs as a single admin account. The **Deployer**, **Node Admin**, and **Auditor** roles, plus scoped permissions, require **Admiral**.
 </Note>
 
-Sencho supports role-based access control with five distinct roles. **Admin** and **Viewer** are available on all paid tiers, while **Deployer**, **Node Admin**, and **Auditor** are exclusive to Admiral.
+<Note>
+  The Users panel is hub-only. It does not appear under Settings on a remote node, since accounts and roles are managed from the gateway that proxies the fleet.
+</Note>
+
+Sencho ships with five built-in roles that map to the permissions most operators reach for: full operator access, read-only observation, day-to-day deploys, scoped fleet management, and audit-only compliance. Admiral adds **scoped permissions** so you can grant a viewer the right to deploy one specific stack without elevating them anywhere else.
 
 ## Roles
 
-| Role | Description | Tier |
-|------|-------------|------|
-| **Admin** | Full access to all features: deploy, edit, manage users, configure nodes, and system settings | Skipper+ |
-| **Viewer** | Read-only access to dashboards, logs, stats, and file contents | Skipper+ |
-| **Deployer** | Can deploy, restart, stop, and start stacks, but cannot edit compose files, delete stacks, or access system settings | Admiral |
-| **Node Admin** | Full stack and node management within their scope, but no access to system settings, users, or license management | Admiral |
-| **Auditor** | Read-only access like Viewer, plus access to the audit log | Admiral |
+| Role | What it grants | Tier |
+|------|----------------|------|
+| **Admin** | Full operator access: deploy, edit compose, manage users, configure nodes, view audit log, every system setting | Skipper+ |
+| **Viewer** | Read-only access to stacks, logs, stats, file contents, and node listings | Skipper+ |
+| **Deployer** | Deploy, restart, stop, and start stacks. Cannot edit compose files, create or delete stacks, or view nodes | Admiral |
+| **Node Admin** | Full stack and node management across the fleet. No access to system settings, users, or license | Admiral |
+| **Auditor** | Read-only access to stacks, nodes, and the audit log. No write access anywhere | Admiral |
 
 ### Permission matrix
 
-| Action | Admin | Node Admin | Deployer | Auditor | Viewer |
-|--------|-------|------------|----------|---------|--------|
-| View stacks, logs, stats | Yes | Yes | Yes | Yes | Yes |
-| Deploy / restart / stop / start stacks | Yes | Yes | Yes | No | No |
-| Edit compose and `.env` files | Yes | Yes | No | No | No |
-| Create and delete stacks | Yes | Yes | No | No | No |
-| View nodes | Yes | Yes | Yes | Yes | Yes |
-| Add / edit / delete nodes | Yes | Yes | No | No | No |
-| Audit log | Yes | No | No | Yes | No |
-| System settings | Yes | No | No | No | No |
-| User management | Yes | No | No | No | No |
-| License management | Yes | No | No | No | No |
-| Webhooks | Yes | No | No | No | No |
-| API tokens | Yes | No | No | No | No |
-| Host console | Yes | No | No | No | No |
+Each row is one of the permission keys the backend checks. The matrix below is the source of truth for what each role can do globally. Admin always grants every permission; the other roles are explicit.
 
-## Managing users
+| Permission | Admin | Node Admin | Deployer | Auditor | Viewer |
+|------------|:-----:|:----------:|:--------:|:-------:|:------:|
+| View stacks, logs, stats (`stack:read`) | Yes | Yes | Yes | Yes | Yes |
+| Deploy, restart, stop, start (`stack:deploy`) | Yes | Yes | Yes | No | No |
+| Edit compose and `.env` files (`stack:edit`) | Yes | Yes | No | No | No |
+| Create stacks (`stack:create`) | Yes | Yes | No | No | No |
+| Delete stacks (`stack:delete`) | Yes | Yes | No | No | No |
+| View nodes (`node:read`) | Yes | Yes | No | Yes | Yes |
+| Add, edit, delete, cordon nodes (`node:manage`) | Yes | Yes | No | No | No |
+| Audit log (`system:audit`) | Yes | No | No | Yes | No |
+| System settings (`system:settings`) | Yes | No | No | No | No |
+| User management (`system:users`) | Yes | No | No | No | No |
+| License management (`system:license`) | Yes | No | No | No | No |
+| Webhooks (`system:webhooks`) | Yes | No | No | No | No |
+| API tokens (`system:tokens`) | Yes | No | No | No | No |
+| Host console (`system:console`) | Yes | No | No | No | No |
+| Container registries (`system:registries`) | Yes | No | No | No | No |
 
-Go to **Settings > Users** to view the user list. The table shows each user's username, role badge, creation date, and action buttons.
-
-<Frame>
-  <img src="/images/rbac/users-list.png" alt="User Management showing the users table with username, role, and creation date" />
-</Frame>
-
-From the user table you can:
-
-- **Edit** a user by clicking the pencil icon
-- **Delete** a user by clicking the trash icon (with a confirmation dialog)
-
-You cannot delete your own account. The delete button is disabled for the currently logged-in user.
-
-### Creating a user
-
-Click **Add User** to open the creation form.
-
-<Frame>
-  <img src="/images/rbac/user-create-form.png" alt="New User form with Username, Role, Password, and Confirm Password fields" />
-</Frame>
-
-| Field | Description |
-|-------|-------------|
-| **Username** | At least 3 characters. Letters, numbers, underscores, and hyphens only. |
-| **Role** | Select from the available roles (see below) |
-| **Password** | At least 8 characters |
-| **Confirm Password** | Must match the password field |
-
-On Admiral, all five roles appear in the role selector. On Skipper, only Admin and Viewer are available.
-
-<Frame>
-  <img src="/images/rbac/role-selector-dropdown.png" alt="Role selector dropdown showing all five roles on Admiral" />
-</Frame>
-
-### Editing a user
-
-Click the pencil icon on a user row to edit. You can change the username, role, and optionally set a new password. Leave the password fields blank to keep the existing password.
-
-## Scoped permissions
-
-<Note>
-  Scoped permissions require an **Admiral** license.
-</Note>
-
-Roles can be scoped to specific stacks or nodes. This lets you grant a user elevated permissions on particular resources without giving them broad access.
-
-Scoped permissions **add to** the user's global role. They never reduce it. A user with a global Viewer role plus a scoped Deployer assignment on the "my-app" stack can deploy "my-app" but has read-only access to everything else.
-
-When editing a user on Admiral, a **Scoped Permissions** section appears below the user form. From there you can:
-
-1. **View** the user's current scoped assignments, each showing the role badge, resource type, and resource name
-2. **Add** a new scope by selecting a role (Deployer, Node Admin, or Admin), resource type (Stack or Node), and the specific resource
-3. **Remove** an existing scope with the trash icon
-
-### Example scenarios
-
-- A **Viewer** with a scoped **Deployer** assignment on the `frontend` stack can deploy, restart, and stop only that stack.
-- A **Deployer** with a scoped **Node Admin** assignment on node "staging-server" can manage stacks and nodes on that server, plus deploy globally.
-- A **Node Admin** without any scoped assignments can manage all stacks and nodes but has no access to system settings.
-
-## SSO auto-provisioning
-
-With an Admiral license, users can also be created automatically when they log in via SSO (LDAP, Google, GitHub, or Okta). SSO users appear in the Users list alongside local accounts and are assigned a role based on identity provider group membership or claim mapping.
-
-SSO users cannot log in with a password; they must always authenticate through their identity provider. After SSO provisioning, an admin can add scoped permissions to SSO users just like local accounts.
-
-To set up identity provider authentication, see [SSO Authentication](/features/sso).
-
-## Session security
-
-Sencho enforces user changes immediately:
-
-- **Account deletion**: A deleted user's active sessions are rejected on the next request. There is no delay or grace period.
-- **Role changes**: When an admin changes a user's role, the new permissions take effect immediately for all of that user's active sessions.
-- **Password changes**: Changing a password (either your own or as an admin reset) invalidates all other active sessions for that user. The session that performed the change remains valid.
-- **SSO users**: Password fields are hidden for SSO-provisioned users. SSO accounts always authenticate through their identity provider.
-
-## Migration from single-admin setup
-
-When you upgrade to a Skipper or Admiral license, your existing single-admin credentials are automatically migrated. No manual action is required; your login continues to work as before, and your account is assigned the Admin role.
+On Admiral, a user with a lower global role can still hold extra permissions on specific stacks or nodes through scoped assignments (covered below). Scoped permissions are additive: they grant more, never less.
 
 ## Account limits by tier
 
 | Tier | Admin accounts | Non-admin accounts | Intermediate roles | Scoped permissions |
-|------|---------------|-------------------|-------------------|-------------------|
+|------|---------------|--------------------|--------------------|--------------------|
 | **Community** | 1 | 0 | No | No |
 | **Skipper** | 1 | 3 | No | No |
 | **Admiral** | Unlimited | Unlimited | Yes | Yes |
+
+Quotas are enforced when you click **Create user**. Hitting a cap returns a `403` with a clear message, and the form keeps your input so you can adjust the role.
+
+## Managing users
+
+The Users panel lives at **Settings · Users**, under the **Identity** group of the settings sidebar. It is visible only to users with the Admin role on Skipper or Admiral, and is hidden when a remote node is the active selection.
+
+<Frame>
+  <img src="/images/rbac/users-list.png" alt="Settings Users panel showing the Identity sidebar selection, a SCOPE operator chip, an OPERATORS 2 counter, an Add user button, and a four-column table (Username, Role, Created, Actions) with two rows: admin marked (you) with a disabled trash icon and viewer with active edit and trash icons." />
+</Frame>
+
+The table shows one row per user with their **Username**, **Role** badge, account **Created** date, and per-row action icons. The signed-in admin's row carries a small `(you)` marker after the username and the delete icon is disabled, so you cannot lock yourself out by deleting your own account.
+
+Per-row actions, left to right:
+
+- **Edit** (pencil icon): open the user in the inline edit form.
+- **Reset 2FA** (shield icon, warning color): appears only on users that have enrolled in two-factor authentication. Opens the reset confirmation dialog described in [Two-factor reset](#two-factor-reset).
+- **Delete** (trash icon, destructive color): open the delete confirmation. Disabled on your own row.
+
+### Creating a user
+
+Click **Add user**. The form opens inline below the button (it is not a modal), with the heading **New User** and four fields laid out in two columns.
+
+<Frame>
+  <img src="/images/rbac/add-user-form.png" alt="Users panel with the New User form expanded inline above the table. The form shows Username and Role fields on the top row (Username placeholder username; Role combobox defaulting to Viewer), Password and Confirm Password fields below (Password placeholder min. 8 characters), and Cancel and CREATE USER buttons on the right." />
+</Frame>
+
+| Field | Rules |
+|-------|-------|
+| **Username** | At least 3 characters. Letters, numbers, underscores, and hyphens only. Submitting with `.` or whitespace returns `Username can only contain letters, numbers, underscores, and hyphens.` |
+| **Role** | Combobox. On Admiral you see all five roles; on Skipper you see Admin and Viewer only. |
+| **Password** | At least 8 characters. The placeholder reads `min. 8 characters`. |
+| **Confirm Password** | Must match the password field, validated on submit. |
+
+The role combobox on Admiral exposes the full set:
+
+<Frame>
+  <img src="/images/rbac/role-selector.png" alt="Role combobox open inside the New User form on an Admiral instance, listing Admin, Viewer (checkmark), Deployer, Node Admin, and Auditor as selectable options." />
+</Frame>
+
+Click **Create user** to submit. The form clears, the table refreshes, and an audit-log entry is written with the actor, target username, and assigned role.
+
+### Editing a user
+
+Click the pencil icon on a row to switch the form into **Edit User** mode. The same four fields render with the existing values pre-filled, plus a separate **Scoped Permissions** box below for Admiral instances (see [Scoped permissions](#scoped-permissions)).
+
+The password fields change subtly in edit mode:
+
+- The **Password** label becomes **New Password (optional)** with the placeholder `Leave blank to keep`. Submit without filling them in and the current password is preserved.
+- If the user was provisioned via SSO, the password fields are replaced with an inline line that reads `Password is managed by the identity provider (<provider>).` Sencho never stores or rotates passwords for SSO accounts.
+
+Click **Update user** to save. Changing the role takes effect on the next API request from any of that user's active sessions; see [Session security](#session-security) below.
+
+## Scoped permissions
+
+<Note>
+  Scoped permissions require **Admiral**. On Skipper, the Scoped Permissions box does not render and the underlying `/api/users/:id/roles` endpoints reject writes.
+</Note>
+
+Scoped permissions let you grant a user a higher role on a specific stack or node without elevating them globally. A Viewer can be granted Deployer on one stack; a Deployer can be granted Node Admin on one server.
+
+The box appears below the user form whenever you are editing a user on Admiral.
+
+<Frame>
+  <img src="/images/rbac/scoped-permissions.png" alt="Edit User form for the viewer account with a Scoped Permissions box below. The box contains an existing assignment row (a Deployer badge with the text on Stack: bazarr and a destructive trash icon on the right) and a three-column add-scope row underneath (Role combobox set to Deployer, Resource Type combobox set to Stack, Resource combobox showing Select..., and a disabled Add button)." />
+</Frame>
+
+The add-scope form has three controls and an **Add** button:
+
+| Control | Options |
+|---------|---------|
+| **Role** | Deployer, Node Admin, or Admin. The scoped role picker is narrower than the global role picker. Viewer and Auditor cannot be scoped (they are floor-only roles). |
+| **Resource Type** | `Stack` or `Node`. |
+| **Resource** | The picker shows stacks (when type is `Stack`) or remote nodes (when type is `Node`) the gateway knows about. Resource names match what you see in the sidebar. |
+
+Click **Add** to save the assignment. Existing scopes render as a row with the role badge, the line `on <type>: <resource>`, and a trash icon for removal. Removing an assignment is instant; the user's effective permissions are recomputed on their next request.
+
+Scoped assignments are **additive only**. A Viewer with a scoped Deployer on `frontend` can deploy `frontend` but stays read-only on every other resource. Scopes never reduce the global role.
+
+### Example scenarios
+
+- A **Viewer** with a scoped **Deployer** assignment on the `frontend` stack can deploy, restart, and stop only that stack. They cannot edit compose or delete it.
+- A **Deployer** with a scoped **Node Admin** assignment on node `staging-server` can manage every stack and node operation on that server, while keeping plain Deployer rights on the rest of the fleet.
+- A **Node Admin** without any scoped assignments has full stack and node management across every node, but still cannot reach system settings, the user list, or the audit log.
+
+## Two-factor reset
+
+Admins can reset a user's two-factor authentication enrollment. Use this only when the user has lost access to their authenticator app or backup codes.
+
+The shield icon next to the pencil icon appears for any user who has finished TOTP enrollment. Clicking it opens a confirmation modal with the kicker `USERS · RESET 2FA`, the title `Reset 2FA for <username>`, and the body:
+
+> Removes the user's authenticator enrolment and backup codes. They will sign in with just their password on their next login and can re-enrol from their account settings. Use this when a user has lost access to their authenticator.
+
+Click **Reset 2FA** to confirm or **Cancel** to dismiss. Confirming bumps the user's session token version, which signs out every other active session of theirs on the next request, and writes an audit-log entry.
+
+### Lockout after failed two-factor attempts
+
+If a user submits five wrong codes during sign-in (TOTP or backup), the account is locked for **15 minutes**. The lockout applies to sign-in only; sessions already authenticated continue to work. An admin **Reset 2FA** clears the lockout by removing the enrollment.
+
+If you need to track repeated lockouts, the audit log records each failed login attempt and the lockout state changes.
+
+## Deleting a user
+
+Click the trash icon on a user row. A confirmation modal with the kicker `USERS · DELETE · IRREVERSIBLE` opens.
+
+<Frame>
+  <img src="/images/rbac/delete-confirm.png" alt="Delete confirmation modal with the kicker USERS DELETE IRREVERSIBLE, the title Delete user viewer in italic display type, the body Removes the user immediately. They lose access right away., and Cancel and Delete buttons on the lower right." />
+</Frame>
+
+The body reads:
+
+> Removes the user immediately. They lose access right away.
+
+This is literal. Deletion bumps the user's token version, so every active session of theirs returns `401` on their next API request. There is no grace period and no soft-delete table. The deletion is also written to the audit log.
+
+You cannot delete your own account; the trash icon on the `(you)` row is disabled.
+
+## Session security
+
+Sencho enforces user changes immediately by versioning JWT tokens at the user record. Each token carries the user's `tv` (token-version) claim; mismatches return `401` on the next request without consulting any session table.
+
+| Event | Effect on active sessions |
+|-------|---------------------------|
+| **Account deletion** | Token version bump. Every existing session of the deleted user returns `401` on its next request. |
+| **Role change** | The database role wins. The user's existing JWTs continue to validate, but the new role is read from the user record on every request, so the new permissions take effect immediately. |
+| **Password change (self)** | Token version bump. All **other** sessions of the user are invalidated. The session that performed the change is reissued a fresh token, so the user stays signed in where they made the change. |
+| **Two-factor reset (admin)** | Token version bump. Every session of the target user is invalidated. |
+
+Cookies and Bearer tokens go through the same auth middleware, so the same rules apply to API-token-based sessions where a token is bound to a user.
+
+## SSO auto-provisioning
+
+With SSO configured on Admiral, users authenticate through an identity provider (LDAP, Custom OIDC, Google, GitHub, Okta). On their first successful sign-in, Sencho auto-creates a user record. SSO accounts appear in the Users list alongside local accounts and can be edited the same way; only the password and (optionally) the role differ.
+
+Two SSO-specific behaviors to keep in mind:
+
+- **Password fields are hidden when editing an SSO user.** The form shows `Password is managed by the identity provider (<provider>)` in place of the password inputs. SSO users always authenticate through their IdP.
+- **Optional MFA enforcement.** Each SSO provider config exposes a `Require MFA` toggle. Off (default), SSO users are not required to enroll in TOTP. On, every SSO-provisioned user must enroll TOTP after their first successful sign-in before they can use the rest of the console.
+
+The role assigned at provisioning is the role configured on the SSO provider (or, for LDAP, derived from group membership). After provisioning, an admin can adjust the role and add scoped permissions just like any local account.
+
+To configure a provider, see [SSO Authentication](/features/sso). The tier split for provider configuration (Custom OIDC at Community, preset providers at Skipper, LDAP at Admiral) is enforced separately from the rest of the user-management surface.
+
+## API tokens for automation
+
+Users are for humans; **API tokens** are for machines. Sencho issues opaque tokens with the `sen_sk_` prefix and three scopes (Read Only, Deploy Only, Full Admin) that can authenticate CI pipelines, monitoring loops, or deployment scripts without going through the user table at all. Tokens cannot reach the user-management endpoints regardless of scope.
+
+See [API Tokens](/features/api-tokens) for the full reference.
+
+## Audit logging
+
+Every user-management mutation is recorded in the audit log:
+
+- `Create user <username>` with the assigned role
+- `Update user <username>` with the changed fields
+- `Delete user <username>`
+- `Reset 2FA for <username>`
+- Scoped role assignments (`POST /api/users/:id/roles`) and removals (`DELETE /api/users/:id/roles/:assignmentId`)
+
+Entries include the acting user, IP address, HTTP method and path, response status, and a human-readable summary. Sign-in events and failed-MFA attempts are recorded in the same trail. See [Audit Log](/features/audit-log) for the full schema and filter options.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The Users entry is missing from the Settings sidebar">
+    The Users entry is hidden in three cases. **One,** the active license is Community: the Users panel is gated to Skipper+ and does not render on Community. Activate a Skipper or Admiral license under **Settings · License** to expose it. **Two,** you are signed in as a non-admin (Viewer, Deployer, Auditor): the entry is admin-only. **Three,** you have a remote node selected: the panel is hub-only and is hidden in the sidebar when any remote node is active. Switch back to the local node via the node switcher in the masthead.
+  </Accordion>
+  <Accordion title="The role I want is greyed out in the role combobox">
+    The combobox only shows roles available on your tier. On Skipper, the combobox lists Admin and Viewer only. **Deployer**, **Node Admin**, and **Auditor** are Admiral-only roles and do not appear on Skipper. Upgrade to Admiral, or use scoped permissions equivalents once you do.
+  </Accordion>
+  <Accordion title="Creating a user fails with `Your license allows a maximum of N account(s)`">
+    You have hit the seat limit for your tier. Skipper allows one admin and three non-admin users; Admiral has no cap. Either delete an unused account or upgrade. The exact remaining capacity is visible on the OPERATORS counter in the panel header.
+  </Accordion>
+  <Accordion title="A user complains they were signed out unexpectedly">
+    Token-version bumps invalidate sessions. Two events do this: an admin changed the user's password, or an admin reset their 2FA. Both rotate the user's token version, so every JWT issued before the rotation is rejected on the next request. The user can sign in again with their (possibly new) password. Role changes do **not** sign the user out; they take effect on the next request without rotating the token version.
+  </Accordion>
+  <Accordion title="A scoped Deployer cannot deploy a stack they were granted">
+    Two causes. **One,** the assignment was created on Admiral but the license has since dropped to Skipper. The permission resolver only consults scoped assignments when the effective tier is Admiral; on Skipper the scope is ignored and the user falls back to their global role. **Two,** the resource type or name on the assignment does not match the request's resource. Re-open the user in the edit form and check the existing-scope row matches the stack name (case-sensitive) exactly.
+  </Accordion>
+  <Accordion title="The shield (Reset 2FA) icon is missing on a user I expected to see it on">
+    The icon only appears for users with a finished TOTP enrollment. If the user started enrollment but never confirmed their first code, the enrollment is incomplete and the icon stays hidden. Ask the user to finish enrollment from their account settings, or, if they cannot, leave the row alone: there is nothing to reset.
+  </Accordion>
+  <Accordion title="A locked-out user keeps re-locking after waiting 15 minutes">
+    The 15-minute window expires on the clock, but the failure counter only resets on a successful sign-in. If the user retries with another wrong code after the window expires, the counter is still at five and the lockout re-engages immediately. Reset the user's 2FA from the row action to clear both the enrollment and the failure counter, then ask them to sign in with their password and re-enroll TOTP from their account settings.
+  </Accordion>
+  <Accordion title="An SSO user has the wrong role assigned at provisioning">
+    The role assigned at first sign-in comes from the SSO provider configuration (group mapping for LDAP, claim mapping for OIDC). The user record already exists, so edit the role from **Settings · Users** for an immediate fix, and update the provider config under **Settings · SSO** to prevent the same drift on the next provisioning.
+  </Accordion>
+</AccordionGroup>
