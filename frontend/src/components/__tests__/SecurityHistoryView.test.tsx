@@ -211,7 +211,7 @@ describe('SecurityHistoryView', () => {
     expect(mockedFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('hides Compare button for community tier', async () => {
+  it('shows Compare button for community tier (scan compare is Community per PR #930)', async () => {
     licenseState.isPaid = false;
     mockedFetch.mockResolvedValue(
       listResponse([
@@ -226,6 +226,6 @@ describe('SecurityHistoryView', () => {
     await user.click(checkboxes[0]);
     await user.click(checkboxes[1]);
 
-    expect(screen.queryByRole('button', { name: /Compare/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Compare \(2\/2\)/ })).toBeEnabled();
   });
 });

@@ -157,12 +157,12 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
       crumb={['Security', 'Scan history']}
       name="Scan history"
       meta={meta}
-      primaryAction={isPaid ? {
+      primaryAction={{
         label: `Compare (${selected.length}/2)`,
         icon: GitCompare,
         onClick: compareSelected,
         disabled: compareDisabled,
-      } : undefined}
+      }}
       secondaryActions={[{
         label: 'Refresh',
         icon: RefreshCw,
@@ -316,7 +316,7 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
         onClose={() => setInspectScanId(null)}
         canGenerateSbom={isPaid}
         canCompare={false}
-        canManageSuppressions={isPaid && isAdmin}
+        canManageSuppressions={isAdmin}
       />
     </SystemSheet>
   );

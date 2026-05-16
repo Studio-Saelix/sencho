@@ -732,7 +732,7 @@ export default function ResourcesView() {
                             </TabsHighlightItem>
                         </TabsHighlight>
                     </TabsList>
-                    {trivy.available && isPaid && (
+                    {trivy.available && (
                         <Button
                             variant="outline"
                             size="sm"
@@ -836,13 +836,11 @@ export default function ResourcesView() {
                                                                 >
                                                                     Scan (vulnerabilities)
                                                                 </DropdownMenuItem>
-                                                                {isPaid && (
-                                                                    <DropdownMenuItem
-                                                                        onClick={() => handleScanImage(img.RepoTags![0], { scanners: ['vuln', 'secret'] })}
-                                                                    >
-                                                                        Full scan (vulnerabilities + secrets)
-                                                                    </DropdownMenuItem>
-                                                                )}
+                                                                <DropdownMenuItem
+                                                                    onClick={() => handleScanImage(img.RepoTags![0], { scanners: ['vuln', 'secret'] })}
+                                                                >
+                                                                    Full scan (vulnerabilities + secrets)
+                                                                </DropdownMenuItem>
                                                             </DropdownMenuContent>
                                                         </DropdownMenu>
                                                     )}
@@ -1304,8 +1302,8 @@ export default function ResourcesView() {
                 onClose={() => setInspectScanId(null)}
                 onRescan={(imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); }}
                 canGenerateSbom={isPaid}
-                canCompare={isPaid}
-                canManageSuppressions={isPaid && isAdmin}
+                canCompare
+                canManageSuppressions={isAdmin}
             />
         </div>
     );
