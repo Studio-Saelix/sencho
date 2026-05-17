@@ -224,6 +224,11 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
     const id = parseInt(nodeId);
     const updates = req.body;
 
+    const existingNode = DatabaseService.getInstance().getNode(id);
+    if (!existingNode) {
+      return res.status(404).json({ error: 'Node not found' });
+    }
+
     if (updates.api_url !== undefined && updates.api_url !== '') {
       const urlCheck = isValidRemoteUrl(updates.api_url);
       if (!urlCheck.valid) {
@@ -239,11 +244,15 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
     // Trigger 2: if the api_token was rotated on a mesh-enabled proxy-mode
     // remote, close the existing callback bridge and re-dial. The next
     // ensureBridge mints a JWT with the fresh token fingerprint so the
-    // remote's tunnel auth gate accepts the upgrade.
-    if (typeof updates.api_token === 'string') {
-      const node = DatabaseService.getInstance().getNode(id);
+    // remote's tunnel auth gate accepts the upgrade. Gate on actual value
+    // change so a Save that only edits name / compose_dir does not cycle
+    // the bridge (the frontend sends the full formData on every Save).
+    const tokenChanged =
+      typeof updates.api_token === 'string' &&
+      updates.api_token !== existingNode.api_token;
+    if (tokenChanged) {
       const meshEnabled = DatabaseService.getInstance().getNodeMeshEnabled(id);
-      if (node && node.type === 'remote' && node.mode === 'proxy' && meshEnabled) {
+      if (existingNode.type === 'remote' && existingNode.mode === 'proxy' && meshEnabled) {
         MeshProxyTunnelDialer.getInstance().closeBridge(id, 'peer token rotated');
         void MeshProxyTunnelDialer.getInstance().ensureBridge(id).catch((err) => {
           console.warn(`[Mesh] proactive re-bootstrap on token rotation failed for node ${id}: ${(err as Error).message}`);

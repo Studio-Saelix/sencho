@@ -174,4 +174,24 @@ describe('Trigger 2: api_token rotation forces re-bootstrap', () => {
         expect(closeSpy).not.toHaveBeenCalled();
         expect(ensureSpy).not.toHaveBeenCalled();
     });
+
+    it('does not fire when api_token in payload equals the current value', async () => {
+        const closeSpy = vi.spyOn(MeshProxyTunnelDialer.getInstance(), 'closeBridge');
+        const ensureSpy = vi.spyOn(MeshProxyTunnelDialer.getInstance(), 'ensureBridge')
+            .mockResolvedValue(null);
+        const nodeId = seedProxyNode(true);
+        const existingToken = DatabaseService.getInstance().getNode(nodeId)?.api_token;
+        expect(existingToken).toBeTruthy();
+
+        const res = await request(app)
+            .put(`/api/nodes/${nodeId}`)
+            .set('Authorization', authHeader)
+            .send({ name: `renamed-${uniqueSuffix()}`, api_token: existingToken });
+
+        expect(res.status).toBe(200);
+        await new Promise((r) => setImmediate(r));
+
+        expect(closeSpy).not.toHaveBeenCalled();
+        expect(ensureSpy).not.toHaveBeenCalled();
+    });
 });
