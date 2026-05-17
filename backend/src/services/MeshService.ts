@@ -1231,10 +1231,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             if (!Array.isArray(body.stacks)) return [];
             return body.stacks.filter((s): s is string => typeof s === 'string');
         } catch (err) {
-            // proxyFetch throws MeshError('push_failed') when getProxyTarget
-            // returns null (e.g. pilot tunnel offline). Treat the same as a
-            // non-OK response: empty list.
-            if (err instanceof MeshError && err.code === 'push_failed') {
+            if (err instanceof MeshError && err.code === 'no_target') {
                 console.warn(`[MeshService] listStacksOnNode: no proxy target for node ${nodeId} (${sanitizeForLog(node.name)})`);
                 return [];
             }
@@ -1261,7 +1258,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         timeoutMs: number,
     ): Promise<Response> {
         const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
-        if (!target) throw new MeshError('push_failed', `no proxy target for node ${nodeId}`);
+        if (!target) throw new MeshError('no_target', `no proxy target for node ${nodeId}`);
         const url = `${target.apiUrl.replace(/\/$/, '')}${apiPath}`;
         const headers: Record<string, string> = {};
         if (body !== undefined) headers['Content-Type'] = 'application/json';
