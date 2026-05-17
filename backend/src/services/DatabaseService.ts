@@ -4,6 +4,10 @@ import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
 
+function isPilotMode(): boolean {
+    return process.env.SENCHO_MODE === 'pilot';
+}
+
 export interface Agent {
     id?: number;
     type: 'discord' | 'slack' | 'webhook';
@@ -1462,20 +1466,28 @@ export class DatabaseService {
 
     private migrateMeshTables(): void {
         try {
-            this.db.prepare(`
-                CREATE TABLE IF NOT EXISTS mesh_stacks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    node_id INTEGER NOT NULL,
-                    stack_name TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    created_by TEXT,
-                    UNIQUE(node_id, stack_name),
-                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
-                )
-            `).run();
-            this.db.prepare('CREATE INDEX IF NOT EXISTS idx_mesh_stacks_node ON mesh_stacks(node_id)').run();
+            if (isPilotMode()) {
+                // Per C-3 design, mesh state lives on central. Pilots never write
+                // to mesh_stacks; alias data arrives via the D-1 override push
+                // and lives in MeshService.pilotAliasOverlay. Drop any leftover
+                // rows from a prior central-mode boot and skip the CREATE.
+                this.db.prepare('DROP TABLE IF EXISTS mesh_stacks').run();
+            } else {
+                this.db.prepare(`
+                    CREATE TABLE IF NOT EXISTS mesh_stacks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        node_id INTEGER NOT NULL,
+                        stack_name TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        created_by TEXT,
+                        UNIQUE(node_id, stack_name),
+                        FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                    )
+                `).run();
+                this.db.prepare('CREATE INDEX IF NOT EXISTS idx_mesh_stacks_node ON mesh_stacks(node_id)').run();
+            }
         } catch (e) {
-            console.warn('[DatabaseService] Could not create mesh_stacks:', (e as Error).message);
+            console.warn('[DatabaseService] mesh_stacks migration:', (e as Error).message);
         }
         try {
             this.db.prepare(`
@@ -1600,6 +1612,7 @@ export class DatabaseService {
     // --- Sencho Mesh ---
 
     public listMeshStacks(nodeId?: number): Array<{ id: number; node_id: number; stack_name: string; created_at: number; created_by: string | null }> {
+        if (isPilotMode()) return [];
         const sql = nodeId !== undefined
             ? 'SELECT id, node_id, stack_name, created_at, created_by FROM mesh_stacks WHERE node_id = ?'
             : 'SELECT id, node_id, stack_name, created_at, created_by FROM mesh_stacks';
@@ -1610,17 +1623,23 @@ export class DatabaseService {
     }
 
     public isMeshStackEnabled(nodeId: number, stackName: string): boolean {
+        if (isPilotMode()) return false;
         const row = this.db.prepare('SELECT 1 FROM mesh_stacks WHERE node_id = ? AND stack_name = ?').get(nodeId, stackName);
         return !!row;
     }
 
     public insertMeshStack(nodeId: number, stackName: string, createdBy: string | null): void {
+        if (isPilotMode()) {
+            console.warn(`[DatabaseService] insertMeshStack ignored on pilot (node=${nodeId}, stack=${stackName})`);
+            return;
+        }
         this.db.prepare(
             'INSERT INTO mesh_stacks (node_id, stack_name, created_at, created_by) VALUES (?, ?, ?, ?)'
         ).run(nodeId, stackName, Date.now(), createdBy);
     }
 
     public deleteMeshStack(nodeId: number, stackName: string): void {
+        if (isPilotMode()) return;
         this.db.prepare('DELETE FROM mesh_stacks WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
