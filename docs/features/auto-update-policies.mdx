@@ -1,6 +1,6 @@
 ---
 title: "Auto-Update Readiness"
-description: "Review pending container updates across your fleet, with risk tags, changelogs, and rollback targets, before applying."
+description: "Review pending container updates across your fleet, with risk badges, changelogs, and scheduled run times, before applying."
 ---
 
 <Note>
@@ -17,39 +17,44 @@ Auto-Update Readiness is the launchpad for every pending update across your stac
 
 Each card shows:
 
-- The current and next tag, with the new version highlighted in cyan.
-- A **risk tag** derived from the version delta: `patch` (safe), `minor`, `major`, or `digest rebuild`.
-- A one-line changelog preview when the registry publishes one.
-- The **rollback target** (the tag Sencho will fall back to if an update is reverted).
-- The next scheduled run for the matching auto-update task, if one exists.
+- The current tag and (for semver updates) the next tag, with the new version highlighted in cyan. For digest-only updates, the card shows the current tag with a **Rebuild available** marker instead of a version diff.
+- A **risk badge** derived from the version delta: `Safe · patch` (green), `Review · minor` (amber), `Blocked · major` (red), or `Digest rebuild` (gray) for non-semver tags.
+- The primary image reference, plus a count of additional services if more than one image in the stack has an update.
+- A one-line changelog preview when the registry publishes one. Registries that omit changelog metadata render the card with "No changelog available from the registry yet."
+- The next scheduled run for the matching auto-update task, if one exists, or "No schedule".
 
 <Frame>
-  <img src="/images/auto-update/readiness-board.png" alt="Readiness board with hero count, per-stack cards, and risk tags" />
+  <img src="/images/auto-update/readiness-board.png" alt="Readiness board with hero counter, per-node groups, and risk badges" />
 </Frame>
 
-The hero at the top counts pending updates across every node in your fleet and tells you how many of them are ready to apply without human review. Major version jumps and stacks with blocked registries are counted separately so they can be reviewed before the scheduler runs.
+The hero at the top counts pending updates across every node in your fleet and tells you how many are ready to apply without human review. Its subtitle reads `X of Y ready to apply automatically across N nodes`. Stacks with a major version bump are surfaced as a separate count (`· Z blocked by major bump`) so they can be reviewed before the scheduler runs.
 
-Cards are grouped by node, with a section header for each node that has at least one pending update. The local node is listed first, followed by remote nodes alphabetically. If any of your online nodes is unreachable when the page loads, a small line under the hero shows how many of your online nodes responded.
+Cards are grouped by node, with a section header for each node that has at least one pending update. The header shows the node name, a `local` or `remote` pill, and the stack count. The local node is listed first, followed by remote nodes alphabetically. If any of your online nodes is unreachable when the page loads, a small line under the hero reads `X of Y nodes reachable. Unreachable nodes are not shown.`
+
+## Empty state
+
+When nothing is pending, the board renders a single Shield-icon panel with the headline "All stacks on current builds" and the sub-line "Sencho will recheck registries on the scheduler interval." Image update detection runs every six hours on each node; the readiness board reflects that cached status until the next cycle (or until you press **Recheck**).
 
 ## Workflow
 
 1. Open the **Auto-Update** view from the sidebar.
-2. Skim the card grid. Patch and minor bumps render with a green or amber tag; major bumps render in red and are marked as blocked.
+2. Skim the card grid. The badge tells you the risk at a glance: `Safe · patch` is green, `Review · minor` is amber, `Blocked · major` is red, and a digest-only rebuild on a non-semver tag shows the gray `Digest rebuild` badge.
 3. For a safe update, click **Apply now** on the card to pull and recreate the stack immediately.
-4. For a major bump, review the changelog preview and the rollback target before deciding. If you still want to apply it, switch to the **Schedules** view and create or edit an auto-update task for that stack.
-5. Use **Recheck** in the hero to force an immediate registry poll across every reachable node. Per-node cooldowns still apply, and the toast tells you how many nodes were triggered, rate-limited, or failed.
+4. For a major bump, review the changelog preview and the upstream release notes. **Apply now** is disabled on the readiness board for blocked cards; to apply a major bump after review, use the stack's lifecycle **Update** action (right-click the stack in the sidebar, or open the kebab menu and choose **Update**, or click **Deploy** in the stack editor).
+5. Use **Recheck** in the hero to force an immediate registry poll across every reachable node. A 2-minute per-node cooldown applies, and the toast tells you how many nodes were triggered, rate-limited, or failed.
 
-## Risk tags
+## Risk badges
 
-| Tag | Meaning | Source |
-|-----|---------|--------|
-| **patch** | Safe automated update (e.g. `1.2.3` → `1.2.4`) | Semver comparison of tags |
-| **minor** | Backwards-compatible update (e.g. `1.2.3` → `1.3.0`) | Semver comparison of tags |
-| **major** | Potentially breaking change (e.g. `1.2.3` → `2.0.0`). Marked **blocked** by default | Semver comparison of tags |
-| **digest rebuild** | Same tag, new image digest (e.g. `latest` pushed again) | Local vs remote digest diff |
-| **unknown** | Non-semver tag (e.g. `main`, `stable`) | Fallback when tags cannot be compared |
+| Badge | Color | When it appears |
+|-------|-------|-----------------|
+| `Safe · patch` | Green (Shield icon) | Patch-level semver bump (e.g. `1.2.3` to `1.2.4`) |
+| `Review · minor` | Amber (AlertTriangle icon) | Minor semver bump (e.g. `1.2.3` to `1.3.0`) |
+| `Blocked · major` | Red (ShieldAlert icon) | Major semver bump (e.g. `1.2.3` to `2.0.0`). **Apply now** is disabled; the card surfaces the reason "Major version jumps require human review before applying." |
+| `Digest rebuild` | Gray | Non-semver tag (e.g. `main`, `stable`) with an updated digest |
 
-Blocked updates still schedule check runs, but the apply button is disabled until you review them manually.
+A separate inline `Rebuild available` label replaces the version diff when only the digest changed (same tag, new image). The risk badge on those cards still reflects the underlying semver classification reported by the registry.
+
+Blocked updates still surface in scheduled check runs so you stay informed, but the apply button is disabled until you review them manually.
 
 ## Per-stack control
 
@@ -89,7 +94,7 @@ The task lives alongside restart, prune, snapshot, and scan tasks in the same ti
 
 The readiness board shows pending updates from every node in your fleet in a single view, regardless of which node is selected in the sidebar. You do not need to switch nodes to inspect what is pending elsewhere.
 
-Each node group renders its own card grid. **Apply now** runs on the node that owns the stack, and **Recheck** fans out to every reachable node so registries get polled in parallel. Sencho handles the routing through the Distributed API; no additional configuration is needed.
+Each node group renders its own card grid under a header showing the node name, a `local` or `remote` pill, and a stack count. **Apply now** runs on the node that owns the stack, and **Recheck** fans out to every reachable node so registries get polled in parallel. Sencho handles the routing through the Distributed API; no additional configuration is needed.
 
 ## How readiness is computed
 
@@ -97,34 +102,31 @@ For each stack with a pending image update, Sencho computes a preview by:
 
 1. Parsing the compose file to enumerate every pullable image reference.
 2. Calling the registry with your configured credentials to fetch the current tag list and remote digest.
-3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix) or, if tags match but digests differ, treating it as a digest rebuild.
+3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If the highest available tag matches the current one but the remote digest has changed, the card surfaces as a `Rebuild available` update.
 4. Scoring the overall stack by the most severe image bump. Any major bump marks the stack as blocked.
-5. Deriving the rollback target from the running tag and normalizing Docker Hub library paths.
+5. Normalizing Docker Hub library paths so credentials and changelog lookups resolve correctly.
 
 The preview is recomputed each time the readiness board loads, so it reflects the live state of your registries and local images.
 
 ## Troubleshooting
 
-### Card shows "No changelog available"
-
-Sencho reads changelog metadata from the registry's manifest and OCI annotations. Registries that do not publish this metadata (most private registries and many self-hosted ones) will simply render the card without a changelog. The risk tag is still accurate because it is computed from the tag itself.
-
-### Apply button is disabled with a "blocked" tooltip
-
-The stack has a major version bump. Open the cron schedule for that stack and apply manually after reviewing the upstream release notes. The block is a policy decision: major updates never auto-apply without human review.
-
-### Card stays stuck on "Checking"
-
-The registry call is either still pending or failed. Click **Recheck** in the hero to retry. If the stack has private-registry credentials, confirm they are still valid in **Settings > Registries**.
-
-### "Nothing to update" but I see an update on another view
-
-Image update detection runs every six hours on each node. The readiness board uses the same cached status. Trigger **Recheck** to force a fresh check across every reachable node, or see [Image update detection](/features/image-update-detection) for details on the refresh cycle.
-
-### Scheduled auto-update runs are not applying to a specific stack
-
-The stack likely has auto-updates disabled. Open the stack's kebab menu or right-click context menu and check the **Inspect** group. If the item reads **Auto-update: Disabled**, click it to re-enable. Once re-enabled, the next scheduled run will include the stack, or you can trigger an immediate run from the Auto-Update view.
-
-### Banner says "X of Y nodes reachable"
-
-One or more nodes that are marked online in your fleet did not respond within the request timeout. Pending updates from those nodes are not shown until they come back. Check the node's status from the Fleet view and the network path between this Sencho instance and the unreachable node.
+<AccordionGroup>
+  <Accordion title='Card shows "No changelog available"'>
+    Sencho reads changelog metadata from the registry's manifest and OCI annotations. Registries that do not publish this metadata (most private registries and many self-hosted ones) render the card without a changelog. The risk badge is still accurate because it is computed from the tag itself.
+  </Accordion>
+  <Accordion title='Apply now is disabled with a "Blocked · major" tooltip'>
+    The stack has a major version bump and is blocked on the readiness board by policy: major updates never auto-apply without human review. To apply after reviewing the upstream release notes, use the stack's lifecycle **Update** action from the sidebar kebab or right-click menu, or open the stack editor and click **Deploy**.
+  </Accordion>
+  <Accordion title='Card stays stuck on "Checking registry..."'>
+    The registry call is either still pending or it failed. Click **Recheck** in the hero to retry. If the stack uses private-registry credentials, confirm they are still valid in **Settings > Registries**.
+  </Accordion>
+  <Accordion title='"Nothing to update" but I see an update on another view'>
+    Image update detection runs every six hours on each node and the readiness board uses the same cached status. Trigger **Recheck** to force a fresh check across every reachable node.
+  </Accordion>
+  <Accordion title='Scheduled auto-update runs are not applying to a specific stack'>
+    The stack likely has auto-updates disabled. Open the stack's kebab menu or right-click context menu and check the **Inspect** group. If the item reads **Auto-update: Disabled**, click it to re-enable. Once re-enabled, the next scheduled run will include the stack, or you can trigger an immediate run from the Auto-Update view.
+  </Accordion>
+  <Accordion title='Banner says "X of Y nodes reachable"'>
+    One or more nodes that are marked online in your fleet did not respond within the request timeout. Pending updates from those nodes are not shown until they come back. Check the node's status from the Fleet view and the network path between this Sencho instance and the unreachable node.
+  </Accordion>
+</AccordionGroup>
