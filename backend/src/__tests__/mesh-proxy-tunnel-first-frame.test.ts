@@ -184,4 +184,44 @@ describe('meshProxyTunnel first-frame state machine', () => {
             await srv.close();
         }
     });
+
+    it('persists mesh_handshake material even when reverse-dialer CAS rejects the bridge', async () => {
+        // Simulate a peer-initiated callback bridge that already owns the
+        // reverseDialer slot. Central's Trigger-2 dial then arrives with a
+        // rotated mesh_handshake frame; the CAS swap must refuse the new
+        // bridge, but the bootstrap material has to land on the peer
+        // anyway so subsequent peer-initiated callbacks authenticate with
+        // the rotated JWT.
+        MeshService.getInstance().setReverseDialer({
+            openMeshTcpStream: () => null,
+        });
+
+        const srv = await startServer();
+        try {
+            const ws = await dialTunnel(srv.port, '?nodeId=7');
+
+            const expiresAt = Math.floor(Date.now() / 1000) + 7200;
+            const closeInfo = new Promise<{ code: number }>((resolve) => {
+                ws.once('close', (code) => resolve({ code }));
+            });
+            ws.send(makeHandshakeFrame({
+                centralInstanceId: 'rotation-central-id',
+                centralApiUrl: 'https://central.example.test',
+                meshTunnelJwt: 'rotation.jwt.value',
+                jwtExpiresAt: expiresAt,
+            }));
+
+            const info = await closeInfo;
+            expect(info.code).toBe(1013);
+
+            const row = MeshCentralRegistry.getInstance().getActive();
+            expect(row).not.toBeNull();
+            expect(row?.centralInstanceId).toBe('rotation-central-id');
+            expect(row?.centralApiUrl).toBe('https://central.example.test');
+            expect(row?.callbackJwt).toBe('rotation.jwt.value');
+            expect(row?.jwtExpiresAt).toBe(expiresAt);
+        } finally {
+            await srv.close();
+        }
+    });
 });

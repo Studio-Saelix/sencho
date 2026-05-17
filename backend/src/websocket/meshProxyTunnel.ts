@@ -69,6 +69,17 @@ function isMeshHandshakeFrame(parsed: unknown): parsed is MeshHandshakeFrame {
  */
 const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_SIZE_BYTES });
 
+/**
+ * Upper bound on the pre-CAS first-frame wait inside attachSwitchboard.
+ * Sized to cover localhost-loopback RTT plus a slim margin for the
+ * central-side ms-scale gap between `ws.send(mesh_handshake)` and the
+ * registerProxyBridge throw + ws.close that follows on a refused dial.
+ * On a dial that carries no bootstrap, this is pure added latency
+ * before the reverse-dialer install; 30ms is well below operator
+ * perception and well above realistic localhost RTT.
+ */
+const FIRST_FRAME_WAIT_MS = 30;
+
 interface SwitchboardReverseDialer {
     openMeshTcpStream(target: { nodeId: number; stack: string; service: string; port: number }): ReverseTcpStreamHandle | null;
 }
@@ -115,60 +126,6 @@ export async function handleMeshProxyTunnel(req: IncomingMessage, socket: Duplex
 async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Promise<void> {
     let switchboard: TcpStreamSwitchboard | null = null;
     let meshServiceCleanup: (() => void) | null = null;
-
-    try {
-        switchboard = attachTcpStreamSwitchboard({
-            ws,
-            resolveTarget: resolveByComposeLabels,
-            logLabel: 'MeshProxy',
-        });
-
-        // Register a reverse dialer so this side's MeshForwarder can dial
-        // cross-node aliases via `tcp_open_reverse` over the same WS. The
-        // CAS swap refuses to overwrite a dialer that another caller
-        // (a concurrent proxy-tunnel upgrade, or a pilot agent in a
-        // misconfigured deployment) has already installed.
-        const { MeshService } = await import('../services/MeshService');
-        const meshService = MeshService.getInstance();
-        const localSwitchboard = switchboard;
-        const localDialer: SwitchboardReverseDialer = {
-            openMeshTcpStream(target) {
-                return localSwitchboard.openReverseStream(target);
-            },
-        };
-        const installed = meshService.setReverseDialer(localDialer, null);
-        if (!installed) {
-            console.warn('[MeshProxy] reverse dialer already installed; rejecting concurrent tunnel');
-            try { ws.close(1013, 'reverse dialer already installed'); } catch { /* ignore */ }
-            switchboard.cleanup('reverse dialer already installed');
-            switchboard = null;
-            return;
-        }
-        // Install central's view of this peer's nodeId so handleAccept
-        // dispatches cross-node aliases correctly. Done after setReverseDialer
-        // succeeds so a CAS-rejected tunnel does not leak nodeId state.
-        //
-        // The install persists across bridge lifecycles: the peer's identity
-        // in central's namespace is stable for the enrollment, not per-WS.
-        // Null-clearing on teardown caused dispatch to fall back to
-        // getDefaultNodeId() after idle close, which collides with central's
-        // own nodeId for Local and misdispatches cross-fleet traffic to the
-        // same-node path. A subsequent install with a different nodeId
-        // (e.g. re-enrollment) is detected by the setter's overwrite-warn.
-        if (peerNodeId !== null) {
-            meshService.setProxyTunnelSelfCentralNodeId(peerNodeId);
-        }
-        meshServiceCleanup = () => {
-            meshService.setReverseDialer(null, localDialer);
-        };
-    } catch (err) {
-        if (isDebugEnabled()) {
-            console.warn('[MeshProxy:diag] failed to attach switchboard:', sanitizeForLog((err as Error).message));
-        }
-        try { ws.close(1011, 'switchboard attach failed'); } catch { /* ignore */ }
-        return;
-    }
-
     let phase: BootstrapPhase = 'awaiting';
 
     const onMessage = (data: unknown, isBinary: boolean): void => {
@@ -257,12 +214,84 @@ async function attachSwitchboard(ws: WebSocket, peerNodeId: number | null): Prom
         }
     };
 
-    ws.on('message', onMessage);
-    ws.once('close', teardown);
-    ws.once('error', (err) => {
-        if (isDebugEnabled()) {
-            console.warn('[MeshProxy:diag] ws error:', sanitizeForLog(err.message));
+    try {
+        switchboard = attachTcpStreamSwitchboard({
+            ws,
+            resolveTarget: resolveByComposeLabels,
+            logLabel: 'MeshProxy',
+        });
+
+        // Wire listeners synchronously so any first frame from central
+        // reaches onMessage even when the reverse-dialer CAS swap below
+        // refuses this bridge. Bootstrap material identifies central for
+        // the next peer-initiated callback and must persist independent
+        // of whether this particular WS becomes the active bridge.
+        ws.on('message', onMessage);
+        ws.once('close', teardown);
+        ws.once('error', (err) => {
+            if (isDebugEnabled()) {
+                console.warn('[MeshProxy:diag] ws error:', sanitizeForLog(err.message));
+            }
+            teardown();
+        });
+
+        // Register a reverse dialer so this side's MeshForwarder can dial
+        // cross-node aliases via `tcp_open_reverse` over the same WS. The
+        // CAS swap refuses to overwrite a dialer that another caller
+        // (a concurrent proxy-tunnel upgrade, or a pilot agent in a
+        // misconfigured deployment) has already installed.
+        const { MeshService } = await import('../services/MeshService');
+        const meshService = MeshService.getInstance();
+        const localSwitchboard = switchboard;
+        const localDialer: SwitchboardReverseDialer = {
+            openMeshTcpStream(target) {
+                return localSwitchboard.openReverseStream(target);
+            },
+        };
+        const installed = meshService.setReverseDialer(localDialer, null);
+        if (!installed) {
+            console.warn('[MeshProxy] reverse dialer already installed; rejecting concurrent tunnel');
+            // Hold the WS open briefly so any in-flight first frame can
+            // land in onMessage before we send the close. Central
+            // optionally sends a mesh_handshake as the first frame on
+            // Trigger 1 / Trigger 2 dials; that bootstrap material must
+            // persist via MeshCentralRegistry regardless of whether this
+            // WS becomes the active bridge. The wait resolves as soon as
+            // any 'message' arrives (the listener attached above runs
+            // synchronously on the event and updates the registry); the
+            // timeout bounds the close-latency overhead for refused
+            // dials that carry no bootstrap.
+            await new Promise<void>((resolve) => {
+                const onFirst = (): void => { clearTimeout(t); resolve(); };
+                const t = setTimeout(() => { ws.off('message', onFirst); resolve(); }, FIRST_FRAME_WAIT_MS);
+                ws.once('message', onFirst);
+            });
+            try { ws.close(1013, 'reverse dialer already installed'); } catch { /* ignore */ }
+            // teardown fires on the 'close' event and runs switchboard.cleanup.
+            return;
         }
-        teardown();
-    });
+        // Install central's view of this peer's nodeId so handleAccept
+        // dispatches cross-node aliases correctly. Done after setReverseDialer
+        // succeeds so a CAS-rejected tunnel does not leak nodeId state.
+        //
+        // The install persists across bridge lifecycles: the peer's identity
+        // in central's namespace is stable for the enrollment, not per-WS.
+        // Null-clearing on teardown caused dispatch to fall back to
+        // getDefaultNodeId() after idle close, which collides with central's
+        // own nodeId for Local and misdispatches cross-fleet traffic to the
+        // same-node path. A subsequent install with a different nodeId
+        // (e.g. re-enrollment) is detected by the setter's overwrite-warn.
+        if (peerNodeId !== null) {
+            meshService.setProxyTunnelSelfCentralNodeId(peerNodeId);
+        }
+        meshServiceCleanup = () => {
+            meshService.setReverseDialer(null, localDialer);
+        };
+    } catch (err) {
+        if (isDebugEnabled()) {
+            console.warn('[MeshProxy:diag] failed to attach switchboard:', sanitizeForLog((err as Error).message));
+        }
+        try { ws.close(1011, 'switchboard attach failed'); } catch { /* ignore */ }
+        return;
+    }
 }
