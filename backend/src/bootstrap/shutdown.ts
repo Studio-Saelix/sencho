@@ -10,6 +10,7 @@ import { SchedulerService } from '../services/SchedulerService';
 import { MfaService } from '../services/MfaService';
 import { MeshService } from '../services/MeshService';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { PilotMetrics } from '../services/PilotMetrics';
 
 /**
  * Wire graceful shutdown handlers. Docker sends SIGTERM when the container
@@ -48,6 +49,9 @@ export function installShutdownHandlers(server: Server): void {
       });
       try { BlueprintReconciler.getInstance().stop(); } catch (e) {
         console.warn('[Shutdown] BlueprintReconciler cleanup failed:', (e as Error).message);
+      }
+      try { PilotMetrics.flush(); } catch (e) {
+        console.warn('[Shutdown] PilotMetrics flush failed:', (e as Error).message);
       }
       try { DatabaseService.getInstance().flushAuditLogBuffer(); } catch (e) {
         console.warn('[Shutdown] Audit log flush failed:', (e as Error).message);

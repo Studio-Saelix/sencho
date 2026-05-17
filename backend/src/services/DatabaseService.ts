@@ -605,6 +605,8 @@ export interface ScanSummary {
 const AUDIT_LOG_FLUSH_INTERVAL_MS = 1_000;
 const AUDIT_LOG_FLUSH_THRESHOLD = 100;
 
+export const PILOT_METRICS_COUNTERS_KEY = 'pilot_metrics_counters';
+
 export class DatabaseService {
     private static instance: DatabaseService;
     private db: Database.Database;
@@ -1773,6 +1775,39 @@ export class DatabaseService {
 
     public setSystemState(key: string, value: string): void {
         this.db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)').run(key, value);
+    }
+
+    /**
+     * Persisted PilotMetrics counters. Returns the parsed JSON object (a
+     * numeric record keyed by counter name) or null when the row is missing
+     * or unparseable. Callers (PilotMetrics.load) handle per-field defaulting
+     * so a missing counter in the persisted blob does not break a new release
+     * that added the counter.
+     *
+     * This is the first JSON blob stored in `system_state`; mirror this
+     * parse/validate shape (object check + numeric filter) for any future
+     * JSON-shaped system_state row so an operator-edited row cannot crash
+     * boot.
+     */
+    public getPilotMetricsCounters(): Record<string, number> | null {
+        const raw = this.getSystemState(PILOT_METRICS_COUNTERS_KEY);
+        if (raw === null) return null;
+        try {
+            const parsed = JSON.parse(raw) as unknown;
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+            const out: Record<string, number> = {};
+            for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+                if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+            }
+            return out;
+        } catch (err) {
+            console.warn('[DatabaseService] pilot_metrics_counters JSON parse failed:', (err as Error).message);
+            return null;
+        }
+    }
+
+    public setPilotMetricsCounters(counters: Record<string, number>): void {
+        this.setSystemState(PILOT_METRICS_COUNTERS_KEY, JSON.stringify(counters));
     }
 
     /**
