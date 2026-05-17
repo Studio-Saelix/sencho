@@ -39,7 +39,7 @@ import { PilotMetrics } from './PilotMetrics';
 import { httpUrlToWs } from '../utils/wsUrl';
 import { sanitizeForLog } from '../utils/safeLog';
 
-interface CallbackReverseDialer {
+interface SwitchboardReverseDialer {
     openMeshTcpStream(target: { nodeId: number; stack: string; service: string; port: number }): ReverseTcpStreamHandle | null;
 }
 
@@ -173,7 +173,7 @@ export class PeerToCentralMeshSessionDialer extends EventEmitter {
 
         const { MeshService } = await import('./MeshService');
         const meshService = MeshService.getInstance();
-        const localDialer: CallbackReverseDialer = {
+        const localDialer: SwitchboardReverseDialer = {
             openMeshTcpStream(target) {
                 return switchboard.openReverseStream(target);
             },

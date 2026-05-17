@@ -21,7 +21,7 @@
 import http from 'http';
 import type { AddressInfo } from 'net';
 import { WebSocketServer, type WebSocket as WsClient } from 'ws';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -236,6 +236,11 @@ describe('PeerToCentralMeshSessionDialer', () => {
             });
             switchboard = await PeerToCentralMeshSessionDialer.getInstance().ensureSession();
             expect(switchboard).not.toBeNull();
+            // The R1-A2 design puts a TcpStreamSwitchboard on the peer end of
+            // this WS, not a PilotTunnelBridge (which is central's role). A
+            // future regression that returns the wrong shape would surface
+            // here before the more abstract reverseDialer-installed check.
+            expect(switchboard).toBeInstanceOf(TcpStreamSwitchboardCtor);
             expect(PeerToCentralMeshSessionDialer.getInstance().hasSession()).toBe(true);
             // markUsed is called synchronously inside attachSwitchboard before
             // ensureSession resolves, so the DB row reflects it immediately.
