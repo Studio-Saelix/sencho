@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.6](https://github.com/Studio-Saelix/sencho/compare/v0.81.5...v0.81.6) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** close data-plane race that dropped early TcpData frames ([#1086](https://github.com/Studio-Saelix/sencho/issues/1086)) ([a318e6b](https://github.com/Studio-Saelix/sencho/commit/a318e6b3c17a9aed734d8a8f5e309cc50b571ca3))
+
 ## [0.81.5](https://github.com/Studio-Saelix/sencho/compare/v0.81.4...v0.81.5) (2026-05-17)
 
 
