@@ -4,62 +4,68 @@ description: Trigger stack actions from CI/CD pipelines via HTTP webhooks with H
 ---
 
 <Note>
-  Webhooks require a **Sencho Admiral** license.
+  Webhooks require a **Skipper** or **Admiral** license. Creating, editing, and deleting webhooks is restricted to admin users; non-admins on a paid tier can view the list but cannot manage it.
 </Note>
 
 Sencho webhooks let external systems trigger stack actions over HTTP. The typical use case: your CI pipeline builds a new image, then calls a Sencho webhook to deploy the updated stack, with no manual intervention required.
 
 ## How it works
 
-1. You create a webhook in **Settings > Webhooks**, targeting a specific stack and action
-2. Sencho generates a unique secret for HMAC-SHA256 signature validation
-3. Your CI/CD system sends a `POST` request to the trigger URL with the correct signature
-4. Sencho validates the signature and executes the action asynchronously
+1. You create a webhook in **Settings → Alerts → Webhooks**, targeting a specific stack and action.
+2. Sencho generates a unique secret for HMAC-SHA256 signature validation.
+3. Your CI/CD system sends a `POST` request to the trigger URL with the correct signature.
+4. Sencho validates the signature and executes the action asynchronously.
 
 ## Creating a webhook
 
-Go to **Settings > Webhooks** and click **Create Webhook**. Fill in:
+Open **Settings → Alerts → Webhooks** and click **Create webhook**. The page is part of the global settings and is reachable while the **Local** node is active in the node switcher; webhooks created from this page execute against the local Sencho instance.
 
 <Frame>
-  <img src="/images/webhooks/webhooks-create-form.png" alt="Webhook creation form with Name, Stack, and Action fields" />
+  <img src="/images/webhooks/webhooks-create-form.png" alt="New webhook form with Name, Stack, Node, and Action fields. The Action dropdown is open showing Deploy (down + up), Restart, Stop, Start, Pull and Update, and Git source sync." />
 </Frame>
 
 | Field | Description |
 |-------|-------------|
-| **Name** | A display name (e.g. "Deploy on push") |
-| **Stack** | The target stack to act on |
-| **Action** | One of the actions listed below |
+| **Name** | A display name shown in the configured-webhooks list and execution history. |
+| **Stack** | The target stack to act on. Picked from the stacks on the active node. |
+| **Node** | Read-only. Reflects the currently active node; webhook execution is pinned to that node. |
+| **Action** | One of the actions listed below. |
 
-After creation, Sencho shows the webhook secret **once** in a green banner. Copy it immediately; it cannot be retrieved later. The webhook list only shows the last four characters of the secret.
+After you click **Create**, the new webhook's secret appears once in a green callout titled **Webhook created. Copy your secret now.** Copy it before dismissing the callout; once you navigate away, it cannot be retrieved. The configured-webhooks list always shows the secret in masked form (`********` plus the last four characters).
 
 <Frame>
-  <img src="/images/webhooks/webhooks-secret-reveal.png" alt="Secret reveal banner after creating a webhook, showing the full secret and a copy button" />
+  <img src="/images/webhooks/webhooks-secret-reveal.png" alt="Green success callout after creating a webhook, showing the full secret in a monospace block, a Copy button, and a Dismiss button. Below the callout, the configured-webhooks list shows the new webhook card with its trigger URL and masked secret." />
 </Frame>
 
 ### Available actions
 
 | Action | What it does |
 |--------|-------------|
-| **Deploy (down + up)** | Stops and redeploys the entire stack |
-| **Restart** | Restarts the stack's running containers |
-| **Stop** | Stops the stack |
-| **Start** | Starts a stopped stack |
-| **Pull & Update** | Pulls the latest images and recreates changed containers |
+| **Deploy (down + up)** | Stops and redeploys the entire stack. |
+| **Restart** | Restarts the stack's running containers. |
+| **Stop** | Stops the stack. |
+| **Start** | Starts a stopped stack. |
+| **Pull & Update** | Pulls the latest images and recreates changed containers. |
+| **Git source sync** | Pulls the latest commit from the stack's Git source, then deploys. Requires a [Git source](/features/git-sources) attached to the stack. |
 
 ## Managing webhooks
 
-Each webhook appears as a card showing the webhook name, an action badge, a stack badge, the trigger URL with a copy button, and the masked secret.
+Each configured webhook renders as a card showing the webhook name, an **action** badge, a **stack** badge, a **node** badge, an enable toggle, and a delete button. Below the header are a labeled **Trigger URL** row with a copy button, a labeled **Secret** row showing the masked secret, and a **Recent executions** disclosure that expands inline.
+
+The masthead above the section reports total **Webhooks** and how many are **Enabled**.
 
 <Frame>
-  <img src="/images/webhooks/webhooks-settings.png" alt="Webhooks settings showing a configured webhook with trigger URL, masked secret, and controls" />
+  <img src="/images/webhooks/webhooks-settings.png" alt="Configured webhooks section with two webhook cards. The first card has Recent executions expanded, showing several deploy entries with timestamps and durations and one restart entry that failed with an error message. The second card is collapsed. The masthead at the top shows WEBHOOKS 2 and ENABLED 2." />
 </Frame>
 
-From the webhook card you can:
+From a webhook card you can:
 
-- **Toggle** the webhook on or off with the switch
-- **Delete** the webhook with the trash icon
-- **Copy** the trigger URL with the clipboard button
-- **View execution history** by clicking **Recent executions**
+- Toggle the webhook on or off with the **On / Off** switch.
+- Delete the webhook with the trash icon.
+- Copy the trigger URL to the clipboard with the copy button.
+- Expand **Recent executions** to view the inline history.
+
+The card has no in-place edit affordance: to change the name, stack, or action, delete the webhook and create a new one. The signing secret is bound to a single webhook for its lifetime; deleting and recreating rotates it.
 
 ## Triggering a webhook
 
@@ -71,7 +77,7 @@ Content-Type: application/json
 X-Webhook-Signature: sha256={hmac}
 ```
 
-The signature is computed as `HMAC-SHA256(request_body, webhook_secret)` and sent with a `sha256=` prefix.
+The signature is computed as `HMAC-SHA256(raw_request_body, webhook_secret)` over the exact bytes of the request body (UTF-8 if you send JSON) and sent with a `sha256=` prefix. Sencho uses a constant-time comparison.
 
 ### Example with curl
 
@@ -88,21 +94,22 @@ curl -X POST https://your-sencho.example.com/api/webhooks/3/trigger \
 
 ### Overriding the action
 
-By default, the webhook executes the action configured at creation time. You can override it per-request by including an `action` field in the body:
+By default, the webhook executes the action configured at creation time. You can override it per request by including an `action` field in the body:
 
 ```json
 { "action": "restart" }
 ```
 
-Valid override values are: `deploy`, `restart`, `stop`, `start`, `pull`.
+Valid override values are: `deploy`, `restart`, `stop`, `start`, `pull`, `git-pull`. An unknown value causes the execution to fail and appear with an error in **Recent executions**.
 
-### Response
+### Responses
 
-A successful trigger returns `202 Accepted` immediately. The action executes asynchronously in the background.
-
-```json
-{ "message": "Webhook accepted", "action": "deploy" }
-```
+| Status | Body | Meaning |
+|--------|------|---------|
+| `202 Accepted` | `{ "message": "Webhook accepted", "action": "deploy" }` | Signature is valid; the action is now running asynchronously. A 202 means accepted, not finished. |
+| `401 Unauthorized` | `{ "error": "Missing X-Webhook-Signature header" }` | The request omitted the signature header. |
+| `401 Unauthorized` | `{ "error": "Invalid signature" }` | The provided signature did not match the expected HMAC. |
+| `404 Not Found` | `{ "error": "Webhook not found or disabled" }` | The webhook id is unknown or its enable toggle is off. |
 
 ## CI/CD integration examples
 
@@ -135,20 +142,46 @@ deploy:
 
 ## Execution history
 
-Each webhook tracks its recent executions. Click **Recent executions** on any webhook card to expand the history, which shows:
+Click **Recent executions** on any webhook card to expand its inline history. Each row shows:
 
-- **Status** icon (green check for success, red X for failure)
-- **Action** that was performed
-- **Timestamp** of the execution
-- **Duration** in seconds
-- **Error message** if the execution failed
+- A **status** icon (green check for success, red X for failure).
+- The **action** that ran (the configured action, or the override if one was supplied).
+- A localized **timestamp**.
+- The **duration** in seconds when available.
+- A truncated **error** message on failures; hover the row to see the full message in a tooltip.
+
+Sencho retains the last 100 executions per webhook and surfaces the 20 most recent in the inline view.
 
 ## Security
 
-- Secrets are shown only once at creation. The webhook list displays only the last four characters.
-- Trigger endpoints do not require a session cookie, but are protected by HMAC signature validation.
-- Each webhook targets a single stack. There is no way to execute arbitrary commands through a webhook.
+- Webhook secrets are returned only once, at the moment of creation. Every subsequent view of the webhook (in the list, in the API, anywhere) shows the masked form `********` plus the last four characters.
+- Trigger endpoints are public in the sense that they do not require a Sencho session cookie, but every request must carry a valid HMAC-SHA256 signature; signatures are compared with a constant-time check.
+- Each webhook targets a single stack and runs a single action, optionally narrowed by the supplied override. There is no path to execute arbitrary commands through a webhook.
+- Webhook execution is pinned to the node selected at creation time.
 
-<Note>
-  Webhooks only operate on the **local node**. You cannot trigger actions on remote nodes through webhooks.
-</Note>
+## Troubleshooting
+
+<Accordion title="I don't see Webhooks in Settings.">
+The page requires a **Skipper** or **Admiral** license. If you are on a paid tier but the node switcher in the top-left shows a remote node, switch to **Local** to reveal the page.
+</Accordion>
+
+<Accordion title="My trigger returns '401 Invalid signature'.">
+The signature must be computed over the **exact raw bytes** of the request body. Common causes:
+
+- The CI step JSON-encodes the body before signing but sends a different body to curl (or vice versa). Sign the same string you send.
+- The shell adds a trailing newline (use `echo -n` rather than `echo`).
+- The header is missing the `sha256=` prefix; the full value is `sha256={hex}`.
+- The webhook secret used to sign does not match the secret stored in Sencho. The secret is shown once at creation; if you lost it, delete the webhook and create a new one.
+</Accordion>
+
+<Accordion title="My trigger returns '404 Webhook not found or disabled'.">
+The id in the URL is wrong, or the webhook's enable toggle is off. Copy the trigger URL from the card and check the **On / Off** switch on the webhook in **Settings → Alerts → Webhooks**.
+</Accordion>
+
+<Accordion title="The action returns 202 but the stack does not change.">
+A 202 means the action was accepted, not that it produced a visible change. **Pull & Update** is a no-op if the registry has no newer image for any service in the stack; **Start** is a no-op on an already-running stack. Check the stack's **Activity** sheet to confirm what actually ran, and the webhook's **Recent executions** for the action's status and duration.
+</Accordion>
+
+<Accordion title="I cannot create a Git source sync webhook for this stack.">
+The **Git source sync** action can only be selected for a stack that already has a [Git source](/features/git-sources) attached. If you try to create one without it, the form returns a validation error. Attach a Git source to the stack in its Compose editor, then create the webhook.
+</Accordion>
