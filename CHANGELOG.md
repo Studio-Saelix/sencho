@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.7](https://github.com/Studio-Saelix/sencho/compare/v0.81.6...v0.81.7) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** surface data-plane failures in health, meta, and Routing tab ([#1088](https://github.com/Studio-Saelix/sencho/issues/1088)) ([578cac8](https://github.com/Studio-Saelix/sencho/commit/578cac89da005b57085d6ab4addbeee15d4ff17a))
+
 ## [0.81.6](https://github.com/Studio-Saelix/sencho/compare/v0.81.5...v0.81.6) (2026-05-17)
 
 
