@@ -222,6 +222,121 @@ describe('MeshService.optInStack', () => {
         // was unlinked separately, so it must not appear in the cascade.
         expect(pushed.find((p) => p.stackName === 'to-remove')).toBeUndefined();
     });
+
+    it('optInStack cascades recompose to every previously meshed stack across the fleet', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(localNodeId, 'local-existing', 'setup');
+        db.insertMeshStack(remoteNodeId, 'remote-existing', 'setup');
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        const redeployed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((nodeId, stackName) => {
+            redeployed.push({ nodeId, stackName });
+        });
+
+        await svc.optInStack(localNodeId, 'new-stack', 'tester');
+
+        // The cascade must redeploy every previously meshed stack so its
+        // container's /etc/hosts picks up the newly-added alias.
+        expect(redeployed).toContainEqual({ nodeId: localNodeId, stackName: 'local-existing' });
+        expect(redeployed).toContainEqual({ nodeId: remoteNodeId, stackName: 'remote-existing' });
+        // The just-opted-in stack is still redeployed separately by the
+        // explicit triggerRedeploy at the end of optInStack.
+        expect(redeployed).toContainEqual({ nodeId: localNodeId, stackName: 'new-stack' });
+    });
+
+    it('optInStack does not double-redeploy the just-opted-in tuple via the cascade path', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(remoteNodeId, 'remote-existing', 'setup');
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        const redeployed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((nodeId, stackName) => {
+            redeployed.push({ nodeId, stackName });
+        });
+
+        await svc.optInStack(localNodeId, 'new-stack', 'tester');
+
+        // new-stack appears exactly once: the explicit redeploy at the end
+        // of optInStack. The cascade walks db.listMeshStacks() (which now
+        // includes new-stack) but its skip tuple drops it.
+        const newStackHits = redeployed.filter(
+            (r) => r.nodeId === localNodeId && r.stackName === 'new-stack',
+        );
+        expect(newStackHits).toHaveLength(1);
+    });
+
+    it('optInStack cascade is a no-op when no other meshed stacks exist', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        const redeployed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((nodeId, stackName) => {
+            redeployed.push({ nodeId, stackName });
+        });
+
+        await svc.optInStack(localNodeId, 'first-stack', 'tester');
+
+        // Only the just-opted-in stack is redeployed; the cascade has no
+        // peers to recompose so the early return short-circuits before
+        // the summary activity entry fires.
+        expect(redeployed).toEqual([{ nodeId: localNodeId, stackName: 'first-stack' }]);
+        const cascadeEntries = svc.getActivity({ limit: 1000 })
+            .filter((e) => e.message.startsWith('mesh cascade recompose'));
+        expect(cascadeEntries).toHaveLength(0);
+    });
+
+    it('optOutStack cascades recompose to every other meshed stack', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(localNodeId, 'to-remove', 'setup');
+        db.insertMeshStack(localNodeId, 'local-survivor', 'setup');
+        db.insertMeshStack(remoteNodeId, 'remote-survivor', 'setup');
+
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        vi.spyOn(svc as unknown as { removeOverrideFromNode: (n: number, s: string) => Promise<void> }, 'removeOverrideFromNode')
+            .mockResolvedValue(undefined);
+        const redeployed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((nodeId, stackName) => {
+            redeployed.push({ nodeId, stackName });
+        });
+
+        await svc.optOutStack(localNodeId, 'to-remove', 'tester');
+
+        // Surviving meshed stacks must recompose so their /etc/hosts drops
+        // the now-removed alias.
+        expect(redeployed).toContainEqual({ nodeId: localNodeId, stackName: 'local-survivor' });
+        expect(redeployed).toContainEqual({ nodeId: remoteNodeId, stackName: 'remote-survivor' });
+        // The opted-out stack is still redeployed separately by the
+        // explicit triggerRedeploy at the end of optOutStack so its own
+        // container's /etc/hosts is cleared.
+        expect(redeployed).toContainEqual({ nodeId: localNodeId, stackName: 'to-remove' });
+    });
 });
 
 describe('MeshService activity log', () => {

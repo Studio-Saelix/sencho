@@ -795,6 +795,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         // avoid a duplicate round-trip. Best-effort; per-stack failures
         // surface as forwarder.error activity events.
         await this.regenerateOverridesAcrossFleet(nodeId, stackName);
+        // Recompose every previously-meshed container so the new alias
+        // actually lands in /etc/hosts. The override file alone is not
+        // enough: extra_hosts is read at container creation, so prior
+        // containers need to be recreated. Skip the just-opted-in tuple
+        // because the explicit triggerRedeploy below already covers it.
+        this.cascadeRecomposeAcrossFleet(nodeId, stackName, actor);
         this.triggerRedeploy(nodeId, stackName, actor);
 
         this.logActivity({
@@ -823,6 +829,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         // include it. Walk the remaining fleet-wide rows so every other
         // meshed stack regenerates its override without the dropped alias.
         await this.regenerateOverridesAcrossFleet();
+        // Recompose every still-meshed container so the dropped alias
+        // exits /etc/hosts. Skip args are absent because the opted-out
+        // row is already gone from listMeshStacks; the explicit
+        // triggerRedeploy below recomposes the opted-out stack itself
+        // (with the override file removed) so its container drops the
+        // entries it owned.
+        this.cascadeRecomposeAcrossFleet(undefined, undefined, actor);
         this.triggerRedeploy(nodeId, stackName, actor);
 
         this.logActivity({
@@ -1078,6 +1091,64 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     }
                 }),
         );
+    }
+
+    /**
+     * Walk every `mesh_stacks` row across the fleet and fire a redeploy for
+     * each, skipping the (skipNodeId, skipStack) tuple. Called from
+     * optInStack / optOutStack after `regenerateOverridesAcrossFleet` so
+     * previously-meshed containers actually pick up the new or removed
+     * alias entries in `/etc/hosts`. Without this, override `.yml` files on
+     * disk reflect the new alias set but the running containers still hold
+     * the alias set they had at last compose, so cross-stack DNS silently
+     * fails until an operator redeploys every prior stack by hand.
+     *
+     * Each `triggerRedeploy` call is fire-and-forget. Local stacks route
+     * through `ComposeService.deployStack`, remote stacks through
+     * `POST /api/stacks/:name/deploy` via the proxy chain. Failures land in
+     * the mesh activity ring buffer and the audit log, so one slow or
+     * offline peer cannot block other targets.
+     *
+     * This is intentionally not invoked from `regenerateAllOverrides`
+     * (boot and manual `/regen-overrides`). A Sencho restart must not
+     * force a fleet-wide recompose of every meshed stack; the override
+     * files alone are sufficient there.
+     *
+     * Pacing: the cascade fans out in parallel. For the v1 mesh-stack
+     * counts (single-digit to low teens per host) this is fine; Docker's
+     * daemon serializes the contention that matters. If real-world fleets
+     * routinely exceed ~20 meshed stacks on one host, swap the loop for a
+     * `p-limit(4)` semaphore keyed on `node_id` (no test rewiring needed).
+     */
+    private cascadeRecomposeAcrossFleet(
+        skipNodeId: number | undefined,
+        skipStack: string | undefined,
+        actor: string,
+    ): void {
+        const db = DatabaseService.getInstance();
+        const targets = db.listMeshStacks().filter(
+            (s) => !(s.node_id === skipNodeId && s.stack_name === skipStack),
+        );
+        if (targets.length === 0) return;
+
+        for (const t of targets) {
+            this.triggerRedeploy(t.node_id, t.stack_name, actor);
+        }
+
+        const nodeIds = new Set(targets.map((t) => t.node_id));
+        const skippedNote = skipNodeId !== undefined && skipStack !== undefined
+            ? ` (skipped ${skipStack} on node ${skipNodeId})`
+            : '';
+        this.logActivity({
+            source: 'mesh', level: 'info', type: 'mesh.enable',
+            message: `mesh cascade recompose: ${targets.length} stack${targets.length === 1 ? '' : 's'} across ${nodeIds.size} node${nodeIds.size === 1 ? '' : 's'}${skippedNote}`,
+            details: {
+                cascadeRecomposes: targets.length,
+                nodeCount: nodeIds.size,
+                skipNodeId: skipNodeId ?? null,
+                skipStack: skipStack ?? null,
+            },
+        });
     }
 
     /**
