@@ -675,11 +675,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             await this.syncForwarderListeners();
             throw err;
         }
-        // Regenerate OTHER meshed stacks' overrides on the same node so
-        // they pick up the new alias entry. The just-opted-in stack was
-        // already pushed above; skip it to avoid a duplicate round-trip.
-        // Best-effort; per-stack failures are logged inside the helper.
-        await this.regenerateOverridesForNode(nodeId, stackName);
+        // Regenerate every other meshed stack's override across the fleet
+        // so they pick up the new alias entry. The just-opted-in stack was
+        // already pushed above; skip the (nodeId, stackName) tuple to
+        // avoid a duplicate round-trip. Best-effort; per-stack failures
+        // surface as forwarder.error activity events.
+        await this.regenerateOverridesAcrossFleet(nodeId, stackName);
         this.triggerRedeploy(nodeId, stackName, actor);
 
         this.logActivity({
@@ -704,7 +705,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         await this.removeOverrideFromNode(nodeId, stackName);
         await this.refreshAliasCache();
         await this.syncForwarderListeners();
-        await this.regenerateOverridesForNode(nodeId);
+        // The opted-out row is already deleted, so listMeshStacks() will not
+        // include it. Walk the remaining fleet-wide rows so every other
+        // meshed stack regenerates its override without the dropped alias.
+        await this.regenerateOverridesAcrossFleet();
         this.triggerRedeploy(nodeId, stackName, actor);
 
         this.logActivity({
@@ -922,6 +926,41 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                         await this.pushOverrideToNode(nodeId, s.stack_name);
                     } catch (err) {
                         console.warn('[MeshService] override push failed:', sanitizeForLog((err as Error).message));
+                    }
+                }),
+        );
+    }
+
+    /**
+     * Walk every `mesh_stacks` row across the fleet and re-push each override.
+     * Called from optInStack / optOutStack so a new or removed alias
+     * propagates to every meshed node's override file in one pass, not just
+     * the node whose row changed. Best-effort: per-stack failures emit a
+     * forwarder.error activity event and the other nodes still get
+     * regenerated. An offline remote node leaves stale overrides until the
+     * next opt-in / opt-out, the next tunnel reconnect, or a manual
+     * `POST /api/mesh/regen-overrides`.
+     */
+    private async regenerateOverridesAcrossFleet(
+        skipNodeId?: number,
+        skipStack?: string,
+    ): Promise<void> {
+        const db = DatabaseService.getInstance();
+        const stacks = db.listMeshStacks();
+        await Promise.allSettled(
+            stacks
+                .filter((s) => !(s.node_id === skipNodeId && s.stack_name === skipStack))
+                .map(async (s) => {
+                    try {
+                        await this.pushOverrideToNode(s.node_id, s.stack_name);
+                    } catch (err) {
+                        const message = sanitizeForLog((err as Error).message);
+                        this.logActivity({
+                            source: 'mesh', level: 'warn', type: 'forwarder.error',
+                            nodeId: s.node_id,
+                            message: `cascade override push failed for ${s.stack_name}: ${message}`,
+                            details: { stackName: s.stack_name },
+                        });
                     }
                 }),
         );
