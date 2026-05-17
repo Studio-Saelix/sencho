@@ -1180,19 +1180,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!node) return [];
         if (node.type !== 'remote') return this.inspectLocalStackServices(stackName);
 
-        const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
-        if (!target) {
-            console.warn(`[MeshService] inspectStackServices: no proxy target for node ${nodeId} (${sanitizeForLog(node.name)})`);
-            return [];
-        }
         try {
-            const url = `${target.apiUrl.replace(/\/$/, '')}/api/mesh/local-services/${encodeURIComponent(stackName)}`;
-            const headers: Record<string, string> = {};
-            if (target.apiToken) headers['Authorization'] = `Bearer ${target.apiToken}`;
-            const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-            headers[PROXY_TIER_HEADER] = proxyHeaders.tier;
-            headers[PROXY_VARIANT_HEADER] = proxyHeaders.variant || '';
-            const res = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) });
+            const res = await this.proxyFetch(
+                nodeId,
+                'GET',
+                `/api/mesh/local-services/${encodeURIComponent(stackName)}`,
+                undefined,
+                5_000,
+            );
             if (!res.ok) {
                 console.error(`[MeshService] inspectStackServices: HTTP ${res.status} from node ${nodeId} (${sanitizeForLog(node.name)})`);
                 return [];
@@ -1200,6 +1195,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             const body = await res.json() as { services?: Array<{ service: string; ports: number[] }> };
             return body.services ?? [];
         } catch (err) {
+            // proxyFetch throws MeshError('push_failed') when getProxyTarget
+            // returns null (e.g. pilot tunnel offline). Treat the same as a
+            // non-OK response: empty list.
+            if (err instanceof MeshError && err.code === 'push_failed') {
+                console.warn(`[MeshService] inspectStackServices: no proxy target for node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return [];
+            }
             console.error('[MeshService] inspectStackServices remote unreachable:', sanitizeForLog((err as Error).message));
             return [];
         }
