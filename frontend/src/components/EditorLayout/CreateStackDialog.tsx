@@ -319,7 +319,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
 
             {createMode === 'git' && (
                 <div role="tabpanel" id={panelId('git')} aria-labelledby={tabId('git')}>
-                    <ScrollArea className="max-h-[60vh]">
+                    <ScrollArea block className="max-h-[60vh]">
                         <ModalBody>
                             <div className="space-y-2">
                                 <Label htmlFor="create-git-stack-name">Stack Name</Label>
@@ -387,7 +387,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
 
             {createMode === 'docker-run' && (
                 <div role="tabpanel" id={panelId('docker-run')} aria-labelledby={tabId('docker-run')}>
-                    <ScrollArea className="max-h-[60vh]">
+                    <ScrollArea block className="max-h-[60vh]">
                         <ModalBody>
                             <div className="space-y-2">
                                 <Label htmlFor="create-dr-stack-name">Stack Name</Label>
@@ -431,7 +431,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                             {convertedYaml !== null && (
                                 <div className="space-y-2">
                                     <Label>compose.yaml preview</Label>
-                                    <ScrollArea className="max-h-[240px] rounded-md border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
+                                    <ScrollArea block className="max-h-[240px] rounded-md border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
                                         <pre className="px-3 py-2 text-xs font-mono whitespace-pre leading-relaxed">
                                             {convertedYaml}
                                         </pre>
