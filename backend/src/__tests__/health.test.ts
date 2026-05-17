@@ -38,6 +38,42 @@ describe('GET /api/health', () => {
     expect(res.status).not.toBe(401);
     expect(res.status).not.toBe(403);
   });
+
+  it('reports mesh.dataPlane as a typed status object', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.body.mesh).toBeDefined();
+    expect(res.body.mesh.dataPlane).toBeDefined();
+    expect(typeof res.body.mesh.dataPlane.ok).toBe('boolean');
+    expect(typeof res.body.mesh.dataPlane.reason).toBe('string');
+    expect(typeof res.body.mesh.dataPlane.subnet).toBe('string');
+    // `message` is string or null
+    expect(['string', 'object']).toContain(typeof res.body.mesh.dataPlane.message);
+  });
+
+  it('reflects an injected data-plane failure', async () => {
+    const { MeshService } = await import('../services/MeshService');
+    const svc = MeshService.getInstance() as unknown as {
+      dataPlaneStatus: { ok: boolean; reason: string; message: string | null; subnet: string };
+    };
+    const prev = { ...svc.dataPlaneStatus };
+    svc.dataPlaneStatus = {
+      ok: false,
+      reason: 'subnet_overlap',
+      message: 'Pool overlaps with other one on this address space',
+      subnet: '172.30.0.0/24',
+    };
+    try {
+      const res = await request(app).get('/api/health');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('ok'); // process is up even when mesh is down
+      expect(res.body.mesh.dataPlane.ok).toBe(false);
+      expect(res.body.mesh.dataPlane.reason).toBe('subnet_overlap');
+      expect(res.body.mesh.dataPlane.subnet).toBe('172.30.0.0/24');
+      expect(res.body.mesh.dataPlane.message).toContain('overlap');
+    } finally {
+      svc.dataPlaneStatus = prev;
+    }
+  });
 });
 
 describe('GET /api/meta experimental flag', () => {

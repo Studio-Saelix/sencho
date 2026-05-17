@@ -1,5 +1,22 @@
 export type MeshRoutePillState = 'healthy' | 'degraded' | 'unreachable' | 'tunnel-down' | 'not-authorized';
 
+export type MeshDataPlaneReason =
+    | 'ok'
+    | 'not_started'
+    | 'subnet_invalid'
+    | 'subnet_overlap'
+    | 'subnet_mismatch'
+    | 'ip_in_use'
+    | 'attach_failed'
+    | 'not_in_docker';
+
+export interface MeshDataPlaneStatus {
+    ok: boolean;
+    reason: MeshDataPlaneReason;
+    message: string | null;
+    subnet: string;
+}
+
 export interface MeshAlias {
     host: string;
     nodeId: number;
