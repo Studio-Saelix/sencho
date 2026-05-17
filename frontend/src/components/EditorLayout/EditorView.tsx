@@ -399,7 +399,7 @@ export function EditorView({
                                         </Button>
                                         {(() => {
                                             const canRollback = isPaid && backupInfo.exists;
-                                            const canScan = trivy.available && isAdmin && isPaid;
+                                            const canScan = trivy.available && isAdmin;
                                             const hasOverflowExtras = canRollback || canScan;
                                             return (
                                                 <DropdownMenu>

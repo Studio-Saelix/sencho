@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.2](https://github.com/Studio-Saelix/sencho/compare/v0.81.1...v0.81.2) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** peer-initiated callback bridge installs reverse dialer ([#1071](https://github.com/Studio-Saelix/sencho/issues/1071)) ([0b4cf90](https://github.com/Studio-Saelix/sencho/commit/0b4cf90bf1175c0c3e813724a5a95c02e445fe8f))
+* **security-ui:** expose Community-tier scan surfaces per PR [#930](https://github.com/Studio-Saelix/sencho/issues/930) ([#1070](https://github.com/Studio-Saelix/sencho/issues/1070)) ([6354cb3](https://github.com/Studio-Saelix/sencho/commit/6354cb33870481311a453a525071991128d8d15f))
+
+## [0.81.1](https://github.com/Studio-Saelix/sencho/compare/v0.81.0...v0.81.1) (2026-05-16)
+
+
+### Fixed
+
+* **mesh:** skip peer-side recovery in openCrossNode on central instances ([#1068](https://github.com/Studio-Saelix/sencho/issues/1068)) ([54d84a7](https://github.com/Studio-Saelix/sencho/commit/54d84a7edb50959b7ca1906611d10bf3fb77bec8))
+
+## [0.81.0](https://github.com/Studio-Saelix/sencho/compare/v0.80.0...v0.81.0) (2026-05-16)
+
+
+### Added
+
+* **mesh:** symmetric WS dial for proxy-mode mesh peers ([#1066](https://github.com/Studio-Saelix/sencho/issues/1066)) ([cf618dd](https://github.com/Studio-Saelix/sencho/commit/cf618dd866e5fe48d6dce8db2c18b54a6b089618))
+
 ## [0.80.0](https://github.com/Studio-Saelix/sencho/compare/v0.79.0...v0.80.0) (2026-05-15)
 
 

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import fsSync from 'fs';
 import path from 'path';
@@ -849,6 +849,14 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
         };
     }
 
+    // Install a stub reverseDialer so openCrossNode skips the peer-side
+    // bootstrap path (PeerToCentralMeshSessionDialer.ensureSession). The
+    // dispatch behavior under test relies on dialMeshTcpStream being called
+    // directly; the bootstrap kick would short-circuit before that mock fires.
+    const stubDialer = { openMeshTcpStream: vi.fn() };
+    beforeEach(() => { MeshService.getInstance().setReverseDialer(stubDialer); });
+    afterEach(() => { MeshService.getInstance().setReverseDialer(null); });
+
     it('emits route.dispatch immediately on cross-node entry', async () => {
         const svc = MeshService.getInstance();
         const target: MeshTarget = {
@@ -909,6 +917,114 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+});
+
+describe('MeshService.openCrossNode peer-recovery gating', () => {
+    // Regression cover for the v0.81.0 forward-direction break: on central
+    // (no mesh_centrals row, no reverseDialer because central is the bridge
+    // initiator side) the peer-recovery branch incorrectly fired, found no
+    // PeerToCentralMeshSessionDialer session, and destroyed the inbound
+    // socket with route.resolve.fail forward-from-peer no_session. The
+    // intent of the branch was peer cold-start; the guard
+    // `!this.reverseDialer` alone could not distinguish "I am central" from
+    // "I am a peer waiting for central to dial in", because both states
+    // present as reverseDialer===null.
+    function makeFakeStream(streamId: number): MeshTcpStreamLike & EventEmitter {
+        const ee = new EventEmitter() as MeshTcpStreamLike & EventEmitter & { destroyed: boolean };
+        ee.destroyed = false;
+        Object.defineProperty(ee, 'streamId', { value: streamId, writable: false });
+        ee.write = vi.fn().mockReturnValue(true);
+        ee.end = vi.fn();
+        ee.destroy = vi.fn(() => { ee.destroyed = true; });
+        return ee;
+    }
+    function makeFakeSocket(): { destroy: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn>; write: ReturnType<typeof vi.fn> } {
+        return { destroy: vi.fn(), end: vi.fn(), on: vi.fn(), write: vi.fn() };
+    }
+
+    // No stub reverseDialer here: the whole point is to exercise the
+    // !reverseDialer code path. Reset the registry per test so the mesh_centrals
+    // row state is deterministic.
+    beforeEach(async () => {
+        const { MeshCentralRegistry } = await import('../services/MeshCentralRegistry');
+        MeshCentralRegistry.resetForTest();
+        DatabaseService.getInstance().getDb().prepare('DELETE FROM mesh_centrals').run();
+        MeshService.getInstance().setReverseDialer(null);
+    });
+
+    it('central (no mesh_centrals row) skips peer-recovery and calls dialMeshTcpStream', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 7, stack: 'audit-mesh-proxy', service: 'echo',
+            port: 9002, alias: 'echo.audit-mesh-proxy.sencho-test-03.sencho',
+        };
+        const fakeStream = makeFakeStream(101);
+        const dialSpy = vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeFakeSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        const events = svc.getActivity({ limit: 50 });
+        const dispatch = events.find((e) => e.type === 'route.dispatch');
+        expect(dispatch).toBeDefined();
+
+        // The bug surface: a route.resolve.fail with direction=forward-from-peer
+        // would mean central wrongly went through the peer-recovery branch.
+        const wrongFail = events.find((e) =>
+            e.type === 'route.resolve.fail'
+            && (e.details as { direction?: string } | undefined)?.direction === 'forward-from-peer',
+        );
+        expect(wrongFail).toBeUndefined();
+        expect(dialSpy).toHaveBeenCalledTimes(1);
+        expect(fakeSrc.destroy).not.toHaveBeenCalled();
+        fakeStream.emit('close');
+    });
+
+    it('proxy-peer (mesh_centrals row + no session) still emits route.resolve.fail forward-from-peer no_session', async () => {
+        const { MeshCentralRegistry } = await import('../services/MeshCentralRegistry');
+        const { PeerToCentralMeshSessionDialer } = await import('../services/PeerToCentralMeshSessionDialer');
+        MeshCentralRegistry.getInstance().upsert({
+            centralInstanceId: 'central-uuid-test',
+            centralApiUrl: 'https://central.example.com',
+            callbackJwt: 'eyJhbGciOiJIUzI1NiJ9.fake.token',
+            jwtIssuedAt: Math.floor(Date.now() / 1000),
+            jwtExpiresAt: Math.floor(Date.now() / 1000) + 90 * 24 * 3600,
+        });
+        const ensureSpy = vi.spyOn(
+            PeerToCentralMeshSessionDialer.getInstance(),
+            'ensureSession',
+        ).mockResolvedValue(null);
+
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 1, stack: 'audit-mesh-central', service: 'echo',
+            port: 9000, alias: 'echo.audit-mesh-central.Local.sencho',
+        };
+        const dialSpy = vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        );
+
+        const fakeSrc = makeFakeSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        const events = svc.getActivity({ limit: 50 });
+        const fail = events.find((e) =>
+            e.type === 'route.resolve.fail'
+            && (e.details as { direction?: string; reason?: string } | undefined)?.direction === 'forward-from-peer'
+            && (e.details as { reason?: string } | undefined)?.reason === 'no_session',
+        );
+        expect(fail).toBeDefined();
+        expect(ensureSpy).toHaveBeenCalled();
+        // Peer-recovery aborted dispatch before reaching dialMeshTcpStream.
+        expect(dialSpy).not.toHaveBeenCalled();
+        expect(fakeSrc.destroy).toHaveBeenCalled();
     });
 });
 
