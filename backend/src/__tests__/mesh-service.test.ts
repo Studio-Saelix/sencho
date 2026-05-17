@@ -57,7 +57,7 @@ describe('MeshService.optInStack', () => {
 
         vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
             .mockResolvedValue([{ service: 'db', ports: [5432] }]);
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
 
         const db = DatabaseService.getInstance();
@@ -80,7 +80,7 @@ describe('MeshService.optInStack', () => {
                 { service: 'web', ports: [] },
                 { service: 'db', ports: [] },
             ]);
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
 
         await expect(svc.optInStack(localNodeId, 'silent', 'tester'))
@@ -94,7 +94,7 @@ describe('MeshService.optInStack', () => {
         const svc = MeshService.getInstance();
         vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
             .mockResolvedValue([{ service: 'db', ports: [5432] }]);
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
         vi.spyOn(svc as unknown as { removeStackOverride: (n: number, s: string) => Promise<void> }, 'removeStackOverride')
             .mockResolvedValue(undefined);
@@ -164,6 +164,63 @@ describe('MeshService.optInStack', () => {
             aliasByPort.clear();
             db.deleteNode(remoteNodeId);
         }
+    });
+
+    it('optInStack cascades override regen to every meshed node, not just the source node', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(remoteNodeId, 'remote-existing', 'setup');
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        const pushed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'pushOverrideToNode').mockImplementation(async (nodeId, stackName) => {
+            pushed.push({ nodeId, stackName });
+        });
+        vi.spyOn(svc as unknown as { triggerRedeploy: (n: number, s: string, a: string) => void }, 'triggerRedeploy')
+            .mockImplementation(() => { /* noop */ });
+
+        await svc.optInStack(localNodeId, 'new-stack', 'tester');
+
+        expect(pushed).toContainEqual({ nodeId: localNodeId, stackName: 'new-stack' });
+        // Other meshed nodes' existing stacks must regenerate so they pick
+        // up the new alias entry.
+        expect(pushed).toContainEqual({ nodeId: remoteNodeId, stackName: 'remote-existing' });
+    });
+
+    it('optOutStack cascades override regen to every other meshed node', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(localNodeId, 'to-remove', 'setup');
+        db.insertMeshStack(remoteNodeId, 'remote-existing', 'setup');
+
+        const pushed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'pushOverrideToNode').mockImplementation(async (nodeId, stackName) => {
+            pushed.push({ nodeId, stackName });
+        });
+        vi.spyOn(svc as unknown as { removeOverrideFromNode: (n: number, s: string) => Promise<void> }, 'removeOverrideFromNode')
+            .mockResolvedValue(undefined);
+        vi.spyOn(svc as unknown as { triggerRedeploy: (n: number, s: string, a: string) => void }, 'triggerRedeploy')
+            .mockImplementation(() => { /* noop */ });
+
+        await svc.optOutStack(localNodeId, 'to-remove', 'tester');
+
+        // Other meshed nodes' existing stacks must regenerate so they drop
+        // the removed alias entry.
+        expect(pushed).toContainEqual({ nodeId: remoteNodeId, stackName: 'remote-existing' });
+        // The removed row was deleted before the cascade ran, and its file
+        // was unlinked separately, so it must not appear in the cascade.
+        expect(pushed.find((p) => p.stackName === 'to-remove')).toBeUndefined();
     });
 });
 
@@ -439,7 +496,7 @@ describe('MeshService.optInStack guard rails (network setup)', () => {
         const svc = MeshService.getInstance();
         vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
             .mockResolvedValue([{ service: 'web', ports: [1852] }]);
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
 
         const db = DatabaseService.getInstance();
@@ -589,7 +646,7 @@ describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
         const pushSpy = vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
         vi.spyOn(svc as unknown as { triggerRedeploy: (n: number, s: string, a: string) => void }, 'triggerRedeploy')
             .mockImplementation(() => { /* noop */ });
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number, skip?: string) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, skip?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
 
         const [summary] = await Promise.all([
