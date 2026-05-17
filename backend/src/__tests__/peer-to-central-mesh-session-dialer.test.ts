@@ -20,15 +20,16 @@
  */
 import http from 'http';
 import type { AddressInfo } from 'net';
-import { WebSocketServer } from 'ws';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { WebSocketServer, type WebSocket as WsClient } from 'ws';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 let tmpDir: string;
 let PeerToCentralMeshSessionDialer: typeof import('../services/PeerToCentralMeshSessionDialer').PeerToCentralMeshSessionDialer;
 let MeshCentralRegistry: typeof import('../services/MeshCentralRegistry').MeshCentralRegistry;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
-let PilotTunnelBridge: typeof import('../services/PilotTunnelBridge').PilotTunnelBridge;
+let TcpStreamSwitchboardCtor: typeof import('../mesh/tcpStreamSwitchboard').TcpStreamSwitchboard;
+let MeshService: typeof import('../services/MeshService').MeshService;
 
 interface RejectingServer {
     server: http.Server;
@@ -79,7 +80,8 @@ beforeAll(async () => {
     ({ PeerToCentralMeshSessionDialer } = await import('../services/PeerToCentralMeshSessionDialer'));
     ({ MeshCentralRegistry } = await import('../services/MeshCentralRegistry'));
     ({ DatabaseService } = await import('../services/DatabaseService'));
-    ({ PilotTunnelBridge } = await import('../services/PilotTunnelBridge'));
+    ({ TcpStreamSwitchboard: TcpStreamSwitchboardCtor } = await import('../mesh/tcpStreamSwitchboard'));
+    ({ MeshService } = await import('../services/MeshService'));
 });
 
 afterAll(() => {
@@ -207,7 +209,7 @@ describe('PeerToCentralMeshSessionDialer', () => {
         }
     });
 
-    it('marks the row used on successful WS open', async () => {
+    it('marks the row used on successful WS open and installs a reverseDialer', async () => {
         const wss = new WebSocketServer({ noServer: true });
         const srv = http.createServer();
         srv.on('upgrade', (req, socket, head) => {
@@ -220,7 +222,10 @@ describe('PeerToCentralMeshSessionDialer', () => {
         await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
         const port = (srv.address() as AddressInfo).port;
         const url = `http://127.0.0.1:${port}`;
-        let bridge: InstanceType<typeof PilotTunnelBridge> | null = null;
+        // Start with a clean reverseDialer slot on the local MeshService so
+        // setReverseDialer's CAS swap succeeds inside attachSwitchboard.
+        MeshService.getInstance().setReverseDialer(null);
+        let switchboard: InstanceType<typeof TcpStreamSwitchboardCtor> | null = null;
         try {
             MeshCentralRegistry.getInstance().upsert({
                 centralInstanceId: 'inst-success',
@@ -229,14 +234,34 @@ describe('PeerToCentralMeshSessionDialer', () => {
                 jwtIssuedAt: 1,
                 jwtExpiresAt: 9999999999,
             });
-            bridge = await PeerToCentralMeshSessionDialer.getInstance().ensureSession();
-            expect(bridge).toBeInstanceOf(PilotTunnelBridge);
-            await vi.waitFor(() => {
-                expect(MeshCentralRegistry.getInstance().getActive()?.lastUsedAt ?? 0).toBeGreaterThan(0);
-            });
+            switchboard = await PeerToCentralMeshSessionDialer.getInstance().ensureSession();
+            expect(switchboard).not.toBeNull();
+            // The R1-A2 design puts a TcpStreamSwitchboard on the peer end of
+            // this WS, not a PilotTunnelBridge (which is central's role). A
+            // future regression that returns the wrong shape would surface
+            // here before the more abstract reverseDialer-installed check.
+            expect(switchboard).toBeInstanceOf(TcpStreamSwitchboardCtor);
             expect(PeerToCentralMeshSessionDialer.getInstance().hasSession()).toBe(true);
+            // markUsed is called synchronously inside attachSwitchboard before
+            // ensureSession resolves, so the DB row reflects it immediately.
+            expect(MeshCentralRegistry.getInstance().getActive()?.lastUsedAt ?? 0).toBeGreaterThan(0);
+            // The R1-A2 wiring under test: MeshService.reverseDialer must be
+            // populated so MeshService.dialMeshTcpStream routes peer-side
+            // cross-fleet traffic through this callback bridge instead of
+            // falling through to PilotTunnelManager.ensureBridge(centralId),
+            // which has no record for central on a proxy peer.
+            const meshSvc = MeshService.getInstance() as unknown as { reverseDialer: unknown };
+            expect(meshSvc.reverseDialer).not.toBeNull();
         } finally {
-            try { bridge?.close(1000, 'test done'); } catch { /* ignore */ }
+            try { switchboard?.cleanup('test done'); } catch { /* ignore */ }
+            // The dialer owns the client-side WS and the switchboard doesn't
+            // close it on cleanup; tear it down explicitly so wss.close can
+            // resolve (it waits for all client connections to disconnect).
+            try {
+                const inst = PeerToCentralMeshSessionDialer.getInstance() as unknown as { currentWs: WsClient | null };
+                inst.currentWs?.close(1000, 'test done');
+            } catch { /* ignore */ }
+            MeshService.getInstance().setReverseDialer(null);
             await new Promise<void>((resolve) => wss.close(() => resolve()));
             await new Promise<void>((resolve) => srv.close(() => resolve()));
         }
