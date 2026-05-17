@@ -34,9 +34,13 @@ beforeEach(() => {
     DatabaseService.getInstance().getDb().prepare("DELETE FROM nodes WHERE name LIKE 'pilot-mgr-test-%'").run();
     MeshProxyTunnelDialer.resetForTest(0); // idle-close disabled; clears any prior bridges
     // Drop any bridges held over from a prior test in the same file.
+    // Both maps must clear together: every production write path keeps
+    // `bridges` and `bridgeKinds` in lockstep, and a stale kind entry
+    // would mislead the kind-discriminator in registerProxyBridge.
     type BridgeMap = Map<number, unknown>;
-    const bridges = (PilotTunnelManager.getInstance() as unknown as { bridges: BridgeMap }).bridges;
-    bridges.clear();
+    const inst = PilotTunnelManager.getInstance() as unknown as { bridges: BridgeMap; bridgeKinds: BridgeMap };
+    inst.bridges.clear();
+    inst.bridgeKinds.clear();
 });
 
 function makeFakeBridge(nodeId: number): { bridge: import('../services/PilotTunnelBridge').PilotTunnelBridge; close: () => void } {
@@ -88,6 +92,39 @@ describe('PilotTunnelManager.ensureBridge', () => {
         } finally {
             closeA();
             closeB();
+        }
+    });
+
+    it('registerProxyBridge rejection names the existing bridge kind (proxy vs pilot)', () => {
+        const mgr = PilotTunnelManager.getInstance();
+
+        // Existing peer-initiated proxy bridge: rejection must say "proxy bridge",
+        // not "pilot tunnel". Locks in the F-R-2 discriminator.
+        const { bridge: existingProxy, close: closeProxy } = makeFakeBridge(404);
+        const { bridge: rejected, close: closeRejected } = makeFakeBridge(404);
+        try {
+            mgr.registerProxyBridge(404, existingProxy);
+            expect(() => mgr.registerProxyBridge(404, rejected))
+                .toThrow(/proxy bridge already registered for node 404/);
+            expect(mgr.getBridge(404)).toBe(existingProxy);
+        } finally {
+            closeProxy();
+            closeRejected();
+        }
+
+        // Existing pilot-agent tunnel: rejection keeps the original "pilot tunnel"
+        // wording so log filters and the sister regex in pilot-tunnel-manager-replace
+        // still match the pilot case.
+        const { bridge: pilot, close: closePilot } = makeFakeBridge(505);
+        const { bridge: rejectedProxy, close: closeRejectedProxy } = makeFakeBridge(505);
+        try {
+            mgr.injectBridgeForTest(505, pilot, 'pilot');
+            expect(() => mgr.registerProxyBridge(505, rejectedProxy))
+                .toThrow(/pilot tunnel already registered for node 505/);
+            expect(mgr.getBridge(505)).toBe(pilot);
+        } finally {
+            closePilot();
+            closeRejectedProxy();
         }
     });
 
