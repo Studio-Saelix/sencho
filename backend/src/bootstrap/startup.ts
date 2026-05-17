@@ -17,6 +17,7 @@ import { MeshService } from '../services/MeshService';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { applyPilotModeCapabilityFilter } from '../services/CapabilityRegistry';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
+import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs } from '../services/GitSourceService';
 import { PORT } from '../helpers/constants';
@@ -68,6 +69,15 @@ export async function startServer(server: Server): Promise<void> {
 
   if (isPilotMode()) {
     applyPilotModeCapabilityFilter();
+  }
+
+  // Hydrate pilot/mesh counters from the persisted snapshot before any
+  // service that increments them (MeshService, PilotTunnelManager) starts.
+  // Failures fall through to zero-initialized counters; do not block boot.
+  try {
+    PilotMetrics.load(DatabaseService.getInstance());
+  } catch (err) {
+    console.warn('[Startup] PilotMetrics load failed:', (err as Error).message);
   }
 
   // Initialize the license service before any tier-gated code can run.
