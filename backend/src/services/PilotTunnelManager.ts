@@ -258,10 +258,17 @@ export class PilotTunnelManager extends EventEmitter {
     public registerProxyBridge(nodeId: number, bridge: PilotTunnelBridge): void {
         const existing = this.bridges.get(nodeId);
         if (existing) {
-            // A pilot tunnel for this node already exists. Proxy bridges
-            // should not silently shadow them; refuse the registration so
-            // the dialer can surface a clear error.
-            throw new Error(`pilot tunnel already registered for node ${nodeId}; proxy bridge refused`);
+            // A bridge for this node already holds the slot. Pilot tunnels
+            // are agent-initiated long-lived sessions; peer-initiated proxy
+            // bridges are short-lived callback dials from a pilot agent on
+            // a proxy-mode remote. Either way a fresh central-initiated
+            // dial must back off so the dialer surfaces an accurate error
+            // instead of silently shadowing the live data plane.
+            const existingKind = this.bridgeKinds.get(nodeId);
+            const detail = existingKind === 'proxy'
+                ? `proxy bridge already registered for node ${nodeId}; concurrent dial refused`
+                : `pilot tunnel already registered for node ${nodeId}; proxy bridge refused`;
+            throw new Error(detail);
         }
         if (this.bridges.size >= PILOT_TUNNEL_HARD_LIMIT) {
             PilotMetrics.increment('tunnels_rejected_capacity');
