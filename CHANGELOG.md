@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.8](https://github.com/Studio-Saelix/sencho/compare/v0.81.7...v0.81.8) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** recompose previously-meshed containers when alias set changes ([#1090](https://github.com/Studio-Saelix/sencho/issues/1090)) ([1d7418a](https://github.com/Studio-Saelix/sencho/commit/1d7418a233796f61efc4739cd358298ab71f6438))
+
 ## [0.81.7](https://github.com/Studio-Saelix/sencho/compare/v0.81.6...v0.81.7) (2026-05-17)
 
 
