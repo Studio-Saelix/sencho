@@ -161,27 +161,29 @@ Sencho retains the last 100 executions per webhook and surfaces the 20 most rece
 
 ## Troubleshooting
 
-<Accordion title="I don't see Webhooks in Settings.">
-The page requires a **Skipper** or **Admiral** license. If you are on a paid tier but the node switcher in the top-left shows a remote node, switch to **Local** to reveal the page.
-</Accordion>
+<AccordionGroup>
+  <Accordion title="I don't see Webhooks in Settings.">
+    The page requires a **Skipper** or **Admiral** license. If you are on a paid tier but the node switcher in the top-left shows a remote node, switch to **Local** to reveal the page.
+  </Accordion>
 
-<Accordion title="My trigger returns '401 Invalid signature'.">
-The signature must be computed over the **exact raw bytes** of the request body. Common causes:
+  <Accordion title="My trigger returns '401 Invalid signature'.">
+    The signature must be computed over the **exact raw bytes** of the request body. Common causes:
 
-- The CI step JSON-encodes the body before signing but sends a different body to curl (or vice versa). Sign the same string you send.
-- The shell adds a trailing newline (use `echo -n` rather than `echo`).
-- The header is missing the `sha256=` prefix; the full value is `sha256={hex}`.
-- The webhook secret used to sign does not match the secret stored in Sencho. The secret is shown once at creation; if you lost it, delete the webhook and create a new one.
-</Accordion>
+    - The CI step JSON-encodes the body before signing but sends a different body to curl (or vice versa). Sign the same string you send.
+    - The shell adds a trailing newline (use `echo -n` rather than `echo`).
+    - The header is missing the `sha256=` prefix; the full value is `sha256={hex}`.
+    - The webhook secret used to sign does not match the secret stored in Sencho. The secret is shown once at creation; if you lost it, delete the webhook and create a new one.
+  </Accordion>
 
-<Accordion title="My trigger returns '404 Webhook not found or disabled'.">
-The id in the URL is wrong, or the webhook's enable toggle is off. Copy the trigger URL from the card and check the **On / Off** switch on the webhook in **Settings → Alerts → Webhooks**.
-</Accordion>
+  <Accordion title="My trigger returns '404 Webhook not found or disabled'.">
+    The id in the URL is wrong, or the webhook's enable toggle is off. Copy the trigger URL from the card and check the **On / Off** switch on the webhook in **Settings → Alerts → Webhooks**.
+  </Accordion>
 
-<Accordion title="The action returns 202 but the stack does not change.">
-A 202 means the action was accepted, not that it produced a visible change. **Pull & Update** is a no-op if the registry has no newer image for any service in the stack; **Start** is a no-op on an already-running stack. Check the stack's **Activity** sheet to confirm what actually ran, and the webhook's **Recent executions** for the action's status and duration.
-</Accordion>
+  <Accordion title="The action returns 202 but the stack does not change.">
+    A 202 means the action was accepted, not that it produced a visible change. **Pull & Update** is a no-op if the registry has no newer image for any service in the stack; **Start** is a no-op on an already-running stack. Check the stack's **Activity** sheet to confirm what actually ran, and the webhook's **Recent executions** for the action's status and duration.
+  </Accordion>
 
-<Accordion title="I cannot create a Git source sync webhook for this stack.">
-The **Git source sync** action can only be selected for a stack that already has a [Git source](/features/git-sources) attached. If you try to create one without it, the form returns a validation error. Attach a Git source to the stack in its Compose editor, then create the webhook.
-</Accordion>
+  <Accordion title="I cannot create a Git source sync webhook for this stack.">
+    The **Git source sync** action can only be selected for a stack that already has a [Git source](/features/git-sources) attached. If you try to create one without it, the form returns a validation error. Attach a Git source to the stack in its Compose editor, then create the webhook.
+  </Accordion>
+</AccordionGroup>
