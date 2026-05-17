@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.5](https://github.com/Studio-Saelix/sencho/compare/v0.81.4...v0.81.5) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** cascade override regen across all meshed nodes on opt-in/opt-out ([#1079](https://github.com/Studio-Saelix/sencho/issues/1079)) ([a32183d](https://github.com/Studio-Saelix/sencho/commit/a32183d198e11ffa23bf26d3803129e2ee843962))
+* **stacks:** prevent right-side clipping in Create Stack modal ([#1081](https://github.com/Studio-Saelix/sencho/issues/1081)) ([24155ca](https://github.com/Studio-Saelix/sencho/commit/24155cad664e8b36d6f44ce0649ce1b72187ecc3))
+
 ## [0.81.4](https://github.com/Studio-Saelix/sencho/compare/v0.81.3...v0.81.4) (2026-05-17)
 
 
