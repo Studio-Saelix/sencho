@@ -17,7 +17,9 @@ import { WebSocket } from 'ws';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import {
     AGENT_REVERSE_ID_BASE,
+    BinaryFrameType,
     decodeJsonFrame,
+    encodeBinaryFrame,
     encodeJsonFrame,
 } from '../pilot/protocol';
 
@@ -119,6 +121,58 @@ describe('PilotTunnelBridge handles tcp_open_reverse (Phase B)', () => {
         expect(ack.err).toBe('no_target');
         expect(spy).toHaveBeenCalledTimes(1);
 
+        bridge.close();
+        vi.restoreAllMocks();
+    });
+
+    it('buffers TcpData arriving during the resolveContainerIp await and flushes it on connect (F-9 reverse race fix)', async () => {
+        const mockWs = makeMockTunnelWs();
+        const bridge = new PilotTunnelBridge(1, mockWs as unknown as WebSocket);
+        await bridge.start();
+
+        // Upstream that captures received bytes so we can assert the peer's
+        // request body was delivered (not silently dropped during the
+        // resolveContainerIp window).
+        let resolveReceived!: (buf: Buffer) => void;
+        const received = new Promise<Buffer>((r) => { resolveReceived = r; });
+        const upstream = net.createServer((socket) => {
+            let acc = Buffer.alloc(0);
+            socket.on('data', (chunk: Buffer) => {
+                acc = Buffer.concat([acc, chunk]);
+                if (acc.length >= 'POST /hook HTTP/1.1\r\n\r\n'.length) resolveReceived(acc);
+            });
+        });
+        await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', () => resolve()));
+        const addr = upstream.address();
+        if (!addr || typeof addr === 'string') throw new Error('no address');
+        const upstreamPort = addr.port;
+
+        const localNodeId = (await import('../services/NodeRegistry')).NodeRegistry.getInstance().getDefaultNodeId();
+        // Delay the resolve to widen the race window; without the fix the
+        // TcpData frame below lands while this.streams has no entry for s
+        // and the bytes are dropped at the lookup-miss path in
+        // handleBinaryFrame, so the upstream never sees the request.
+        vi.spyOn(MeshService.getInstance(), 'resolveContainerIp')
+            .mockImplementation(() => new Promise((r) => setTimeout(() => r('127.0.0.1'), 50)));
+
+        const s = AGENT_REVERSE_ID_BASE + 3;
+        mockWs.emit('message', encodeJsonFrame({
+            t: 'tcp_open_reverse', s,
+            targetNodeId: localNodeId, stack: 'real', service: 'svc', port: upstreamPort,
+        }), false);
+        // Immediately push the "HTTP request" bytes while resolve is in flight.
+        mockWs.emit('message',
+            encodeBinaryFrame(BinaryFrameType.TcpData, s, Buffer.from('POST /hook HTTP/1.1\r\n\r\n')),
+            true);
+
+        const body = await received;
+        expect(body.toString()).toBe('POST /hook HTTP/1.1\r\n\r\n');
+
+        // ack:true should also have landed (after the flush).
+        const ack = await waitFor(() => findAck(mockWs, s));
+        expect(ack.ok).toBe(true);
+
+        upstream.close();
         bridge.close();
         vi.restoreAllMocks();
     });

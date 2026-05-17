@@ -8,6 +8,7 @@ import {
     DecodedBinaryFrame,
     MAX_STREAMS_PER_TUNNEL,
     STREAM_IDLE_TIMEOUT_MS,
+    STREAM_PENDING_DATA_MAX_BYTES,
     StreamIdAllocator,
     decodeBinaryFrame,
     decodeJsonFrame,
@@ -66,9 +67,18 @@ interface TcpStreamState extends StreamMeta {
  */
 interface ReverseLocalTcpStreamState extends StreamMeta {
     kind: 'reverse_local';
-    socket: Socket;
+    /**
+     * Null between the synchronous reservation in `handleTcpOpenReverse`
+     * and `net.createConnection` inside `acceptReverseLocal`. Filled in
+     * once the dial begins. Any `TcpData` for `s` arriving in that window
+     * is held in `pendingData` so the lookup-miss path in handleBinaryFrame
+     * does not silently drop the peer's request bytes.
+     */
+    socket: Socket | null;
     bytesIn: number;
     bytesOut: number;
+    pendingData: Buffer[];
+    pendingBytes: number;
 }
 
 /**
@@ -557,7 +567,13 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                     s.handle.emit('close');
                 } else if (s.kind === 'reverse_local') {
                     this.removeStream(frame.s);
-                    try { s.socket.destroy(); } catch { /* ignore */ }
+                    // socket may be null if the peer sends tcp_close while
+                    // resolveContainerIp is still in flight; the in-flight
+                    // acceptReverseLocal sees the missing reservation and
+                    // aborts the dial.
+                    if (s.socket) {
+                        try { s.socket.destroy(); } catch { /* ignore */ }
+                    }
                 } else if (s.kind === 'reverse_relay') {
                     this.removeStream(frame.s);
                     try { s.target.destroy(); } catch { /* ignore */ }
@@ -602,7 +618,24 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 } else if (s.kind === 'reverse_local') {
                     s.bytesIn += frame.payload.length;
                     this.refreshIdleTimer(frame.streamId, s);
-                    try { s.socket.write(frame.payload); } catch { /* ignore */ }
+                    if (s.socket) {
+                        try { s.socket.write(frame.payload); } catch { /* ignore */ }
+                    } else {
+                        // Reservation exists but the local socket is not
+                        // created yet (still inside resolveContainerIp /
+                        // pre-connect). Buffer up to the cap; over the cap,
+                        // drop the stream and tell the peer to tear down.
+                        // Copy the payload because decodeBinaryFrame returns
+                        // a subarray view of the WS frame; holding the view
+                        // would pin the parent buffer past its lifecycle.
+                        if (s.pendingBytes + frame.payload.length > STREAM_PENDING_DATA_MAX_BYTES) {
+                            this.removeStream(frame.streamId);
+                            this.sendJson({ t: 'tcp_close', s: frame.streamId });
+                            break;
+                        }
+                        s.pendingData.push(Buffer.from(frame.payload));
+                        s.pendingBytes += frame.payload.length;
+                    }
                 } else if (s.kind === 'reverse_relay') {
                     s.bytesIn += frame.payload.length;
                     this.refreshIdleTimer(frame.streamId, s);
@@ -732,7 +765,11 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 state.handle.emit('close');
             } catch { /* ignore */ }
         } else if (state.kind === 'reverse_local') {
-            try { state.socket.destroy(); } catch { /* ignore */ }
+            // socket may be null if teardown fires while the resolve is
+            // still in flight; the pending buffer goes away with the state.
+            if (state.socket) {
+                try { state.socket.destroy(); } catch { /* ignore */ }
+            }
         } else if (state.kind === 'reverse_relay') {
             try { state.target.destroy(); } catch { /* ignore */ }
         }
@@ -767,6 +804,20 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'agent_error' });
             return;
         }
+        // Reserve the slot synchronously here, BEFORE the IIFE awaits the
+        // NodeRegistry / MeshService dynamic imports plus resolveContainerIp.
+        // Without this, a TcpData frame the agent sends back-to-back with
+        // tcp_open_reverse lands while this.streams is empty for `s` and is
+        // dropped by the lookup-miss path in handleBinaryFrame. The
+        // reservation is reverse_local-shaped because that is the common
+        // case; the relay path discards it and sets up its own state when
+        // it discovers targetNodeId is remote.
+        const reservation: ReverseLocalTcpStreamState = {
+            kind: 'reverse_local', socket: null,
+            bytesIn: 0, bytesOut: 0, pendingData: [], pendingBytes: 0,
+        };
+        this.streams.set(s, reservation);
+        this.refreshIdleTimer(s, reservation);
         // Lazy-import services that import this module to avoid a cycle.
         void (async () => {
             const { NodeRegistry } = await import('./NodeRegistry');
@@ -774,15 +825,28 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             if (targetNodeId === localNodeId) {
                 await this.acceptReverseLocal(s, { stack, service, port });
             } else {
+                // Relay path does not yet buffer early data (separate
+                // follow-up); drop the local-shaped reservation so the
+                // relay state machine starts from a clean slot. Any frames
+                // buffered up to this point are discarded with it.
+                if (this.streams.get(s) === reservation) this.removeStream(s);
                 await this.acceptReverseRelay(s, targetNodeId, { stack, service, port });
             }
         })().catch((err) => {
             if (isDebugEnabled()) console.warn('[PilotBridge:diag] reverse-open dispatch failed:', sanitizeForLog((err as Error).message));
+            if (this.streams.get(s) === reservation) this.removeStream(s);
             this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'agent_error' });
         });
     }
 
     private async acceptReverseLocal(s: number, target: { stack: string; service: string; port: number }): Promise<void> {
+        // The reservation was placed in `this.streams` synchronously by
+        // handleTcpOpenReverse so any TcpData arriving in the resolve
+        // window is already buffered in state.pendingData by
+        // handleBinaryFrame. Recover it here and abort if it's gone
+        // (cleanup ran, idle-evicted, or a concurrent close removed it).
+        const state = this.streams.get(s);
+        if (!state || state.kind !== 'reverse_local') return;
         const { MeshService } = await import('./MeshService');
         const meshSvc = MeshService.getInstance();
         // Shared discriminator + target metadata so the Routing tab can
@@ -798,6 +862,10 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         };
         const ip = await meshSvc.resolveContainerIp({ stack: target.stack, service: target.service });
         if (!ip) {
+            // Drop the reservation before acking the failure so the stream
+            // map stays honest and any over-cap-evicted pending frames do
+            // not strand on an empty entry.
+            if (this.streams.get(s) === state) this.removeStream(s);
             meshSvc.logActivity({
                 source: 'mesh', level: 'error', type: 'route.resolve.fail',
                 nodeId: this.nodeId,
@@ -807,10 +875,14 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'no_target' });
             return;
         }
+        // The reservation may have been evicted under the pending-bytes cap
+        // (see handleBinaryFrame's reverse_local branch) while we were
+        // resolving. If so, do not dial: the peer has already been told via
+        // tcp_close to tear down.
+        if (this.streams.get(s) !== state) return;
+
         const socket = net.createConnection({ host: ip, port: target.port });
-        const state: ReverseLocalTcpStreamState = { kind: 'reverse_local', socket, bytesIn: 0, bytesOut: 0 };
-        this.streams.set(s, state);
-        this.refreshIdleTimer(s, state);
+        state.socket = socket;
 
         const teardown = (sendClose: boolean) => {
             if (!this.streams.has(s)) return;
@@ -842,6 +914,16 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 message: `reverse dial ok: ${target.stack}/${target.service}:${target.port}`,
                 details: baseDetails,
             });
+            // Ack only after buffered bytes are queued on the socket so
+            // peer sees a clean "ack + data" sequence rather than racing
+            // post-ack data ahead of the request body it carried in.
+            if (state.pendingData.length > 0) {
+                for (const buf of state.pendingData) {
+                    try { socket.write(buf); } catch { /* ignore */ }
+                }
+                state.pendingData = [];
+                state.pendingBytes = 0;
+            }
             this.sendJson({ t: 'tcp_open_ack', s, ok: true });
             socket.on('data', (chunk: Buffer) => {
                 const cur = this.streams.get(s);
