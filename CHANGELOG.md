@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.4](https://github.com/Studio-Saelix/sencho/compare/v0.81.3...v0.81.4) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** gate Trigger 2 re-bootstrap on actual api_token change ([#1076](https://github.com/Studio-Saelix/sencho/issues/1076)) ([9aaa857](https://github.com/Studio-Saelix/sencho/commit/9aaa8573c0ecceade58a613c209effeab52aeec0))
+* **mesh:** name actual bridge kind in proxy-bridge rejection ([#1075](https://github.com/Studio-Saelix/sencho/issues/1075)) ([7e3e221](https://github.com/Studio-Saelix/sencho/commit/7e3e22138bb7110d9316dfe67fd2dadb6b84bc66))
+* **mesh:** persist PilotMetrics counters across central restart ([#1078](https://github.com/Studio-Saelix/sencho/issues/1078)) ([6b72859](https://github.com/Studio-Saelix/sencho/commit/6b728599c471034761d6b3e48772eedc899d08eb))
+
 ## [0.81.3](https://github.com/Studio-Saelix/sencho/compare/v0.81.2...v0.81.3) (2026-05-17)
 
 
