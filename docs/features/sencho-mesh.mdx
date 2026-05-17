@@ -138,12 +138,16 @@ A few things are deliberately out of scope for the first release:
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Adding a stack rejects with 'mesh data plane unavailable'">
-    The Sencho instance failed to set up its `sencho_mesh` Docker network at boot. Check the Sencho container's logs for `[Mesh]` messages. Common causes: Sencho is running outside Docker (dev mode, mesh routing skipped); the Docker socket is not mounted; `sencho_mesh` already exists with a different subnet from a previous install. The mesh status surface on the Routing tab shows the specific reason.
-  </Accordion>
+  <Accordion title="Mesh data plane is down">
+    The Routing tab shows a red banner when this Sencho's `sencho_mesh` setup did not complete. The banner names the specific reason; the same reason appears in the mesh activity log and on `/api/health` as `mesh.dataPlane.reason`. The fix depends on which reason fired:
 
-  <Accordion title="`sencho_mesh` exists with a different subnet">
-    Sencho refuses to start the mesh data plane if a network named `sencho_mesh` exists with a subnet different from the one this Sencho is configured for. Either remove the existing network (`docker network rm sencho_mesh` on the affected host, after detaching any containers) or set `SENCHO_MESH_SUBNET` on this node to match the existing subnet. Restart the Sencho container so the setup runs again.
+    - `subnet_overlap`: the requested CIDR overlaps another Docker bridge network on this host. Run `docker network ls -q | xargs -L1 docker network inspect --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}'` to list every existing subnet, then set `SENCHO_MESH_SUBNET` to a free `/24` (for example `10.42.0.0/24`) and recreate the Sencho container.
+    - `subnet_mismatch`: `sencho_mesh` already exists with a different subnet. Either remove the network (`docker network rm sencho_mesh` after detaching any containers) or set `SENCHO_MESH_SUBNET` to match the existing subnet.
+    - `subnet_invalid`: `SENCHO_MESH_SUBNET` is not a valid CIDR. Fix the value (it must look like `10.42.0.0/24`) and recreate the container.
+    - `ip_in_use`: another container is squatting the IP Sencho wants on its mesh subnet. Find the squatting container with `docker network inspect sencho_mesh`, detach or remove it, then restart Sencho.
+    - `attach_failed`: the Docker daemon refused the network attachment for a reason that does not match the patterns above. The full error appears in the activity log entry and on `/api/health`.
+
+    The `mesh.dataPlane.subnet` field shows the CIDR Sencho tried to use, so the operator can verify which subnet is configured before changing anything.
   </Accordion>
 
   <Accordion title="Opt-in rejects with 'host-network service'">
@@ -164,10 +168,6 @@ A few things are deliberately out of scope for the first release:
 
   <Accordion title="Adding a stack hangs on redeploy">
     Mesh redeploys the stack on opt-in to refresh hostnames and network attachments. A stuck redeploy usually means the stack itself failed to come back up. Check the stack's deploy logs.
-  </Accordion>
-
-  <Accordion title="Subnet conflict with another network on the host">
-    `172.30.0.0/24` is the default range for the `sencho_mesh` network and is rare in most setups. If it collides with an existing VPN, VLAN, or Docker network, set `SENCHO_MESH_SUBNET` on the Sencho service to a free `/24` and restart the container. Each node can be configured independently.
   </Accordion>
 
   <Accordion title="A Distributed API node shows `unreachable` on the Routing tab">

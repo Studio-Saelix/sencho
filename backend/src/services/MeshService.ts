@@ -14,6 +14,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDialer';
 import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
+import { disableCapability, enableCapability } from './CapabilityRegistry';
 import { lookupContainerIp } from '../mesh/containerLookup';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
@@ -59,6 +60,29 @@ export function getSenchoIpFromSubnet(subnet: string): string {
         (sencho >>> 8) & 0xff,
         sencho & 0xff,
     ].join('.');
+}
+
+/**
+ * Discriminator for why the mesh data plane is or is not healthy. Set by
+ * `setupMeshNetwork` and exposed through `getDataPlaneStatus()` so
+ * `/api/health` and `/api/meta` can surface the state without parsing the
+ * raw error string.
+ */
+export type MeshDataPlaneReason =
+    | 'ok'
+    | 'not_started'      // MeshService.start() has not finished setupMeshNetwork yet
+    | 'subnet_invalid'   // SENCHO_MESH_SUBNET did not parse
+    | 'subnet_overlap'   // Docker refused the IPAM pool, another network owns the CIDR
+    | 'subnet_mismatch'  // sencho_mesh already exists with a different subnet
+    | 'ip_in_use'        // another container squats <network>+2
+    | 'attach_failed'    // self-attach failed for any other reason
+    | 'not_in_docker';   // HOSTNAME unset or self-container lookup returned 404
+
+export interface MeshDataPlaneStatus {
+    ok: boolean;
+    reason: MeshDataPlaneReason;
+    message: string | null;
+    subnet: string;
 }
 
 export type MeshActivitySource = 'pilot' | 'mesh';
@@ -228,6 +252,17 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private senchoIp: string | null = null;
     private meshSubnet: string = DEFAULT_MESH_SUBNET;
     private networkSetupError: string | null = null;
+    // Discriminator-typed mirror of networkSetupError. Both stay in sync via
+    // `recordSetupFailure` / the setupMeshNetwork success path. The discriminator
+    // is consumed by /api/health and the Routing tab; networkSetupError is
+    // preserved for callers that already read the raw error string (optInStack,
+    // applyLocalOverride, regenerateAllOverrides).
+    private dataPlaneStatus: MeshDataPlaneStatus = {
+        ok: false,
+        reason: 'not_started',
+        message: 'mesh data plane has not initialized yet',
+        subnet: '',
+    };
     // On a pilot node, central's DB id for this node (e.g. 14). Used by
     // handleAccept to decide same-node vs cross-node; the pilotAliasOverlay
     // carries nodeIds from central's perspective, so comparing against the
@@ -335,9 +370,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             })();
         }, ALIAS_REFRESH_INTERVAL_MS);
 
-        const dataPlane = this.senchoIp ? 'ok' : `unavailable (${this.networkSetupError ?? 'unknown'})`;
+        const dpReason = this.dataPlaneStatus.reason;
+        const dataPlane = this.senchoIp ? 'ok' : `unavailable (${dpReason}: ${this.networkSetupError ?? 'unknown'})`;
+        const summaryLevel: MeshActivityLevel = dpReason === 'ok'
+            ? 'info'
+            : dpReason === 'not_in_docker' ? 'warn' : 'error';
         this.logActivity({
-            source: 'mesh', level: this.senchoIp ? 'info' : 'warn', type: 'mesh.enable',
+            source: 'mesh', level: summaryLevel, type: 'mesh.enable',
             message: `MeshService started (data plane ${dataPlane}, self nodeId ${this.selfCentralNodeId})`,
         });
     }
@@ -430,6 +469,74 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     /**
+     * Typed mirror of `networkSetupError` for consumers that need a
+     * discriminator (e.g. `/api/health` and the Routing tab). Always returns
+     * a value: `{ ok: true, reason: 'ok' }` once `setupMeshNetwork` completes
+     * successfully, otherwise a typed failure shape.
+     */
+    public getDataPlaneStatus(): MeshDataPlaneStatus {
+        return this.dataPlaneStatus;
+    }
+
+    /**
+     * Single recording path for every mesh-setup failure. Keeps the legacy
+     * `networkSetupError` string in sync, sets the typed `dataPlaneStatus`,
+     * strips `mesh_proxy_callback_bootstrap` from advertised capabilities,
+     * and emits a `mesh.disable` activity entry. Callers pass `level: 'warn'`
+     * for expected conditions (`not_in_docker` in dev mode) and `'error'` for
+     * real failures.
+     */
+    private recordSetupFailure(
+        reason: Exclude<MeshDataPlaneReason, 'ok' | 'not_started'>,
+        err: unknown,
+        level: MeshActivityLevel,
+        // The subnet_invalid path fires before `this.meshSubnet` is assigned,
+        // so callers must pass the value they tried explicitly; deriving from
+        // the field would silently report DEFAULT_MESH_SUBNET instead of the
+        // bad CIDR the operator actually configured.
+        subnet: string,
+    ): void {
+        const message = err instanceof Error ? err.message : String(err);
+        this.networkSetupError = message;
+        this.dataPlaneStatus = { ok: false, reason, message, subnet };
+        this.senchoIp = null;
+        disableCapability('mesh_proxy_callback_bootstrap');
+        this.logActivity({
+            source: 'mesh',
+            level,
+            type: 'mesh.disable',
+            message: `mesh data plane unavailable (${reason}): ${sanitizeForLog(message)}`,
+            details: { reason, subnet },
+        });
+    }
+
+    /**
+     * Classify a throw from `ensureMeshNetwork` into a typed reason by matching
+     * on the error message. Docker's "pool overlaps with other one on this
+     * address space" surfaces as a 500 when another bridge owns the requested
+     * CIDR; the subnet-mismatch error is thrown synchronously from
+     * `ensureMeshNetwork` itself and contains the literal "exists with subnet".
+     */
+    private classifyMeshNetworkError(err: unknown): 'subnet_overlap' | 'subnet_mismatch' | 'attach_failed' {
+        const m = err instanceof Error ? err.message : String(err);
+        if (/overlap/i.test(m)) return 'subnet_overlap';
+        if (/exists with subnet/i.test(m)) return 'subnet_mismatch';
+        return 'attach_failed';
+    }
+
+    /**
+     * Classify a throw from `ensureSelfAttached` (after its non-throwing
+     * not-in-Docker paths). Docker's "Address already in use" /
+     * "no available addresses" come back when another container squats
+     * `<network>+2`; anything else is a generic attach failure.
+     */
+    private classifySelfAttachError(err: unknown): 'ip_in_use' | 'attach_failed' {
+        const m = err instanceof Error ? err.message : String(err);
+        if (/already in use|no available addresses|address already/i.test(m)) return 'ip_in_use';
+        return 'attach_failed';
+    }
+
+    /**
      * Idempotent setup of the shared `sencho_mesh` Docker bridge network and
      * Sencho's static attachment to it. Called once at boot before alias
      * cache refresh. Failures here disable mesh routing for the lifetime of
@@ -446,31 +553,34 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             this.senchoIp = getSenchoIpFromSubnet(subnet);
             this.meshSubnet = subnet;
         } catch (err) {
-            this.networkSetupError = (err as Error).message;
-            console.warn('[Mesh]', this.networkSetupError);
-            this.senchoIp = null;
+            this.recordSetupFailure('subnet_invalid', err, 'error', subnet);
             return;
         }
 
         try {
             await this.ensureMeshNetwork(subnet);
         } catch (err) {
-            this.networkSetupError = (err as Error).message;
-            console.warn('[Mesh] mesh network setup failed:', sanitizeForLog(this.networkSetupError));
-            this.senchoIp = null;
+            this.recordSetupFailure(this.classifyMeshNetworkError(err), err, 'error', subnet);
             return;
         }
 
         try {
             await this.ensureSelfAttached();
         } catch (err) {
-            this.networkSetupError = (err as Error).message;
-            console.warn('[Mesh] self-attach failed:', sanitizeForLog(this.networkSetupError));
-            this.senchoIp = null;
+            this.recordSetupFailure(this.classifySelfAttachError(err), err, 'error', subnet);
             return;
         }
 
+        // `ensureSelfAttached` has non-throwing paths for the not-in-Docker
+        // case (HOSTNAME unset / inspect 404). Those paths call
+        // `recordSetupFailure` directly and leave `senchoIp` null, so a
+        // null here means the data plane is intentionally disabled (dev
+        // mode), not that the success path should run.
+        if (!this.senchoIp) return;
+
         this.networkSetupError = null;
+        this.dataPlaneStatus = { ok: true, reason: 'ok', message: null, subnet };
+        enableCapability('mesh_proxy_callback_bootstrap');
     }
 
     /**
@@ -517,8 +627,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!this.senchoIp) return;
         const hostname = process.env.HOSTNAME;
         if (!hostname) {
-            console.log('[Mesh] HOSTNAME not set, mesh routing disabled (not running in Docker?)');
-            this.senchoIp = null;
+            this.recordSetupFailure(
+                'not_in_docker',
+                new Error('HOSTNAME unset; mesh routing disabled (not running in Docker?)'),
+                'warn',
+                this.meshSubnet,
+            );
             return;
         }
         const dc = DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
@@ -527,12 +641,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         } catch (err) {
             const e = err as { statusCode?: number; message?: string };
             if (e?.statusCode === 404) {
-                this.logActivity({
-                    source: 'mesh', level: 'warn', type: 'mesh.disable',
-                    message: 'self-container lookup failed; mesh routing disabled (not running in Docker?)',
-                });
-                console.warn('[Mesh] self-container lookup failed; mesh routing disabled (not running in Docker?)');
-                this.senchoIp = null;
+                this.recordSetupFailure(
+                    'not_in_docker',
+                    new Error('self-container lookup failed (404); mesh routing disabled (not running in Docker?)'),
+                    'warn',
+                    this.meshSubnet,
+                );
                 return;
             }
             throw err;
