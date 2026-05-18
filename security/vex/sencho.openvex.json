@@ -3,9 +3,9 @@
   "@id": "https://github.com/studio-saelix/sencho/security/vex/sencho.openvex.json",
   "author": "Studio Saelix",
   "role": "Vendor",
-  "timestamp": "2026-04-29T00:00:00Z",
-  "last_updated": "2026-04-29T00:00:00Z",
-  "version": 4,
+  "timestamp": "2026-05-18T00:00:00Z",
+  "last_updated": "2026-05-18T00:00:00Z",
+  "version": 5,
   "statements": [
     {
       "vulnerability": {
@@ -21,6 +21,36 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "The authorization bypass affects Docker Engine's daemon-side plugin authorization hook on oversized request bodies. docker-compose v5.1.3 statically bundles docker/docker v28.5.2+incompatible as a client-side library for API types and codecs; it never acts as a daemon and never runs authorization hooks. Sencho invokes compose only for up/down/ps operations against local user-authored compose files. The daemon auth code path is not reachable. The advisory's 'fixed in 29.3.1' refers to Docker Engine the daemon product. The Go library containing the fix is github.com/moby/moby/v2 (a new module path adopted on the docker-29.x branch), not github.com/docker/docker. Until upstream compose migrates to the v2 import path, v28.5.2+incompatible is the only Go-module-resolvable version."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://www.cve.org/CVERecord?id=CVE-2026-41567",
+        "name": "CVE-2026-41567",
+        "description": "Docker: PUT /containers/{id}/archive executes container binary on the host"
+      },
+      "products": [
+        {
+          "@id": "pkg:golang/github.com/docker/docker@v28.5.2+incompatible"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The vulnerable code is the Docker Engine daemon-side handler for the PUT /containers/{id}/archive endpoint, which under certain conditions resolves the archive target by executing a binary from inside the container on the host. docker-compose v5.1.3 statically bundles docker/docker v28.5.2+incompatible as a client-side library for API types and codecs; it never serves daemon HTTP routes. Sencho invokes compose only for up/down/ps operations against local user-authored compose files and never calls the /archive route in either direction. The daemon-side archive handler is not reachable. The fix lives on the github.com/moby/moby/v2 module path; until upstream compose migrates to the v2 import path, v28.5.2+incompatible is the only Go-module-resolvable version of the affected library that compose can reference."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://www.cve.org/CVERecord?id=CVE-2026-42306",
+        "name": "CVE-2026-42306",
+        "description": "Docker: Race condition in docker cp allows bind mount redirection to host"
+      },
+      "products": [
+        {
+          "@id": "pkg:golang/github.com/docker/docker@v28.5.2+incompatible"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The race condition is in the Docker Engine daemon-side bind-mount resolution path that backs `docker cp`, where a concurrent rename can redirect a copy operation onto a host path. docker-compose v5.1.3 statically bundles docker/docker v28.5.2+incompatible as a client-side library for API types and codecs; it never serves the daemon-side cp endpoint and never resolves bind mounts on the host. Sencho invokes compose only for up/down/ps operations against local user-authored compose files and does not invoke `docker cp` through compose. The vulnerable daemon-side code path is not reachable. The fix lives on the github.com/moby/moby/v2 module path; until upstream compose migrates to the v2 import path, v28.5.2+incompatible is the only Go-module-resolvable version of the affected library that compose can reference."
     }
   ]
 }
