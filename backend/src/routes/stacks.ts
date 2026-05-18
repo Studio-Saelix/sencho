@@ -6,6 +6,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
+import { MeshService } from '../services/MeshService';
 import { CacheService } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
@@ -561,6 +562,24 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().clearStackAutoUpdateSetting(req.nodeId, stackName);
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);
+
+    // Cascade a mesh opt-out so the mesh_stacks row, override file on disk,
+    // and derived aliases do not outlive the stack. optOutStack is idempotent
+    // (no-op when the stack was never opted in). Best-effort: a mesh cleanup
+    // failure must not regress the delete itself.
+    try {
+      await MeshService.getInstance().optOutStack(
+        req.nodeId,
+        stackName,
+        req.user?.username ?? 'system',
+      );
+    } catch (meshErr) {
+      console.warn(
+        '[Stacks] Mesh opt-out cascade failed for %s, continuing delete:',
+        sanitizeForLog(stackName),
+        meshErr,
+      );
+    }
 
     if (fsErr) throw fsErr;
 
