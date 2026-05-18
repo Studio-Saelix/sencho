@@ -249,6 +249,16 @@ When a request arrives at a remote node, it is verified using the remote instanc
 
 For multi-node setup, see [Multi-Node Management](/features/multi-node).
 
+## Pilot Agent tunnel credentials
+
+Pilot Agent nodes use a different credential than Distributed API Proxy nodes. Instead of a long-lived bearer token configured on the control instance, each pilot agent persists a per-node tunnel JWT on its own data volume at `/app/data/pilot.jwt`. The token is signed with the control instance's own `auth_jwt_secret` and is valid for 365 days.
+
+Bootstrap uses a separate one-time enrollment JWT with a 15-minute lifetime. Its hash is stored on the control instance and the slot is consumed on first use, so a leaked enrollment token cannot be replayed. The enrollment endpoint is rate-limited to 10 requests per minute per operator (or per IP when unauthenticated).
+
+The tunnel JWT is bound to the control instance's JWT secret. If you restore the control instance from a backup made before a key rotation, or rebuild it into a different environment, every existing tunnel JWT stops verifying. Re-enroll each affected agent from Settings → Nodes to issue new tunnel credentials.
+
+For the full Pilot Agent trust model (what the control instance trusts about the agent, what the agent trusts about the control instance, and what is not exposed inbound), see [Pilot Agent](/features/pilot-agent#security-and-trust-model).
+
 ## Supply chain security
 
 Every Sencho release image ships a set of verifiable supply-chain artifacts:
