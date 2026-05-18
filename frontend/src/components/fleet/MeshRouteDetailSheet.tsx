@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
+import { formatTimeAgo } from '@/lib/relativeTime';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Badge } from '@/components/ui/badge';
 import { Loader2, Activity, Hash } from 'lucide-react';
@@ -71,7 +72,11 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
 
     const footerContext = probe
         ? (probe.ok ? `Last probe ok · ${probe.latencyMs}ms` : `Last probe failed · ${probe.where ?? 'unknown'}`)
-        : (diag?.lastProbeMs != null ? `Last probe ${diag.lastProbeMs}ms` : 'No probe run yet');
+        : diag?.lastProbeMs != null
+            ? (diag.lastProbeAt != null
+                ? `Last probe ${formatTimeAgo(diag.lastProbeAt)} · ${diag.lastProbeMs}ms`
+                : `Last probe ${diag.lastProbeMs}ms`)
+            : 'No probe run yet';
 
     return (
         <SystemSheet

@@ -219,6 +219,8 @@ export interface MeshRouteDiagnostic {
     pilot: { connected: boolean; lastSeen: number | null };
     lastError: { ts: number; message: string } | null;
     lastProbeMs: number | null;
+    /** Wall-clock ms epoch of the last probe for this alias; null when no probe has ever run. */
+    lastProbeAt: number | null;
     state: 'healthy' | 'degraded' | 'unreachable' | 'tunnel down' | 'not authorized';
 }
 
@@ -275,6 +277,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private bridgeReconcileTimer?: NodeJS.Timeout;
     private routeErrorMap = new Map<string, { ts: number; message: string }>();
     private routeLatencyMap = new Map<string, number>();
+    // Lets the route diagnostic distinguish a fresh "healthy" verdict from a
+    // stale one carried over from a past probe; written in lockstep with the
+    // latency/error maps by every probe outcome.
+    private routeProbeAtMap = new Map<string, number>();
     private activityListeners = new Set<(e: MeshActivityEvent) => void>();
     private readonly forwarder: MeshForwarder;
     private senchoIp: string | null = null;
@@ -1964,12 +1970,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             return new Promise<MeshProbeResult>((resolve) => {
                 const timer = setTimeout(() => {
                     stream.destroy();
+                    this.routeProbeAtMap.set(target.host, Date.now());
                     resolve({ ok: false, where: 'agent_dial', code: 'timeout', message: 'probe timeout' });
                 }, PROBE_TIMEOUT_MS);
                 stream.once('open', () => {
                     clearTimeout(timer);
                     const latency = Date.now() - t0;
                     this.routeLatencyMap.set(target.host, latency);
+                    this.routeProbeAtMap.set(target.host, Date.now());
                     stream.destroy();
                     this.logActivity({
                         source: 'mesh', level: 'info', type: 'probe.ok',
@@ -1979,6 +1987,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 });
                 stream.once('error', (err: Error) => {
                     clearTimeout(timer);
+                    this.routeProbeAtMap.set(target.host, Date.now());
                     const sanitized = sanitizeForLog(err.message);
                     this.logActivity({
                         source: 'mesh', level: 'error', type: 'probe.fail',
@@ -1996,15 +2005,27 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             sock.once('connect', () => {
                 const latency = Date.now() - t0;
                 this.routeLatencyMap.set(target.host, latency);
+                this.routeProbeAtMap.set(target.host, Date.now());
                 sock.destroy();
                 resolve({ ok: true, latencyMs: latency });
             });
             sock.once('timeout', () => {
                 sock.destroy();
+                this.routeProbeAtMap.set(target.host, Date.now());
+                this.logActivity({
+                    source: 'mesh', level: 'error', type: 'probe.fail',
+                    alias: target.host, message: 'connect timeout',
+                });
                 resolve({ ok: false, where: 'target_port', code: 'timeout', message: 'connect timeout' });
             });
             sock.once('error', (err) => {
-                resolve({ ok: false, where: 'target_port', code: 'unreachable', message: sanitizeForLog(err.message) });
+                this.routeProbeAtMap.set(target.host, Date.now());
+                const sanitized = sanitizeForLog(err.message);
+                this.logActivity({
+                    source: 'mesh', level: 'error', type: 'probe.fail',
+                    alias: target.host, message: sanitized,
+                });
+                resolve({ ok: false, where: 'target_port', code: 'unreachable', message: sanitized });
             });
         });
     }
@@ -2059,11 +2080,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
     public async getRouteDiagnostic(alias: string): Promise<MeshRouteDiagnostic> {
         const target = this.lookupAliasGlobal(alias);
-        const lastError = this.routeErrorMap.get(alias) || null;
-        const lastProbeMs = this.routeLatencyMap.get(alias) ?? null;
 
         if (!target) {
-            return { alias, target: null, pilot: { connected: false, lastSeen: null }, lastError, lastProbeMs, state: 'not authorized' };
+            const lastError = this.routeErrorMap.get(alias) || null;
+            const lastProbeMs = this.routeLatencyMap.get(alias) ?? null;
+            const lastProbeAt = this.routeProbeAtMap.get(alias) ?? null;
+            return { alias, target: null, pilot: { connected: false, lastSeen: null }, lastError, lastProbeMs, lastProbeAt, state: 'not authorized' };
         }
 
         const node = DatabaseService.getInstance().getNode(target.nodeId);
@@ -2076,6 +2098,25 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             : routable;
         const lastSeen = node?.pilot_last_seen ?? null;
         const optedIn = DatabaseService.getInstance().isMeshStackEnabled(target.nodeId, target.stackName);
+
+        // F-11: cached state was stale until someone manually hit POST .../test.
+        // Probe synchronously here so the GET reflects current upstream state.
+        // Skip when the probe would be wasted (no target, opt-out, tunnel down) —
+        // those short-circuits keep a downed peer from holding the GET for
+        // PROBE_TIMEOUT_MS. Probe failures are swallowed because we only use the
+        // call for its side effects on routeLatencyMap / routeErrorMap /
+        // routeProbeAtMap; the activity log already records probe.fail.
+        if (optedIn && routable && pilotLive) {
+            try {
+                await this.testUpstream(alias, NodeRegistry.getInstance().getDefaultNodeId());
+            } catch {
+                // ignore — diagnostic must not error out on probe failure
+            }
+        }
+
+        const lastError = this.routeErrorMap.get(alias) || null;
+        const lastProbeMs = this.routeLatencyMap.get(alias) ?? null;
+        const lastProbeAt = this.routeProbeAtMap.get(alias) ?? null;
 
         let state: MeshRouteDiagnostic['state'];
         if (!optedIn) state = 'not authorized';
@@ -2096,6 +2137,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             pilot: { connected: pilotLive, lastSeen },
             lastError,
             lastProbeMs,
+            lastProbeAt,
             state,
         };
     }
