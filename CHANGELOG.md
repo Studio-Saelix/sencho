@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.12](https://github.com/Studio-Saelix/sencho/compare/v0.81.11...v0.81.12) (2026-05-18)
+
+
+### Fixed
+
+* **mesh:** surface stopped-stack opt-ins on routing node cards ([#1098](https://github.com/Studio-Saelix/sencho/issues/1098)) ([554f662](https://github.com/Studio-Saelix/sencho/commit/554f6625637c60562b0c5fc3858aa965acd60bb5))
+
 ## [0.81.11](https://github.com/Studio-Saelix/sencho/compare/v0.81.10...v0.81.11) (2026-05-18)
 
 
