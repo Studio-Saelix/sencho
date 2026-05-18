@@ -49,6 +49,16 @@ describe('MeshService diagnostic — local-node pilot state (M-12)', () => {
         // 'tunnel down'.
         vi.spyOn(PilotTunnelManager.getInstance(), 'hasActiveTunnel').mockReturnValue(false);
 
+        // F-11: getRouteDiagnostic now probes synchronously. Stub testUpstream
+        // so the unit test does not depend on a live TCP socket on port 9000.
+        // The stub writes routeLatencyMap in lockstep with the real probe
+        // success path so the state computation below resolves to 'healthy'.
+        vi.spyOn(svc, 'testUpstream').mockImplementation(async (alias: string) => {
+            (svc as unknown as { routeLatencyMap: Map<string, number> }).routeLatencyMap.set(alias, 5);
+            (svc as unknown as { routeProbeAtMap: Map<string, number> }).routeProbeAtMap.set(alias, Date.now());
+            return { ok: true, latencyMs: 5 };
+        });
+
         (svc as unknown as { aliasCache: Map<string, unknown> }).aliasCache = new Map([
             ['echo.audit-mesh-prod.local.sencho', {
                 host: 'echo.audit-mesh-prod.local.sencho',

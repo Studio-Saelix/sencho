@@ -76,6 +76,8 @@ export interface MeshRouteDiagnostic {
     pilot: { connected: boolean; lastSeen: number | null };
     lastError: { ts: number; message: string } | null;
     lastProbeMs: number | null;
+    /** Wall-clock ms epoch of the last probe attempt for this alias, or null if no probe has run. */
+    lastProbeAt: number | null;
     state: 'healthy' | 'degraded' | 'unreachable' | 'tunnel down' | 'not authorized';
 }
 
