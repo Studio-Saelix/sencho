@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.11](https://github.com/Studio-Saelix/sencho/compare/v0.81.10...v0.81.11) (2026-05-18)
+
+
+### Fixed
+
+* **mesh:** cascade opt-out when a stack is deleted (F-1 / F-14) ([#1096](https://github.com/Studio-Saelix/sencho/issues/1096)) ([9f238e1](https://github.com/Studio-Saelix/sencho/commit/9f238e187c228c717eef0e237339fb649b2b040f))
+
 ## [0.81.10](https://github.com/Studio-Saelix/sencho/compare/v0.81.9...v0.81.10) (2026-05-18)
 
 
