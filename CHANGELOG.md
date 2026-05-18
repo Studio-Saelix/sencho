@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.14](https://github.com/Studio-Saelix/sencho/compare/v0.81.13...v0.81.14) (2026-05-18)
+
+
+### Fixed
+
+* **security:** suppress CVE-2026-41567 and CVE-2026-42306 against vendored docker-compose moby library (VEX) ([#1102](https://github.com/Studio-Saelix/sencho/issues/1102)) ([596cce3](https://github.com/Studio-Saelix/sencho/commit/596cce35070c1bc868129236831992904c178256))
+
 ## [0.81.13](https://github.com/Studio-Saelix/sencho/compare/v0.81.12...v0.81.13) (2026-05-18)
 
 
