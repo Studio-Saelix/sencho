@@ -1,6 +1,6 @@
 ---
 title: "Auto-Heal Policies"
-description: "Automatically restart containers that fail Docker healthchecks."
+description: "Restart containers that fail their Docker healthcheck and stay unhealthy, with per-policy thresholds and a built-in safety rail set."
 ---
 
 <Note>
@@ -9,69 +9,128 @@ description: "Automatically restart containers that fail Docker healthchecks."
 
 ## Overview
 
-Auto-Heal Policies let you define rules that restart containers when they have been in an `unhealthy` Docker healthcheck state for longer than a specified threshold. This keeps long-running services recoverable without manual intervention.
+Auto-Heal Policies watch each container's Docker healthcheck and restart it when it has been continuously unhealthy for longer than you allow. Policies are scoped to a stack and can target every container in the stack or a single Compose service. Each policy runs with its own thresholds and four built-in safety rails so a persistently broken container cannot be restarted in a tight loop.
+
+Policies live next to your stack-level alert rules in the stack's **Monitor** sheet, which has two tabs: **Alerts** and **Auto-heal**.
 
 ## Prerequisites
 
-- Your containers must define a `HEALTHCHECK` instruction in their `Dockerfile` or in the `healthcheck` section of your `docker-compose.yml`.
-- You must be an admin user.
+- Containers must declare a `HEALTHCHECK` in the Dockerfile or a `healthcheck` block in `docker-compose.yml`. Auto-Heal only acts on containers that report a Docker health status; a container that fails to start or exits with a non-zero code without ever reaching `unhealthy` is not in scope.
+- You must be signed in as an admin.
 - A Skipper or Admiral license.
 
-## Creating a Policy
+## Workflow
 
-1. In the sidebar, right-click the stack you want to protect.
-2. Select **Auto-Heal** from the context menu.
-3. In the sheet that opens, fill in the form:
-   - **Service** — Select a specific service from your stack, or choose **All services** to apply the policy to every container.
-   - **Unhealthy for (minutes)** — How long a container must be continuously unhealthy before it is restarted.
-   - **Cooldown (minutes)** — How long to wait after a restart before evaluating the container again.
-   - **Max restarts per hour** — The maximum number of times this container can be restarted within a rolling hour window.
-   - **Auto-disable after (failures)** — How many consecutive failed restart attempts disable the policy automatically.
-4. Click **Add Policy**.
+1. In the sidebar, right-click the stack you want to protect (or focus the stack and press **H**).
+2. Click **Auto-Heal** in the **inspect** group. The stack's **Monitor** sheet opens directly on the **Auto-heal** tab.
+3. In **Add new policy**, pick a **Service** (or leave the combobox on **All services** to cover every container in the stack) and tune the four thresholds.
+4. Click **Add Policy**. The new policy appears in **Active policies** above the form, with its enable toggle already on.
 
 <Frame>
-  <img src="/images/auto-heal-policies/policy-sheet.png" alt="Auto-Heal Policies sheet showing a policy for the web service" />
+  <img src="/images/auto-heal-policies/sheet.png" alt="The Stack › PLEX › MONITOR sheet on the Auto-heal tab, showing one All-services policy in the ACTIVE POLICIES section with its ON toggle, and the ADD NEW POLICY form below with Service, Unhealthy for, Cooldown, Max restarts / hr, and Auto-disable after fields, plus the Add Policy button" />
 </Frame>
 
-## Stack vs Service Scope
+You can add as many policies to a stack as you need. Each policy is evaluated independently.
 
-- **All services** — The policy applies to every container in the stack that reports `unhealthy` status.
-- **Named service** — The policy targets only the containers for that specific Compose service (matched by the `com.docker.compose.service` label).
+## Form fields
 
-Multiple policies can coexist on the same stack. Each policy is evaluated independently.
+| Field | Meaning |
+|-------|---------|
+| **Service** | The Compose service this policy applies to. Leave on **All services** for a stack-wide policy, or pick a specific service to limit the policy to that service's containers. |
+| **Unhealthy for (minutes)** | How long a container must be continuously reporting `unhealthy` before Auto-Heal restarts it. |
+| **Cooldown (minutes)** | After a restart fires, the policy pauses evaluation for this many minutes so the container has time to come back up. |
+| **Max restarts / hr** | The most times this policy will restart a given container in a rolling one-hour window. Once the cap is reached, further restarts are skipped until the window clears. |
+| **Auto-disable after (failures)** | If the restart call itself fails this many times in a row, the policy disables itself so it stops looping on a broken setup. The counter resets after any successful restart. |
 
-## Safety Rails
+## Stack vs service scope
 
-Each policy includes four built-in safety mechanisms:
+- **All services** applies the policy to every container in the stack that reports `unhealthy`. Containers are matched by the `com.docker.compose.service` label.
+- A **named service** scopes the policy to the containers for that Compose service only. Multiple policies can coexist on the same stack, so you can keep an aggressive policy on one service while running a more permissive default for the rest.
 
-**Cooldown period** — After a restart is triggered, the policy pauses evaluation for the configured number of minutes. This gives the container time to recover before being evaluated again.
+## Safety rails
 
-**Hourly restart cap** — If a container has been restarted the configured maximum number of times within the last hour, further restarts are skipped until the window clears. This prevents a persistently broken container from being restarted in a tight loop.
+Each policy has four safety rails built in. They run before any restart.
 
-**Recent user action suppression** — If you or another operator has manually stopped or restarted the container in the last 60 seconds, the policy skips evaluation for that container. This avoids interfering with in-progress manual interventions.
+**Cooldown.** After a restart, the policy ignores the container for the configured number of minutes. This gives the container time to start up and pass its healthcheck before the next evaluation. The cooldown is per container, so other services in the same stack are not blocked.
 
-**Auto-disable on repeated failures** — If the restart attempt itself fails (for example, because the Docker daemon is temporarily unavailable) the configured number of times in a row, the policy is automatically disabled. A notification is sent, and you can re-enable the policy from the sheet once the underlying issue is resolved.
+**Hourly cap.** The **Max restarts / hr** value is enforced as a rolling one-hour window per container. When the cap is reached, evaluations continue but restarts are skipped until the window clears.
 
-## Policy History
+**Recent operator action.** If you or another operator manually stops or restarts the container, the policy suppresses evaluation for that container for 60 seconds. This avoids fighting an operator who is intentionally power-cycling a service.
 
-Each policy row in the sheet can be expanded to show recent activity: restarts, skipped evaluations, and any auto-disable events. The history shows the container name, action taken, and the reason.
+**Auto-disable.** If the restart call itself fails (for example, the Docker daemon is not reachable, or the container is in a state that cannot be restarted), the policy increments a consecutive-failure counter. When the counter reaches the configured **Auto-disable after (failures)** value, the policy disables itself and emits a notification. A successful restart resets the counter to zero.
+
+## Managing policies
+
+Each row in **Active policies** shows the service it targets, a compact summary of the thresholds, and three controls on the right: an **ON/OFF** toggle, a chevron that expands the history panel, and a trash icon that deletes the policy.
+
+<Frame>
+  <img src="/images/auto-heal-policies/policy-row.png" alt="Single Auto-heal policy row showing the threshold summary, ON toggle, history chevron, and delete button" />
+</Frame>
+
+- **Toggle a policy off** to pause evaluation without losing its configuration. This is useful when you need to take a service down for maintenance without auto-heal interfering.
+- **Delete a policy** to remove it and its history. The policy stops evaluating immediately.
+- When a policy has accumulated restart failures but has not yet hit the auto-disable threshold, a red **N failures** pill appears next to its summary so you can see trouble building before the policy disables itself.
+
+## Recent activity
+
+Expand the chevron on any policy to reveal its history. Each entry shows the timestamp, the container that was acted on, a colored action label, and a one-line reason.
+
+<Frame>
+  <img src="/images/auto-heal-policies/recent-activity.png" alt="Active policy row with the Recent activity panel expanded, showing No history yet" />
+</Frame>
+
+The action label tells you what Auto-Heal did or, if it chose not to act, why it skipped.
+
+| Action | When you see it |
+|--------|-----------------|
+| **Restarted** | A restart fired successfully. |
+| **Skipped (user action)** | The container was manually stopped or restarted in the last 60 seconds. |
+| **Skipped (cooldown)** | The policy fired recently and is still inside its cooldown window. |
+| **Skipped (rate limit)** | The hourly cap for this container has been hit. |
+| **Failed** | The restart call was attempted and failed. Counts toward the auto-disable threshold. |
+| **Auto-disabled** | The consecutive-failure threshold was reached and the policy disabled itself. |
+| **Docker unavailable** | The Docker daemon was not reachable at evaluation time. The policy is not penalized and will retry on the next 30-second tick. |
+
+## Multi-node
+
+Auto-heal is per node. Policies you create against a remote node are stored on and evaluated by that remote Sencho instance, so the policy keeps running even if the central node is offline. The **Monitor** sheet operates against whichever node is currently selected in the sidebar; switch nodes to see and edit that node's policies.
+
+## Notifications
+
+Auto-Heal dispatches a notification through your configured channels when:
+
+- A restart fires successfully (info severity).
+- A restart call fails (warning).
+- A policy auto-disables itself (warning).
+
+Each notification includes the stack and container names. Configure delivery channels under **Settings → Notifications**. See [Alerts & Notifications](/features/alerts-notifications) for setup details.
+
+## Dashboard visibility
+
+The dashboard's **Configuration status** card surfaces an **Auto-heal policies** entry that reads `N / M active` across the current node, so you can see at a glance whether stacks are covered. The entry shows **None** when no policies exist on the active node.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="The policy was auto-disabled">
-    The policy disabled itself after the configured number of consecutive restart failures. Check the container logs to understand why the restart is failing. Common causes include the Docker daemon being unavailable, insufficient system resources, or a misconfigured compose file. Once the issue is resolved, re-enable the policy from the Auto-Heal sheet.
+    The policy hit its **Auto-disable after (failures)** threshold. Open the policy's **Recent activity** to see which container the restart calls were failing on and what reason was reported. Common causes are a corrupted container that cannot be restarted, missing image layers after a registry change, or a stack that needs to be recreated rather than restarted. Resolve the underlying issue, then flip the policy back to **ON**.
   </Accordion>
 
   <Accordion title="The policy did not fire when expected">
-    Verify that the container's Docker healthcheck actually reports `unhealthy`. A container can fail to start (exit code non-zero) without ever reaching the `unhealthy` state. Use `docker inspect <container>` and check `State.Health.Status`.
+    Auto-Heal only acts on Docker's `unhealthy` state. A container that crashes (non-zero exit) or never starts will not trigger a policy. Use `docker inspect <container>` and check `State.Health.Status` to confirm the container actually reaches `unhealthy`.
 
-    If a manual restart was performed recently, the policy suppresses evaluation for 60 seconds after the restart to avoid conflicting with operator actions.
+    Evaluation runs every 30 seconds, so there is up to a 30-second delay between the **Unhealthy for (minutes)** threshold being crossed and the restart firing. The 60-second operator-action window also suppresses evaluation right after a manual stop or restart.
+  </Accordion>
 
-    Also check that the **Unhealthy for (minutes)** threshold has elapsed. The policy evaluates every 30 seconds, so there may be up to a 30-second delay between the threshold being crossed and the restart firing.
+  <Accordion title="History shows 'Docker unavailable'">
+    The Docker daemon was not reachable when Auto-Heal tried to read or restart a container. This is treated as transient: the policy is not penalized, the consecutive-failures counter is not incremented, and the next 30-second tick will retry. If you see this entry repeatedly, check that the Docker socket is mounted and the daemon is running on that node.
   </Accordion>
 
   <Accordion title="The container keeps getting restarted in a loop">
-    If the container becomes unhealthy immediately after each restart, the hourly restart cap and the auto-disable-after-failures setting limit how many times this can occur. Review the container logs to address the root cause. You can lower the **Max restarts per hour** value or increase the **Unhealthy for (minutes)** threshold to reduce restart frequency while you investigate.
+    Two safety rails are designed to stop this: the **Max restarts / hr** cap and the **Auto-disable after (failures)** threshold. If a container is unhealthy immediately after each restart, lower the cap and the failure threshold while you investigate the root cause in the container's logs. You can also raise **Unhealthy for (minutes)** so transient blips do not count against the policy.
+  </Accordion>
+
+  <Accordion title="I cannot see the Auto-heal tab on a stack">
+    The tab is hidden for Community-tier installs. Upgrade to Skipper to unlock auto-heal alongside the rest of Sencho's automation surface.
   </Accordion>
 </AccordionGroup>

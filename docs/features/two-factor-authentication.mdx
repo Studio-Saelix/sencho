@@ -1,148 +1,260 @@
 ---
 title: Two-Factor Authentication
-description: Protect your Sencho account with a time-based one-time password (TOTP) and single-use backup codes.
+description: Protect your Sencho account with a time-based one-time password (TOTP), single-use recovery codes, and optional SSO enforcement.
 ---
 
-Two-factor authentication (2FA) adds a second step to sign-in. After your password is accepted, Sencho asks for a six-digit code from your authenticator app. Someone who steals your password still cannot sign in without that code.
+<Note>
+  Two-factor authentication is available on every Sencho tier including Community. It is enrolled per operator account, so each user (admin, viewer, deployer, node admin, auditor) can turn it on independently.
+</Note>
 
-2FA is available on all Sencho tiers, including Community.
+<Note>
+  The Account panel is hub-only. It does not appear under Settings on a remote node, since each operator's password and 2FA live on the gateway that proxies the fleet. Switch back to the local node via the node switcher in the masthead to enrol or disable.
+</Note>
+
+Two-factor authentication adds a second step to sign-in. After your password is accepted, Sencho asks for a six-digit code from your authenticator app. Someone who steals your password still cannot sign in without that code. Sencho also issues ten single-use recovery codes during enrolment, so a lost phone is not a lockout.
 
 ## How it works
 
-1. You enrol once by scanning a QR code with an authenticator app (or typing a secret by hand)
-2. The app generates a fresh six-digit code every 30 seconds
-3. On every sign-in, Sencho asks for the current code after your password passes
-4. You also save ten single-use backup codes for the days when your phone is not available
+1. You enrol once by scanning a QR code with an authenticator app (or pasting the secret by hand).
+2. The app generates a fresh six-digit code every 30 seconds.
+3. On every sign-in, Sencho asks for the current code after your password passes. The form auto-submits the moment you enter the sixth digit.
+4. You also save ten single-use recovery codes for the days when your phone is not available. Each code is consumed the first time it is used.
 
 <Frame>
-  <img src="/images/two-factor-auth/challenge.png" alt="Sign-in challenge screen asking for the six-digit code" />
+  <img src="/images/two-factor-auth/challenge.png" alt="Sign-in challenge screen with the kicker SENCHO VERIFY, an italic display Verify hero, the caption Enter the 6-digit code from your authenticator, six empty digit cells, a Use backup code link in mono brackets below, and a Console Verify / Cancel Sign out footer." />
 </Frame>
 
 ## Enrol
 
-Open **Settings → Account & Security** and click **Set up 2FA**. Sencho walks you through three steps.
-
-### Step 1 – Scan the QR code
-
-Scan the QR code with an authenticator app such as **1Password**, **Bitwarden**, **Google Authenticator**, **Authy**, or **Microsoft Authenticator**.
+Open **Settings · Account** and locate the **Two-factor authentication** section under the Password section. When 2FA is off, a warn callout reads `Two-factor is off` with the subtitle `Add a time-based code from your authenticator app, every sign-in.` and a `Set up 2FA` button on the right.
 
 <Frame>
-  <img src="/images/two-factor-auth/enroll-qr.png" alt="Enrolment dialog showing the QR code" />
+  <img src="/images/two-factor-auth/account-card-disabled.png" alt="Settings Account panel, Two-factor authentication section in the off state. The kicker on the right reads OFF, and the warn callout shows a shield icon, the title Two-factor is off, the subtitle Add a time-based code from your authenticator app, every sign-in, and a Set up 2FA button on the far right." />
 </Frame>
 
-If your app cannot scan or you would rather type the secret into a password manager, click **Can't scan? Show secret key** and copy the base32 string. Paste it into the app's manual-entry field.
+Clicking `Set up 2FA` opens a three-step modal with the kicker `SECURITY · MFA`. A step rail at the top shows `01 PAIR` → `02 CONFIRM` → `03 ARCHIVE` and highlights the active step.
 
-### Step 2 – Confirm
+### Step 1 · Pair your authenticator
 
-Enter the six-digit code your app is currently showing. This proves the app is paired correctly before Sencho turns 2FA on.
+The first step shows a QR code and the message `Scan the code with 1Password, Bitwarden, Google Authenticator, or any TOTP app.` Any RFC 6238 TOTP authenticator works; the four names listed are common ones, not an exhaustive list.
 
 <Frame>
-  <img src="/images/two-factor-auth/enroll-confirm.png" alt="Enrolment confirmation step asking for the six-digit code" />
+  <img src="/images/two-factor-auth/enroll-qr.png" alt="Enrol step 1 modal titled Pair your authenticator. The modal shows the SECURITY MFA kicker, the active 01 PAIR step in the rail, an instruction line about scanning with 1Password Bitwarden Google Authenticator or any TOTP app, a square QR code, a SECRET MANUAL ENTRY label below it with the base32 secret in a monospace field plus a copy icon button, and Cancel and Continue buttons at the bottom." />
 </Frame>
 
-### Step 3 – Save your backup codes
+If your app cannot scan or you would rather paste the secret into a password manager, the base32 string sits directly below the QR under the `SECRET · MANUAL ENTRY` label. The copy icon next to it puts the raw secret on your clipboard.
 
-Sencho shows ten single-use backup codes. Each code can sign you in once without the authenticator app. **Save them somewhere safe before closing this dialog**, they are not shown again.
+Click **Continue** to advance to the confirmation step.
+
+### Step 2 · Confirm the pairing
+
+The second step asks for the current six-digit code so Sencho can verify the app is paired correctly before turning 2FA on. The instruction line reads `Enter the 6-digit code shown in your authenticator to confirm the pairing.`
 
 <Frame>
-  <img src="/images/two-factor-auth/enroll-backup-codes.png" alt="Ten backup codes shown after enrolment" />
+  <img src="/images/two-factor-auth/enroll-confirm.png" alt="Enrol step 2 modal titled Confirm the pairing. The step rail shows step 1 PAIR as a small filled dot (complete), step 02 CONFIRM active with a brand underline, and step 03 ARCHIVE muted. The body shows the instruction line and six empty digit cells (one focused on the left). A Back button sits at the bottom right and there is no submit button." />
 </Frame>
 
-Copy them to a password manager or download them as a text file. Common places users store them:
+Sencho submits the moment you enter the sixth digit. There is no submit button on this step; if the code is wrong, the cells turn briefly red and clear themselves so you can try again with the next 30-second code. The `Back` button at the bottom right returns to the QR step if you need to re-pair.
 
-- Their primary password manager as a secure note on the Sencho entry
-- An encrypted document on a separate device
-- Printed and stored with other emergency recovery material
+### Step 3 · Save your recovery codes
+
+After a successful confirmation Sencho issues ten single-use recovery codes, shown grouped as `ABCDE-FGHIJ` for easier reading. **Save them somewhere safe before closing this dialog.** They are not shown again.
+
+<Frame>
+  <img src="/images/two-factor-auth/enroll-backup-codes.png" alt="Enrol step 3 modal titled Save your recovery codes. The step rail shows 1 PAIR and 2 CONFIRM as complete dots and 03 ARCHIVE active with a brand underline. The body has the instruction Each code unlocks your account once if your authenticator is unavailable, a RECOVERY CODES card with the 10 ISSUED counter on the right, two columns of five codes each in the ABCDE-FGHIJ format with row numbers 01 to 10, a Copy all button and a Download button side by side, and a Done button at the bottom right." />
+</Frame>
+
+The dialog offers two actions:
+
+- **Copy all** puts the ten codes (newline-separated) on the clipboard.
+- **Download** saves them as `sencho-backup-codes.txt`, a plain-text file you can move to a password manager or print.
+
+Common places operators store recovery codes:
+
+- A secure note attached to the Sencho entry in their primary password manager.
+- An encrypted document on a separate device.
+- Printed and kept with other emergency recovery material.
+
+Clicking **Done** finishes enrolment. The Account panel now shows the **enabled** state.
 
 ## Sign in with 2FA
 
-After entering your password, Sencho shows the 2FA challenge screen.
-
-1. Open your authenticator app, find the Sencho entry, read the six-digit code
-2. Type it into the **Verification code** field
-3. Sencho submits automatically once you enter the sixth digit. No click required.
-
-<Note>
-If you prefer the explicit route, the **Verify and sign in** button still works. The auto-submit only applies to the six-digit TOTP field; backup codes always require a click to confirm.
-</Note>
-
-If your phone is unavailable, click **Use a backup code instead**, enter one of the codes you saved during enrolment, and click **Verify and sign in**. That code is now used up.
-
-### Backup code entry tips
-
-Backup codes are shown grouped as `ABCDE-FGHIJ` to make them easier to read. When signing in, you can enter them any of these ways:
-
-- Paste the code exactly as shown: `ABCDE-FGHIJ`
-- Paste without the dash: `ABCDEFGHIJ`
-- Paste with extra whitespace or lowercase letters; Sencho normalises the input before sending it to the server
-
-Only letters and digits are significant; dashes, spaces, and case are ignored.
-
-## Regenerate backup codes
-
-If you think your backup codes have been exposed, or you have used most of them, regenerate them from **Settings → Account & Security → Regenerate backup codes**. Sencho asks for a current code, then issues a fresh set of ten and invalidates the old set immediately.
-
-The Account & Security card nudges you about low code counts so you notice before you are locked out:
-
-- **3 or more codes remaining:** a muted count under the status message.
-- **1 or 2 codes remaining:** the count turns warning-coloured with an alert icon, inviting you to regenerate a fresh set.
-- **0 codes remaining:** a dedicated warning card appears with a **Regenerate now** button. At this point, losing your authenticator app means recovery needs an administrator, so regenerate before that happens.
+After your password is accepted, Sencho replaces the password form with the verify screen.
 
 <Frame>
-  <img src="/images/two-factor-auth/account-card-enabled.png" alt="Account card showing 2FA enabled with regenerate and disable actions" />
+  <img src="/images/two-factor-auth/challenge.png" alt="Sign-in challenge in TOTP mode showing the SENCHO VERIFY kicker, an italic display Verify hero, the caption Enter the 6-digit code from your authenticator, six digit cells (first focused), a mono-bracketed Use backup code link, and a footer reading Console Verify on the left and Cancel Sign out on the right." />
 </Frame>
+
+1. Open your authenticator, find the Sencho entry, read the six-digit code.
+2. Type it into the digit cells. Sencho submits automatically once you enter the sixth digit. No click required.
+
+The mono-bracketed `[ Use backup code ]` link below the cells switches the form to backup-code mode.
+
+### Backup-code mode
+
+<Frame>
+  <img src="/images/two-factor-auth/challenge-backup.png" alt="Sign-in challenge in backup-code mode showing the SENCHO VERIFY kicker, the Verify hero, the caption Enter one of your saved backup codes to continue, a BACKUP CODE 10 CHARS label, a single wide input pre-filled with the placeholder ABCDE-FGHIJ, a Verify button below, and a Use authenticator link to toggle back." />
+</Frame>
+
+The input is one wide field labelled `BACKUP CODE · 10 CHARS`. Type or paste a code in any of these forms:
+
+- Exactly as shown on the dialog: `ABCDE-FGHIJ`.
+- Without the dash: `ABCDEFGHIJ`.
+- With extra whitespace or lowercase letters; Sencho normalises before sending to the server.
+
+Only letters and digits are significant; dashes, spaces, and case are ignored on both client and server. The form here does **not** auto-submit (a 10-character paste is too easy to truncate by mistake); click **Verify** to send the code. That code is now used up.
+
+The mono-bracketed `[ Use authenticator ]` link toggles back to the six-digit TOTP form.
+
+### Rate limiting
+
+Five failed verifications in a row lock the account for 15 minutes. The challenge screen replaces the input with a `Retry in MM:SS` countdown and a `Rate limited` label while the lockout is in effect. The failure counter resets only on a successful sign-in: if you retry with another wrong code after the window expires, the counter is still at five and the lockout re-engages immediately. See [Lockout recovery](#lockout-recovery) below.
+
+## Account panel anatomy
+
+Once 2FA is enabled, the **Two-factor authentication** section on the Account panel renders three rows and a destructive ghost link. The kicker on the right of the section header reads `ENABLED` (it reads `OFF` before enrolment).
+
+<Frame>
+  <img src="/images/two-factor-auth/account-card-enabled.png" alt="Two-factor authentication section in the enabled state. The header reads TWO-FACTOR AUTHENTICATION on the left and ENABLED on the right. The Authenticator app row shows a shield-check icon next to the mono badge ENROLLED. The Backup codes row shows 10 remaining next to an outline Regenerate button. A destructive ghost Disable 2FA link sits at the bottom right." />
+</Frame>
+
+| Row | What it shows |
+|------|---------------|
+| **Authenticator app** | A shield-check icon and the mono badge `ENROLLED`. Helper text: `Sign-in requires a time-based code from your authenticator. Keep your backup codes safe.` |
+| **Backup codes** | The current remaining count (`N remaining`) and an outline **Regenerate** button. Helper text varies by count (see [Recovery codes](#recovery-codes)). |
+| **Require 2FA on SSO sign-in** | A TogglePill, only rendered when at least one SSO provider is configured. Default is off. Helper text: `By default, SSO logins skip the second factor. Enforce it here to require both.` See [SSO sign-in](#sso-sign-in) below. |
+| **Disable 2FA** | A destructive ghost link at the bottom right. See [Disable 2FA](#disable-2fa). |
+
+The masthead at the top of the Settings page also carries a `2FA on` chip while 2FA is enabled. When the remaining count drops to two or below, a second masthead chip appears: `BACKUP · 2 left` (warn) or `BACKUP · 0 left` (error).
+
+## Recovery codes
+
+Each recovery code can be used once. Regenerate when you have used most of them, or if you think the saved set has been exposed.
+
+### How the row reacts to the remaining count
+
+The **Backup codes** row helper text and tone change as the count drops:
+
+| Codes remaining | Helper text | Tone | Extra UI |
+|-----------------|-------------|------|----------|
+| 3 or more | `Single-use codes for when your authenticator is unavailable.` | default | none |
+| 1–2 | `Running low. Regenerate a fresh set.` | warn | masthead `BACKUP · N left` chip |
+| 0 | `No backup codes remain. Regenerate a fresh set before you lose access to your authenticator.` | error | masthead `BACKUP · 0 left` chip plus the standalone callout described below |
+
+<Frame>
+  <img src="/images/two-factor-auth/account-card-low-codes.png" alt="Two-factor authentication section with 2 backup codes remaining. The Backup codes row helper text Running low Regenerate a fresh set is rendered in a warning amber tone. The value column shows 2 remaining next to an outline Regenerate button." />
+</Frame>
+
+When the count hits zero, an additional error callout renders below the section action row:
+
+<Frame>
+  <img src="/images/two-factor-auth/account-card-no-codes.png" alt="Two-factor authentication section with 0 backup codes remaining. The Backup codes row shows the error-tone helper text No backup codes remain Regenerate a fresh set before you lose access to your authenticator, the value 0 remaining, and a Regenerate button. Below the section, a standalone error callout with an alert-triangle icon shows the kicker NO BACKUP CODES LEFT, the subtitle Without codes recovery needs an administrator if you lose your authenticator, and a Regenerate button on the right." />
+</Frame>
+
+### Regenerate
+
+Click the **Regenerate** button on the Backup codes row. The dialog opens with the kicker `SECURITY · BACKUP CODES` and the title `Confirm identity`. The body reads `Enter a code from your authenticator to generate a new set. The previous codes stop working immediately.`
+
+<Frame>
+  <img src="/images/two-factor-auth/regenerate-confirm.png" alt="Regenerate dialog confirm step. The modal header shows the kicker SECURITY BACKUP CODES and the italic display title Confirm identity. The body has the instruction Enter a code from your authenticator to generate a new set The previous codes stop working immediately and six empty digit cells, with the first cell focused. A Cancel ghost button sits at the bottom right and there is no submit button." />
+</Frame>
+
+Sencho submits the moment you enter the sixth digit. On success the dialog advances to the `New recovery codes` step:
+
+<Frame>
+  <img src="/images/two-factor-auth/regenerate-show.png" alt="Regenerate dialog show step. The header reads SECURITY BACKUP CODES kicker and New recovery codes title. A warn rail at the top reads PREVIOUS CODES HAVE BEEN INVALIDATED. Below it is the line Each code can be used once Store them safely They will not be shown again and a RECOVERY CODES card with 10 ISSUED on the right showing ten new codes in two columns. Copy all and Download buttons sit side by side, with a Done button at the bottom right." />
+</Frame>
+
+The previous ten codes stop working the instant the new set is issued, including any that you have not yet used. Save the new set the same way you saved the originals: copy to a password manager, download as `sencho-backup-codes.txt`, or both.
+
+This dialog accepts only a TOTP code, not a backup code. Regenerating with a backup code would invalidate that very code mid-flight, so the action requires a fresh six-digit TOTP from the authenticator.
+
+## SSO sign-in
+
+If Sencho is configured with LDAP or an OIDC provider (Custom OIDC, Google, GitHub, Okta), the SSO flow signs you in without the second factor by default. Your identity provider has already authenticated you, and stacking a TOTP on top is friction most teams do not need.
+
+You can opt your own account into stricter behaviour with the **Require 2FA on SSO sign-in** toggle. It only appears on the Account panel when at least one SSO provider is enabled.
+
+<Frame>
+  <img src="/images/two-factor-auth/sso-enforce.png" alt="Require 2FA on SSO sign-in row. The row title is bold on the left, the helper text reads By default SSO logins skip the second factor Enforce it here to require both, and a TogglePill on the right is in the OFF state." />
+</Frame>
+
+This toggle is a per-user opt-in. For a fleet-wide policy, admins can require MFA enrolment at the SSO provider level via the **Require MFA** toggle on the provider config (see [SSO Authentication](/features/sso) and the [RBAC page](/features/rbac#sso-auto-provisioning)). The two toggles are independent: the per-user toggle decides whether a TOTP is asked for on every SSO sign-in; the per-provider toggle decides whether new SSO-provisioned users are forced to enrol TOTP before they can use the rest of the console.
 
 ## Disable 2FA
 
-From the same Account & Security section, click **Disable 2FA**. Sencho asks you to confirm with a current authenticator code (or a backup code) so that no one else can disable protection without your phone. Once disabled, only your password protects the account.
-
-## Signing in with SSO
-
-If Sencho is configured with LDAP or an OIDC provider (Google, GitHub, Okta), the SSO flow signs you in without the second factor by default. Your identity provider has already authenticated you.
-
-If you want Sencho to ask for a TOTP code even after a successful SSO sign-in, flip the **Require 2FA even when signing in via SSO** switch on the Account & Security card. The switch only appears when at least one SSO provider is enabled.
+The destructive ghost **Disable 2FA** link at the bottom of the Two-factor authentication section opens a red-chromed confirmation modal:
 
 <Frame>
-  <img src="/images/two-factor-auth/sso-enforce.png" alt="Toggle that requires 2FA even when signing in via SSO" />
+  <img src="/images/two-factor-auth/disable-confirm.png" alt="Disable 2FA confirmation modal. The destructive header shows the kicker SECURITY MFA DISABLE in red and the italic display title Turn off two-factor with a red top rail. The body reads Disabling 2FA removes this login layer Your backup codes become invalid Confirm with a current code to proceed, with six digit cells below and a mono-bracketed Use backup code toggle. The footer shows a Cancel button on the left and a red Disable button on the right." />
 </Frame>
+
+| Surface | Value |
+|---------|-------|
+| Kicker | `SECURITY · MFA · DISABLE` |
+| Title | `Turn off two-factor` |
+| Body | `Disabling 2FA removes this login layer. Your backup codes become invalid. Confirm with a current code to proceed.` |
+| Toggle | `[ Use backup code ]` / `[ Use authenticator ]` |
+| Confirm button | `Disable` (red destructive variant) |
+
+Confirmation needs either a current TOTP or a backup code, so nobody who has only your password can disable the second factor. Once 2FA is disabled, your backup codes are invalidated immediately and only your password protects the account.
+
+## Admin reset (lost authenticator)
+
+If you lose both your authenticator app and your remaining backup codes, you cannot sign in on your own. Any administrator can reset your 2FA from **Settings · Users**: the shield-off icon on your row opens a confirmation modal targeted at your account.
+
+<Frame>
+  <img src="/images/two-factor-auth/admin-reset.png" alt="Admin reset confirmation modal opened from the Users panel. The header shows the kicker USERS RESET 2FA and the italic display title Reset 2FA for viewer. The body reads Removes the user's authenticator enrolment and backup codes They will sign in with just their password on their next login and can re-enrol from their account settings Use this when a user has lost access to their authenticator. The footer has Cancel and Reset 2FA buttons." />
+</Frame>
+
+The modal copy is verbatim:
+
+> Removes the user's authenticator enrolment and backup codes. They will sign in with just their password on their next login and can re-enrol from their account settings. Use this when a user has lost access to their authenticator.
+
+The reset bumps the target user's token version, so any active sessions of theirs return `401` on the next API request. After the reset, the user signs in with their password and re-enrols TOTP from **Settings · Account**. The full procedure for administrators, including a CLI fallback if every admin has lost access, lives at [Managing Two-Factor Authentication](/operations/two-factor-admin).
+
+## Lockout recovery
+
+The 15-minute lockout that fires after five failed verifications is per-account, not per-IP. The counter clears on a successful sign-in. Practical consequence: if you keep retrying with wrong codes after the 15-minute window expires, the counter is still at five and the lockout re-engages on the first wrong code. To break the cycle, either wait until you have a known-good code (clock synced authenticator) and sign in cleanly, or have an administrator reset your 2FA from the Users panel to clear both the enrollment and the failure counter at once.
 
 ## Troubleshooting
 
-### "Code invalid" even though the code is current
+<AccordionGroup>
+  <Accordion title="Code invalid even though the code is current">
+    The most common cause is clock drift between your phone and the Sencho host. TOTP codes are computed from the current Unix time; even a 30-second skew breaks verification.
 
-The most common cause is clock drift between your phone and the Sencho server. Authenticator apps compute codes from the current Unix time, and even a 30 second skew breaks verification.
+    - On iOS: **Settings · General · Date & Time** → enable **Set Automatically**.
+    - On Android: **Settings · System · Date & time** → enable **Automatic date & time**.
+    - In Google Authenticator: open the menu → **Settings · Time correction for codes · Sync now**.
+    - In Authy: **Settings · My account · Sync device time**.
 
-- On iOS, open **Settings → General → Date & Time** and enable **Set Automatically**
-- On Android, open **Settings → System → Date & time** and enable **Automatic date & time**
-- In Google Authenticator, open the menu → **Settings → Time correction for codes → Sync now**
-- In Authy, open **Settings → My account → Sync device time**
+    If Sencho runs in a container, the container's clock follows the host. Make sure the host clock is synced with NTP.
+  </Accordion>
+  <Accordion title="Wrong account selected in the authenticator">
+    Authenticator apps let you store many accounts. The label Sencho uses is the literal issuer `Sencho` plus your username. If you have more than one Sencho instance enrolled in the same authenticator, every entry shows the same issuer; rename them in the app to distinguish (most apps let you edit the label without invalidating the secret).
+  </Accordion>
+  <Accordion title="The QR code will not scan">
+    Use the **Secret · manual entry** row directly below the QR. Click the copy icon to put the base32 string on your clipboard, then paste it into your authenticator's manual-entry screen. The secret is identical; the QR is just a convenience.
+  </Accordion>
+  <Accordion title="Lost phone and no backup codes left">
+    Ask an administrator to reset your 2FA from **Settings · Users**. The shield-off icon on your row opens the confirmation modal documented above. If you are the only admin and have also lost access, the administrator can run the CLI reset on the host running Sencho; see [Managing Two-Factor Authentication](/operations/two-factor-admin) for the command.
+  </Accordion>
+  <Accordion title="Lost your backup codes but still have the authenticator">
+    Sign in normally with a TOTP, then **Settings · Account · Two-factor authentication · Regenerate**. Sencho asks for a current authenticator code and then issues a fresh set of ten codes. The previous set is invalidated the moment the new set is shown.
+  </Accordion>
+  <Accordion title="Ran out of backup codes">
+    Each code is single-use, so the count drops by one every time you sign in with a backup code instead of the authenticator. As soon as you sign back in with an authenticator code, regenerate a new set from **Settings · Account · Two-factor authentication · Regenerate**. Without codes, recovery from a lost authenticator requires an administrator.
+  </Accordion>
+  <Accordion title="SSO sign-in is unexpectedly asking for a code">
+    Two independent toggles can cause this. Check both:
 
-If your server runs in a container, make sure its host clock is synced with NTP.
-
-### Wrong account selected in the authenticator
-
-Authenticator apps let you store many accounts. If you have more than one Sencho instance, or a Sencho entry and a different service that looks similar, pick the correct one. The issuer label Sencho uses is simply `Sencho`.
-
-### The QR code will not scan
-
-Click **Can't scan? Show secret key** during enrolment, copy the base32 string, and paste it into the authenticator app's manual-entry screen. The secret is identical, the QR code is just a convenience.
-
-### Lost phone and no backup codes left
-
-Contact an administrator. An admin can reset your 2FA from the Users section in **Settings → Users**. See the [admin guide](/operations/two-factor-admin) for the steps. If you are the only admin and have lost access, the administrator can also reset 2FA from the command line on the host running Sencho.
-
-### Lost your backup codes
-
-If you still have your authenticator app, sign in as normal and regenerate the codes from **Settings → Account & Security → Regenerate backup codes**. The previous set stops working immediately. If you no longer have the authenticator app either, follow the "Lost phone and no backup codes left" entry above and ask an administrator to reset 2FA.
-
-### Ran out of backup codes
-
-Each backup code can be used once. As soon as you sign back in with an authenticator code, regenerate a new set from **Settings → Account & Security**. Without codes, losing your phone means recovery requires an administrator.
-
-### SSO sign-in is unexpectedly asking for a code
-
-The **Require 2FA even when signing in via SSO** toggle is on for your account. Open **Settings → Account & Security** and flip it off if SSO alone is enough for your threat model.
-
-### Enrolment did not activate after confirmation
-
-The browser may have dropped the JSON response. Retry the confirmation step and watch for an error toast. If confirmation continues to fail, cancel the dialog, ensure your clock is synced, and start enrolment again.
+    - **Your own toggle.** **Settings · Account · Two-factor authentication · Require 2FA on SSO sign-in** is on for your account. Flip it off if SSO alone is enough for your threat model.
+    - **The provider's toggle.** Each SSO provider config has a `Require MFA` switch. When that is on, every SSO-provisioned user must enrol TOTP after their first successful sign-in. Only an administrator can change this on the provider config under **Settings · SSO**.
+  </Accordion>
+  <Accordion title="Repeatedly locked out after waiting 15 minutes">
+    The 15-minute window expires on the clock, but the failure counter only resets on a successful sign-in. If you retry with another wrong code after the window expires, the counter is still at five and the lockout re-engages immediately. Have an administrator reset your 2FA from the Users panel to clear both the enrolment and the failure counter, then sign in with your password and re-enrol TOTP from your account settings.
+  </Accordion>
+  <Accordion title="The shield icon is missing on a user I expected to reset">
+    The shield-off icon on a Users-panel row only renders when that user has a finished TOTP enrolment. A user who started enrolment but never completed step 2 has no enrolment to reset; ask them to finish enrolment from their account settings.
+  </Accordion>
+</AccordionGroup>

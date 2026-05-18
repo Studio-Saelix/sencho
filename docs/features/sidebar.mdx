@@ -1,12 +1,12 @@
 ---
 title: Stack Sidebar
-description: Manage, group, and pin your stacks from the primary sidebar.
+description: Manage, group, pin, and bulk-act on your stacks from the primary sidebar.
 ---
 
-The stack sidebar is your cockpit for every stack on the active node. Stacks are grouped by label, your most-used stacks can be pinned to the top, and a live activity footer keeps you aware of what just happened.
+The stack sidebar is your cockpit for every stack on the active node. Stacks are grouped by label, your most-used stacks can be pinned to the top, a one-click bulk mode lets you act on several at once, and a live activity footer keeps you aware of what just happened.
 
 <Frame>
-  <img src="/images/sidebar/sidebar-overview.png" alt="Stack sidebar overview" />
+  <img src="/images/sidebar/sidebar-overview.png" alt="Stack sidebar overview with branding header, node switcher, Create Stack button, Bulk mode and Scan icons, search box, ALL/UP/DOWN/UPDATES filter chips, three label groups (MEDIA, UTILITIES, NETWORK) with stack rows and label dots, and a LIVE activity footer at the bottom" />
 </Frame>
 
 ## Layout
@@ -15,39 +15,86 @@ From top to bottom:
 
 1. **Branding header** shows your Sencho build version.
 2. **Node switcher** selects which Sencho instance you are managing.
-3. **Create Stack** opens the new-stack dialog. The folder icon scans your compose directory.
-4. **Search** filters stacks by name. Press <kbd>⌘K</kbd> (or <kbd>Ctrl+K</kbd>) to focus it.
-5. **Stack list** shows your stacks grouped by label.
-6. **Activity footer** shows the most recent stack event.
+3. **Action row** holds **Create Stack**, the **Bulk mode** toggle (square icon), and **Scan stacks folder** (folder-search icon).
+4. **Search** filters the stack list. Start typing into **Search stacks...** to filter in place.
+5. **Filter chips** narrow the list by status (described below).
+6. **Stack list** shows your stacks grouped by label.
+7. **Activity footer** shows the most recent stack event on the node.
+
+## Filter chips
+
+Four chips sit below the search box. Each shows a live count to the right of its label, and counts above 99 render as **99+** to keep the row from overflowing.
+
+- **All**: every stack on the node.
+- **Up**: stacks where at least one container is running.
+- **Down**: stacks where no container is running.
+- **Updates**: stacks with at least one image update available. The chip turns orange when the count is non-zero so you can spot pending updates at a glance.
+
+<Frame>
+  <img src="/images/sidebar/sidebar-filter-chips.png" alt="Filter chip row with ALL pressed (count 14), UP (count 14), DOWN (count 0), and UPDATES highlighted in orange with count 1" />
+</Frame>
+
+Click the **−** (minus) icon on the right to collapse the chip row when you need more vertical room; it becomes a **+** (plus) icon you click to bring the chips back. The collapsed state is remembered in your browser.
 
 ## Groups
 
-Stacks are grouped by label. Stacks with multiple labels appear in each matching group so you always see the full fleet membership per label. Stacks without labels appear in an **Unlabeled** group at the bottom. Click a group header to collapse or expand it; the collapsed state is remembered per node.
+Stacks are grouped by label. Groups are sorted by size (most populated first), then alphabetically. Stacks with multiple labels appear in every matching group so you always see the full fleet membership per label. Stacks without labels appear in an **Unlabeled** group at the bottom. Click a group header to collapse or expand it; the collapsed state is remembered per node.
 
 ## Pinning
 
-Right-click a stack and choose **Pin to top**. Pinned stacks sit in a dedicated **PINNED** group at the top of the list. Up to 10 stacks can be pinned per node; pinning an 11th evicts the oldest.
+Right-click a stack and choose **Pin to top**. Pinned stacks sit in a dedicated **★ PINNED** group at the top of the list. Up to 10 stacks can be pinned per node; pinning an 11th evicts the oldest. Right-click a pinned stack and choose **Unpin** to remove it from the group.
 
 <Frame>
-  <img src="/images/sidebar/sidebar-pinned.png" alt="Pinned stacks appear in a PINNED group at top" />
+  <img src="/images/sidebar/sidebar-pinned.png" alt="Sidebar with a starred PINNED group at the top containing plex, sonarr, and cloudflared, followed by the regular MEDIA group below" />
+</Frame>
+
+## Stack rows
+
+Each row gives you everything you need to read the stack at a glance, in a fixed column order:
+
+- **Status pill** on the left. Two uppercase letters in mono type, or a spinner while a lifecycle action is in flight. `UP` means at least one container is running; `DN` means the stack is stopped.
+- **Stack name** in mono type, truncated with an ellipsis when the row gets tight.
+- **Label dots** to the right of the name. Up to three colored dots representing the stack's labels render here. If a stack carries more than three labels, a **+N** counter appears for the extras.
+- **Update indicator**. When a stack has an image update pending, an extra colored dot appears alongside the label dots. If only a Git source update is pending (no image update), a small Git branch icon shows instead. The image-update dot takes priority when both apply.
+- **Hover kebab** on the right edge. Hover the row to reveal a vertical three-dot menu that opens the same actions as right-clicking the row.
+
+<Frame>
+  <img src="/images/sidebar/sidebar-row-anatomy.png" alt="Two stack rows shown stacked: dozzle with two label dots (utilities in grey and media in magenta) and a hover kebab, and cloudflared with an orange indicator dot and a hover kebab" />
+</Frame>
+
+## Bulk mode
+
+Click the **Bulk mode** icon next to **Create Stack** (or press <kbd>B</kbd>) to enter selection mode. A checkbox appears at the left of every row, and a sticky toolbar slides in just above the list:
+
+- **Start**, **Stop**, **Restart** apply the action to every selected stack.
+- **Update** pulls the latest images for every selected stack and requires a **Skipper** or **Admiral** license.
+
+Click rows to toggle their selection. The toolbar header shows a running count. Click the **×** in the corner of the toolbar to clear the selection, and click the icon again (or press <kbd>B</kbd>) to leave bulk mode.
+
+<Frame>
+  <img src="/images/sidebar/sidebar-bulk-mode.png" alt="Sidebar in bulk mode with the Bulk mode icon highlighted, a sticky toolbar reading 3 selected with Start, Stop, Restart, and Update buttons, and checkboxes visible on every stack row" />
 </Frame>
 
 ## Context menu
 
-Right-click any stack (or open the kebab that appears on hover) for its context menu, grouped by purpose:
+Right-click any stack (or open the kebab that appears on hover) for its context menu. Items are grouped by purpose:
 
-- **Inspect**: view alerts, open the auto-heal sheet, check for image updates, open the running app.
-- **Organize**: assign labels, pin or unpin the stack.
-- **Lifecycle**: deploy, stop, restart, or update the stack.
-- **Destructive**: delete the stack.
+- **Inspect**: **Alerts**, **Auto-Heal**, the **Auto-update** toggle, **Check updates**, and **Open App** (the last only appears when the stack is running and exposes a port).
+- **Organize**: **Labels** (a submenu listing every label on the node, with a check next to each label the stack already carries) and **Pin to top** / **Unpin**.
+- **Lifecycle**: **Deploy** (when stopped), **Stop**, **Restart**, **Update** (when running), and **Schedule task**.
+- **Destructive**: **Delete**.
+
+<Note>
+  **Auto-Heal**, the **Auto-update** toggle, and **Schedule task** require a **Skipper** or **Admiral** license.
+</Note>
 
 <Frame>
-  <img src="/images/sidebar/sidebar-context-menu.png" alt="Grouped stack context menu" />
+  <img src="/images/sidebar/sidebar-context-menu.png" alt="Right-click context menu on a running plex stack with four sections. INSPECT lists Alerts, Auto-Heal, Auto-update: Enabled, Check updates, and Open App. ORGANIZE lists Labels with a submenu arrow and Pin to top. LIFECYCLE lists Stop, Restart, Update, and Schedule task. DESTRUCTIVE lists Delete in red." />
 </Frame>
 
 ## Keyboard shortcuts
 
-Every action in the context menu has a keyboard shortcut. Shortcuts fire on the currently selected stack and are blocked when a text input is focused or the command palette is open.
+Shortcuts fire on the currently selected stack. They are blocked while a text input is focused or the global command palette is open.
 
 ### Lifecycle
 
@@ -65,15 +112,35 @@ On macOS, use <kbd>Cmd</kbd> in place of <kbd>Ctrl</kbd>.
 
 | Key | Action |
 |-----|--------|
-| <kbd>A</kbd> | Open alerts sheet |
-| <kbd>H</kbd> | Open auto-heal sheet (Skipper and above) |
+| <kbd>A</kbd> | Open the alerts sheet |
+| <kbd>H</kbd> | Open the auto-heal sheet (Skipper or Admiral) |
 | <kbd>U</kbd> | Check for image updates |
 | <kbd>P</kbd> | Pin or unpin the stack |
+| <kbd>B</kbd> | Toggle bulk mode |
+
+The **↗** and **L ›** glyphs inside the context menu are visual hints, not global bindings. Open **Open App** or **Labels** through the menu (or the hover kebab) to use them.
 
 ## Activity footer
 
-The footer shows the most recent stack lifecycle event within the last hour. Click it to jump to the global activity log. When nothing has happened recently, the footer reads **IDLE**.
+The footer surfaces the most recent stack lifecycle event on the node. Each ticker shows the stack name in brand color, a short event description, and a relative time. The kicker text below alternates between **LIVE · VIEW ACTIVITY →** when an event is showing and **IDLE · NO RECENT ACTIVITY** when nothing has happened recently. A pulsing dot to the left indicates the WebSocket subscription is healthy. Click anywhere on the footer to open the global activity view.
 
 <Frame>
-  <img src="/images/sidebar/sidebar-activity.png" alt="Activity footer ticker" />
+  <img src="/images/sidebar/sidebar-activity.png" alt="Activity footer with a green pulsing dot, the stack name 'cloudflared' in brand color, an event description, and the kicker LIVE · VIEW ACTIVITY" />
 </Frame>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="I can't see my newly created stack in the sidebar">
+    Confirm the active filter chip is **All** so a status filter is not hiding the row. Clear the **Search stacks...** box in case a stale query is filtering the list. Then click the **Scan stacks folder** icon next to **Create Stack** to re-index the compose directory on disk.
+  </Accordion>
+  <Accordion title="Pinning is not sticking past the 10th stack">
+    Each node has a 10-stack pin limit. When you pin an 11th stack, the oldest pin is automatically evicted so the new one fits. Unpin a stack you no longer need before adding another, or accept that the oldest will roll off.
+  </Accordion>
+  <Accordion title="Keyboard shortcuts are not firing">
+    Shortcuts only fire when a stack row is selected in the sidebar (one row is highlighted). They are intentionally blocked while a text input is focused or the global command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) is open, so they do not collide with typing. Click a stack row, then try the shortcut again.
+  </Accordion>
+  <Accordion title="The filter chips disappeared from the sidebar">
+    Click the **+** icon to the right of the search box to bring them back. The chip row collapses to a thin **−** / **+** toggle, and the state is remembered in your browser, so an earlier collapse persists across reloads until you expand it again.
+  </Accordion>
+</AccordionGroup>

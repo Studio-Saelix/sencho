@@ -6,18 +6,18 @@ description: An interactive terminal on your host OS, directly in the browser - 
 The **Console** tab opens a full interactive terminal session on the machine running Sencho. It behaves exactly like an SSH session, but without needing an SSH server, client, or key management.
 
 <Note>
-  The Host Console requires a **Sencho Admiral** license. Community and Skipper users will not see the Console tab in the navigation bar. [Learn more about licensing](/features/licensing).
+  The Host Console requires a **Sencho Admiral** license and the **admin** role. [Learn more about licensing](/features/licensing).
 </Note>
 
 <Frame>
-  <img src="/images/host-console/host-console-overview.png" alt="Host Console showing a PowerShell prompt in the COMPOSE_DIR working directory" />
+  <img src="/images/host-console/host-console-overview.png" alt="Host Console showing a live bash session listing containers with the floating chip strip in the bottom right" />
 </Frame>
 
 ## What it is
 
 The Host Console gives you a real terminal session on the Sencho host, streamed to your browser over a WebSocket. It supports:
 
-- Full colour and cursor support
+- Full color and cursor support
 - Tab completion (provided by the host shell)
 - Automatic terminal resizing when you resize the browser window
 - Copy and paste
@@ -25,53 +25,58 @@ The Host Console gives you a real terminal session on the Sencho host, streamed 
 
 ## Opening the console
 
-Click **Console** in the top navigation bar. The session starts immediately in the `COMPOSE_DIR` root. If a stack is selected in the sidebar, the terminal opens directly inside that stack's directory instead.
+Click **Console** in the top navigation bar. The session starts immediately in the `COMPOSE_DIR` root. If a stack is selected in the sidebar, the terminal opens directly inside that stack's directory instead, and a small back button appears in the masthead so you can return to the stack editor.
 
 ## Cockpit layout
 
-The Console page is a vertical stack of two surfaces:
+The Console page is a vertical stack of two surfaces.
 
 <Frame>
-  <img src="/images/host-console/host-console-masthead.png" alt="Masthead with cyan rail, Connected state, and shell, viewport, and session uptime metadata" />
+  <img src="/images/host-console/host-console-masthead.png" alt="Masthead with brand-cyan accent on the left, Connected state in italic, and shell, viewport, and session uptime metadata on the right" />
 </Frame>
 
-| Surface | What it shows |
-|---------|---------------|
-| **Masthead** | Connection state (`Connected`, `Reconnecting`, or `Disconnected`) with a live status dot that pulses cyan while the session is active. The kicker reads `HOST CONSOLE · {node}`. When the console was opened from a stack, a small `← {stack-name}` link sits beside the state word so you can return to the stack editor. |
-| **Metadata** | Right side of the masthead: the active **shell** (e.g. `BASH`), the current **viewport** (`{cols}×{rows}` as reported by the fit addon), and **session uptime** since the shell opened. |
-| **Terminal well** | The interactive xterm session, sized to fill the remaining height. |
-| **Chip strip** | Floating bottom-right controls: **Copy** (copies the current selection), **Clear** (wipes the visible scrollback without killing the shell), **Download** (exports the full scrollback as a timestamped `.txt`), and **Reconnect** (closes and reopens the WebSocket without leaving the page). |
+The **masthead** holds the live connection state. The state word recolors with the tone of the session:
+
+- **Connected** in brand cyan with a pulsing dot whenever output is flowing
+- **Reconnecting** in amber when the WebSocket is being re-established
+- **Disconnected** in red when the session has ended
+
+The kicker reads `HOST CONSOLE · {NODE}`, so it always tells you which node the session belongs to. The right side carries three metadata pills:
+
+| Pill | Meaning |
+|------|---------|
+| **SHELL** | The pill reads `BASH`. In a Docker deployment, the spawned shell is bash, falling back to `sh` if bash is unavailable inside the image. |
+| **VIEWPORT** | Current terminal size in `{cols}×{rows}`, updated automatically when you resize the browser window. |
+| **SESSION** | Time elapsed since the shell was opened (`M:SS UP` while under an hour, then `1H 05M` once it crosses an hour). |
+
+The **terminal well** sits below the masthead and fills the remaining height with an xterm.js session.
 
 <Frame>
   <img src="/images/host-console/host-console-chip-strip.png" alt="Floating chip strip with Copy, Clear, Download, and Reconnect buttons" />
 </Frame>
 
-## Shell type
+The **chip strip** floats over the bottom right of the terminal:
 
-The shell depends on the host operating system:
+- **Copy** copies the current xterm selection to your clipboard
+- **Clear** wipes the visible scrollback without killing the shell
+- **Download** exports the full scrollback as a timestamped `.txt` file
+- **Reconnect** closes and reopens the WebSocket without leaving the page
 
-- **Linux / macOS hosts:** `bash` (falls back to `sh` if bash is not available)
-- **Windows hosts:** PowerShell
+## Sessions and limits
 
-In a typical Docker deployment, the Sencho container runs Linux, so the console opens a `bash` shell regardless of the Docker host's OS. The PowerShell prompt shown in the screenshot above reflects a native Windows development environment.
+Sencho enforces a maximum of **5 concurrent console sessions** per instance. If you hit this limit, close an existing session before opening a new one. Each session runs a heartbeat; if the browser tab is closed or the network drops, the server detects the dead connection and cleans up the orphaned shell within 60 to 90 seconds.
 
-## Availability
+## Environment variables
 
-The Host Console is available exclusively to users with the **admin** role on the **Admiral** tier. Other roles (node-admin, deployer, viewer, auditor) cannot access the console, even on Admiral-licensed instances. If your instance is on the Community or Skipper tier, the Console tab does not appear in the navigation bar at all. Attempting to access the console endpoint directly without the correct license or role is rejected.
-
-## Session limits
-
-Sencho enforces a maximum of **5 concurrent console sessions** per instance. If you hit this limit, close an existing session before opening a new one. Each session also includes an automatic heartbeat; if the browser tab is closed or the network drops, the server detects the dead connection and cleans up the session within about a minute.
+Environment variables whose names suggest secrets (passwords, tokens, keys, credentials, auth-related variables, private keys, passphrases, encryption and signing secrets) and certain well-known connection strings (`DATABASE_URL`, `REDIS_URL`, `MONGO_URI`, `AMQP_URL`, `DSN`) are stripped from the console environment before the shell spawns. Running `env` or `printenv` inside the console will not reveal them.
 
 ## Security considerations
 
-The Host Console has stricter access requirements than other features:
+The Host Console is one of the most powerful features in Sencho and is treated as such:
 
-- **Admin role required.** Only users with the `admin` role can open a console session. Non-admin roles are blocked at both the UI and the API level.
-- **Browser sessions only.** API tokens used for automation or multi-node communication cannot open a console session.
-- **Admiral license required.** The license check is enforced at every layer, not just in the UI.
-- **Session invalidation.** Changing a user's password or role immediately invalidates any active session tokens. A user who is downgraded from admin loses console access instantly.
-- **Sensitive environment variables are stripped.** Environment variables whose names suggest secrets (passwords, tokens, keys, credentials, auth-related variables, private keys, passphrases, encryption and signing secrets) and certain well-known connection strings are automatically removed from the console environment. Running `env` or `printenv` inside the console will not reveal them.
+- **Admin role required.** Only users with the **admin** role can open a console session.
+- **Admiral license required.** The Console tab is not available on the Community or Skipper tiers.
+- **Browser sessions only.** Console sessions are only available from a signed-in browser session, not from API tokens.
 
 <Warning>
   The Host Console provides unrestricted shell access to the machine running Sencho. Do not expose Sencho on a public network without HTTPS and strong authentication.
@@ -88,18 +93,18 @@ The Host Console has stricter access requirements than other features:
 
 <AccordionGroup>
   <Accordion title="Maximum console sessions reached">
-    Sencho limits concurrent console sessions to 5 per instance. Close one or more existing console sessions (either through the UI or by closing the browser tab) and try again. Stale sessions from disconnected browsers are cleaned up automatically within about a minute.
+    Sencho limits concurrent console sessions to 5 per instance. Close one or more existing console sessions (either through the UI or by closing the browser tab) and try again. Stale sessions from disconnected browsers are cleaned up automatically within 60 to 90 seconds.
   </Accordion>
 
   <Accordion title="Session ends immediately after connecting">
-    This typically means the shell could not be found on the host. In a Docker deployment, ensure `bash` or `sh` is available inside the container. You can check by running `docker exec <container> which bash` from the host. Also verify that your user has the `admin` role and your instance has an active Admiral license.
+    This typically means the shell could not be found on the host. In a Docker deployment, ensure `bash` or `sh` is available inside the container. You can check by running `docker exec <container> which bash` from the host. Also verify that your user has the **admin** role and your instance has an active Admiral license.
   </Accordion>
 
   <Accordion title="Connection drops after a short time">
-    If you are running Sencho behind a reverse proxy (e.g. Nginx, Caddy, Traefik), the proxy may be closing WebSocket connections after its default idle timeout. Increase the WebSocket timeout in your proxy configuration. For Nginx, set `proxy_read_timeout` and `proxy_send_timeout` to a higher value (e.g. `3600s`).
+    If you are running Sencho behind a reverse proxy (Nginx, Caddy, Traefik), the proxy may be closing WebSocket connections after its default idle timeout. Increase the WebSocket timeout in your proxy configuration. For Nginx, set `proxy_read_timeout` and `proxy_send_timeout` to a higher value (for example `3600s`).
   </Accordion>
 
   <Accordion title="Console tab is not visible">
-    The Console tab only appears for users with the `admin` role on an Admiral-licensed instance. Verify both conditions are met. If you recently upgraded your license, you may need to refresh the page.
+    The Console tab only appears for users with the **admin** role on an Admiral-licensed instance. Verify both conditions are met. If you recently activated an Admiral license, refresh the page.
   </Accordion>
 </AccordionGroup>

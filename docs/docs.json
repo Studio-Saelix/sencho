@@ -118,7 +118,6 @@
                   "features/global-search",
                   "features/global-observability",
                   "features/alerts-notifications",
-                  "features/notification-routing",
                   "features/audit-log"
                 ]
               },
@@ -174,7 +173,6 @@
               "features/licensing",
               "features/node-compatibility",
               "security",
-              "reference/security-advisories",
               "reference/contact"
             ]
           },
