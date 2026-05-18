@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.13](https://github.com/Studio-Saelix/sencho/compare/v0.81.12...v0.81.13) (2026-05-18)
+
+
+### Fixed
+
+* **mesh:** probe upstream synchronously in route diagnostic (F-11) ([#1100](https://github.com/Studio-Saelix/sencho/issues/1100)) ([c460bb8](https://github.com/Studio-Saelix/sencho/commit/c460bb87a87cb4a39db11c6cec2ca9f1ffbb956f))
+
 ## [0.81.12](https://github.com/Studio-Saelix/sencho/compare/v0.81.11...v0.81.12) (2026-05-18)
 
 

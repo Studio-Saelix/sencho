@@ -1,6 +1,6 @@
 {
   "name": "sencho",
-  "version": "0.81.12",
+  "version": "0.81.13",
   "description": "Self-hosted Docker Compose management dashboard with fleet control, atomic deployments, and self-healing infrastructure.",
   "main": "index.js",
   "scripts": {
