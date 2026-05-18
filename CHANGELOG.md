@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.10](https://github.com/Studio-Saelix/sencho/compare/v0.81.9...v0.81.10) (2026-05-18)
+
+
+### Fixed
+
+* **mesh:** route peer→central traffic over the existing forward WS ([#1094](https://github.com/Studio-Saelix/sencho/issues/1094)) ([f6e4253](https://github.com/Studio-Saelix/sencho/commit/f6e42535c8acda6e06facadf1fc5f41e00cd9a93))
+
 ## [0.81.9](https://github.com/Studio-Saelix/sencho/compare/v0.81.8...v0.81.9) (2026-05-18)
 
 
