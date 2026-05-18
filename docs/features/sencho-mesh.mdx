@@ -71,19 +71,16 @@ services:
 
 Sencho's static IP on the network is `<network address> + 2` (so `10.42.0.2` for the example above). Operators can configure each node independently; the override generator pushes alias hostnames that resolve to whichever IP the deploying node uses locally.
 
-## Bidirectional secure callback
+## Bidirectional traffic
 
-Proxy-mode mesh nodes can re-establish their secure mesh callback to central
-when traffic starts from that node. Central is the hub; the callback is signed
-with a `mesh_tunnel`-scoped credential bound to the node's API token.
-
-<Note>
-  **Prerequisite:** set `SENCHO_PRIMARY_URL` on central to its canonical public
-  origin. This value is used as the audience for the mesh callback credential
-  and as the callback URL on the node side. Without it, central infers an origin
-  from inbound request headers; the inference works in standard installs but is
-  not the intended deploy shape for fleets where reverse-proxy headers may differ.
-</Note>
+Mesh traffic flows in both directions over a single persistent WebSocket
+between central and each proxy-mode peer. Central dials the bridge to every
+mesh-enabled peer on startup and re-dials any dropped bridge on its
+reconcile tick (every 60 seconds by default). When a container on the peer
+needs to reach a service on central, the request multiplexes over that same
+bridge: no extra inbound listener on central, no public URL required on
+the central side. This is the path that makes "call a service on any node
+by hostname" work in NAT'd homelab topologies out of the box.
 
 ## Test upstream
 

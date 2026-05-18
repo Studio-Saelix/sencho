@@ -28,16 +28,8 @@ export interface Counters {
     proxy_bridges_total: number;
     /** Failed proxy-tunnel dial attempts (all reasons). Pair with `proxy_bridges_total` for an attempt/success ratio; pair with `proxy_idle_closes` for retention. */
     proxy_dials_failed: number;
-    /** Proxy-tunnel teardowns initiated by the dialer's idle sweep (zero active streams for the configured TTL). */
+    /** Proxy-tunnel teardowns initiated by the dialer's idle sweep (zero active streams for the configured TTL). Effectively 0 by default since the dialer no longer idle-closes the bridge. */
     proxy_idle_closes: number;
-    /** Proxy bridges registered via the peer-initiated dial-back path (`/api/mesh/proxy-tunnel-from-peer`). Disjoint from `proxy_bridges_total`, which counts central-initiated dials. */
-    proxy_bridges_peer_initiated_total: number;
-    /** Successful peer-to-central dial-back sessions (counted on WS open + bridge start). Disjoint from `proxy_bridges_peer_initiated_total`, which is incremented by the central-side ingress at register time. Useful for operators investigating asymmetric counts (peer thinks it dialed, central never registered). */
-    mesh_central_bootstraps_total: number;
-    /** Peer-to-central dial-back attempts that did not complete a WS open. Covers transport errors, upgrade rejections, and bridge.start failures. */
-    mesh_callback_dials_failed_total: number;
-    /** Subset of `mesh_callback_dials_failed_total` where central responded 401 with a terminal reason code (stale, signature_invalid, ...) that caused the peer to clear its cached central material. */
-    mesh_callback_auth_failures_total: number;
 }
 
 const ZERO_COUNTERS: Counters = {
@@ -49,10 +41,6 @@ const ZERO_COUNTERS: Counters = {
     proxy_bridges_total: 0,
     proxy_dials_failed: 0,
     proxy_idle_closes: 0,
-    proxy_bridges_peer_initiated_total: 0,
-    mesh_central_bootstraps_total: 0,
-    mesh_callback_dials_failed_total: 0,
-    mesh_callback_auth_failures_total: 0,
 };
 
 export const PILOT_METRICS_FLUSH_INTERVAL_MS = 1_000;

@@ -1,15 +1,11 @@
 /**
- * `MeshService.proactiveBootstrapFanout` (Trigger 3).
+ * `MeshService.proactiveBridgeFanout` and the bridge-reconcile loop.
  *
- * At central startup, after `MeshService.start()` finishes, iterate the
- * mesh-enabled proxy-mode nodes that have at least one `mesh_stacks` row
- * and call `MeshProxyTunnelDialer.ensureBridge(nodeId)` on each. This
- * proactively re-establishes the central->peer bridges so the
- * capability-gated handshake can mint and ship bootstrap material to any
- * peer that just came online or just got upgraded to v0.79+.
- *
- * Concurrency 4, 250ms stagger, fire-and-forget. Failures do not abort
- * the fan-out.
+ * Central proactively dials every mesh-enabled proxy-mode peer at startup
+ * and on every reconcile tick so peer→central reverse traffic always has a
+ * live forward WS to multiplex through. The fanout selects ALL such peers
+ * regardless of whether they have any `mesh_stacks` rows yet, because the
+ * bridge is a control-plane primitive, not stack-scoped.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -61,7 +57,13 @@ function clearNodesAndMeshStacks(): void {
     db.prepare('DELETE FROM nodes WHERE is_default = 0').run();
 }
 
-describe('MeshService.proactiveBootstrapFanout (Trigger 3)', () => {
+function callFanout(): Promise<void> {
+    return (MeshService.getInstance() as unknown as {
+        proactiveBridgeFanout: () => Promise<void>;
+    }).proactiveBridgeFanout();
+}
+
+describe('MeshService.proactiveBridgeFanout', () => {
     beforeEach(() => {
         clearNodesAndMeshStacks();
         MeshProxyTunnelDialer.resetForTest();
@@ -71,7 +73,7 @@ describe('MeshService.proactiveBootstrapFanout (Trigger 3)', () => {
         vi.restoreAllMocks();
     });
 
-    it('iterates only mesh-enabled proxy-mode nodes that have mesh_stacks rows', async () => {
+    it('iterates every mesh-enabled proxy-mode node regardless of mesh_stacks rows', async () => {
         const calls: number[] = [];
         vi.spyOn(MeshProxyTunnelDialer.getInstance(), 'ensureBridge')
             .mockImplementation(async (id: number) => {
@@ -79,22 +81,20 @@ describe('MeshService.proactiveBootstrapFanout (Trigger 3)', () => {
                 return null;
             });
 
-        // Eligible: mesh-enabled proxy node with a mesh_stacks row.
-        const eligible = seedProxyNode(true);
-        insertMeshStack(eligible, `stack-eligible-${uniqueSuffix()}`);
+        const withStack = seedProxyNode(true);
+        insertMeshStack(withStack, `stack-${uniqueSuffix()}`);
 
-        // Ineligible: mesh-enabled proxy node WITHOUT a mesh_stacks row.
-        seedProxyNode(true);
+        // Mesh-enabled proxy node WITHOUT any mesh_stacks row. The old
+        // SQL excluded these; this assertion locks in the new behavior.
+        const withoutStack = seedProxyNode(true);
 
-        // Ineligible: mesh-disabled proxy node WITH a mesh_stacks row.
+        // Mesh-disabled proxy node WITH a mesh_stacks row. Must still be skipped.
         const meshOff = seedProxyNode(false);
         insertMeshStack(meshOff, `stack-meshoff-${uniqueSuffix()}`);
 
-        await (MeshService.getInstance() as unknown as {
-            proactiveBootstrapFanout: () => Promise<void>;
-        }).proactiveBootstrapFanout();
+        await callFanout();
 
-        expect(calls).toEqual([eligible]);
+        expect(calls.sort((a, b) => a - b)).toEqual([withStack, withoutStack].sort((a, b) => a - b));
     });
 
     it('throttles to concurrency 4', async () => {
@@ -109,14 +109,9 @@ describe('MeshService.proactiveBootstrapFanout (Trigger 3)', () => {
                 return null;
             });
 
-        for (let i = 0; i < 12; i++) {
-            const id = seedProxyNode(true);
-            insertMeshStack(id, `stack-${i}-${uniqueSuffix()}`);
-        }
+        for (let i = 0; i < 12; i++) seedProxyNode(true);
 
-        await (MeshService.getInstance() as unknown as {
-            proactiveBootstrapFanout: () => Promise<void>;
-        }).proactiveBootstrapFanout();
+        await callFanout();
 
         expect(maxInflight).toBeLessThanOrEqual(4);
         expect(maxInflight).toBeGreaterThan(0);
@@ -124,11 +119,7 @@ describe('MeshService.proactiveBootstrapFanout (Trigger 3)', () => {
 
     it('failures do not abort the fanout', async () => {
         const ids: number[] = [];
-        for (let i = 0; i < 3; i++) {
-            const id = seedProxyNode(true);
-            insertMeshStack(id, `stack-fail-${i}-${uniqueSuffix()}`);
-            ids.push(id);
-        }
+        for (let i = 0; i < 3; i++) ids.push(seedProxyNode(true));
         const failingId = ids[1];
 
         const calls: number[] = [];
@@ -139,10 +130,19 @@ describe('MeshService.proactiveBootstrapFanout (Trigger 3)', () => {
                 return null;
             });
 
-        await (MeshService.getInstance() as unknown as {
-            proactiveBootstrapFanout: () => Promise<void>;
-        }).proactiveBootstrapFanout();
+        await callFanout();
 
         expect(calls.slice().sort((a, b) => a - b)).toEqual(ids.slice().sort((a, b) => a - b));
+    });
+
+    it('repeated fanout calls invoke ensureBridge each tick (reconcile semantics)', async () => {
+        const ensureSpy = vi.spyOn(MeshProxyTunnelDialer.getInstance(), 'ensureBridge')
+            .mockResolvedValue(null);
+
+        const id = seedProxyNode(true);
+        await callFanout();
+        await callFanout();
+
+        expect(ensureSpy.mock.calls.filter(([n]) => n === id).length).toBe(2);
     });
 });

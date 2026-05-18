@@ -21,6 +21,7 @@ function makeNode(over: Partial<MeshNodeStatus> & Pick<MeshNodeStatus, 'nodeId' 
         pilotConnected: over.pilotConnected ?? false,
         reachableMode: over.reachableMode ?? 'unreachable',
         reachableReason: over.reachableReason ?? null,
+        reverseCallbackStatus: over.reverseCallbackStatus ?? 'not_applicable',
         optedInStacks: over.optedInStacks ?? [],
         activeStreamCount: over.activeStreamCount ?? 0,
     };

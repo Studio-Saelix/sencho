@@ -8,7 +8,6 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { COOKIE_NAME } from '../helpers/constants';
 import { handlePilotTunnel } from './pilotTunnel';
 import { handleMeshProxyTunnel } from './meshProxyTunnel';
-import { handleMeshProxyTunnelFromPeerUpgrade } from './meshProxyTunnelFromPeer';
 import { handleNotificationsWs } from './notifications';
 import { handleRemoteForwarder } from './remoteForwarder';
 import { handleLogsWs } from './logs';
@@ -33,15 +32,14 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
  *
  * Dispatch order (first match wins):
  *   1. `/api/pilot/tunnel`                  -> handlePilotTunnel (own auth, own wss)
- *   2. `/api/mesh/proxy-tunnel-from-peer`   -> handleMeshProxyTunnelFromPeerUpgrade (own JWT chain, central-side dial-back)
- *   3. shared cookie/Bearer auth + JWT verify (rejects unauthenticated)
- *   4. API token scope gate (read-only / deploy-only restricted to logs + notifications)
- *   5. `/api/mesh/proxy-tunnel`             -> handleMeshProxyTunnel (machine-to-machine: node_proxy or full-admin api_token)
- *   6. `/ws/notifications` local           -> handleNotificationsWs
- *   7. remote nodeId path                   -> handleRemoteForwarder
- *   8. `/api/stacks/:name/logs`             -> handleLogsWs
- *   9. `/api/system/host-console`           -> handleHostConsoleWs
- *  10. fallback                             -> handleGenericWs (`/ws` exec + stats)
+ *   2. shared cookie/Bearer auth + JWT verify (rejects unauthenticated)
+ *   3. API token scope gate (read-only / deploy-only restricted to logs + notifications)
+ *   4. `/api/mesh/proxy-tunnel`             -> handleMeshProxyTunnel (machine-to-machine: node_proxy or full-admin api_token; bidirectional bridge for both forward and reverse mesh traffic)
+ *   5. `/ws/notifications` local           -> handleNotificationsWs
+ *   6. remote nodeId path                   -> handleRemoteForwarder
+ *   7. `/api/stacks/:name/logs`             -> handleLogsWs
+ *   8. `/api/system/host-console`           -> handleHostConsoleWs
+ *   9. fallback                             -> handleGenericWs (`/ws` exec + stats)
  */
 export function attachUpgrade(
   server: http.Server,
@@ -52,20 +50,14 @@ export function attachUpgrade(
   attachGenericConnectionHandlers(wss);
 
   server.on('upgrade', async (req, socket, head) => {
-    // Pilot-agent tunnel ingress: machine credentials, no cookies.
-    // Mesh proxy-tunnel-from-peer ingress: peer-initiated dial-back over
-    // a `mesh_tunnel`-scoped JWT (minted earlier during the bootstrap
-    // exchange). Both handlers run their own auth before the shared
-    // cookie/Bearer pipeline because their credentials are not user
-    // sessions and would fail the shared user-existence check.
+    // Pilot-agent tunnel ingress: machine credentials, no cookies. Runs its
+    // own auth before the shared cookie/Bearer pipeline because the
+    // credential is not a user session and would fail the shared
+    // user-existence check.
     try {
       const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
       if (reqUrl.pathname === '/api/pilot/tunnel') {
         await handlePilotTunnel(req, socket, head, pilotTunnelWss);
-        return;
-      }
-      if (reqUrl.pathname === '/api/mesh/proxy-tunnel-from-peer') {
-        handleMeshProxyTunnelFromPeerUpgrade(req, socket, head);
         return;
       }
     } catch {

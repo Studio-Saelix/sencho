@@ -66,17 +66,12 @@ describe('PilotMetrics persistence', () => {
             proxy_bridges_total: 7,
             proxy_dials_failed: 5,
             proxy_idle_closes: 2,
-            proxy_bridges_peer_initiated_total: 3,
-            mesh_central_bootstraps_total: 4,
-            mesh_callback_dials_failed_total: 0,
-            mesh_callback_auth_failures_total: 0,
         });
         PilotMetrics.load(db);
         const snap = PilotMetrics.snapshot();
         expect(snap.tunnels_total).toBe(11);
         expect(snap.proxy_dials_failed).toBe(5);
         expect(snap.proxy_bridges_total).toBe(7);
-        expect(snap.mesh_central_bootstraps_total).toBe(4);
     });
 
     it('threshold flush: increments past the threshold trigger a single persist', () => {
@@ -150,7 +145,7 @@ describe('PilotMetrics persistence', () => {
         expect(snap.proxy_dials_failed).toBe(9);
         expect(snap.proxy_bridges_total).toBe(0);
         expect(snap.tunnels_total).toBe(0);
-        expect(snap.mesh_callback_auth_failures_total).toBe(0);
+        expect(snap.proxy_idle_closes).toBe(0);
     });
 
     it('stop() cancels a pending interval flush without persisting', () => {

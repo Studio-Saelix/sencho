@@ -72,6 +72,22 @@ export function RoutingNodeCard({
                                 unreachable
                             </span>
                         )}
+                        {status.reverseCallbackStatus === 'connecting' && (
+                            <span
+                                title="Central is dialing the reverse bridge to this peer."
+                                className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-card-border bg-card text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-stat-subtitle"
+                            >
+                                reconnecting
+                            </span>
+                        )}
+                        {status.reverseCallbackStatus === 'unavailable' && (
+                            <span
+                                title="Peer→central tunnel is between dials. Central will redial on its next reconcile tick."
+                                className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-amber-500/40 bg-amber-500/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-amber-600 dark:text-amber-400"
+                            >
+                                reverse unavailable
+                            </span>
+                        )}
                     </div>
                     <div className="flex items-center gap-2">
                         <TogglePill
