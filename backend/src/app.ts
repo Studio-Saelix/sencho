@@ -6,35 +6,37 @@ import helmet from 'helmet';
 import { globalApiLimiter, pollingLimiter } from './middleware/rateLimiters';
 import { conditionalJsonParser } from './middleware/jsonParser';
 import { nodeContextMiddleware } from './middleware/nodeContext';
+import { normalizeAcceptEncoding } from './middleware/normalizeAcceptEncoding';
 import './types/express';
 
 /**
  * Build an Express app with the full middleware pipeline installed.
  *
- * Canonical middleware order (17 steps). Do not reorder without re-running the
+ * Canonical middleware order (18 steps). Do not reorder without re-running the
  * regression checklist in `docs/internal/architecture/middleware-order.md`.
  *
  *   1.  trust proxy
  *   2.  helmet
  *   3.  cors
- *   4.  compression
- *   5.  cookieParser
- *   6.  globalApiLimiter (at /api)
- *   7.  pollingLimiter (at /api)
- *   8.  conditionalJsonParser
- *   9.  nodeContextMiddleware
- *   10. authGate (at /api)                -- registered in index.ts
- *   11. auditLog (at /api)                -- registered in index.ts
- *   12. enforceApiTokenScope (at /api)    -- registered in index.ts
- *   13. hubOnlyGuard (at /api)            -- middleware/hubOnlyGuard.ts, registered in index.ts
- *   14. createRemoteProxyMiddleware       -- proxy/remoteNodeProxy.ts, registered in index.ts
- *   15. routes                            -- registered in index.ts from routes/*
- *   16. static serving + SPA fallback     -- registered in index.ts
- *   17. errorHandler                      -- registered in index.ts
+ *   4.  normalizeAcceptEncoding
+ *   5.  compression
+ *   6.  cookieParser
+ *   7.  globalApiLimiter (at /api)
+ *   8.  pollingLimiter (at /api)
+ *   9.  conditionalJsonParser
+ *   10. nodeContextMiddleware
+ *   11. authGate (at /api)                -- registered in index.ts
+ *   12. auditLog (at /api)                -- registered in index.ts
+ *   13. enforceApiTokenScope (at /api)    -- registered in index.ts
+ *   14. hubOnlyGuard (at /api)            -- middleware/hubOnlyGuard.ts, registered in index.ts
+ *   15. createRemoteProxyMiddleware       -- proxy/remoteNodeProxy.ts, registered in index.ts
+ *   16. routes                            -- registered in index.ts from routes/*
+ *   17. static serving + SPA fallback     -- registered in index.ts
+ *   18. errorHandler                      -- registered in index.ts
  *
- * Steps 10 to 13 and 15 must run after the public auth routers (meta, auth,
+ * Steps 11 to 14 and 16 must run after the public auth routers (meta, auth,
  * mfa, sso) are registered so those routes stay reachable without a session
- * cookie. index.ts mounts those public routers before step 10 to preserve
+ * cookie. index.ts mounts those public routers before step 11 to preserve
  * that invariant.
  */
 export function createApp(): express.Express {
@@ -99,7 +101,12 @@ export function createApp(): express.Express {
     credentials: true,
   }));
 
-  // 4. Compression. SSE streams (Content-Type: text/event-stream) MUST NOT be
+  // 4. Drop unknown Accept-Encoding tokens (e.g. `zstd` from Chromium 123+)
+  // before compression negotiates. See middleware/normalizeAcceptEncoding.ts
+  // for the symptom this prevents.
+  app.use(normalizeAcceptEncoding);
+
+  // 5. Compression. SSE streams (Content-Type: text/event-stream) MUST NOT be
   // compressed because compression buffers output and would delay event delivery
   // until a flush, breaking live log and status streams.
   app.use(compression({
@@ -112,18 +119,18 @@ export function createApp(): express.Express {
     },
   }));
 
-  // 5. Cookie parser must run before the rate limiters so the hybrid key
+  // 6. Cookie parser must run before the rate limiters so the hybrid key
   // generator can read req.cookies for per-user rate limit bucketing.
   app.use(cookieParser());
 
-  // 6-7. Tiered rate limiting (see middleware/rateLimiters.ts for the model).
+  // 7-8. Tiered rate limiting (see middleware/rateLimiters.ts for the model).
   app.use('/api/', globalApiLimiter);
   app.use('/api/', pollingLimiter);
 
-  // 8. Parse JSON on local requests; preserve the raw stream for remote proxy.
+  // 9. Parse JSON on local requests; preserve the raw stream for remote proxy.
   app.use(conditionalJsonParser);
 
-  // 9. Resolve req.nodeId and short-circuit requests to deleted nodes.
+  // 10. Resolve req.nodeId and short-circuit requests to deleted nodes.
   app.use(nodeContextMiddleware);
 
   return app;

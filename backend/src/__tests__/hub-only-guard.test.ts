@@ -9,8 +9,8 @@
  * on a remote instance, crossing a node-authority boundary that the UI
  * promises will not happen.
  *
- * The guard sits between `enforceApiTokenScope` (step 12) and
- * `createRemoteProxyMiddleware` (step 14).
+ * The guard sits between `enforceApiTokenScope` (step 13) and
+ * `createRemoteProxyMiddleware` (step 15).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
