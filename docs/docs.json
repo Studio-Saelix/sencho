@@ -173,7 +173,6 @@
               "features/licensing",
               "features/node-compatibility",
               "security",
-              "reference/security-advisories",
               "reference/contact"
             ]
           },
