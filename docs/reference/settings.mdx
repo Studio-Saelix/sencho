@@ -14,58 +14,92 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 | Group | What it covers |
 |-------|----------------|
 | **Identity** | Account, Appearance, License, Users, SSO, API Tokens |
-| **System** (node-scoped) | System Limits, Registries, Nodes |
+| **System** | System Limits, Registries, Cloud Backup, Nodes (System Limits is per-node; the rest are global) |
 | **Alerts** | Notifications, Routing, Webhooks |
 | **Advanced** | Labels, Security, Developer, App Store, Support, About |
 
-Sections that require a higher license tier show a tier chip (`SKIPPER` or `ADMIRAL`) next to their name. Admin-only sections stay hidden for non-admins.
+Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Registries, Cloud Backup, Routing, Security) stay hidden for non-admin operators.
+
+### Page chrome
+
+Every section renders inside the same masthead-and-sidebar layout. The masthead breadcrumb on the left tells you exactly where you are. Metadata pills on the right tell you what's loaded.
+
+| Pill | Meaning |
+|------|---------|
+| **SCOPE** `operator` / `global` | Setting applies to your account (Identity sections) or to the whole instance (System and Advanced) |
+| **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
+| **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
+| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Notifications); `ROUTES` (Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `TRIVY managed`/`host`/`missing` and `POLICIES` (Security); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer) |
 
 ### Quick search
 
-Click **Filter settings** at the top of the sidebar, or press `Ctrl+K` / `⌘K` while the hub is open, to open the command palette. Type any section name, keyword, or synonym (for example, `saml` finds SSO and `trivy` finds Security) and press Enter to jump to it.
+Click **Filter** at the top of the sidebar, or press `Ctrl+K` / `⌘K` while the hub is open, to open the command palette. Type any section name, keyword, or synonym (for example, `saml` finds SSO and `trivy` finds Security) and press Enter to jump to it.
 
 <Frame>
-  <img src="/images/settings/settings-search.png" alt="Settings command palette filtered to webhook" />
+  <img src="/images/settings/settings-search.png" alt="Settings command palette filtered to a webhook query" />
 </Frame>
 
-### Scope breadcrumb
+### Node scope
 
-The content pane shows a breadcrumb such as `SETTINGS › SYSTEM › SYSTEM LIMITS`. For node-scoped sections the breadcrumb appends the active node name (for example, `LOCAL (NODE-SCOPED)`) so you always know which node you are editing.
+For node-scoped sections the masthead replaces the **SCOPE** pill with a **NODE** pill showing the active node name. Switch the active node from the top bar's **Switch node** button to edit a different node's per-node settings.
 
 <Frame>
-  <img src="/images/settings/settings-node-scope.png" alt="System Limits section showing the node-scope indicator in the breadcrumb" />
+  <img src="/images/settings/settings-node-scope.png" alt="System Limits section showing the NODE pill in the masthead" />
 </Frame>
 
 ---
 
 ## Account
 
-**Scope:** Global (applies to this Sencho instance, not per-node)
+**Scope:** Operator (applies to the signed-in account)
 
-Change the admin account password. All three fields are required.
+The Account section manages password and two-factor authentication for the operator currently signed in. The masthead publishes a **2FA** pill so you can see at a glance whether the second factor is enabled.
+
+<Frame>
+  <img src="/images/settings/settings-account-2fa.png" alt="Account section showing the Password form and the Two-factor authentication card" />
+</Frame>
+
+### Password
 
 | Field | Description |
 |-------|-------------|
-| **Current Password** | Your existing password for verification |
-| **New Password** | Must be at least 6 characters |
-| **Confirm New Password** | Must match New Password |
+| **Current password** | Your existing password. Required to change any auth setting. |
+| **New password** | Minimum 8 characters. 12 or more is recommended. |
+| **Confirm new password** | Must match New password. |
 
-Click **Update Password** to apply. The change takes effect immediately; existing sessions remain valid.
+Click **Update password** to apply. Existing sessions remain valid.
+
+### Two-factor authentication
+
+When 2FA is off, a **Set up 2FA** button opens the enrolment dialog. The dialog walks through scanning the QR code in an authenticator app (Authy, 1Password, Aegis, etc.) and verifying a code.
+
+Once enrolled, the card shows:
+
+| Element | Description |
+|---------|-------------|
+| **Authenticator app** | Confirms the enrolment is active. |
+| **Backup codes** | Shows how many single-use recovery codes remain. **Regenerate** issues a fresh set; the count resets to ten. |
+| **Require 2FA on SSO sign-in** | Visible only when an SSO provider is configured. When on, SSO logins must also pass the second factor; when off, SSO logins skip it. |
+| **Disable 2FA** | Removes the second factor after a confirmation prompt. |
+
+See [Two-Factor Authentication](/features/two-factor-authentication) for the enrolment walkthrough and recovery options. If you lose access to your authenticator and have no backup codes left, an admin can clear your second factor from the [Users](#users) section.
 
 ---
 
 ## Appearance
 
-**Scope:** Per-device (saved to this browser only)
+**Scope:** This browser (preferences are saved to local storage)
 
-Control how much information Sencho packs on screen. Each browser you sign in from remembers its own choice, so a compact laptop setup does not force the same rhythm on a larger desktop.
+Control how dense and how interactive the workspace feels. Each browser remembers its own choices so a compact laptop setup does not force the same rhythm on a larger desktop.
 
 <Frame>
-  <img src="/images/settings/appearance-density.png" alt="Appearance settings showing the Density selector" />
+  <img src="/images/settings/appearance-density.png" alt="Appearance settings showing the Density selector, Deploy progress modal, and Diff preview toggles" />
 </Frame>
 
-| Density | When to pick it |
-|---------|-----------------|
+### Density
+
+| Value | When to pick it |
+|-------|-----------------|
 | **Comfortable** | Default spacing. Roomier rows and tiles for review and orientation. |
 | **Compact** | Tighter rows and tiles. Fits more stacks, tasks, and audit entries on screen at once. |
 
@@ -89,29 +123,32 @@ When enabled, clicking **Save & Deploy** or **Save Only** in the compose or env 
 | **Enabled** | Diff modal opens on every save that has unsaved changes |
 | **Disabled** (default) | File is saved directly without a review step |
 
-If there are no unsaved changes the modal is skipped and the save proceeds immediately.
-
-See [Diff preview before save](/features/editor#diff-preview-before-save) in the Editor guide for screenshots and the full workflow.
+If there are no unsaved changes the modal is skipped and the save proceeds immediately. See [Diff preview before save](/features/editor#diff-preview-before-save) in the Editor guide for the full workflow.
 
 ---
 
 ## License
 
-**Scope:** Global
+**Scope:** Operator-facing, but reflects the instance license
 
-Manage your Sencho license and subscription from this section.
+Activate, view, or deactivate the license for this Sencho control plane. The masthead publishes a **PLAN** pill showing the current tier, a **TRIAL** pill with days remaining if a trial is active, a **RENEWS** pill with the next renewal date, and a **STATUS** pill if the license is in an unusual state (expired, error).
+
+<Frame>
+  <img src="/images/settings/settings-license.png" alt="License section showing the Plan, Customer, Product, License key, and Deactivate action" />
+</Frame>
 
 | Element | Description |
 |---------|-------------|
-| **Current tier** | Shows your current tier (Community, Skipper, or Admiral) with a tier badge |
-| **Trial status** | If on a trial, shows remaining days |
-| **Renews** | Next renewal date for active subscriptions |
-| **Upgrade cards** | Dynamic plan cards with feature highlights and checkout links. Community users see Skipper and Admiral; Skipper users see Admiral only |
-| **Activate** | Enter a license key to activate your plan (visible when no license is active) |
-| **Manage Subscription** | Opens the Lemon Squeezy billing portal (Skipper / Admiral only) |
-| **Deactivate License** | Reverts to Community features (Skipper / Admiral only) |
+| **Plan** | The active tier (Sencho Community, Sencho Skipper, Sencho Admiral, or Sencho Admiral (Trial)) with a tier badge. |
+| **Customer** | The customer name on file with Lemon Squeezy (paid plans only). |
+| **Product** | The product variant (paid plans only). |
+| **License key** | The active key, masked to the last four characters. |
+| **Trial countdown** | Days remaining. Visible only while a trial is active. |
+| **Manage subscription** | Opens the Lemon Squeezy customer portal (subscription plans only; not shown for lifetime). |
+| **Deactivate** | Releases the key from this instance and reverts to Community features. |
+| **See pricing** | Direct link to the pricing page; visible on Community or when an existing license has expired. |
 
-See [Licensing & Billing](/features/licensing) for the full walkthrough.
+See [Licensing & Billing](/features/licensing) for the full walkthrough including trial activation.
 
 ---
 
@@ -123,13 +160,14 @@ See [Licensing & Billing](/features/licensing) for the full walkthrough.
 
 **Scope:** Global
 
-Create and manage user accounts with role-based access.
+Create and manage user accounts with role-based access. The masthead publishes an **OPERATORS** pill with the total user count.
 
 | Action | Description |
 |--------|-------------|
-| **Create user** | Add a new account with username, password, and role |
-| **Edit user** | Change an existing user's password or role |
-| **Delete user** | Remove a user account (you cannot delete your own account) |
+| **Create user** | Add a new account with username, password, and role. |
+| **Edit user** | Change an existing user's password or role. |
+| **Delete user** | Remove a user account (you cannot delete your own account). |
+| **Reset MFA** | Clears the second factor for a user who has lost access to their authenticator. |
 
 **Available roles:**
 
@@ -148,12 +186,12 @@ See [RBAC & User Management](/features/rbac) for details on what each role can a
 ## SSO
 
 <Note>
-  SSO requires a Sencho Admiral license.
+  Custom OIDC is available on Community; preset providers (Google, GitHub, Okta) require Skipper; LDAP / Active Directory requires Admiral.
 </Note>
 
-**Scope:** Global
+**Scope:** Global, admin-only
 
-Configure Single Sign-On providers (LDAP/AD and OIDC) for centralized authentication. Each provider type has its own configuration card with connection fields, a test button, and an active toggle.
+Configure Single Sign-On providers for centralized authentication. Each provider type has its own configuration card with connection fields, a test button, and an active toggle.
 
 See [SSO](/features/sso) for the full configuration walkthrough.
 
@@ -165,11 +203,40 @@ See [SSO](/features/sso) for the full configuration walkthrough.
   API Tokens require a Sencho Admiral license.
 </Note>
 
-**Scope:** Global
+**Scope:** Global, admin-only
 
 Create and manage long-lived API tokens for external integrations and automation. Tokens can be scoped to specific permissions.
 
 See [API Tokens](/features/api-tokens) for the full walkthrough.
+
+---
+
+## System Limits
+
+**Scope:** Per-node (applies to the currently selected node)
+
+Configure resource thresholds that trigger visual warnings on the dashboard stat cards. These are display thresholds only; Sencho does not throttle or kill containers when limits are reached. The masthead **NODE** pill names which node you are configuring; the **EDITED** pill counts unsaved changes.
+
+<Frame>
+  <img src="/images/settings/settings-system-limits.png" alt="System Limits section showing Host thresholds and Docker hygiene subsections" />
+</Frame>
+
+### Host thresholds
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **CPU limit** | 90% | Alerts fire when the 5-minute average CPU exceeds this percentage. The input warns at values above 95%. |
+| **RAM limit** | 90% | Set this below the point at which the host starts paging to swap. |
+| **Disk limit** | 90% | Low free space slows image pulls and backups. |
+
+### Docker hygiene
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Janitor threshold** | 5 GiB | Alert when reclaimable Docker data (images, volumes, build cache that `docker prune` could free) exceeds this size. Set to `0` to disable the alert. |
+| **Global crash capture** | On | Watch every managed container for unexpected exits. When on, Sencho sends a notification whenever a container exits with a non-zero status outside a planned stop. |
+
+Click **Save limits** to apply.
 
 ---
 
@@ -179,7 +246,7 @@ See [API Tokens](/features/api-tokens) for the full walkthrough.
   Private Registries require a Sencho Admiral license.
 </Note>
 
-**Scope:** Global
+**Scope:** Global, admin-only
 
 Configure private Docker registries so Sencho can pull images that require authentication.
 
@@ -187,117 +254,31 @@ See [Private Registries](/features/private-registries) for the full walkthrough.
 
 ---
 
-## Labels
+## Cloud Backup
 
 <Note>
-  Stack Labels require a Sencho Skipper or Admiral license.
+  Cloud Backup requires a Sencho Admiral license.
 </Note>
 
-**Scope:** Global
+**Scope:** Global, admin-only
 
-Create, edit, and delete labels used to organize and filter stacks across your fleet. Each label has a name and one of ten available colors.
-
-See [Stack Labels](/features/stack-labels) for the full walkthrough.
-
----
-
-## System Limits
-
-**Scope:** Per-node (applies to the currently selected node)
-
-Configure resource thresholds that trigger visual warnings on the dashboard stat cards. These are display thresholds only; Sencho does not throttle or kill containers when limits are reached. When viewing a remote node, a badge shows which node you are configuring.
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| **Host CPU Alert Threshold** | 90% | CPU percentage above which the CPU card turns orange/red |
-| **Host RAM Alert Threshold** | 90% | RAM percentage above which the RAM card turns orange/red |
-| **Host Disk Alert Threshold** | 90% | Disk percentage above which the Disk card turns orange/red |
-| **Docker Janitor Storage Threshold** | 5 GB | Alert when unused Docker data (reclaimable via prune) exceeds this size. Set to `0` to disable. |
-| **Global Crash Detection** | On | Watch all containers for unexpected exits. When enabled, Sencho sends a notification whenever any managed container exits unexpectedly. |
-
-Click **Save Limits** to apply.
-
----
-
-## Notifications
-
-**Scope:** Per-node (each node has its own notification agents; remote nodes dispatch alerts through their own channels)
-
-Configure external destinations for alert notifications. Three agent types are available on separate tabs: **Discord**, **Slack**, and **Webhook**.
-
-For each agent:
-
-| Field | Description |
-|-------|-------------|
-| **Enable toggle** | Activates or deactivates this agent. Disabled agents receive no messages even if a URL is saved. |
-| **Webhook URL** | The endpoint Sencho will POST to when an alert fires |
-
-Click **Save** to persist changes. Click **Test** to send a test payload immediately and verify delivery.
-
-At least one agent must be enabled for stack alerts to deliver notifications. See [Alerts & Notifications](/features/alerts-notifications) for how to create alert rules.
-
----
-
-## Routing
-
-<Note>
-  Notification Routing requires a Sencho Admiral license.
-</Note>
-
-**Scope:** Global
-
-Create routing rules that direct specific alert types to specific notification channels. Rules let you send critical alerts to one channel and informational alerts to another.
-
-See [Notification Routing](/features/alerts-notifications#notification-routing) for the full walkthrough.
-
----
-
-## Webhooks
-
-<Note>
-  Webhooks require a Sencho Skipper or Admiral license.
-</Note>
-
-**Scope:** Global
-
-Create and manage HTTP webhooks that external systems (CI/CD pipelines, automation tools) can call to trigger stack actions. See [Webhooks](/features/webhooks) for the full walkthrough including authentication and CI examples.
-
-Quick reference:
-
-| Action | How |
-|--------|-----|
-| Create a webhook | Click **Create Webhook**, select a stack and action |
-| Copy trigger URL | Click the copy icon on any webhook row |
-| View execution history | Expand a webhook row to see recent executions |
-| Delete a webhook | Click the trash icon |
-
----
-
-## Developer
-
-**Scope:** Per-node (developer mode), Global (data retention)
+Mirror fleet snapshots to Sencho Cloud Backup or any S3-compatible storage so a control-plane loss does not take the recovery history with it. The masthead publishes a **PROVIDER** pill (`sencho` / `s3` / `disabled`), a **USED** pill showing storage consumption, and a **SNAPSHOTS** pill with the cloud object count.
 
 <Frame>
-  <img src="/images/settings/settings-developer-section.png" alt="Developer settings panel with the Developer Mode toggle and Data Retention fields" />
+  <img src="/images/settings/settings-cloud-backup.png" alt="Cloud Backup section with Sencho Cloud Backup mode selected" />
 </Frame>
 
-Advanced settings for debug diagnostics and data retention. Most users can leave these at their defaults.
+### Storage modes
 
-### Debug
+| Mode | When to pick it |
+|------|-----------------|
+| **Disabled** | Snapshots stay on the control plane's local disk only. Default for fresh installs. |
+| **Sencho Cloud Backup (included)** | Replicate snapshots to managed storage that ships with the Admiral subscription. On first selection, click **Activate** to provision the 500 MB allowance (backed by Cloudflare R2, scoped to this Admiral license). Auto-upload is always on for this mode. The **Test** and **Reprovision** buttons appear on the activated card if you need to verify connectivity or replace the credentials. |
+| **Custom S3 (BYOB)** | Point Sencho at your own S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, Backblaze B2). Required fields: **Endpoint URL**, **Region**, **Bucket**, **Path Prefix** (default `sencho/`), **Access Key ID**, **Secret Access Key**. The secret access key is masked after save. Use **Test connection** to verify credentials, then toggle **Auto-upload** to start replicating snapshots. |
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| **Developer Mode** | Off | Enables Real-Time Metrics and Debug Diagnostics (timing, cache state, file resolution) in the server logs. Does not affect [Global Observability](/features/global-observability) streaming, which is always on. |
+The **Cloud Snapshots** list at the bottom of the section is an inventory of objects currently in the configured destination. Each row exposes a **Download** icon and a **Delete** icon.
 
-### Data Retention
-
-| Setting | Default | Max | Description |
-|---------|---------|-----|-------------|
-| **Container Metrics Retention** | 24 hrs | 8,760 (1 year) | How long to keep per-container CPU, RAM, and network history for dashboard charts |
-| **Notification Log Retention** | 30 days | 365 | How long to keep alert and notification history |
-| **Audit Log Retention** | 90 days | 365 | How long to keep audit trail entries (Admiral only) |
-
-Click **Save Developer Settings** to apply.
+See [Fleet Snapshots & Backups](/features/fleet-backups) for restore workflows.
 
 ---
 
@@ -319,19 +300,169 @@ Quick reference:
 
 ---
 
-## App Store
+## Notifications
+
+**Scope:** Per-node (each node has its own notification agents; remote nodes dispatch alerts through their own channels)
+
+Configure external destinations for alert notifications. Three agent types are available on separate tabs: **Discord**, **Slack**, and **Webhook**. The masthead publishes a **CHANNELS** pill showing how many agents are enabled (for example, `2/3`).
+
+For each agent:
+
+| Field | Description |
+|-------|-------------|
+| **Enabled** toggle | Activates or deactivates this agent. Disabled agents receive no messages even if a URL is saved. |
+| **Webhook URL** | The endpoint Sencho will POST to when an alert fires. |
+
+Click **Save** to persist changes. Click **Test** to send a test payload immediately and verify delivery.
+
+At least one agent must be enabled for stack alerts to deliver notifications. See [Alerts & Notifications](/features/alerts-notifications) for how to create alert rules.
+
+---
+
+## Routing
+
+<Note>
+  Notification Routing requires a Sencho Admiral license.
+</Note>
+
+**Scope:** Global, admin-only
+
+Create routing rules that direct specific alert types to specific notification channels. Rules let you send critical alerts to one channel and informational alerts to another. The masthead publishes a **ROUTES** pill with the active rule count.
+
+| Field | Description |
+|-------|-------------|
+| **Name** | Operator-facing label for the rule. |
+| **Node** | Specific node, or all nodes if left empty. |
+| **Stack patterns** | Glob patterns to match stack names (multi-select). |
+| **Labels** | Apply this rule to stacks that carry any of the selected labels. |
+| **Categories** | Event categories that trigger the rule (crash, deploy, vulnerability, etc.). |
+| **Channel type** | `discord`, `slack`, or `webhook`. |
+| **Channel URL** | The destination endpoint for this rule. |
+| **Priority** | Order in which rules are evaluated; the first match wins. |
+| **Enabled** toggle | Mute a rule without deleting it. |
+
+Each rule keeps an execution history (collapsible per row) showing which alerts triggered it, when, and whether the delivery succeeded.
+
+See [Notification Routing](/features/alerts-notifications#notification-routing) for the full walkthrough.
+
+---
+
+## Webhooks
+
+<Note>
+  Webhooks require a Sencho Skipper or Admiral license.
+</Note>
 
 **Scope:** Global
+
+Create and manage HTTP webhooks that external systems (CI/CD pipelines, automation tools) can call to trigger stack actions. The masthead publishes **WEBHOOKS** and **ENABLED** counts.
+
+| Field | Description |
+|-------|-------------|
+| **Name** | Operator-facing label. |
+| **Stack** | Target stack for this webhook. |
+| **Action** | `deploy`, `restart`, `update`, etc. |
+| **Secret** | Auto-generated on create. Shown once in a confirmation dialog so you can copy it into your CI secret store; recoverable later via **Copy secret** on the row. |
+| **Enabled** toggle | Mute a webhook without deleting it. |
+
+Each row exposes an execution history with timestamp, trigger source, duration, and any error returned to the caller.
+
+See [Webhooks](/features/webhooks) for the full walkthrough including authentication and CI examples.
+
+---
+
+## Labels
+
+<Note>
+  Stack Labels require a Sencho Skipper or Admiral license.
+</Note>
+
+**Scope:** Per-node
+
+Create, edit, and delete labels used to organize and filter stacks across your fleet. Each label has a name and one of ten available colors. Up to 100 labels per node. The masthead publishes a **LABELS** pill with the current and maximum counts.
+
+See [Stack Labels](/features/stack-labels) for the full walkthrough.
+
+---
+
+## Security
+
+<Note>
+  Security is admin-only. The Trivy installer and CVE/misconfig suppressions are available on all tiers; scan policies require Sencho Skipper or Admiral; the **Auto-update Trivy** toggle requires Admiral and a managed Trivy binary.
+</Note>
+
+**Scope:** Per-node
+
+Manage the Trivy scanner, scan policies, suppressions, and acknowledgements that power [vulnerability scanning](/features/vulnerability-scanning) across the fleet. The masthead publishes a **TRIVY** pill (`managed` / `host` / `missing`) and a **POLICIES** pill with the active rule count.
+
+<Frame>
+  <img src="/images/settings/settings-security.png" alt="Security section showing the Trivy installer card and the empty scan-policy state" />
+</Frame>
+
+### Trivy scanner
+
+| Element | Description |
+|---------|-------------|
+| **Status** | `Installed (managed)` when Sencho manages the binary, `Installed (host)` when an existing host binary is being reused, or empty when nothing is detected. |
+| **Version** | The current Trivy version, when installed. |
+| **Install / Update / Uninstall** | Lifecycle actions for the managed binary. Uninstall asks for confirmation. |
+| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires Admiral and a managed Trivy binary. |
+
+### Scan policies
+
+A scan policy enforces a severity threshold on a set of stacks. Each policy carries a severity level (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`), a stack pattern (regex), a **Block on deploy** toggle, and an **Enabled** toggle. Use **Add policy** to create one.
+
+### CVE Suppressions and Misconfig Acknowledgements
+
+- **CVE Suppressions** are fleet-wide accepted CVEs. They apply at read time across every instance and never modify stored scan data. See [CVE Suppressions](/features/cve-suppressions).
+- **Misconfig Acknowledgements** are fleet-wide accepted misconfigurations, with the same read-time semantics.
+
+### Fleet role
+
+Sencho instances on the Admiral tier can act as a security control plane for the fleet or as a replica. When this instance is a replica, the section shows a **Managed by control node** banner and a **Demote to control** button that converts the replica back into a standalone control.
+
+---
+
+## Developer
+
+**Scope:** Per-node (developer mode), Global (data retention)
+
+<Frame>
+  <img src="/images/settings/settings-developer-section.png" alt="Developer settings panel with the Developer Mode toggle and Data Retention fields" />
+</Frame>
+
+Advanced settings for debug diagnostics and data retention. Most operators can leave these at their defaults. The masthead publishes a **DEV MODE** pill (`on` / `off`).
+
+### Diagnostics
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Developer mode** | Off | Enables real-time metrics streams and verbose debug diagnostics in the UI. Does not affect [Global Observability](/features/global-observability) streaming, which is always on. |
+
+### Data retention
+
+| Setting | Default | Max | Description |
+|---------|---------|-----|-------------|
+| **Container metrics** | 24 hrs | 8,760 (1 year) | How long to keep per-container CPU, RAM, and network history for dashboard charts. |
+| **Notification log** | 30 days | 365 | How long to keep alert and notification history. |
+| **Audit log** | 90 days | 365 | How long to keep audit trail entries. Admiral only; the row is hidden on Community and Skipper. |
+
+Click **Save settings** to apply. Retention rows are global; the **Developer mode** toggle is per-node.
+
+---
+
+## App Store
+
+**Scope:** Per-node
 
 Configure the template source used by the App Store.
 
 | Element | Description |
 |---------|-------------|
-| **Default Registry** | LinuxServer.io (used when no custom URL is set) |
-| **Custom Registry URL** | A URL pointing to a Portainer v2 compatible template JSON file. Overrides the default registry. Leave empty to use the default. |
-| **Reset to Default** | Clears the custom URL and reverts to LinuxServer.io |
-
-Click **Save & Refresh** to update the URL and immediately refresh the cached template list.
+| **Default registry** | `api.linuxserver.io/api/v1/images` (read-only; used when no custom URL is set). |
+| **Custom registry URL** | A URL pointing to a Portainer v2 compatible template JSON file. Overrides the default registry. Leave empty to use the default. |
+| **Reset to default** | Clears the custom URL and reverts to the default registry. |
+| **Save & refresh** | Saves the URL and immediately refreshes the cached template list. |
 
 See [App Store](/features/app-store#custom-template-registry) for more on custom registries.
 
@@ -341,25 +472,23 @@ See [App Store](/features/app-store#custom-template-registry) for more on custom
 
 **Scope:** Global
 
-Links to help resources, with additional channels for Skipper and Admiral users.
+Links to help resources, with additional channels for Skipper and Admiral operators.
 
 ### Resources (all tiers)
 
 | Resource | Description |
 |----------|-------------|
-| **Documentation** | Opens docs.sencho.io |
-| **GitHub Issues** | Report bugs and request features on GitHub |
+| **Documentation** | Opens docs.sencho.io. |
+| **GitHub Issues** | Report bugs and request features on GitHub. |
 
 ### Paid tier support
 
-Skipper and Admiral license holders see additional support channels:
+| Channel | Tier | Description |
+|---------|------|-------------|
+| **Email Support** | Skipper | Direct email support. |
+| **Priority Email Support** | Admiral | Responses within 24 hours. |
 
-| Channel | Description |
-|---------|-------------|
-| **Email Support** | Direct email support (Skipper) |
-| **Priority Email Support** | Responses within 24 hours (Admiral) |
-
-Community users see an upgrade prompt with a link to the pricing page.
+Community operators see an upgrade callout with a link to the pricing page in place of the support channels.
 
 ---
 
@@ -371,9 +500,9 @@ Displays instance information at a glance.
 
 | Field | Description |
 |-------|-------------|
-| **Version** | Current Sencho version (e.g. v0.38.0) |
-| **Tier** | Community, Skipper, or Admiral badge |
-| **License Status** | Active, trial, expired, or community |
-| **Instance ID** | Truncated unique identifier for this Sencho instance |
+| **Version** | Current Sencho version. |
+| **Tier** | Community, Skipper, or Admiral badge. |
+| **License Status** | active, trial, expired, or community. |
+| **Instance ID** | First eight characters of the unique identifier for this Sencho control plane (used by the license server to identify it). |
 
 The **Links** section contains a link to the full changelog on GitHub.
