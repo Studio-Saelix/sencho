@@ -6,8 +6,6 @@ import { DatabaseService } from '../services/DatabaseService';
 import { CacheService } from '../services/CacheService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
-import { MeshCentralRegistry } from '../services/MeshCentralRegistry';
-import { PeerToCentralMeshSessionDialer } from '../services/PeerToCentralMeshSessionDialer';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { STATS_CACHE_TTL_MS, SYSTEM_STATS_CACHE_TTL_MS } from '../helpers/constants';
@@ -263,21 +261,7 @@ metricsRouter.get('/system/pilot-tunnels', authMiddleware, async (req: Request, 
   if (!requireAdmin(req, res)) return;
   try {
     const snapshot = PilotTunnelManager.getInstance().getMetricsSnapshot();
-    // centralCallback exposes the peer-side view of the symmetric mesh
-    // callback path (cached central material plus the live bridge presence).
-    // PilotMetrics already tracks the attempt/success counters via
-    // `counters.mesh_central_bootstraps_total` and friends; this block adds
-    // the per-instance last-success / last-failure diagnostics that live in
-    // MeshCentralRegistry rather than PilotMetrics.
-    const cached = MeshCentralRegistry.getInstance().getActive();
-    const centralCallback = {
-      bridgeOpen: PeerToCentralMeshSessionDialer.getInstance().hasSession(),
-      lastBootstrapAt: cached?.lastBootstrapAt ?? null,
-      lastDialOkAt: cached?.lastUsedAt ?? null,
-      lastDialFailAt: cached?.lastRejectedAt ?? null,
-      lastDialFailReason: cached?.lastRejectReason ?? null,
-    };
-    res.json({ ...snapshot, centralCallback });
+    res.json(snapshot);
   } catch (error) {
     console.error('Failed to fetch pilot tunnel metrics:', error);
     res.status(500).json({ error: 'Failed to fetch pilot tunnel metrics' });

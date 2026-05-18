@@ -5,13 +5,11 @@ import type { MeshActivityEvent, MeshDataPlaneStatus } from '../services/MeshSer
 let tmpDir: string;
 let MeshService: typeof import('../services/MeshService').MeshService;
 let DockerController: typeof import('../services/DockerController').default;
-let capability: typeof import('../services/CapabilityRegistry');
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ MeshService } = await import('../services/MeshService'));
     ({ default: DockerController } = await import('../services/DockerController'));
-    capability = await import('../services/CapabilityRegistry');
 });
 
 afterAll(() => {
@@ -43,7 +41,6 @@ beforeEach(() => {
         message: 'mesh data plane has not initialized yet',
         subnet: '',
     };
-    capability.enableCapability('mesh_proxy_callback_bootstrap');
 });
 
 afterEach(() => {
@@ -51,7 +48,6 @@ afterEach(() => {
     else process.env.SENCHO_MESH_SUBNET = prevSubnetEnv;
     if (prevHostnameEnv === undefined) delete process.env.HOSTNAME;
     else process.env.HOSTNAME = prevHostnameEnv;
-    capability.enableCapability('mesh_proxy_callback_bootstrap');
     vi.restoreAllMocks();
 });
 
@@ -94,7 +90,6 @@ describe('MeshService.setupMeshNetwork failure classification', () => {
         expect(status.ok).toBe(false);
         expect(status.reason).toBe('subnet_invalid');
         expect(status.subnet).toBe('not-a-cidr');
-        expect(capability.getActiveCapabilities()).not.toContain('mesh_proxy_callback_bootstrap');
         const entry = lastDisable(svc);
         expect(entry?.level).toBe('error');
         expect(entry?.details?.reason).toBe('subnet_invalid');
@@ -114,7 +109,6 @@ describe('MeshService.setupMeshNetwork failure classification', () => {
         expect(status.reason).toBe('subnet_overlap');
         expect(status.subnet).toBe('10.42.0.0/24');
         expect(status.message).toMatch(/overlap/i);
-        expect(capability.getActiveCapabilities()).not.toContain('mesh_proxy_callback_bootstrap');
         const entry = lastDisable(svc);
         expect(entry?.level).toBe('error');
         expect(entry?.details?.reason).toBe('subnet_overlap');
@@ -169,9 +163,6 @@ describe('MeshService.setupMeshNetwork failure classification', () => {
         const entry = lastDisable(svc);
         expect(entry?.level).toBe('warn');
         expect(entry?.details?.reason).toBe('not_in_docker');
-        // Capability is still stripped even in the warn-level not_in_docker
-        // case; pilot processes outside Docker must not advertise it.
-        expect(capability.getActiveCapabilities()).not.toContain('mesh_proxy_callback_bootstrap');
     });
 
     it('records the 404-on-inspect path as not_in_docker at level warn', async () => {
@@ -187,11 +178,9 @@ describe('MeshService.setupMeshNetwork failure classification', () => {
         expect(lastDisable(svc)?.level).toBe('warn');
     });
 
-    it('records success as ok and re-enables the capability', async () => {
+    it('records success as ok', async () => {
         process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
         process.env.HOSTNAME = 'sencho';
-        // Force the capability off first to prove the success path flips it back on.
-        capability.disableCapability('mesh_proxy_callback_bootstrap');
         mockDocker();
         const svc = MeshService.getInstance();
         await callSetup(svc);
@@ -200,7 +189,6 @@ describe('MeshService.setupMeshNetwork failure classification', () => {
         expect(status.reason).toBe('ok');
         expect(status.subnet).toBe('10.42.0.0/24');
         expect(status.message).toBeNull();
-        expect(capability.getActiveCapabilities()).toContain('mesh_proxy_callback_bootstrap');
     });
 
     it('preserves the legacy networkSetupError getter on failure', async () => {

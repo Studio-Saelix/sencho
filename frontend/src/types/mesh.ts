@@ -28,6 +28,17 @@ export interface MeshAlias {
 
 export type MeshReachableMode = 'local' | 'pilot' | 'proxy' | 'unreachable';
 
+/**
+ * State of the peer→central reverse path for a proxy-mode peer. Central
+ * maintains a persistent forward WS to every mesh-enabled proxy peer;
+ * peer→central traffic multiplexes over that same bridge. The four values:
+ *   - `connected`: bridge open, reverse multiplex available.
+ *   - `connecting`: dial in flight (transient).
+ *   - `unavailable`: bridge not open, no dial in flight; central will redial on its next reconcile tick.
+ *   - `not_applicable`: local node, pilot-mode peer, or mesh disabled.
+ */
+export type MeshReverseCallbackStatus = 'connected' | 'connecting' | 'unavailable' | 'not_applicable';
+
 export interface MeshNodeStatus {
     nodeId: number;
     nodeName: string;
@@ -40,6 +51,8 @@ export interface MeshNodeStatus {
     reachableMode: MeshReachableMode;
     /** Operator-facing reason when `reachableMode === 'unreachable'`. Null otherwise. */
     reachableReason: string | null;
+    /** Peer→central reverse path state. `not_applicable` for non-proxy peers. */
+    reverseCallbackStatus: MeshReverseCallbackStatus;
     optedInStacks: string[];
     activeStreamCount: number;
 }

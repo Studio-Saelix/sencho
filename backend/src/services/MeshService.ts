@@ -4,7 +4,7 @@ import fs from 'fs/promises';
 import { EventEmitter } from 'events';
 import * as YAML from 'yaml';
 import { ComposeService } from './ComposeService';
-import { DatabaseService } from './DatabaseService';
+import { DatabaseService, type NodeMode } from './DatabaseService';
 import DockerController from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { LicenseService } from './LicenseService';
@@ -14,7 +14,6 @@ import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDialer';
 import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
-import { disableCapability, enableCapability } from './CapabilityRegistry';
 import { lookupContainerIp } from '../mesh/containerLookup';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
@@ -97,7 +96,7 @@ export type MeshActivityType =
     | 'forwarder.listen' | 'forwarder.unlisten' | 'forwarder.error'
     | 'proxy-tunnel.open.ok' | 'proxy-tunnel.open.fail' | 'proxy-tunnel.close'
     | 'mesh.proxy_tunnel.identify'
-    | 'mesh_handshake.received';
+    | 'mesh.reconcile.fail';
 
 export interface MeshActivityEvent {
     ts: number;
@@ -148,12 +147,27 @@ export interface MeshRegenSummary {
  *   - `pilot`: a remote with a pilot agent. Live-tunnel state is captured
  *      separately in `pilotConnected`.
  *   - `proxy`: a remote that central reaches via the long-lived api_token.
- *      Mesh tunnels are opened on demand by `MeshProxyTunnelDialer`; the
- *      operator sees no badge while the configuration is sound.
+ *      Central maintains a persistent bidirectional WS to each mesh-enabled
+ *      proxy peer, reconciled periodically; the operator sees no badge while
+ *      the bridge is up.
  *   - `unreachable`: configuration or runtime problem keeps mesh traffic
  *      from flowing. `reachableReason` carries an actionable hint.
  */
 export type MeshReachableMode = 'local' | 'pilot' | 'proxy' | 'unreachable';
+
+/**
+ * State of the peer→central reverse path. The forward WS to a proxy-mode
+ * peer is bidirectional; peer→central traffic flows over the same WS via
+ * `tcp_open_reverse`. This discriminator surfaces whether that bridge is
+ * currently usable so the Routing tab can show a transient pill while the
+ * dialer is reconnecting.
+ *   - `connected`: forward WS is open; peer can dispatch reverse streams.
+ *   - `connecting`: dial in flight; transient.
+ *   - `unavailable`: no bridge and no dial in flight (peer just rebooted, or
+ *     last dial cached a failure).
+ *   - `not_applicable`: not a proxy-mode peer, or mesh disabled on this node.
+ */
+export type MeshReverseCallbackStatus = 'connected' | 'connecting' | 'unavailable' | 'not_applicable';
 
 export interface MeshNodeStatus {
     nodeId: number;
@@ -174,6 +188,8 @@ export interface MeshNodeStatus {
     reachableMode: MeshReachableMode;
     /** Short, operator-facing reason when `reachableMode === 'unreachable'`. Null otherwise. */
     reachableReason: string | null;
+    /** Peer→central reverse path state. `not_applicable` for non-proxy peers. */
+    reverseCallbackStatus: MeshReverseCallbackStatus;
     optedInStacks: string[];
     activeStreamCount: number;
 }
@@ -245,6 +261,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private activity: MeshActivityEvent[] = [];
     private activeStreams = new Map<number, ActiveStreamRecord>();
     private aliasRefreshTimer?: NodeJS.Timeout;
+    private bridgeReconcileTimer?: NodeJS.Timeout;
     private routeErrorMap = new Map<string, { ts: number; message: string }>();
     private routeLatencyMap = new Map<string, number>();
     private activityListeners = new Set<(e: MeshActivityEvent) => void>();
@@ -335,8 +352,6 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         this.selfCentralNodeId = this.resolveSelfCentralNodeId();
 
-        this.maybeWarnUnsetPrimaryUrl();
-
         await this.setupMeshNetwork();
         try {
             await this.refreshAliasCache();
@@ -355,10 +370,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             });
         }
         await this.regenerateAllOverrides();
-        // Trigger 3: proactively re-establish central->peer bridges so any
-        // peer that is online and capable receives bootstrap material on
-        // startup. Fire-and-forget so start() does not block on remote I/O.
-        void this.proactiveBootstrapFanout();
+        // Proactively dial every mesh-enabled proxy peer so the forward WS
+        // (which also carries peer→central reverse traffic) is up before any
+        // user request hits it. Fire-and-forget so start() does not block on
+        // remote I/O.
+        void this.proactiveBridgeFanout();
+        this.startBridgeReconcileLoop();
         this.aliasRefreshTimer = setInterval(() => {
             void (async () => {
                 try {
@@ -388,49 +405,25 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             clearInterval(this.aliasRefreshTimer);
             this.aliasRefreshTimer = undefined;
         }
+        this.stopBridgeReconcileLoop();
         await this.forwarder.shutdown();
     }
 
     /**
-     * Operator-facing preflight: if `SENCHO_PRIMARY_URL` is unset at
-     * startup and the central has at least one mesh-enabled proxy-mode
-     * node, warn that the Task 8 capability-gated handshake will fall
-     * back to an inferred origin for the callback bootstrap. The matching
-     * fail-safe in `MeshProxyTunnelDialer` silently skips the bootstrap
-     * when the env is unset; this warn makes the consequence visible.
+     * Walk every mesh-enabled proxy-mode peer and call
+     * `MeshProxyTunnelDialer.ensureBridge(nodeId)` on each. The bridge is
+     * the persistent bidirectional control-plane channel: central→peer
+     * `tcp_open` and peer→central `tcp_open_reverse` both flow over the
+     * same WS. Bounded concurrency 4 with a 250 ms stagger; failures are
+     * logged and never abort the fan-out. Called both at startup and on
+     * every reconcile tick. `ensureBridge` short-circuits on already-open
+     * bridges, so steady-state cost is one Map lookup per peer.
      */
-    private maybeWarnUnsetPrimaryUrl(): void {
-        if (process.env.SENCHO_PRIMARY_URL) return;
-        const row = DatabaseService.getInstance().getDb().prepare(`
-            SELECT COUNT(*) as n FROM nodes
-            WHERE type='remote' AND mode='proxy' AND mesh_enabled=1
-        `).get() as { n: number };
-        if (row.n > 0) {
-            console.warn(
-                '[Mesh] SENCHO_PRIMARY_URL is unset; mesh callback bootstrap will use ' +
-                'inferred origin. Set SENCHO_PRIMARY_URL to make peer-initiated mesh ' +
-                'callbacks robust against reverse-proxy edge cases.'
-            );
-        }
-    }
-
-    /**
-     * Trigger 3: at central startup, walk every mesh-enabled proxy-mode
-     * peer that already has at least one `mesh_stacks` row and call
-     * `MeshProxyTunnelDialer.ensureBridge(nodeId)`. The dialer's
-     * capability-gated handshake then mints and ships bootstrap material
-     * to peers that just came online or just got upgraded to a build that
-     * advertises `mesh_proxy_callback_bootstrap`. Bounded concurrency 4
-     * with a 250ms stagger; failures are logged and never abort the
-     * fan-out.
-     */
-    private async proactiveBootstrapFanout(): Promise<void> {
+    private async proactiveBridgeFanout(): Promise<void> {
         const rows = DatabaseService.getInstance().getDb().prepare(`
-            SELECT DISTINCT n.id AS id
-            FROM nodes n
-            INNER JOIN mesh_stacks ms ON ms.node_id = n.id
-            WHERE n.type = 'remote' AND n.mode = 'proxy' AND n.mesh_enabled = 1
-            ORDER BY n.id
+            SELECT id FROM nodes
+            WHERE type = 'remote' AND mode = 'proxy' AND mesh_enabled = 1
+            ORDER BY id
         `).all() as Array<{ id: number }>;
 
         const queue = rows.map((r) => r.id);
@@ -445,8 +438,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     this.logActivity({
                         source: 'mesh', level: 'warn', type: 'proxy-tunnel.open.fail',
                         nodeId,
-                        message: `boot proactive bootstrap failed: ${sanitizeForLog((err as Error).message)}`,
-                        details: { trigger: 'startup_fanout' },
+                        message: `proxy-tunnel reconcile dial failed: ${sanitizeForLog((err as Error).message)}`,
+                        details: { trigger: 'reconcile' },
                     });
                 }
                 await new Promise((r) => setTimeout(r, 250));
@@ -454,6 +447,35 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         };
         const workerCount = Math.min(4, Math.max(1, queue.length));
         await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    }
+
+    /**
+     * Schedule the proxy-tunnel reconcile tick. Interval is overridable via
+     * `SENCHO_MESH_RECONCILE_INTERVAL_MS` (default 60_000 ms) so an operator
+     * can tune the peer-reboot detection window. Idempotent: a second call
+     * is a no-op while the timer is live.
+     */
+    private startBridgeReconcileLoop(): void {
+        if (this.bridgeReconcileTimer) return;
+        const raw = process.env.SENCHO_MESH_RECONCILE_INTERVAL_MS;
+        const parsed = raw === undefined ? Number.NaN : Number(raw);
+        const intervalMs = Number.isFinite(parsed) && parsed >= 1000 ? parsed : 60_000;
+        this.bridgeReconcileTimer = setInterval(() => {
+            void this.proactiveBridgeFanout().catch((err) => {
+                this.logActivity({
+                    source: 'mesh', level: 'error', type: 'mesh.reconcile.fail',
+                    message: `bridge reconcile threw: ${sanitizeForLog((err as Error).message)}`,
+                });
+            });
+        }, intervalMs);
+        this.bridgeReconcileTimer.unref?.();
+    }
+
+    private stopBridgeReconcileLoop(): void {
+        if (this.bridgeReconcileTimer) {
+            clearInterval(this.bridgeReconcileTimer);
+            this.bridgeReconcileTimer = undefined;
+        }
     }
 
     public getSenchoIp(): string | null {
@@ -481,7 +503,6 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     /**
      * Single recording path for every mesh-setup failure. Keeps the legacy
      * `networkSetupError` string in sync, sets the typed `dataPlaneStatus`,
-     * strips `mesh_proxy_callback_bootstrap` from advertised capabilities,
      * and emits a `mesh.disable` activity entry. Callers pass `level: 'warn'`
      * for expected conditions (`not_in_docker` in dev mode) and `'error'` for
      * real failures.
@@ -500,7 +521,6 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         this.networkSetupError = message;
         this.dataPlaneStatus = { ok: false, reason, message, subnet };
         this.senchoIp = null;
-        disableCapability('mesh_proxy_callback_bootstrap');
         this.logActivity({
             source: 'mesh',
             level,
@@ -580,7 +600,6 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         this.networkSetupError = null;
         this.dataPlaneStatus = { ok: true, reason: 'ok', message: null, subnet };
-        enableCapability('mesh_proxy_callback_bootstrap');
     }
 
     /**
@@ -856,15 +875,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             source: 'mesh', level: 'info', type: 'mesh.enable',
             nodeId, message: `mesh enabled on node ${nodeId}`,
         });
-        // Trigger 1: proactive bootstrap. If the peer is a proxy-mode remote,
-        // dial the mesh callback bridge immediately so the capability-gated
-        // handshake can ship `mesh_handshake` material without waiting for
-        // the next forwarder dial. Fire-and-forget; failures are logged by
-        // the dialer.
+        // When mesh is enabled on a proxy peer, dial the persistent bridge
+        // immediately so the next forward (or peer-initiated reverse)
+        // request has the WS already up. Fire-and-forget; failures are
+        // logged by the dialer.
         const node = DatabaseService.getInstance().getNode(nodeId);
         if (node && node.type === 'remote' && node.mode === 'proxy') {
             void MeshProxyTunnelDialer.getInstance().ensureBridge(nodeId).catch((err) => {
-                console.warn(`[Mesh] proactive bootstrap on mesh-enable failed for node ${nodeId}: ${(err as Error).message}`);
+                console.warn(`[Mesh] proxy-tunnel dial on mesh-enable failed for node ${nodeId}: ${(err as Error).message}`);
             });
         }
     }
@@ -1812,59 +1830,23 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             message: `cross-node dispatch to ${target.alias} on node ${target.nodeId}`,
         });
 
-        // Peer-side recovery: when this Sencho is acting as a proxy-mode peer
-        // (mesh_centrals has a row from a prior bootstrap) and the
-        // reverseDialer is not currently installed, the inbound bridge from
-        // central is either cold-start (peer just rebooted) or has been torn
-        // down (idle close, central restart). Kick the symmetric-dial path
-        // so the peer re-opens its callback WS to central before attempting
-        // the cross-node dispatch.
-        //
-        // Central instances never have a mesh_centrals row (central is not a
-        // peer of itself), so this branch is correctly skipped on central.
-        // Central falls straight through to dialMeshTcpStream which uses its
-        // own PilotTunnelManager + MeshProxyTunnelDialer to reach the target
-        // peer. Without this gate, central enters the branch on every
-        // forward dispatch, finds no session, and destroys the inbound
-        // socket with route.resolve.fail forward-from-peer no_session.
-        if (!this.reverseDialer) {
-            const { MeshCentralRegistry } = await import('./MeshCentralRegistry');
-            const isProxyPeer = MeshCentralRegistry.getInstance().getActive() !== null;
-            if (isProxyPeer) {
-                try {
-                    const { PeerToCentralMeshSessionDialer } = await import('./PeerToCentralMeshSessionDialer');
-                    const session = await PeerToCentralMeshSessionDialer.getInstance().ensureSession();
-                    if (!session) {
-                        this.logActivity({
-                            source: 'mesh', level: 'warn', type: 'route.resolve.fail',
-                            nodeId: target.nodeId, alias: target.alias,
-                            message: `peer cross-node dispatch failed: no central callback session available`,
-                            details: { direction: 'forward-from-peer', reason: 'no_session' },
-                        });
-                        try { src.destroy(); } catch { /* ignore */ }
-                        return;
-                    }
-                } catch (err) {
-                    this.logActivity({
-                        source: 'mesh', level: 'warn', type: 'route.resolve.fail',
-                        nodeId: target.nodeId, alias: target.alias,
-                        message: `peer cross-node dispatch failed: bootstrap threw`,
-                        details: { direction: 'forward-from-peer', reason: 'bootstrap_threw' },
-                    });
-                    try { src.destroy(); } catch { /* ignore */ }
-                    return;
-                }
-            }
-        }
-
         const tcpStream = await this.dialMeshTcpStream(target);
         if (!tcpStream) {
+            // Three failure shapes on this path:
+            //   - central with reverseDialer somehow installed (unusual; relay edge case)
+            //   - central without reverseDialer (normal): ensureBridge could not reach the target peer
+            //   - peer side: target nodeId is central's id, which the peer's NodeRegistry does
+            //     not know as a remote proxy target, so ensureBridge returns null. The actionable
+            //     condition is "central has not dialed the bridge yet"; tell the operator.
+            const targetIsLocalKnownRemote = NodeRegistry.getInstance().getNode(target.nodeId)?.type === 'remote';
+            const message = this.reverseDialer
+                ? `cannot open reverse mesh stream to node ${target.nodeId}`
+                : targetIsLocalKnownRemote
+                    ? `no mesh tunnel reachable for node ${target.nodeId}`
+                    : `peer cross-node dispatch deferred: waiting for central to dial the reverse bridge`;
             this.logActivity({
                 source: 'pilot', level: 'error', type: 'tunnel.fail',
-                nodeId: target.nodeId, alias: target.alias,
-                message: this.reverseDialer
-                    ? `cannot open reverse mesh stream to node ${target.nodeId}`
-                    : `no mesh tunnel reachable for node ${target.nodeId}`,
+                nodeId: target.nodeId, alias: target.alias, message,
             });
             try { src.destroy(); } catch { /* ignore */ }
             return;
@@ -2148,12 +2130,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const localListening = this.isLocalForwarderActive();
         const ptm = PilotTunnelManager.getInstance();
+        const dialer = MeshProxyTunnelDialer.getInstance();
         return nodes.map((node) => {
             const reach = this.computeReachable(node, localNodeId);
+            const meshEnabled = db.getNodeMeshEnabled(node.id);
             return {
                 nodeId: node.id,
                 nodeName: node.name,
-                enabled: db.getNodeMeshEnabled(node.id),
+                enabled: meshEnabled,
                 localForwarderListening: node.id === localNodeId ? localListening : null,
                 // `pilotConnected` stays at its original meaning: a pilot
                 // tunnel is currently registered for this node. The
@@ -2163,10 +2147,24 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 pilotConnected: node.type !== 'remote' || ptm.hasActiveTunnel(node.id),
                 reachableMode: reach.mode,
                 reachableReason: reach.reason,
+                reverseCallbackStatus: this.computeReverseCallbackStatus(node, meshEnabled, dialer),
                 optedInStacks: db.listMeshStacks(node.id).map((s) => s.stack_name),
                 activeStreamCount: this.activeStreams.size,
             };
         });
+    }
+
+    private computeReverseCallbackStatus(
+        node: { id: number; type: 'local' | 'remote'; mode: NodeMode },
+        meshEnabled: boolean,
+        dialer: MeshProxyTunnelDialer,
+    ): MeshReverseCallbackStatus {
+        if (node.type !== 'remote' || node.mode !== 'proxy' || !meshEnabled) {
+            return 'not_applicable';
+        }
+        if (dialer.hasBridge(node.id)) return 'connected';
+        if (dialer.isDialing(node.id)) return 'connecting';
+        return 'unavailable';
     }
 
     /** True when the local Sencho's forwarder is started and bound to at least one alias port. */
