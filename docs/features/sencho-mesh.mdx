@@ -180,6 +180,10 @@ A few things are deliberately out of scope for the first release:
     The stack is opted into the mesh but exposes no service ports that became aliases. The stack joins `sencho_mesh` (other meshed containers can talk to it directly by container name) but no fleet-wide hostname is published. To publish an alias, declare a port on a service in the stack's compose file and redeploy.
   </Accordion>
 
+  <Accordion title="A stack on the Routing tab shows a `suspended` pill">
+    The stack is opted into the mesh, but its services are not currently running, so there are no aliases to publish. The opt-in is sticky: when the stack starts again, its aliases reappear automatically on the next refresh (within roughly one minute) without needing a manual opt-out and re-opt-in. To clear the suspended state, start the stack from its **Overview** page. To remove the opt-in entirely, open the node card and use the opt-out action.
+  </Accordion>
+
   <Accordion title="Graph reflects a stale node state">
     The Routing tab polls `/mesh/status` and `/mesh/aliases` every 30 seconds while the browser tab is focused. To force an immediate refresh, leave and return to the Routing tab, or toggle any stack's mesh state to trigger an action-driven refresh. Polling pauses when the tab is hidden, so a long-dormant tab catches up on the first poll after it regains focus.
   </Accordion>

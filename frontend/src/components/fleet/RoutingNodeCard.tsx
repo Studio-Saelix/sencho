@@ -25,6 +25,16 @@ export function RoutingNodeCard({
     const [testingAlias, setTestingAlias] = useState<string | null>(null);
 
     const nodeAliases = aliases.filter((a) => a.nodeId === status.nodeId);
+    const hasOptIns = status.optedInStacks.length > 0;
+    // Defensive de-dup: `/mesh/status` and `/mesh/aliases` are fetched
+    // separately, so a transient inconsistency between the two snapshots
+    // could otherwise render both a live alias row and a suspended row for
+    // the same stack. Drop suspended entries that the alias snapshot still
+    // covers; the alias row already represents the live state.
+    const stackNamesWithAliases = new Set(nodeAliases.map((a) => a.stackName));
+    const suspendedOptIns = status.optedInStacks.filter(
+        (s) => !s.currentlyResolvable && !stackNamesWithAliases.has(s.stackName),
+    );
 
     const toggleEnabled = async (next: boolean) => {
         setToggling(true);
@@ -122,7 +132,7 @@ export function RoutingNodeCard({
                 {status.enabled && (
                     <>
                         <div className="border-t border-card-border pt-2 space-y-1">
-                            {nodeAliases.length === 0 && (
+                            {!hasOptIns && nodeAliases.length === 0 && (
                                 <div className="text-[11px] text-stat-subtitle">No mesh services on this node yet.</div>
                             )}
                             {nodeAliases.map((a) => {
@@ -156,6 +166,25 @@ export function RoutingNodeCard({
                                     </div>
                                 );
                             })}
+                            {suspendedOptIns.map((s) => (
+                                <div
+                                    key={`suspended-${s.stackName}`}
+                                    className="flex items-center justify-between gap-2 rounded border border-card-border bg-card px-2 py-1.5"
+                                    title="Stack is opted into the mesh but has no running services. Aliases will publish when the stack starts."
+                                >
+                                    <span className="text-[11px] font-mono text-left truncate text-stat-subtitle">
+                                        {s.stackName}
+                                    </span>
+                                    <span className="shrink-0 px-1.5 py-0.5 rounded-sm border border-amber-500/40 bg-amber-500/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-amber-600 dark:text-amber-400">
+                                        suspended
+                                    </span>
+                                </div>
+                            ))}
+                            {suspendedOptIns.length > 0 && (
+                                <div className="text-[11px] text-stat-subtitle pt-1">
+                                    Stack stopped, alias resumes when services start.
+                                </div>
+                            )}
                         </div>
                         <Button
                             variant="outline" size="sm" className="w-full"

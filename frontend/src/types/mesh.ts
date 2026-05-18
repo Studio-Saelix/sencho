@@ -53,7 +53,14 @@ export interface MeshNodeStatus {
     reachableReason: string | null;
     /** Peer→central reverse path state. `not_applicable` for non-proxy peers. */
     reverseCallbackStatus: MeshReverseCallbackStatus;
-    optedInStacks: string[];
+    /**
+     * Stacks opted into the mesh on this node. `currentlyResolvable` is `true`
+     * iff the central's alias cache currently carries at least one alias for
+     * that (nodeId, stackName) pair. A suspended opt-in (stack stopped,
+     * services not running) reports `currentlyResolvable: false`; the Routing
+     * tab renders a `suspended` pill for those entries.
+     */
+    optedInStacks: Array<{ stackName: string; currentlyResolvable: boolean }>;
     activeStreamCount: number;
 }
 

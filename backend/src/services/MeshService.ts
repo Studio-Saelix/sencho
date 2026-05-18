@@ -190,7 +190,18 @@ export interface MeshNodeStatus {
     reachableReason: string | null;
     /** Peer→central reverse path state. `not_applicable` for non-proxy peers. */
     reverseCallbackStatus: MeshReverseCallbackStatus;
-    optedInStacks: string[];
+    /**
+     * Stacks opted into the mesh on this node, with a per-stack resolvability
+     * flag. `currentlyResolvable` is `true` iff the alias cache currently
+     * carries at least one alias for that (nodeId, stackName) pair, i.e. the
+     * stack's services were inspectable and exposed at least one port the
+     * last time `refreshAliasCache()` ran (every 60 s on a timer, plus on
+     * opt-in / opt-out and pilot reconnect). A suspended opt-in (stack
+     * stopped, services not running) reports `currentlyResolvable: false` so
+     * the Routing tab can surface the asymmetry between the persistent
+     * registry and the live alias list.
+     */
+    optedInStacks: Array<{ stackName: string; currentlyResolvable: boolean }>;
     activeStreamCount: number;
 }
 
@@ -2131,6 +2142,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const localListening = this.isLocalForwarderActive();
         const ptm = PilotTunnelManager.getInstance();
         const dialer = MeshProxyTunnelDialer.getInstance();
+        // Precompute the (nodeId, stackName) pairs that currently have at least
+        // one alias in the cache. Reading the cache (refreshed every 60 s and
+        // on opt-in/opt-out) keeps the new `currentlyResolvable` field aligned
+        // with what `/api/mesh/aliases` reports, without paying the cost of a
+        // fresh Dockerode/cross-node inspect per status poll.
+        const resolvableKeys = new Set<string>();
+        for (const alias of this.aliasCache.values()) {
+            resolvableKeys.add(`${alias.nodeId}:${alias.stackName}`);
+        }
         return nodes.map((node) => {
             const reach = this.computeReachable(node, localNodeId);
             const meshEnabled = db.getNodeMeshEnabled(node.id);
@@ -2148,7 +2168,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 reachableMode: reach.mode,
                 reachableReason: reach.reason,
                 reverseCallbackStatus: this.computeReverseCallbackStatus(node, meshEnabled, dialer),
-                optedInStacks: db.listMeshStacks(node.id).map((s) => s.stack_name),
+                optedInStacks: db.listMeshStacks(node.id).map((s) => ({
+                    stackName: s.stack_name,
+                    currentlyResolvable: resolvableKeys.has(`${node.id}:${s.stack_name}`),
+                })),
                 activeStreamCount: this.activeStreams.size,
             };
         });

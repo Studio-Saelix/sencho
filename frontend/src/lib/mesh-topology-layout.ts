@@ -22,8 +22,11 @@ export function miniMapColorFor(node: MeshNodeStatus | undefined): string {
     return MINIMAP_BRAND;
 }
 
-export function stacksKey(stacks: readonly string[]): string {
-    return [...stacks].sort().join(' ');
+export function stacksKey(stacks: MeshNodeStatus['optedInStacks']): string {
+    return [...stacks]
+        .map((s) => `${s.stackName}:${s.currentlyResolvable ? '1' : '0'}`)
+        .sort()
+        .join(' ');
 }
 
 export function meshNodeStateEqual(a: MeshNodeStatus, b: MeshNodeStatus): boolean {
