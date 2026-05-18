@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.9](https://github.com/Studio-Saelix/sencho/compare/v0.81.8...v0.81.9) (2026-05-18)
+
+
+### Fixed
+
+* **http:** strip zstd from Accept-Encoding so compression sets Content-Encoding ([#1092](https://github.com/Studio-Saelix/sencho/issues/1092)) ([ed49ed6](https://github.com/Studio-Saelix/sencho/commit/ed49ed6165f33426064eb3e1d04f59b93eec0419))
+
 ## [0.81.8](https://github.com/Studio-Saelix/sencho/compare/v0.81.7...v0.81.8) (2026-05-17)
 
 
