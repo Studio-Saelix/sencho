@@ -55,6 +55,14 @@ Every self-hosted instance includes the full security stack, with advanced featu
   Trivy-powered CVE scanning of container images, with severity badges, post-deploy automation, and policy gating.
 </Card>
 
+<Card title="Fleet Secrets" icon="key-skeleton" href="/features/fleet-secrets">
+  Encrypted, versioned env-var bundles pushed to labeled nodes' stacks. Sealed with the same data key as MFA and registry credentials.
+</Card>
+
+<Card title="Webhook signatures" icon="signature" href="/features/webhooks">
+  Per-webhook HMAC-SHA256 secrets, shown once at creation, never echoed back, validated with constant-time comparison on every inbound trigger.
+</Card>
+
 </CardGroup>
 
 ## Tier availability
@@ -65,7 +73,7 @@ Every Sencho instance includes the foundational security stack. Advanced access-
 |---------|:---------:|:-------:|:-------:|
 | Password authentication | ✓ | ✓ | ✓ |
 | Custom OIDC SSO (Authelia, Keycloak, Authentik, any provider) | ✓ | ✓ | ✓ |
-| One-click Google / GitHub / Okta SSO | | ✓ | ✓ |
+| Preset Google / GitHub / Okta SSO | | ✓ | ✓ |
 | LDAP / Active Directory | | | ✓ |
 | Two-factor authentication (TOTP + backup codes) | ✓ | ✓ | ✓ |
 | Session management (httpOnly, Secure, SameSite) | ✓ | ✓ | ✓ |
@@ -75,6 +83,8 @@ Every Sencho instance includes the foundational security stack. Advanced access-
 | Vulnerability scanning (on-demand + post-deploy) | ✓ | ✓ | ✓ |
 | Multi-user with RBAC (Admin, Viewer) | | ✓ | ✓ |
 | Scan policies, scheduled scans, SBOM generation | | ✓ | ✓ |
+| Fleet Secrets (encrypted env-var bundles) | | ✓ | ✓ |
+| Webhook signatures (HMAC-SHA256) | | ✓ | ✓ |
 | Advanced RBAC (Deployer, Node Admin, Auditor) | | | ✓ |
 | Scoped permissions (per-stack, per-node) | | | ✓ |
 | API tokens (scoped, expiring) | | | ✓ |
@@ -82,7 +92,7 @@ Every Sencho instance includes the foundational security stack. Advanced access-
 
 ## Password authentication
 
-Sencho enforces a minimum 8-character password policy aligned with [NIST SP 800-63B](https://pages.nist.gov/800-63-3/sp800-63b.html). Passwords are cryptographically hashed before storage. On first launch, you create the initial admin account through a setup wizard; additional users can be created from **Settings > Users** on paid tiers.
+Sencho enforces a minimum 8-character password policy aligned with [NIST SP 800-63B](https://pages.nist.gov/800-63-3/sp800-63b.html). Passwords are hashed with bcrypt (cost factor 10) before storage. On first launch, you create the initial admin account through a setup wizard; additional users can be created from **Settings · Users** on paid tiers.
 
 Changing your password immediately invalidates all other active sessions, so a compromised session cannot survive a password reset.
 
@@ -91,7 +101,7 @@ Changing your password immediately invalidates all other active sessions, so a c
 Sencho supports five identity providers split across tiers by delivery model:
 
 - **Community**: **Custom OIDC**, which connects to any spec-compliant OpenID Connect provider (Authelia, Keycloak, Authentik, Zitadel, KanIDM, Pocket ID, and others).
-- **Skipper**: one-click presets for **Google**, **GitHub**, and **Okta**.
+- **Skipper**: preset providers for **Google**, **GitHub**, and **Okta**.
 - **Admiral**: **LDAP / Active Directory** for on-premises directories.
 
 All OIDC flows use PKCE (Proof Key for Code Exchange) and a cryptographic state parameter to prevent authorization code interception and cross-site request forgery. SSO credentials (client secrets and LDAP bind passwords) are encrypted at rest with AES-256-GCM.
@@ -112,7 +122,7 @@ Security controls include:
 
 - **Lockout**: Five consecutive failed attempts trigger a 15-minute lockout
 - **Replay prevention**: The same code cannot be reused within its 30-second validity window
-- **Backup codes**: Each code is individually hashed and consumed on use; once all ten are spent, you must regenerate from **Settings > Account & Security**
+- **Backup codes**: Each code is individually hashed and consumed on use; once all ten are spent, you must regenerate from **Settings · Account**
 - **SSO enforcement**: Users who sign in via SSO can optionally require 2FA on every SSO login
 
 <Frame>
@@ -156,6 +166,12 @@ Tokens are cryptographically hashed before storage; the raw value is shown exact
 
 For setup and usage, see [API Tokens](/features/api-tokens). Admiral tier.
 
+## Webhook signature authentication
+
+Webhook triggers are authenticated with a per-webhook HMAC-SHA256 secret (32 random bytes). The secret is generated at create time and displayed exactly once in the success callout; the configured-webhooks list shows only a masked preview thereafter. Every inbound trigger must present a matching `X-Webhook-Signature` header computed over the raw request body. Sencho recomputes the HMAC server-side and compares it with a constant-time check to defeat timing attacks; mismatches return 401 before any deploy action runs.
+
+Webhooks are available on Skipper and Admiral. For setup and verification recipes, see [Webhooks](/features/webhooks).
+
 ## Role-based access control
 
 Sencho defines five roles with increasing levels of access. Admin and Viewer are available on Skipper; Deployer, Node Admin, and Auditor require Admiral.
@@ -188,7 +204,7 @@ For user management and scoped permissions, see [RBAC & User Management](/featur
 
 Every POST, PUT, DELETE, and PATCH request to the API is recorded in the audit log with the acting username, IP address, HTTP method, response status, and an auto-generated summary. GET requests are excluded to keep the log focused on mutations.
 
-The audit log is searchable by keyword (actions, paths, usernames) and filterable by HTTP method and date range. Results can be exported as CSV or JSON (up to 10,000 entries per export). Retention defaults to 90 days and is configurable from 1 to 365 days in **Settings > Data Retention**.
+The audit log is searchable by keyword (actions, paths, usernames) and filterable by HTTP method and date range. Results can be exported as CSV or JSON (up to 10,000 entries per export). Retention defaults to 90 days and is configurable from 1 to 365 days in **Settings · Developer · Data retention**.
 
 The **Auditor** role provides read-only access to the audit log without any other administrative privileges, making it suitable for compliance reviewers who should not have access to system settings.
 
@@ -206,8 +222,10 @@ Sencho encrypts all sensitive values with AES-256-GCM before writing them to the
 - OIDC client secrets and LDAP bind passwords (SSO providers)
 - Git source access tokens
 - Remote node API tokens
+- Registry credentials (private image registries)
+- Fleet Secrets bundle payloads (env-var key/value pairs)
 
-The encryption key is generated automatically on first startup (32 random bytes) and stored in a dedicated file with 0600 permissions (owner-only read/write). If the file permissions are found to be too permissive at startup, Sencho corrects them automatically.
+A single 32-byte data key seals all of the above. The key is generated automatically on first startup and stored in a dedicated file with 0600 permissions (owner-only read/write). If the file permissions are found to be too permissive at startup, Sencho corrects them automatically.
 
 The key file and the database are stored separately. Exposure of the database file alone does not reveal encrypted values.
 
