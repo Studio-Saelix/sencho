@@ -83,6 +83,7 @@ export default function EditorLayout() {
     scheduleStateInvalidateRefresh,
     toggleBulkMode, toggleSelect, clearSelection, handleBulkAction,
     stackUpdates,
+    fetchImageUpdates,
     pinned,
     isCollapsed, toggleCollapse,
     remoteSearchLoading,
@@ -130,6 +131,7 @@ export default function EditorLayout() {
     nodes,
     onStateInvalidate: scheduleStateInvalidateRefresh,
     onAutoUpdateChange: fetchAutoUpdateSettings,
+    onImageUpdatesChange: fetchImageUpdates,
   });
 
   const containerStats = useContainerStats(containers);
