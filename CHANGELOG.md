@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.15](https://github.com/Studio-Saelix/sencho/compare/v0.81.14...v0.81.15) (2026-05-19)
+
+
+### Fixed
+
+* **mesh:** clean up activeStreams on src socket close/error (F-10) ([#1105](https://github.com/Studio-Saelix/sencho/issues/1105)) ([0cffd60](https://github.com/Studio-Saelix/sencho/commit/0cffd60173a1f347862260062a8e107192419b7b))
+
 ## [0.81.14](https://github.com/Studio-Saelix/sencho/compare/v0.81.13...v0.81.14) (2026-05-18)
 
 
