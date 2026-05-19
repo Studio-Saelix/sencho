@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.82.0](https://github.com/Studio-Saelix/sencho/compare/v0.81.15...v0.82.0) (2026-05-19)
+
+
+### Added
+
+* **fleet:** add fleet-wide Docker prune to Fleet Actions ([#1104](https://github.com/Studio-Saelix/sencho/issues/1104)) ([1f67307](https://github.com/Studio-Saelix/sencho/commit/1f673073ca4f91ae69d39f84d6397250b6c9bc20))
+
+
+### Fixed
+
+* **stack-editor:** reset tab to compose.yaml when clicking edit ([#1107](https://github.com/Studio-Saelix/sencho/issues/1107)) ([3a839b7](https://github.com/Studio-Saelix/sencho/commit/3a839b781b17ef1b6d0ce2b8bb8028c423ca21ed))
+* **stacks:** return 404 for nonexistent stacks on deploy/down/update (F-7) ([#1108](https://github.com/Studio-Saelix/sencho/issues/1108)) ([523ba58](https://github.com/Studio-Saelix/sencho/commit/523ba5854caddebfc082865716f00e92be7f2c3b))
+
 ## [0.81.15](https://github.com/Studio-Saelix/sencho/compare/v0.81.14...v0.81.15) (2026-05-19)
 
 
