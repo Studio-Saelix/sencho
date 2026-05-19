@@ -13,6 +13,7 @@ import { RegistryService } from './RegistryService';
 
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
@@ -202,11 +203,12 @@ export class ComposeService {
       child.on('error', (error: Error & { code?: string }) => {
         exited = true;
         finish(() => {
-          let message = redactSensitiveText(error.message);
-          if (error.code === 'ENOENT' && /^spawn docker(?:$| )/.test(error.message)) {
-            message = 'Docker CLI unavailable on this node';
-          }
+          const mapped = describeSpawnError(error as NodeJS.ErrnoException, { command });
+          const message = redactSensitiveText(mapped.message);
           sendOutput(`Error: ${message}\n`);
+          if (mapped.isLowMemory) {
+            console.warn('[ComposeService] spawn failed under memory pressure:', message);
+          }
           if (pendingTerminationError) {
             if (throwOnError) reject(pendingTerminationError);
             else resolve();
@@ -596,7 +598,13 @@ export class ComposeService {
       let stderr = '';
       child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
       child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
-      child.on('error', (err) => reject(err));
+      child.on('error', (err: NodeJS.ErrnoException) => {
+        const mapped = describeSpawnError(err, { command: 'docker compose' });
+        if (mapped.isLowMemory) {
+          console.warn('[ComposeService] captureCompose spawn failed under memory pressure:', mapped.message);
+        }
+        reject(new Error(mapped.message));
+      });
       child.on('close', (code) => {
         if (code === 0) resolve(stdout);
         else reject(new Error(stderr.trim() || `docker compose ${args.join(' ')} failed with code ${code}`));

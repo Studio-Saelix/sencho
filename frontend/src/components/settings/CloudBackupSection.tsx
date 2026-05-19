@@ -10,7 +10,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { AdmiralGate } from '@/components/AdmiralGate';
-import { Cloud, CloudOff, RefreshCw, CheckCircle2, Loader2, Trash2, Download } from 'lucide-react';
+import { Cloud, CloudOff, RefreshCw, CheckCircle2, Loader2, Trash2, Download, ChevronLeft, ChevronRight } from 'lucide-react';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 
@@ -64,6 +64,8 @@ const PROVIDER_OPTIONS = [
 
 const PANEL_CLASS = 'rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 space-y-3';
 
+const PAGE_SIZE = 10;
+
 export function CloudBackupSection() {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
@@ -76,6 +78,12 @@ export function CloudBackupSection() {
     const [testing, setTesting] = useState(false);
     const [provisioning, setProvisioning] = useState(false);
     const [deleteKey, setDeleteKey] = useState<string | null>(null);
+    const [page, setPage] = useState(0);
+
+    const totalPages = Math.max(1, Math.ceil(snapshots.length / PAGE_SIZE));
+    const safePage = Math.min(page, totalPages - 1);
+    const pagedSnapshots = snapshots.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+    const needsPagination = snapshots.length > PAGE_SIZE;
 
     const loadConfig = useCallback(async () => {
         try {
@@ -449,9 +457,24 @@ export function CloudBackupSection() {
                     <div className={PANEL_CLASS}>
                         <div className="flex items-center justify-between">
                             <span className="font-medium text-sm">Cloud Snapshots</span>
-                            <Button size="sm" variant="ghost" onClick={loadSnapshots}>
-                                <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.5} />
-                            </Button>
+                            <div className="flex items-center gap-1.5">
+                                {needsPagination && (
+                                    <>
+                                        <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage === 0} onClick={() => setPage(safePage - 1)} aria-label="Previous page">
+                                            <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                        </Button>
+                                        <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
+                                            {safePage + 1} / {totalPages}
+                                        </span>
+                                        <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)} aria-label="Next page">
+                                            <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                        </Button>
+                                    </>
+                                )}
+                                <Button size="sm" variant="ghost" onClick={loadSnapshots}>
+                                    <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                </Button>
+                            </div>
                         </div>
                         {snapshots.length === 0 ? (
                             <div className="flex items-start gap-2 text-xs text-muted-foreground py-2">
@@ -460,7 +483,7 @@ export function CloudBackupSection() {
                             </div>
                         ) : (
                             <ul className="space-y-1.5">
-                                {snapshots.map(s => (
+                                {pagedSnapshots.map(s => (
                                     <li key={s.objectKey} className="flex items-center justify-between gap-2 rounded-md border border-glass-border px-3 py-2">
                                         <div className="min-w-0 flex-1">
                                             <div className="text-xs font-mono truncate">{s.objectKey.split('/').pop()}</div>
