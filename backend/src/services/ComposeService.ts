@@ -199,16 +199,20 @@ export class ComposeService {
         });
       });
 
-      child.on('error', (error: Error) => {
+      child.on('error', (error: Error & { code?: string }) => {
         exited = true;
         finish(() => {
-          sendOutput(`Error: ${redactSensitiveText(error.message)}\n`);
+          let message = redactSensitiveText(error.message);
+          if (error.code === 'ENOENT' && /^spawn docker(?:$| )/.test(error.message)) {
+            message = 'Docker CLI unavailable on this node';
+          }
+          sendOutput(`Error: ${message}\n`);
           if (pendingTerminationError) {
             if (throwOnError) reject(pendingTerminationError);
             else resolve();
             return;
           }
-          if (throwOnError) reject(new Error(redactSensitiveText(error.message)));
+          if (throwOnError) reject(new Error(message));
           else resolve();
         });
       });
