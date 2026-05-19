@@ -1,8 +1,9 @@
-import { Square, Tags } from 'lucide-react';
+import { Square, Tags, Eraser } from 'lucide-react';
 import { useLicense } from '@/context/LicenseContext';
 import type { FleetNode } from '@/components/FleetView/types';
 import { LabelFleetStopCard } from './cards/LabelFleetStopCard';
 import { BulkLabelAssignCard } from './cards/BulkLabelAssignCard';
+import { FleetPruneCard } from './cards/FleetPruneCard';
 
 interface Props {
   nodes: FleetNode[];
@@ -18,7 +19,7 @@ export function FleetActionsTab({ nodes }: Props) {
   }
 
   if (!isPaid) {
-    // Both actions are Skipper+. Community users see a calm empty state with
+    // Every action is Skipper+. Community users see a calm empty state with
     // upgrade context rather than a stripped-down launcher.
     return (
       <EmptyState />
@@ -26,9 +27,10 @@ export function FleetActionsTab({ nodes }: Props) {
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
       <LabelFleetStopCard nodes={nodes} accentTone="rose" icon={Square} />
       <BulkLabelAssignCard nodes={nodes} accentTone="purple" icon={Tags} />
+      <FleetPruneCard nodes={nodes} accentTone="amber" icon={Eraser} />
     </div>
   );
 }
@@ -41,8 +43,7 @@ function EmptyState() {
       </div>
       <h3 className="text-sm font-medium text-stat-value mb-1">Fleet-wide bulk actions</h3>
       <p className="text-xs text-stat-subtitle max-w-md mx-auto">
-        Stop stacks across every node by label name, and assign labels to many
-        stacks in one shot. Available on Skipper and Admiral.
+        Stop stacks across every node by label name, assign labels to many stacks at once, and reclaim Docker disk space fleet-wide. Available on Skipper and Admiral.
       </p>
     </div>
   );

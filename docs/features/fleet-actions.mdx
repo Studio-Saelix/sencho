@@ -13,6 +13,7 @@ Fleet Actions covers the operations that aren't already exposed elsewhere in Sen
 
 - **Stop fleet by label** dispatches a stop to every stack labeled with a given name across every node in the fleet.
 - **Bulk label assign** applies the same label set to many stacks on one node in a single round trip.
+- **Prune Docker resources fleet-wide** reclaims disk space on every node by removing unused images, volumes, and networks in one submit.
 
 Other bulk actions you may be looking for live in their natural homes:
 
@@ -45,6 +46,19 @@ This card replaces the label set on many stacks at once on a single node.
 
 Selecting no labels and applying clears existing label assignments on the chosen stacks. The selected label set always **replaces** the existing one rather than appending to it.
 
+## Prune Docker resources fleet-wide
+
+This card reclaims disk space on every reachable node by running Docker prune across the targets you select. Each target runs serially on a node; nodes are processed in parallel.
+
+1. Check the targets you want to prune: **Images**, **Volumes**, and **Networks**. At least one is required.
+2. Pick a **Scope**:
+   - **Managed only** (default): removes only resources owned by stacks Sencho manages. Safe for shared Docker hosts.
+   - **All unused**: runs `docker prune --all` on every reachable node. Removes every unused image, volume, or network, including resources from workloads Sencho does not manage.
+3. Click **Prune across fleet** and confirm. The confirmation copy escalates when **All unused** is selected.
+4. Results appear inline below the card, grouped by node with one sub-row per target showing approximate bytes reclaimed.
+
+Reclaimed-byte totals are best-effort. Docker does not report bytes for network removals, so the networks row always reports `0 B`.
+
 ## Permissions
 
 Both cards require the **admin** role and a **Skipper** or **Admiral** license. Community-tier users see a calm explainer card in this tab instead of the action surface.
@@ -62,3 +76,9 @@ Stack names must be alphanumeric with dashes and underscores. The endpoint valid
 
 **The Fleet Actions tab is missing from Fleet.**
 Confirm the active license is **Skipper** or **Admiral** under **Settings > License**. The tab itself is always visible, but the action cards only render at paid tiers.
+
+**A node row reports "unreachable" after a fleet prune.**
+Sencho was unable to dispatch the prune to that remote node within the per-target timeout. Open the node detail and confirm it is online and that its API token is still valid. Sencho short-circuits later targets on the same node once one fails so a dead remote does not slow the whole operation.
+
+**A target row shows `0 B` reclaimed.**
+That target had nothing to prune at the time of the run. For networks this is also the expected reading on every successful run, because Docker does not report bytes for network removals.
