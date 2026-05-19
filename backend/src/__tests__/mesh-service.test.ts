@@ -1089,6 +1089,108 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
             vi.useRealTimers();
         }
     });
+
+    // F-10 regression: src.on('close')/src.on('error') must delete the
+    // activeStreams entry, not just call tcpStream.destroy(). MeshTcpStream-
+    // Like.destroy() only sends a tcp_close frame; the handle's own 'close'
+    // event waits for the remote ack. If that ack never lands (peer gone,
+    // network drop), the record sits in activeStreams until tunnel idle-
+    // close. Use an EventEmitter-backed fake src so emit('close') actually
+    // delivers to the listener (the plain makeFakeSocket uses vi.fn for .on
+    // which records calls but never fires them).
+    function makeEmittingSocket(): EventEmitter & {
+        destroy: ReturnType<typeof vi.fn>;
+        end: ReturnType<typeof vi.fn>;
+        write: ReturnType<typeof vi.fn>;
+    } {
+        const ee = new EventEmitter() as EventEmitter & {
+            destroy: ReturnType<typeof vi.fn>;
+            end: ReturnType<typeof vi.fn>;
+            write: ReturnType<typeof vi.fn>;
+        };
+        ee.destroy = vi.fn();
+        ee.end = vi.fn();
+        ee.write = vi.fn();
+        return ee;
+    }
+
+    it('src.on(close) deletes activeStreams entry even when tcpStream never emits close', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(50);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeEmittingSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        const activeStreams = (svc as unknown as { activeStreams: Map<number, unknown> }).activeStreams;
+        expect(activeStreams.size).toBe(1);
+        expect(activeStreams.has(50)).toBe(true);
+
+        fakeSrc.emit('close');
+
+        expect(activeStreams.size).toBe(0);
+        expect(fakeStream.destroy).toHaveBeenCalled();
+    });
+
+    it('src.on(error) deletes activeStreams entry symmetrically', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(51);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeEmittingSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        const activeStreams = (svc as unknown as { activeStreams: Map<number, unknown> }).activeStreams;
+        expect(activeStreams.size).toBe(1);
+
+        fakeSrc.emit('error', new Error('connection reset by peer'));
+
+        expect(activeStreams.size).toBe(0);
+        expect(fakeStream.destroy).toHaveBeenCalled();
+    });
+
+    it('cleanup is idempotent when both src and tcpStream emit close', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(52);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeEmittingSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        const activeStreams = (svc as unknown as { activeStreams: Map<number, unknown> }).activeStreams;
+        expect(activeStreams.size).toBe(1);
+
+        expect(() => {
+            fakeSrc.emit('close');
+            fakeStream.emit('close');
+        }).not.toThrow();
+
+        expect(activeStreams.size).toBe(0);
+    });
 });
 
 describe('MeshService.openCrossNode without reverseDialer', () => {

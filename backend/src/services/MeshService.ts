@@ -1888,6 +1888,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const clearOpenTimer = () => {
             if (openTimer) { clearTimeout(openTimer); openTimer = null; }
         };
+        // Idempotent stream cleanup. F-10: src.on('close'/'error') used to
+        // only destroy tcpStream and never delete the activeStreams entry,
+        // so failed dials whose remote tcp_close ack was lost (or whose peer
+        // was already gone) leaked records until the whole tunnel idle-
+        // closed. Map.delete is naturally idempotent, so it's safe for both
+        // the src side and the tcpStream side to call this.
+        const cleanupRecord = () => {
+            clearOpenTimer();
+            this.activeStreams.delete(record.streamId);
+        };
 
         tcpStream.on('open', () => {
             clearOpenTimer();
@@ -1903,18 +1913,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             try { src.write(chunk); } catch { /* ignore */ }
         });
         tcpStream.on('error', (err: Error) => {
-            clearOpenTimer();
+            cleanupRecord();
             this.logActivity({
                 source: 'pilot', level: 'error', type: 'tunnel.fail',
                 nodeId: target.nodeId, alias: target.alias, streamId: record.streamId,
                 message: sanitizeForLog(err.message),
             });
-            this.activeStreams.delete(record.streamId);
             try { src.destroy(); } catch { /* ignore */ }
         });
         tcpStream.on('close', () => {
-            clearOpenTimer();
-            this.activeStreams.delete(record.streamId);
+            cleanupRecord();
             try { src.end(); } catch { /* ignore */ }
         });
         src.on('data', (chunk: Buffer) => {
@@ -1922,8 +1930,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             tcpStream.write(chunk);
         });
         src.on('end', () => tcpStream.end());
-        src.on('close', () => { clearOpenTimer(); tcpStream.destroy(); });
-        src.on('error', () => { clearOpenTimer(); tcpStream.destroy(); });
+        src.on('close', () => { cleanupRecord(); try { tcpStream.destroy(); } catch { /* ignore */ } });
+        src.on('error', () => { cleanupRecord(); try { tcpStream.destroy(); } catch { /* ignore */ } });
     }
 
     private registerActiveStream(alias: string, streamId?: number): ActiveStreamRecord {
