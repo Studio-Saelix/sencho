@@ -37,7 +37,6 @@ export function useStackListState() {
   const [isLoading, setIsLoading] = useState(false);
   const [stackActions, setStackActions] = useState<Record<string, StackAction>>({});
   const stackActionsRef = useRef<Record<string, StackAction>>({});
-  stackActionsRef.current = stackActions;
 
   const [isScanning, setIsScanning] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -65,15 +64,21 @@ export function useStackListState() {
     if (evictedOldest) toast.info('Pinned. Unpinned oldest (max 10).');
   }, [evictedOldest]);
 
+  // Ref is updated synchronously alongside the state setter so any code that
+  // runs right after (e.g. `refreshStacks(true)` in an action's finally block)
+  // observes the cleared map before React commits the next render. Without
+  // this, the busy-stack check inside refreshStacks would still flag the
+  // stack as in-progress and preserve the optimistic status mask.
   const setStackAction = (stackFile: string, action: StackAction) => {
-    setStackActions(prev => ({ ...prev, [stackFile]: action }));
+    const next = { ...stackActionsRef.current, [stackFile]: action };
+    stackActionsRef.current = next;
+    setStackActions(next);
   };
   const clearStackAction = (stackFile: string) => {
-    setStackActions(prev => {
-      const next = { ...prev };
-      delete next[stackFile];
-      return next;
-    });
+    const next = { ...stackActionsRef.current };
+    delete next[stackFile];
+    stackActionsRef.current = next;
+    setStackActions(next);
   };
   const isStackBusy = useCallback((stackFile: string) => stackFile in stackActionsRef.current, []);
 
@@ -271,9 +276,13 @@ export function useStackListState() {
   const handleBulkAction = useCallback((action: BulkAction) => {
     const filesToAction = Array.from(selectedFiles);
     runBulk(action, filesToAction, {
-      onAfter: () => { refreshStacksRef.current(true); clearSelection(); },
+      onAfter: () => {
+        refreshStacksRef.current(true);
+        if (action === 'update') void fetchImageUpdates();
+        clearSelection();
+      },
     });
-  }, [selectedFiles, runBulk, clearSelection]);
+  }, [selectedFiles, runBulk, clearSelection, fetchImageUpdates]);
 
   const chipFilteredFilesRef = useRef(chipFilteredFiles);
   useEffect(() => { chipFilteredFilesRef.current = chipFilteredFiles; }, [chipFilteredFiles]);

@@ -834,6 +834,14 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     invalidateNodeCaches(req.nodeId);
+    NotificationService.getInstance().broadcastEvent({
+      type: 'state-invalidate',
+      scope: 'image-updates',
+      nodeId: req.nodeId,
+      stackName,
+      action: 'stack-updated',
+      ts: Date.now(),
+    });
     console.log(`[Stacks] Update completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
     res.json({ status: 'Update completed' });

@@ -292,6 +292,15 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
         await compose.updateStack(stackName, undefined, atomic);
         db.clearStackUpdateStatus(req.nodeId, stackName);
 
+        NotificationService.getInstance().broadcastEvent({
+          type: 'state-invalidate',
+          scope: 'image-updates',
+          nodeId: req.nodeId,
+          stackName,
+          action: 'stack-updated',
+          ts: Date.now(),
+        });
+
         NotificationService.getInstance().dispatchAlert(
           'info',
           'image_update_applied',

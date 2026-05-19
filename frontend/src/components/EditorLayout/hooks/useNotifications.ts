@@ -8,9 +8,10 @@ interface UseNotificationsOptions {
   nodes: Node[];
   onStateInvalidate: () => void;
   onAutoUpdateChange: () => void;
+  onImageUpdatesChange: () => void;
 }
 
-export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange }: UseNotificationsOptions) {
+export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange, onImageUpdatesChange }: UseNotificationsOptions) {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [tickerConnected, setTickerConnected] = useState(false);
 
@@ -23,6 +24,8 @@ export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange 
   onStateInvalidateRef.current = onStateInvalidate;
   const onAutoUpdateChangeRef = useRef(onAutoUpdateChange);
   onAutoUpdateChangeRef.current = onAutoUpdateChange;
+  const onImageUpdatesChangeRef = useRef(onImageUpdatesChange);
+  onImageUpdatesChangeRef.current = onImageUpdatesChange;
 
   const fetchNotifications = async () => {
     try {
@@ -98,6 +101,9 @@ export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange 
               onAutoUpdateChangeRef.current();
             } else {
               onStateInvalidateRef.current();
+              if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
+                onImageUpdatesChangeRef.current();
+              }
             }
           }
         } catch (e) {
@@ -171,6 +177,9 @@ export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange 
             } else if (msg.type === 'state-invalidate') {
               window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { ...msg, nodeId: rn.id } }));
               onStateInvalidateRef.current();
+              if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
+                onImageUpdatesChangeRef.current();
+              }
             }
           } catch (e) {
             console.error(`[WS notifications:${rn.name}] parse error`, e);
