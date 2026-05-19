@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.83.0](https://github.com/Studio-Saelix/sencho/compare/v0.82.1...v0.83.0) (2026-05-19)
+
+
+### Added
+
+* **cloud-backup:** paginate cloud snapshots list ([#1110](https://github.com/Studio-Saelix/sencho/issues/1110)) ([37413c1](https://github.com/Studio-Saelix/sencho/commit/37413c1020b3562a24884a57c43425c07b3526af))
+* **fleet-secrets:** add Import from stack action to bundle editor ([#1115](https://github.com/Studio-Saelix/sencho/issues/1115)) ([e3e5943](https://github.com/Studio-Saelix/sencho/commit/e3e5943b57090639289a5a83431ddfb499361f9e))
+
+
+### Fixed
+
+* **fleet-secrets:** align bundle-row action aria-label with icon ("Send") ([#1116](https://github.com/Studio-Saelix/sencho/issues/1116)) ([96d9bb9](https://github.com/Studio-Saelix/sencho/commit/96d9bb9f764dcdf661d9436dd70cdb899bb262c0))
+* **stack-update:** refresh frontend state automatically after a stack update ([#1113](https://github.com/Studio-Saelix/sencho/issues/1113)) ([6722335](https://github.com/Studio-Saelix/sencho/commit/6722335a79382e4e6674d63ca7a040f1d4d13e8d))
+
 ## [0.82.1](https://github.com/Studio-Saelix/sencho/compare/v0.82.0...v0.82.1) (2026-05-19)
 
 
