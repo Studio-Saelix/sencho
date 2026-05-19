@@ -11,6 +11,7 @@ import { CacheService } from './CacheService';
 import { isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
+import { describeSpawnError } from '../utils/spawnErrors';
 
 const execAsync = promisify(exec);
 const COMPOSE_DIR = process.env.COMPOSE_DIR || '/app/compose';
@@ -909,9 +910,13 @@ class DockerController {
       return await this.enrichContainers(await this.smartFallback(stackName, stackDir));
 
     } catch (error) {
-      // If command fails (e.g., stack not deployed, invalid YAML, missing env_file)
-      const execError = error as { stderr?: string; message?: string };
-      console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(execError.stderr || execError.message || 'unknown'));
+      // If command fails (e.g., stack not deployed, invalid YAML, missing env_file,
+      // or host under memory pressure causing posix_spawn to fail with ENOMEM,
+      // which Linux libuv can surface as ENOENT).
+      const execError = error as NodeJS.ErrnoException & { stderr?: string };
+      const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
+      const detail = execError.stderr || mapped.message;
+      console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
 
       // Try smart fallback even on error
       return await this.enrichContainers(await this.smartFallback(stackName, stackDir));

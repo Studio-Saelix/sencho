@@ -1,5 +1,6 @@
 import type { Server } from 'http';
 import crypto from 'crypto';
+import os from 'os';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { DatabaseService } from '../services/DatabaseService';
@@ -21,6 +22,7 @@ import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs } from '../services/GitSourceService';
 import { PORT } from '../helpers/constants';
+import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 
 function isPilotMode(): boolean {
   return process.env.SENCHO_MODE === 'pilot';
@@ -56,6 +58,19 @@ export function ensurePilotJwtSecret(): boolean {
  * port.
  */
 export async function startServer(server: Server): Promise<void> {
+  const freeBytes = os.freemem();
+  const freeMiB = Math.round(freeBytes / (1024 * 1024));
+  const totalMiB = Math.round(os.totalmem() / (1024 * 1024));
+  const floorMiB = Math.round(LOW_MEMORY_FLOOR_BYTES / (1024 * 1024));
+  console.log(`[Startup] Host memory: ${freeMiB} MiB free of ${totalMiB} MiB`);
+  if (freeBytes < LOW_MEMORY_FLOOR_BYTES) {
+    console.warn(
+      `[Startup] Free host memory is ${freeMiB} MiB (below ${floorMiB} MiB floor). ` +
+      'Sencho operations that spawn child processes (docker, /bin/sh) may fail ' +
+      'with misleading ENOENT errors under memory pressure.'
+    );
+  }
+
   try {
     console.log('Running stack migration check...');
     const defaultFsService = FileSystemService.getInstance(NodeRegistry.getInstance().getDefaultNodeId());

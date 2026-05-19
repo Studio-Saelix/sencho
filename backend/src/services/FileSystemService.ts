@@ -1,4 +1,5 @@
 import path from 'path';
+import os from 'os';
 import { promises as fsPromises, createReadStream } from 'fs';
 import type { Readable } from 'stream';
 import { NodeRegistry } from './NodeRegistry';
@@ -135,7 +136,12 @@ export class FileSystemService {
 
       return stackNames;
     } catch (error: any) {
-      console.warn(`[FileSystemService] Failed to list stacks: ${error.message}`);
+      if (error?.code === 'ENOMEM') {
+        const freeMiB = Math.round(os.freemem() / (1024 * 1024));
+        console.warn(`[FileSystemService] Failed to list stacks: ENOMEM (host free memory: ${freeMiB} MiB). Returning empty list.`);
+      } else {
+        console.warn(`[FileSystemService] Failed to list stacks: ${error.message}`);
+      }
       return [];
     }
   }

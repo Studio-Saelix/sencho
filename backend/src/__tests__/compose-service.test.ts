@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import os from 'os';
 import type WebSocket from 'ws';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
@@ -269,6 +270,69 @@ describe('ComposeService - runCommand', () => {
     expect(settled).toBe(false);
     proc.emit('close', null);
     await expectation;
+  });
+
+  it('rewrites ENOMEM spawn failures as host out-of-memory', async () => {
+    const freememSpy = vi.spyOn(os, 'freemem').mockReturnValue(32 * 1024 * 1024);
+    const totalmemSpy = vi.spyOn(os, 'totalmem').mockReturnValue(6612 * 1024 * 1024);
+    try {
+      const proc = createMockProcess();
+      mockSpawn.mockReturnValue(proc);
+      const ws = createMockWs();
+
+      const svc = ComposeService.getInstance(1);
+      const promise = svc.runCommand('my-stack', 'restart', ws);
+      const err = Object.assign(new Error('spawn docker ENOMEM'), { code: 'ENOMEM' });
+      proc.emit('error', err);
+
+      await expect(promise).rejects.toThrow(/Out of memory while launching docker/);
+      const sendCalls = ws.send.mock.calls.map(c => c[0] as string);
+      expect(sendCalls.some(msg => msg.includes('Out of memory while launching docker'))).toBe(true);
+    } finally {
+      freememSpy.mockRestore();
+      totalmemSpy.mockRestore();
+    }
+  });
+
+  it('rewrites ENOENT spawn failures as host OOM when free memory is below the floor', async () => {
+    const freememSpy = vi.spyOn(os, 'freemem').mockReturnValue(32 * 1024 * 1024);
+    const totalmemSpy = vi.spyOn(os, 'totalmem').mockReturnValue(6612 * 1024 * 1024);
+    try {
+      const proc = createMockProcess();
+      mockSpawn.mockReturnValue(proc);
+      const ws = createMockWs();
+
+      const svc = ComposeService.getInstance(1);
+      const promise = svc.runCommand('my-stack', 'restart', ws);
+      const err = Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' });
+      proc.emit('error', err);
+
+      await expect(promise).rejects.toThrow(/Out of memory while launching docker/);
+      const sendCalls = ws.send.mock.calls.map(c => c[0] as string);
+      expect(sendCalls.some(msg => msg.includes('reported as ENOENT under memory pressure'))).toBe(true);
+    } finally {
+      freememSpy.mockRestore();
+      totalmemSpy.mockRestore();
+    }
+  });
+
+  it('preserves "Docker CLI unavailable" wording on healthy-memory ENOENT for docker', async () => {
+    const freememSpy = vi.spyOn(os, 'freemem').mockReturnValue(2 * 1024 * 1024 * 1024);
+    const totalmemSpy = vi.spyOn(os, 'totalmem').mockReturnValue(6612 * 1024 * 1024);
+    try {
+      const proc = createMockProcess();
+      mockSpawn.mockReturnValue(proc);
+
+      const svc = ComposeService.getInstance(1);
+      const promise = svc.runCommand('my-stack', 'restart');
+      const err = Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' });
+      proc.emit('error', err);
+
+      await expect(promise).rejects.toThrow('Docker CLI unavailable on this node');
+    } finally {
+      freememSpy.mockRestore();
+      totalmemSpy.mockRestore();
+    }
   });
 });
 

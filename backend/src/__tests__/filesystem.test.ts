@@ -6,18 +6,20 @@
  * Permission errors are surfaced to the caller like any other failure
  * (no Docker-helper fallback).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import os from 'os';
 import path from 'path';
 
-const { mockRm } = vi.hoisted(() => ({
+const { mockRm, mockReaddir } = vi.hoisted(() => ({
   mockRm: vi.fn(),
+  mockReaddir: vi.fn(),
 }));
 
 vi.mock('fs', () => ({
   promises: {
     rm: mockRm,
     mkdir: vi.fn(),
-    readdir: vi.fn(),
+    readdir: mockReaddir,
     readFile: vi.fn(),
     writeFile: vi.fn(),
     access: vi.fn(),
@@ -77,5 +79,51 @@ describe('FileSystemService.deleteStack', () => {
     const err = Object.assign(new Error('disk I/O error'), { code: 'EIO' });
     mockRm.mockRejectedValueOnce(err);
     await expect(service.deleteStack('io-error-stack')).rejects.toThrow(/disk I\/O error/);
+  });
+});
+
+describe('FileSystemService.getStacks', () => {
+  let service: FileSystemService;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    service = FileSystemService.getInstance();
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('returns [] and logs ENOMEM-specific message with host free memory', async () => {
+    const err = Object.assign(
+      new Error("ENOMEM: not enough memory, scandir '/test/compose'"),
+      { code: 'ENOMEM' },
+    );
+    mockReaddir.mockRejectedValueOnce(err);
+    const freememSpy = vi.spyOn(os, 'freemem').mockReturnValue(37 * 1024 * 1024);
+
+    try {
+      const result = await service.getStacks();
+      expect(result).toEqual([]);
+      const warning = warnSpy.mock.calls[0]?.[0] as string;
+      expect(warning).toContain('ENOMEM');
+      expect(warning).toContain('host free memory: 37 MiB');
+      expect(warning).toContain('Returning empty list');
+    } finally {
+      freememSpy.mockRestore();
+    }
+  });
+
+  it('returns [] and logs the raw error message for non-ENOMEM errors', async () => {
+    const err = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    mockReaddir.mockRejectedValueOnce(err);
+
+    const result = await service.getStacks();
+    expect(result).toEqual([]);
+    const warning = warnSpy.mock.calls[0]?.[0] as string;
+    expect(warning).toContain('EACCES: permission denied');
+    expect(warning).not.toContain('host free memory');
   });
 });
