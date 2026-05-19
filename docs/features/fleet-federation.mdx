@@ -12,7 +12,7 @@ Federation lives under **Fleet → Federation**.
 </Frame>
 
 <Note>
-Federation is an Admiral feature. The tab is hidden at the Community and Skipper tiers. Cordon and pin actions require an admin user role.
+Federation is an Admiral feature. Cordon and pin actions require an admin user role.
 </Note>
 
 ## Placement control, not placement automation
@@ -117,7 +117,7 @@ The **Effective** column in the Pin policy table is computed live each time the 
 
 ## Security and audit
 
-Federation actions require both an Admiral license and an admin user role. Viewers, operators, and lower-tier users do not see the cordon toggle on the node card or the Federation tab in the Fleet view. The `Cordoned` pill on the node card stays visible at every tier as a read-only signal, so non-Admiral operators can still understand why a node is skipping new work.
+Federation actions require both an Admiral license and an admin user role. The `Cordoned` pill on the node card stays visible at every tier as a read-only signal, so a non-Admiral operator can still understand why a node is skipping new work.
 
 Every cordon, uncordon, and pin action is captured in the audit log. Each row carries the actor, the action (`node.cordon`, `node.uncordon`, `blueprint.pin`), the affected resource, and the cordon reason where applicable. Filter the **Audit** view by these action names for the full history.
 
@@ -176,7 +176,7 @@ Pinning a stateful blueprint that is currently deployed on multiple nodes shrink
     The Fleet Overview grid polls every 30 seconds, so the `Cordoned` pill can lag the action by up to that long. The Federation tab summary and the audit log update immediately; if the audit log shows the cordon action but the badge is still missing, click **Refresh** on the Fleet page to force an immediate re-fetch.
   </Accordion>
   <Accordion title="The Federation tab is not visible">
-    Federation requires an Admiral license. On Skipper, Federation is hidden by design and the rest of the blueprint surface (catalog, deployments, drift) remains available. The `Cordoned` pill on a node card is visible at every tier; only the toggle and the Federation tab are gated.
+    Federation requires an Admiral license. The rest of the blueprint surface (catalog, deployments, drift) is available on lower tiers, and the read-only `Cordoned` pill on a node card is visible everywhere. If Federation is missing on an Admiral license, sign in as an admin user; cordon and pin actions are admin-only.
   </Accordion>
   <Accordion title="The Pin policy table is empty even though I created blueprints">
     Federation reads from the same Blueprints registry that powers **Fleet → Deployments**. If the Deployments tab shows blueprints but Federation does not, refresh the Fleet page (the Pin policy table caches its source list when the tab mounts). If Deployments is also empty, no blueprint has been saved yet; create one there first.
