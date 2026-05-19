@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Eye, EyeOff, Plus, Trash2, Copy, Loader2 } from 'lucide-react';
+import { Eye, EyeOff, Plus, Trash2, Copy, Loader2, Download } from 'lucide-react';
 import { SystemSheet, SheetSection, type SystemSheetTab } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
+import { useNodes } from '@/context/NodeContext';
 import {
     type SecretSummary,
     type SecretVersionSummary,
@@ -11,6 +12,7 @@ import {
     updateSecret,
     getSecret,
     listSecretVersions,
+    importFromStack,
 } from '@/lib/secretsApi';
 import { copyToClipboard } from '@/lib/clipboard';
 
@@ -58,6 +60,7 @@ function rowsToKv(rows: KvRow[]): { kv: Record<string, string> } | { error: stri
 
 export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props) {
     const mode: Mode = secret ? 'edit' : 'create';
+    const { nodes } = useNodes();
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
     const [rows, setRows] = useState<KvRow[]>([]);
@@ -67,6 +70,11 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
     const [loading, setLoading] = useState(false);
     const [versions, setVersions] = useState<SecretVersionSummary[]>([]);
     const [versionsLoading, setVersionsLoading] = useState(false);
+    const [importOpen, setImportOpen] = useState(false);
+    const [importNodeId, setImportNodeId] = useState<number | null>(null);
+    const [importStackName, setImportStackName] = useState('');
+    const [importEnvFile, setImportEnvFile] = useState('.env');
+    const [importing, setImporting] = useState(false);
 
     useEffect(() => {
         if (!open) return;
@@ -94,6 +102,10 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             setNote('');
             setActiveTab('keys');
         }
+        setImportOpen(false);
+        setImportNodeId(null);
+        setImportStackName('');
+        setImportEnvFile('.env');
         return () => { cancelled = true; };
     }, [open, secret]);
 
@@ -170,6 +182,56 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
             toast.success('Copied');
         } catch {
             toast.error('Copy failed');
+        }
+    }
+
+    async function handleImportFromStack() {
+        if (!secret) return;
+        if (importNodeId === null) {
+            toast.error('Pick a node');
+            return;
+        }
+        const stackName = importStackName.trim();
+        if (!stackName) {
+            toast.error('Stack name is required');
+            return;
+        }
+        const envFile = importEnvFile.trim() || '.env';
+        const nodeId = importNodeId;
+        setImporting(true);
+        try {
+            const { kv } = await importFromStack(secret.id, {
+                nodeId,
+                stackName,
+                envFileBasename: envFile,
+            });
+            const incomingKeys = Object.keys(kv);
+            if (incomingKeys.length === 0) {
+                toast.error(`No keys found in ${envFile} on the selected stack`);
+                return;
+            }
+            setRows((prev) => {
+                const incomingSet = new Set(incomingKeys);
+                const seenInRows = new Set<string>();
+                const next = prev.map((r) => {
+                    const k = r.key.trim();
+                    if (k) seenInRows.add(k);
+                    return k && incomingSet.has(k) ? { ...r, value: kv[k] } : r;
+                });
+                for (const k of incomingKeys) {
+                    if (!seenInRows.has(k)) {
+                        next.push({ id: makeRowId(), key: k, value: kv[k], reveal: false });
+                    }
+                }
+                return next;
+            });
+            const nodeName = nodes.find((n) => n.id === nodeId)?.name ?? `node ${nodeId}`;
+            toast.success(`Imported ${incomingKeys.length} ${incomingKeys.length === 1 ? 'key' : 'keys'} from ${nodeName}/${stackName}`);
+            setImportOpen(false);
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : 'Failed to import env from stack');
+        } finally {
+            setImporting(false);
         }
     }
 
@@ -269,9 +331,89 @@ export function SecretBundleSheet({ open, onOpenChange, secret, onSaved }: Props
                                             </Button>
                                         </div>
                                     ))}
-                                    <Button type="button" variant="outline" size="sm" onClick={addRow} className="gap-1.5">
-                                        <Plus className="w-3.5 h-3.5" /> Add key
-                                    </Button>
+                                    <div className="flex items-center gap-2">
+                                        <Button type="button" variant="outline" size="sm" onClick={addRow} className="gap-1.5">
+                                            <Plus className="w-3.5 h-3.5" /> Add key
+                                        </Button>
+                                        {mode === 'edit' && (
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => setImportOpen((v) => !v)}
+                                                className="gap-1.5"
+                                                aria-expanded={importOpen}
+                                                aria-controls="import-from-stack-panel"
+                                            >
+                                                <Download className="w-3.5 h-3.5" /> Import from stack
+                                            </Button>
+                                        )}
+                                    </div>
+                                    {mode === 'edit' && importOpen && (
+                                        <div id="import-from-stack-panel" className="rounded border border-card-border/60 bg-popover/40 p-3 space-y-3">
+                                            <p className="text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">
+                                                Read an env file from a deployed stack · existing keys overlay, new keys append
+                                            </p>
+                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                                <div className="space-y-1">
+                                                    <label htmlFor="import-node" className="block text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">Node</label>
+                                                    <select
+                                                        id="import-node"
+                                                        value={importNodeId === null ? '' : String(importNodeId)}
+                                                        onChange={(e) => setImportNodeId(e.target.value === '' ? null : Number(e.target.value))}
+                                                        className="font-mono text-sm rounded border border-card-border bg-popover/40 px-2 py-1.5 w-full"
+                                                    >
+                                                        <option value="">Pick a node…</option>
+                                                        {nodes.map((n) => (
+                                                            <option key={n.id} value={n.id}>{n.name}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label htmlFor="import-stack" className="block text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">Stack name</label>
+                                                    <Input
+                                                        id="import-stack"
+                                                        value={importStackName}
+                                                        onChange={(e) => setImportStackName(e.target.value)}
+                                                        placeholder="my-app"
+                                                        className="font-mono"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label htmlFor="import-envfile" className="block text-[10px] uppercase tracking-[0.18em] font-mono text-stat-subtitle">Env file</label>
+                                                    <Input
+                                                        id="import-envfile"
+                                                        value={importEnvFile}
+                                                        onChange={(e) => setImportEnvFile(e.target.value)}
+                                                        placeholder=".env"
+                                                        className="font-mono"
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center justify-end gap-2">
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    onClick={() => setImportOpen(false)}
+                                                    disabled={importing}
+                                                >
+                                                    Cancel
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={() => void handleImportFromStack()}
+                                                    disabled={importing || importNodeId === null || !importStackName.trim()}
+                                                    className="gap-1.5"
+                                                >
+                                                    {importing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                                                    {importing ? 'Importing…' : 'Import'}
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </SheetSection>
 
