@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.82.1](https://github.com/Studio-Saelix/sencho/compare/v0.82.0...v0.82.1) (2026-05-19)
+
+
+### Fixed
+
+* **spawn:** attribute ENOMEM and ENOENT-under-memory-pressure spawn failures to host OOM ([#1111](https://github.com/Studio-Saelix/sencho/issues/1111)) ([9dbce9c](https://github.com/Studio-Saelix/sencho/commit/9dbce9c3c7ec2539878bc7977b3ab31ec187b408))
+
 ## [0.82.0](https://github.com/Studio-Saelix/sencho/compare/v0.81.15...v0.82.0) (2026-05-19)
 
 
