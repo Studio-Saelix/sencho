@@ -99,6 +99,7 @@ vi.mock('../services/FileSystemService', () => ({
       getStacks: vi.fn().mockResolvedValue([]),
       getBaseDir: () => '/tmp/compose',
       readComposeFile: vi.fn().mockResolvedValue(''),
+      hasComposeFile: vi.fn().mockResolvedValue(true),
     }),
   },
 }));

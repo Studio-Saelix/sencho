@@ -37,6 +37,25 @@ function notifyActionSuccess(category: NotificationCategory, message: string, st
     .catch(err => console.error('[Stacks] Failed to dispatch activity for %s:', sanitizeForLog(stackName), err));
 }
 
+async function requireStackExists(nodeId: number, stackName: string, res: Response): Promise<boolean> {
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return false;
+  }
+  const fsSvc = FileSystemService.getInstance(nodeId);
+  const stackDir = path.join(fsSvc.getBaseDir(), stackName);
+  try {
+    if (!(await fsSvc.hasComposeFile(stackDir))) {
+      res.status(404).json({ error: 'Stack not found' });
+      return false;
+    }
+  } catch {
+    res.status(404).json({ error: 'Stack not found' });
+    return false;
+  }
+  return true;
+}
+
 export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
   const fsService = FileSystemService.getInstance(nodeId);
   const stackDir = path.join(fsService.getBaseDir(), stackName);
@@ -620,6 +639,7 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
 stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
@@ -656,6 +676,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
 stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
     await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs());
     invalidateNodeCaches(req.nodeId);
@@ -802,6 +823,7 @@ stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Respons
 stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
