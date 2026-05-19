@@ -449,12 +449,38 @@ export class FleetSyncService {
         return next;
     }
 
+    /**
+     * Concurrency note: the sticky-set in the CONTROL_IDENTITY_MISMATCH catch
+     * branch is best-effort against an operator-initiated reset that lands
+     * during a push's HTTP round-trip. The reset endpoint clears
+     * `sticky_error_code` to NULL; if this push's 409 arrives after that
+     * clear, it will re-pin the row. The operator clicks Reset again. The
+     * window is bounded by one HTTP round-trip per resource; no lock or
+     * generation counter is justified.
+     */
     private async executePushToNode(
         node: Node & { id: number },
         resource: FleetResource,
         partial: Omit<FleetSyncPayload, 'targetIdentity'>,
     ): Promise<void> {
         const db = DatabaseService.getInstance();
+
+        // Sticky-error short-circuit. When a previous push hit a non-retriable
+        // failure (today: CONTROL_IDENTITY_MISMATCH), every subsequent push
+        // would re-issue the same 409 and re-spam the log every 5 minutes. The
+        // sticky flag is cleared by either (a) the operator resetting the
+        // anchor via POST /api/nodes/:id/fleet-sync/reset-anchor, or (b) a
+        // successful push to the same node (recordFleetSyncSuccess clears
+        // it). Until then, skip the HTTP call entirely.
+        if (db.getFleetSyncStickyCode(node.id, resource)) {
+            if (isDebugEnabled()) {
+                console.debug(
+                    `[FleetSync:debug] Skipping ${resource} push to "${node.name}": sticky error blocks retries.`,
+                );
+            }
+            return;
+        }
+
         const apiUrl = node.api_url ?? '';
         const baseUrl = apiUrl.replace(/\/$/, '');
         const payload: FleetSyncPayload = { ...partial, targetIdentity: apiUrl };
@@ -479,13 +505,33 @@ export class FleetSyncService {
             // healthy; suppress the failure record so it does not surface as
             // an alert in the sync-status panel.
             if (err instanceof AxiosError && err.response?.status === 409) {
-                const data = err.response.data as { code?: string } | undefined;
+                const data = err.response.data as { code?: string; expected?: string; got?: string } | undefined;
                 if (data?.code === SYNC_ERROR_CODES.staleSyncPush) {
                     if (isDebugEnabled()) {
                         console.debug(
                             `[FleetSync:debug] Stale push to "${node.name}" (${baseUrl}) for ${resource}; receiver already has a newer state.`,
                         );
                     }
+                    return;
+                }
+                // CONTROL_IDENTITY_MISMATCH is permanent until the operator
+                // explicitly resets the peer anchor. Record the failure once
+                // (last_error + last_failure_at) plus a sticky flag so the
+                // retry service and event-driven push path skip subsequent
+                // attempts.
+                if (data?.code === SYNC_ERROR_CODES.controlIdentityMismatch) {
+                    const message = this.formatError(err);
+                    console.warn(
+                        `[FleetSync] Failed to push ${resource} to "${node.name}" (${baseUrl}): ${message}`,
+                    );
+                    db.recordFleetSyncFailure(node.id, resource, message);
+                    db.setFleetSyncSticky(
+                        node.id,
+                        resource,
+                        SYNC_ERROR_CODES.controlIdentityMismatch,
+                        typeof data.expected === 'string' ? data.expected : null,
+                        typeof data.got === 'string' ? data.got : null,
+                    );
                     return;
                 }
             }

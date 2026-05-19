@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
-import { requireAdmiral } from '../middleware/tierGates';
+import { requireAdmin, requireAdmiral, requirePaid } from '../middleware/tierGates';
 import { enrollmentLimiter } from '../middleware/rateLimiters';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -351,6 +351,93 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('Failed to uncordon node:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to uncordon node' });
+  }
+});
+
+/**
+ * Reset the FleetSync control anchor on a remote peer.
+ *
+ * Proxies POST /api/fleet/role/reanchor to the peer using its stored
+ * Bearer token. A successful reanchor clears every sticky-error row for
+ * this node so the next push (event-driven or via the 5-minute retry
+ * service) re-attempts cleanly and the peer accepts the central's
+ * fingerprint as the new anchor.
+ *
+ * Surfaces UI affordance for the F-16 audit (mesh-e2e-2026-05-17.md):
+ * when a peer was previously enrolled by a different central, FleetSync
+ * keeps 409'ing every reconcile tick; the sticky flag halts retries and
+ * this endpoint is the single one-click recovery for the operator.
+ */
+nodesRouter.post('/:id/fleet-sync/reset-anchor', async (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  const nodeIdParam = req.params.id as string;
+  if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
+  if (!requirePaid(req, res)) return;
+  // Reset-anchor is symmetric with `/api/fleet/sync-status` (admin-only).
+  // Keeping read and write gated at the same role avoids a banner-invisible-to-the-actor
+  // gap where a node-admin could call reset without ever seeing why.
+  if (!requireAdmin(req, res)) return;
+  try {
+    const id = parseInt(nodeIdParam, 10);
+    if (!Number.isFinite(id) || id <= 0) {
+      res.status(400).json({ error: 'Invalid node id' });
+      return;
+    }
+    const node = DatabaseService.getInstance().getNode(id);
+    if (!node) {
+      res.status(404).json({ error: 'Node not found' });
+      return;
+    }
+    if (node.type !== 'remote' || node.mode !== 'proxy') {
+      res.status(400).json({ error: 'Reset anchor only applies to proxy-mode remote nodes' });
+      return;
+    }
+    if (!node.api_url || !node.api_token) {
+      res.status(400).json({ error: 'Node is missing api_url or api_token' });
+      return;
+    }
+
+    const baseUrl = node.api_url.replace(/\/$/, '');
+    let peerResponse: globalThis.Response;
+    try {
+      peerResponse = await fetch(`${baseUrl}/api/fleet/role/reanchor`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${node.api_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ override: true }),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (networkErr) {
+      const message = getErrorMessage(networkErr, 'Failed to reach peer');
+      console.warn(`[Nodes] Reset anchor unreachable for node ${id}: ${message}`);
+      res.status(504).json({ error: `Peer unreachable: ${message}` });
+      return;
+    }
+
+    if (!peerResponse.ok) {
+      const status = peerResponse.status;
+      const body = await peerResponse.json().catch(() => ({}));
+      const peerError = (body as { error?: string })?.error
+        ?? `Peer returned HTTP ${status}`;
+      if (status === 401 || status === 403) {
+        console.warn(`[Nodes] Reset anchor rejected by peer ${id}: ${peerError}`);
+        res.status(502).json({
+          error: `Peer rejected the reanchor request: ${peerError}. The node's API token may need to be regenerated.`,
+        });
+        return;
+      }
+      res.status(502).json({ error: peerError });
+      return;
+    }
+
+    DatabaseService.getInstance().clearFleetSyncStickyForNode(id);
+    console.log(`[Nodes] Fleet-sync anchor reset on node ${id} ("${node.name}")`);
+    res.json({ success: true });
+  } catch (error: unknown) {
+    console.error('Failed to reset fleet-sync anchor:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to reset fleet-sync anchor') });
   }
 });
 

@@ -16,6 +16,8 @@ const {
   mockInsertAuditLog,
   mockRecordFleetSyncSuccess,
   mockRecordFleetSyncFailure,
+  mockSetFleetSyncSticky,
+  mockGetFleetSyncStickyCode,
   mockGetSystemState,
   mockSetSystemState,
   mockTransaction,
@@ -33,6 +35,8 @@ const {
   mockInsertAuditLog: vi.fn(),
   mockRecordFleetSyncSuccess: vi.fn(),
   mockRecordFleetSyncFailure: vi.fn(),
+  mockSetFleetSyncSticky: vi.fn(),
+  mockGetFleetSyncStickyCode: vi.fn().mockReturnValue(null),
   mockGetSystemState: vi.fn().mockReturnValue(null),
   mockSetSystemState: vi.fn(),
   mockTransaction: vi.fn().mockImplementation((fn: () => unknown) => fn()),
@@ -53,6 +57,8 @@ vi.mock('../services/DatabaseService', () => ({
       insertAuditLog: mockInsertAuditLog,
       recordFleetSyncSuccess: mockRecordFleetSyncSuccess,
       recordFleetSyncFailure: mockRecordFleetSyncFailure,
+      setFleetSyncSticky: mockSetFleetSyncSticky,
+      getFleetSyncStickyCode: mockGetFleetSyncStickyCode,
       getSystemState: mockGetSystemState,
       setSystemState: mockSetSystemState,
       transaction: mockTransaction,
@@ -90,6 +96,7 @@ import { FleetSyncService, LOCAL_IDENTITY_SENTINEL } from '../services/FleetSync
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetSystemState.mockReturnValue(null);
+  mockGetFleetSyncStickyCode.mockReturnValue(null);
 });
 
 describe('FleetSyncService.getRole', () => {
@@ -592,5 +599,104 @@ describe('FleetSyncService.formatError redaction', () => {
     expect(failure[2]).not.toMatch(/Bearer\s+[A-Za-z0-9]/);
     expect(failure[2]).toContain('[redacted]');
     expect(failure[2]).toContain('[redacted-jwt]');
+  });
+});
+
+describe('FleetSyncService CONTROL_IDENTITY_MISMATCH sticky handling', () => {
+  function makeMismatchError(expected: string, got: string) {
+    return async () => {
+      const { AxiosError } = await import('axios');
+      const err = new AxiosError('Request failed with status code 409');
+      (err as unknown as { response: unknown }).response = {
+        status: 409,
+        statusText: 'Conflict',
+        data: {
+          error: `Control identity mismatch: replica is anchored to "${expected}", push from "${got}"`,
+          code: 'CONTROL_IDENTITY_MISMATCH',
+          expected,
+          got,
+        },
+      };
+      throw err;
+    };
+  }
+
+  it('sets the sticky flag carrying the expected/got fingerprints on first mismatch', async () => {
+    mockGetNodes.mockReturnValue([
+      { id: 7, type: 'remote', api_url: 'https://peer.example', api_token: 'tok', name: 'peer', mode: 'proxy' },
+    ]);
+    mockGetLocalScanPolicies.mockReturnValue([]);
+    mockGetFleetSyncStickyCode.mockReturnValue(null);
+    mockAxiosPost.mockImplementation(makeMismatchError('cb45a2eff9db81d8', '555f8d1f7e7e71e3'));
+
+    await FleetSyncService.getInstance().pushResource('scan_policies');
+
+    expect(mockRecordFleetSyncFailure).toHaveBeenCalledTimes(1);
+    expect(mockSetFleetSyncSticky).toHaveBeenCalledTimes(1);
+    expect(mockSetFleetSyncSticky).toHaveBeenCalledWith(
+      7,
+      'scan_policies',
+      'CONTROL_IDENTITY_MISMATCH',
+      'cb45a2eff9db81d8',
+      '555f8d1f7e7e71e3',
+    );
+  });
+
+  it('short-circuits subsequent pushes when sticky is already set; no HTTP call, no failure record', async () => {
+    mockGetNodes.mockReturnValue([
+      { id: 7, type: 'remote', api_url: 'https://peer.example', api_token: 'tok', name: 'peer', mode: 'proxy' },
+    ]);
+    mockGetLocalScanPolicies.mockReturnValue([]);
+    // Sticky already set from a prior push.
+    mockGetFleetSyncStickyCode.mockReturnValue('CONTROL_IDENTITY_MISMATCH');
+
+    await FleetSyncService.getInstance().pushResource('scan_policies');
+
+    expect(mockAxiosPost).not.toHaveBeenCalled();
+    expect(mockRecordFleetSyncFailure).not.toHaveBeenCalled();
+    expect(mockRecordFleetSyncSuccess).not.toHaveBeenCalled();
+    expect(mockSetFleetSyncSticky).not.toHaveBeenCalled();
+  });
+
+  it('tolerates a missing expected/got payload (passes null through)', async () => {
+    mockGetNodes.mockReturnValue([
+      { id: 7, type: 'remote', api_url: 'https://peer.example', api_token: 'tok', name: 'peer', mode: 'proxy' },
+    ]);
+    mockGetLocalScanPolicies.mockReturnValue([]);
+    mockGetFleetSyncStickyCode.mockReturnValue(null);
+    mockAxiosPost.mockImplementation(async () => {
+      const { AxiosError } = await import('axios');
+      const err = new AxiosError('Request failed with status code 409');
+      (err as unknown as { response: unknown }).response = {
+        status: 409,
+        statusText: 'Conflict',
+        data: { error: 'mismatch', code: 'CONTROL_IDENTITY_MISMATCH' },
+      };
+      throw err;
+    });
+
+    await FleetSyncService.getInstance().pushResource('scan_policies');
+
+    expect(mockSetFleetSyncSticky).toHaveBeenCalledWith(
+      7,
+      'scan_policies',
+      'CONTROL_IDENTITY_MISMATCH',
+      null,
+      null,
+    );
+  });
+
+  it('does not set sticky for non-mismatch failures (network errors, 500s)', async () => {
+    mockGetNodes.mockReturnValue([
+      { id: 7, type: 'remote', api_url: 'https://peer.example', api_token: 'tok', name: 'peer', mode: 'proxy' },
+    ]);
+    mockGetLocalScanPolicies.mockReturnValue([]);
+    mockGetFleetSyncStickyCode.mockReturnValue(null);
+    mockAxiosPost.mockRejectedValue(new Error('ECONNREFUSED'));
+
+    await FleetSyncService.getInstance().pushResource('scan_policies');
+
+    expect(mockRecordFleetSyncFailure).toHaveBeenCalledTimes(1);
+    expect(mockSetFleetSyncSticky).not.toHaveBeenCalled();
   });
 });
