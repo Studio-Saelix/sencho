@@ -2,7 +2,7 @@
  * Regression guard for `createRemoteProxyMiddleware` mount order.
  *
  * `index.ts` mounts every local `/api/<group>` router before the remote proxy
- * at step 13 of the canonical middleware order. A remote-`nodeId` request
+ * at step 15 of the canonical middleware order. A remote-`nodeId` request
  * must short-circuit into the proxy rather than match a local router. If the
  * order were reversed, a GET `/api/stacks` for a remote node would return the
  * control instance's local stack list instead of the remote's.

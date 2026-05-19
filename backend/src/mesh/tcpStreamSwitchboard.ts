@@ -9,6 +9,7 @@ import {
     MAX_STREAMS_PER_TUNNEL,
     MeshErrCode,
     STREAM_IDLE_TIMEOUT_MS,
+    STREAM_PENDING_DATA_MAX_BYTES,
     StreamIdAllocator,
     encodeBinaryFrame,
     encodeJsonFrame,
@@ -62,8 +63,21 @@ export interface SwitchboardCtx {
 }
 
 interface ForwardTcpStream {
-    socket: net.Socket;
+    /**
+     * Null between the synchronous reservation at the top of `onTcpOpen`
+     * and the moment `net.createConnection` returns. Once assigned the
+     * socket is filled in for the remainder of the stream's life.
+     */
+    socket: net.Socket | null;
     accepted: boolean;
+    /**
+     * `TcpData` payloads received before `socket` exists. Drained onto the
+     * socket inside the `'connect'` handler so frames that arrive during
+     * the resolve / dial window are delivered in order rather than
+     * silently dropped by the lookup-miss path in `handleBinaryFrame`.
+     */
+    pendingData: Buffer[];
+    pendingBytes: number;
 }
 
 /**
@@ -160,7 +174,12 @@ export class TcpStreamSwitchboard {
         const ws = this.ctx.ws;
         const fwd = this.tcpStreams.get(streamId);
         if (fwd) {
-            try { fwd.socket.destroy(); } catch { /* ignore */ }
+            // socket is null if the idle timer somehow fires while still
+            // inside resolveTarget; the in-flight onTcpOpen will see the
+            // missing reservation and abort the dial.
+            if (fwd.socket) {
+                try { fwd.socket.destroy(); } catch { /* ignore */ }
+            }
             this.tcpStreams.delete(streamId);
             try { ws.send(encodeJsonFrame({ t: 'tcp_close', s: streamId })); } catch { /* ignore */ }
             return;
@@ -211,7 +230,25 @@ export class TcpStreamSwitchboard {
         }
         const fwd = this.tcpStreams.get(frame.streamId);
         if (!fwd) return true;
-        try { fwd.socket.write(frame.payload); } catch { /* ignore */ }
+        if (fwd.socket) {
+            try { fwd.socket.write(frame.payload); } catch { /* ignore */ }
+        } else {
+            // Reservation exists but the local socket has not been created
+            // yet (we are still inside the resolveTarget await in onTcpOpen).
+            // Buffer up to STREAM_PENDING_DATA_MAX_BYTES; over the cap, drop
+            // the stream and signal close so peer tears down rather than us
+            // OOMing. Copy the payload because decodeBinaryFrame returns a
+            // subarray view of the WS frame; holding the view would pin the
+            // parent buffer (up to MAX_FRAME_SIZE_BYTES) past its lifecycle.
+            if (fwd.pendingBytes + frame.payload.length > STREAM_PENDING_DATA_MAX_BYTES) {
+                this.tcpStreams.delete(frame.streamId);
+                this.clearIdleTimer(frame.streamId);
+                try { this.ctx.ws.send(encodeJsonFrame({ t: 'tcp_close', s: frame.streamId })); } catch { /* ignore */ }
+                return true;
+            }
+            fwd.pendingData.push(Buffer.from(frame.payload));
+            fwd.pendingBytes += frame.payload.length;
+        }
         this.refreshIdleTimer(frame.streamId);
         return true;
     }
@@ -225,19 +262,38 @@ export class TcpStreamSwitchboard {
             return;
         }
 
+        // Reserve the slot synchronously BEFORE the resolveTarget await so
+        // any `TcpData` frame the peer sends back-to-back with `tcp_open`
+        // (the common HTTP-request case) lands on a known entry instead of
+        // being dropped by the lookup-miss path in handleBinaryFrame.
+        // pendingData captures bytes until the socket is created + connected.
+        const entry: ForwardTcpStream = { socket: null, accepted: false, pendingData: [], pendingBytes: 0 };
+        this.tcpStreams.set(frame.s, entry);
+        this.refreshIdleTimer(frame.s);
+
         const target = await this.ctx.resolveTarget(frame.stack, frame.service, frame.port);
         if (!target.ok) {
+            // Drop the reservation before sending the rejection ack so the
+            // stream cap stays honest and any over-cap-evicted pending frames
+            // do not strand on an empty entry.
+            if (this.tcpStreams.get(frame.s) === entry) {
+                this.tcpStreams.delete(frame.s);
+                this.clearIdleTimer(frame.s);
+            }
             try {
                 ws.send(encodeJsonFrame({ t: 'tcp_open_ack', s: frame.s, ok: false, err: target.err }));
             } catch { /* ignore */ }
             return;
         }
 
+        // The reservation may have been evicted under the pending-bytes cap
+        // (see handleBinaryFrame) while we were resolving. If so, do not
+        // dial: the peer has already been told via tcp_close to tear down.
+        if (this.tcpStreams.get(frame.s) !== entry) return;
+
         const socket = net.createConnection({ host: target.host, port: target.port });
         socket.setTimeout(MESH_CONNECT_TIMEOUT_MS);
-        const entry: ForwardTcpStream = { socket, accepted: false };
-        this.tcpStreams.set(frame.s, entry);
-        this.refreshIdleTimer(frame.s);
+        entry.socket = socket;
 
         const sendAck = (ok: boolean, err?: MeshErrCode) => {
             try { ws.send(encodeJsonFrame({ t: 'tcp_open_ack', s: frame.s, ok, err })); } catch { /* ignore */ }
@@ -246,6 +302,16 @@ export class TcpStreamSwitchboard {
         socket.once('connect', () => {
             entry.accepted = true;
             socket.setTimeout(0);
+            // Ack only after buffered bytes are queued on the socket so
+            // peer sees a clean "ack + data" sequence rather than racing
+            // post-ack data ahead of the request body it carried in.
+            if (entry.pendingData.length > 0) {
+                for (const buf of entry.pendingData) {
+                    try { socket.write(buf); } catch { /* ignore */ }
+                }
+                entry.pendingData = [];
+                entry.pendingBytes = 0;
+            }
             sendAck(true);
             this.refreshIdleTimer(frame.s);
         });
@@ -300,7 +366,12 @@ export class TcpStreamSwitchboard {
         if (!entry) return;
         this.tcpStreams.delete(streamId);
         this.clearIdleTimer(streamId);
-        try { entry.socket.destroy(); } catch { /* ignore */ }
+        // socket may be null if central sent tcp_close while we were still
+        // inside resolveTarget; the reservation goes away and the in-flight
+        // onTcpOpen sees the missing entry and aborts the dial.
+        if (entry.socket) {
+            try { entry.socket.destroy(); } catch { /* ignore */ }
+        }
     }
 
     private onTcpOpenAckReverse(frame: { s: number; ok: boolean; err?: MeshErrCode }): void {
@@ -369,7 +440,11 @@ export class TcpStreamSwitchboard {
      */
     public cleanup(reason = 'mesh tunnel closed'): void {
         for (const [, entry] of this.tcpStreams) {
-            try { entry.socket.destroy(); } catch { /* ignore */ }
+            // socket is null for reservations whose onTcpOpen is still
+            // inside resolveTarget; pending buffers go away with the map.
+            if (entry.socket) {
+                try { entry.socket.destroy(); } catch { /* ignore */ }
+            }
         }
         this.tcpStreams.clear();
         for (const [, handle] of this.reverseTcpStreams) {

@@ -22,6 +22,7 @@ function makeNode(over: Partial<MeshNodeStatus> & Pick<MeshNodeStatus, 'nodeId' 
         pilotConnected: over.pilotConnected ?? false,
         reachableMode: over.reachableMode ?? 'unreachable',
         reachableReason: over.reachableReason ?? null,
+        reverseCallbackStatus: over.reverseCallbackStatus ?? 'not_applicable',
         optedInStacks: over.optedInStacks ?? [],
         activeStreamCount: over.activeStreamCount ?? 0,
     };
@@ -38,32 +39,54 @@ function makeAlias(over: Partial<MeshAlias> & Pick<MeshAlias, 'host' | 'nodeId'>
     };
 }
 
+function entries(...names: string[]): MeshNodeStatus['optedInStacks'] {
+    return names.map((stackName) => ({ stackName, currentlyResolvable: true }));
+}
+
 describe('stacksKey', () => {
     it('returns the same key for the same membership regardless of order', () => {
-        expect(stacksKey(['a', 'b', 'c'])).toBe(stacksKey(['c', 'a', 'b']));
+        expect(stacksKey(entries('a', 'b', 'c'))).toBe(stacksKey(entries('c', 'a', 'b')));
     });
 
     it('differs when membership differs even with the same count', () => {
-        expect(stacksKey(['a', 'b'])).not.toBe(stacksKey(['a', 'c']));
+        expect(stacksKey(entries('a', 'b'))).not.toBe(stacksKey(entries('a', 'c')));
     });
 
     it('returns empty string for empty list', () => {
         expect(stacksKey([])).toBe('');
     });
+
+    it('differs when a stack flips currentlyResolvable', () => {
+        const a = [{ stackName: 'svc', currentlyResolvable: true }];
+        const b = [{ stackName: 'svc', currentlyResolvable: false }];
+        expect(stacksKey(a)).not.toBe(stacksKey(b));
+    });
 });
 
 describe('meshNodeStateEqual', () => {
-    const base = makeNode({ nodeId: 1, nodeName: 'n', reachableMode: 'pilot', enabled: true, pilotConnected: true, optedInStacks: ['a', 'b'] });
+    const base = makeNode({ nodeId: 1, nodeName: 'n', reachableMode: 'pilot', enabled: true, pilotConnected: true, optedInStacks: entries('a', 'b') });
 
     it('returns true when scalar fields and stack membership match', () => {
         const a = { ...base };
-        const b = { ...base, optedInStacks: ['b', 'a'] };
+        const b = { ...base, optedInStacks: entries('b', 'a') };
         expect(meshNodeStateEqual(a, b)).toBe(true);
     });
 
     it('detects a stack swap that preserves the count', () => {
         const a = { ...base };
-        const b = { ...base, optedInStacks: ['a', 'c'] };
+        const b = { ...base, optedInStacks: entries('a', 'c') };
+        expect(meshNodeStateEqual(a, b)).toBe(false);
+    });
+
+    it('detects a resolvability flip on a stack that otherwise stays identical', () => {
+        const a = { ...base };
+        const b = {
+            ...base,
+            optedInStacks: [
+                { stackName: 'a', currentlyResolvable: false },
+                { stackName: 'b', currentlyResolvable: true },
+            ],
+        };
         expect(meshNodeStateEqual(a, b)).toBe(false);
     });
 

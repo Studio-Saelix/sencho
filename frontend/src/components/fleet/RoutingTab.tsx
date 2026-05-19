@@ -3,7 +3,7 @@ import { apiFetch } from '@/lib/api';
 import { visibilityInterval } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { Button } from '@/components/ui/button';
-import { ArrowLeftRight, Loader2, ScrollText, Table2, Network } from 'lucide-react';
+import { AlertTriangle, ArrowLeftRight, Loader2, ScrollText, Table2, Network } from 'lucide-react';
 import { RoutingNodeCard } from './RoutingNodeCard';
 import { MeshOptInSheet } from './MeshOptInSheet';
 import { MeshRouteDetailSheet } from './MeshRouteDetailSheet';
@@ -12,7 +12,7 @@ import { MeshActivitySheet } from './MeshActivitySheet';
 import { MeshTopologyGraph, type MeshGraphEdgeMode } from './MeshTopologyGraph';
 import { MeshStackTopologySheet } from './MeshStackTopologySheet';
 import { SegmentedControl } from '@/components/ui/segmented-control';
-import type { MeshAlias, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
+import type { MeshAlias, MeshDataPlaneStatus, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
 
 type RoutingViewMode = 'table' | 'graph';
 
@@ -46,6 +46,7 @@ function readStoredEdgeMode(): MeshGraphEdgeMode {
 
 export function RoutingTab() {
     const [status, setStatus] = useState<MeshNodeStatus[]>([]);
+    const [localDataPlane, setLocalDataPlane] = useState<MeshDataPlaneStatus | null>(null);
     const [aliases, setAliases] = useState<MeshAlias[]>([]);
     const [loading, setLoading] = useState(true);
     const [optInNode, setOptInNode] = useState<{ id: number; name: string } | null>(null);
@@ -63,8 +64,9 @@ export function RoutingTab() {
                 apiFetch('/mesh/aliases', { localOnly: true }),
             ]);
             if (statusRes.ok) {
-                const body = await statusRes.json() as { nodes: MeshNodeStatus[] };
+                const body = await statusRes.json() as { nodes: MeshNodeStatus[]; localDataPlane?: MeshDataPlaneStatus };
                 setStatus(body.nodes);
+                if (body.localDataPlane) setLocalDataPlane(body.localDataPlane);
             }
             if (aliasesRes.ok) {
                 const body = await aliasesRes.json() as { aliases: MeshAlias[] };
@@ -156,6 +158,7 @@ export function RoutingTab() {
         return (
             <div className="space-y-4">
                 <RoutingMasthead meshedNodes={meshedNodes} reachableNodes={reachableNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
+                <DataPlaneBanner status={localDataPlane} />
                 <div className="flex flex-col items-center justify-center py-12 rounded border border-dashed border-card-border bg-card/50">
                     <ArrowLeftRight className="w-12 h-12 text-stat-subtitle mb-4" />
                     <div className="text-lg font-display italic mb-2">Mesh containers across nodes</div>
@@ -196,6 +199,7 @@ export function RoutingTab() {
     return (
         <div className="space-y-4">
             <RoutingMasthead meshedNodes={meshedNodes} reachableNodes={reachableNodes} totalAliases={totalAliases} onShowActivity={() => setActivityOpen(true)} />
+            <DataPlaneBanner status={localDataPlane} />
             <div className="flex flex-wrap items-center gap-3">
                 <SegmentedControl<RoutingViewMode>
                     value={viewMode}
@@ -252,6 +256,43 @@ export function RoutingTab() {
                 aliases={aliases}
                 onChanged={() => { void refresh(); }}
             />
+        </div>
+    );
+}
+
+/**
+ * Visible when the local Sencho's mesh data plane is down. Distinguishes the
+ * common reasons (subnet conflict, IP-in-use, invalid CIDR) so the operator
+ * does not have to dig through the activity log to know how to recover. The
+ * `not_in_docker` warn-level case is intentionally suppressed: it is the
+ * expected condition for dev-mode startup.
+ */
+function DataPlaneBanner({ status }: { status: MeshDataPlaneStatus | null }) {
+    if (!status || status.ok || status.reason === 'not_in_docker' || status.reason === 'not_started') {
+        return null;
+    }
+    const headlines: Record<Exclude<MeshDataPlaneStatus['reason'], 'ok' | 'not_started' | 'not_in_docker'>, string> = {
+        subnet_invalid: 'SENCHO_MESH_SUBNET is not a valid CIDR.',
+        subnet_overlap: `Mesh subnet ${status.subnet} overlaps another Docker network on this host.`,
+        subnet_mismatch: `sencho_mesh already exists with a different subnet than ${status.subnet}.`,
+        ip_in_use: `Another container is using Sencho's address on ${status.subnet}.`,
+        attach_failed: 'Sencho could not attach to its own mesh network.',
+    };
+    const reason = status.reason as keyof typeof headlines;
+    return (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive flex items-start gap-3 shadow-card-bevel">
+            <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" strokeWidth={1.75} />
+            <div className="min-w-0 space-y-1">
+                <div className="font-medium">Mesh data plane is down</div>
+                <div className="text-xs leading-relaxed text-destructive/90">
+                    {headlines[reason] ?? 'Mesh setup did not complete.'}
+                    {' '}
+                    Set <code className="font-mono bg-destructive/15 px-1 py-0.5 rounded text-[11px]">SENCHO_MESH_SUBNET</code> to a free <code className="font-mono bg-destructive/15 px-1 py-0.5 rounded text-[11px]">/24</code> (for example <code className="font-mono bg-destructive/15 px-1 py-0.5 rounded text-[11px]">10.42.0.0/24</code>) and restart the Sencho container.
+                </div>
+                {status.message ? (
+                    <div className="text-[11px] font-mono text-destructive/80 truncate">{status.message}</div>
+                ) : null}
+            </div>
         </div>
     );
 }

@@ -57,7 +57,7 @@ describe('MeshService.optInStack', () => {
 
         vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
             .mockResolvedValue([{ service: 'db', ports: [5432] }]);
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
 
         const db = DatabaseService.getInstance();
@@ -80,7 +80,7 @@ describe('MeshService.optInStack', () => {
                 { service: 'web', ports: [] },
                 { service: 'db', ports: [] },
             ]);
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
 
         await expect(svc.optInStack(localNodeId, 'silent', 'tester'))
@@ -94,7 +94,7 @@ describe('MeshService.optInStack', () => {
         const svc = MeshService.getInstance();
         vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
             .mockResolvedValue([{ service: 'db', ports: [5432] }]);
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
         vi.spyOn(svc as unknown as { removeStackOverride: (n: number, s: string) => Promise<void> }, 'removeStackOverride')
             .mockResolvedValue(undefined);
@@ -164,6 +164,178 @@ describe('MeshService.optInStack', () => {
             aliasByPort.clear();
             db.deleteNode(remoteNodeId);
         }
+    });
+
+    it('optInStack cascades override regen to every meshed node, not just the source node', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(remoteNodeId, 'remote-existing', 'setup');
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        const pushed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'pushOverrideToNode').mockImplementation(async (nodeId, stackName) => {
+            pushed.push({ nodeId, stackName });
+        });
+        vi.spyOn(svc as unknown as { triggerRedeploy: (n: number, s: string, a: string) => void }, 'triggerRedeploy')
+            .mockImplementation(() => { /* noop */ });
+
+        await svc.optInStack(localNodeId, 'new-stack', 'tester');
+
+        expect(pushed).toContainEqual({ nodeId: localNodeId, stackName: 'new-stack' });
+        // Other meshed nodes' existing stacks must regenerate so they pick
+        // up the new alias entry.
+        expect(pushed).toContainEqual({ nodeId: remoteNodeId, stackName: 'remote-existing' });
+    });
+
+    it('optOutStack cascades override regen to every other meshed node', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(localNodeId, 'to-remove', 'setup');
+        db.insertMeshStack(remoteNodeId, 'remote-existing', 'setup');
+
+        const pushed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'pushOverrideToNode').mockImplementation(async (nodeId, stackName) => {
+            pushed.push({ nodeId, stackName });
+        });
+        vi.spyOn(svc as unknown as { removeOverrideFromNode: (n: number, s: string) => Promise<void> }, 'removeOverrideFromNode')
+            .mockResolvedValue(undefined);
+        vi.spyOn(svc as unknown as { triggerRedeploy: (n: number, s: string, a: string) => void }, 'triggerRedeploy')
+            .mockImplementation(() => { /* noop */ });
+
+        await svc.optOutStack(localNodeId, 'to-remove', 'tester');
+
+        // Other meshed nodes' existing stacks must regenerate so they drop
+        // the removed alias entry.
+        expect(pushed).toContainEqual({ nodeId: remoteNodeId, stackName: 'remote-existing' });
+        // The removed row was deleted before the cascade ran, and its file
+        // was unlinked separately, so it must not appear in the cascade.
+        expect(pushed.find((p) => p.stackName === 'to-remove')).toBeUndefined();
+    });
+
+    it('optInStack cascades recompose to every previously meshed stack across the fleet', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(localNodeId, 'local-existing', 'setup');
+        db.insertMeshStack(remoteNodeId, 'remote-existing', 'setup');
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        const redeployed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((nodeId, stackName) => {
+            redeployed.push({ nodeId, stackName });
+        });
+
+        await svc.optInStack(localNodeId, 'new-stack', 'tester');
+
+        // The cascade must redeploy every previously meshed stack so its
+        // container's /etc/hosts picks up the newly-added alias.
+        expect(redeployed).toContainEqual({ nodeId: localNodeId, stackName: 'local-existing' });
+        expect(redeployed).toContainEqual({ nodeId: remoteNodeId, stackName: 'remote-existing' });
+        // The just-opted-in stack is still redeployed separately by the
+        // explicit triggerRedeploy at the end of optInStack.
+        expect(redeployed).toContainEqual({ nodeId: localNodeId, stackName: 'new-stack' });
+    });
+
+    it('optInStack does not double-redeploy the just-opted-in tuple via the cascade path', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(remoteNodeId, 'remote-existing', 'setup');
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        const redeployed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((nodeId, stackName) => {
+            redeployed.push({ nodeId, stackName });
+        });
+
+        await svc.optInStack(localNodeId, 'new-stack', 'tester');
+
+        // new-stack appears exactly once: the explicit redeploy at the end
+        // of optInStack. The cascade walks db.listMeshStacks() (which now
+        // includes new-stack) but its skip tuple drops it.
+        const newStackHits = redeployed.filter(
+            (r) => r.nodeId === localNodeId && r.stackName === 'new-stack',
+        );
+        expect(newStackHits).toHaveLength(1);
+    });
+
+    it('optInStack cascade is a no-op when no other meshed stacks exist', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        const redeployed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((nodeId, stackName) => {
+            redeployed.push({ nodeId, stackName });
+        });
+
+        await svc.optInStack(localNodeId, 'first-stack', 'tester');
+
+        // Only the just-opted-in stack is redeployed; the cascade has no
+        // peers to recompose so the early return short-circuits before
+        // the summary activity entry fires.
+        expect(redeployed).toEqual([{ nodeId: localNodeId, stackName: 'first-stack' }]);
+        const cascadeEntries = svc.getActivity({ limit: 1000 })
+            .filter((e) => e.message.startsWith('mesh cascade recompose'));
+        expect(cascadeEntries).toHaveLength(0);
+    });
+
+    it('optOutStack cascades recompose to every other meshed stack', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.insertMeshStack(localNodeId, 'to-remove', 'setup');
+        db.insertMeshStack(localNodeId, 'local-survivor', 'setup');
+        db.insertMeshStack(remoteNodeId, 'remote-survivor', 'setup');
+
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        vi.spyOn(svc as unknown as { removeOverrideFromNode: (n: number, s: string) => Promise<void> }, 'removeOverrideFromNode')
+            .mockResolvedValue(undefined);
+        const redeployed: Array<{ nodeId: number; stackName: string }> = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((nodeId, stackName) => {
+            redeployed.push({ nodeId, stackName });
+        });
+
+        await svc.optOutStack(localNodeId, 'to-remove', 'tester');
+
+        // Surviving meshed stacks must recompose so their /etc/hosts drops
+        // the now-removed alias.
+        expect(redeployed).toContainEqual({ nodeId: localNodeId, stackName: 'local-survivor' });
+        expect(redeployed).toContainEqual({ nodeId: remoteNodeId, stackName: 'remote-survivor' });
+        // The opted-out stack is still redeployed separately by the
+        // explicit triggerRedeploy at the end of optOutStack so its own
+        // container's /etc/hosts is cleared.
+        expect(redeployed).toContainEqual({ nodeId: localNodeId, stackName: 'to-remove' });
     });
 });
 
@@ -439,7 +611,7 @@ describe('MeshService.optInStack guard rails (network setup)', () => {
         const svc = MeshService.getInstance();
         vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
             .mockResolvedValue([{ service: 'web', ports: [1852] }]);
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
 
         const db = DatabaseService.getInstance();
@@ -589,7 +761,7 @@ describe('MeshService.regenerateAllOverrides (F6: boot-time regen)', () => {
         const pushSpy = vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
         vi.spyOn(svc as unknown as { triggerRedeploy: (n: number, s: string, a: string) => void }, 'triggerRedeploy')
             .mockImplementation(() => { /* noop */ });
-        vi.spyOn(svc as unknown as { regenerateOverridesForNode: (n: number, skip?: string) => Promise<void> }, 'regenerateOverridesForNode')
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, skip?: string) => Promise<void> }, 'regenerateOverridesAcrossFleet')
             .mockResolvedValue(undefined);
 
         const [summary] = await Promise.all([
@@ -849,10 +1021,9 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
         };
     }
 
-    // Install a stub reverseDialer so openCrossNode skips the peer-side
-    // bootstrap path (PeerToCentralMeshSessionDialer.ensureSession). The
-    // dispatch behavior under test relies on dialMeshTcpStream being called
-    // directly; the bootstrap kick would short-circuit before that mock fires.
+    // Install a stub reverseDialer so openCrossNode routes through the
+    // multiplex path rather than depending on a live MeshProxyTunnelDialer
+    // bridge being open against a real peer.
     const stubDialer = { openMeshTcpStream: vi.fn() };
     beforeEach(() => { MeshService.getInstance().setReverseDialer(stubDialer); });
     afterEach(() => { MeshService.getInstance().setReverseDialer(null); });
@@ -918,18 +1089,117 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
             vi.useRealTimers();
         }
     });
+
+    // F-10 regression: src.on('close')/src.on('error') must delete the
+    // activeStreams entry, not just call tcpStream.destroy(). MeshTcpStream-
+    // Like.destroy() only sends a tcp_close frame; the handle's own 'close'
+    // event waits for the remote ack. If that ack never lands (peer gone,
+    // network drop), the record sits in activeStreams until tunnel idle-
+    // close. Use an EventEmitter-backed fake src so emit('close') actually
+    // delivers to the listener (the plain makeFakeSocket uses vi.fn for .on
+    // which records calls but never fires them).
+    function makeEmittingSocket(): EventEmitter & {
+        destroy: ReturnType<typeof vi.fn>;
+        end: ReturnType<typeof vi.fn>;
+        write: ReturnType<typeof vi.fn>;
+    } {
+        const ee = new EventEmitter() as EventEmitter & {
+            destroy: ReturnType<typeof vi.fn>;
+            end: ReturnType<typeof vi.fn>;
+            write: ReturnType<typeof vi.fn>;
+        };
+        ee.destroy = vi.fn();
+        ee.end = vi.fn();
+        ee.write = vi.fn();
+        return ee;
+    }
+
+    it('src.on(close) deletes activeStreams entry even when tcpStream never emits close', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(50);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeEmittingSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        const activeStreams = (svc as unknown as { activeStreams: Map<number, unknown> }).activeStreams;
+        expect(activeStreams.size).toBe(1);
+        expect(activeStreams.has(50)).toBe(true);
+
+        fakeSrc.emit('close');
+
+        expect(activeStreams.size).toBe(0);
+        expect(fakeStream.destroy).toHaveBeenCalled();
+    });
+
+    it('src.on(error) deletes activeStreams entry symmetrically', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(51);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeEmittingSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        const activeStreams = (svc as unknown as { activeStreams: Map<number, unknown> }).activeStreams;
+        expect(activeStreams.size).toBe(1);
+
+        fakeSrc.emit('error', new Error('connection reset by peer'));
+
+        expect(activeStreams.size).toBe(0);
+        expect(fakeStream.destroy).toHaveBeenCalled();
+    });
+
+    it('cleanup is idempotent when both src and tcpStream emit close', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(52);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeEmittingSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        const activeStreams = (svc as unknown as { activeStreams: Map<number, unknown> }).activeStreams;
+        expect(activeStreams.size).toBe(1);
+
+        expect(() => {
+            fakeSrc.emit('close');
+            fakeStream.emit('close');
+        }).not.toThrow();
+
+        expect(activeStreams.size).toBe(0);
+    });
 });
 
-describe('MeshService.openCrossNode peer-recovery gating', () => {
-    // Regression cover for the v0.81.0 forward-direction break: on central
-    // (no mesh_centrals row, no reverseDialer because central is the bridge
-    // initiator side) the peer-recovery branch incorrectly fired, found no
-    // PeerToCentralMeshSessionDialer session, and destroyed the inbound
-    // socket with route.resolve.fail forward-from-peer no_session. The
-    // intent of the branch was peer cold-start; the guard
-    // `!this.reverseDialer` alone could not distinguish "I am central" from
-    // "I am a peer waiting for central to dial in", because both states
-    // present as reverseDialer===null.
+describe('MeshService.openCrossNode without reverseDialer', () => {
+    // Forward + reverse mesh traffic now share the same central-initiated
+    // bridge. When openCrossNode runs without a reverseDialer installed it
+    // falls straight through to dialMeshTcpStream, which on central uses
+    // MeshProxyTunnelDialer.ensureBridge to reach a proxy peer. The
+    // previous peer-recovery branch (which depended on the now-removed
+    // mesh_centrals table) is gone.
     function makeFakeStream(streamId: number): MeshTcpStreamLike & EventEmitter {
         const ee = new EventEmitter() as MeshTcpStreamLike & EventEmitter & { destroyed: boolean };
         ee.destroyed = false;
@@ -943,17 +1213,11 @@ describe('MeshService.openCrossNode peer-recovery gating', () => {
         return { destroy: vi.fn(), end: vi.fn(), on: vi.fn(), write: vi.fn() };
     }
 
-    // No stub reverseDialer here: the whole point is to exercise the
-    // !reverseDialer code path. Reset the registry per test so the mesh_centrals
-    // row state is deterministic.
-    beforeEach(async () => {
-        const { MeshCentralRegistry } = await import('../services/MeshCentralRegistry');
-        MeshCentralRegistry.resetForTest();
-        DatabaseService.getInstance().getDb().prepare('DELETE FROM mesh_centrals').run();
+    beforeEach(() => {
         MeshService.getInstance().setReverseDialer(null);
     });
 
-    it('central (no mesh_centrals row) skips peer-recovery and calls dialMeshTcpStream', async () => {
+    it('central (no reverseDialer) falls through to dialMeshTcpStream without route.resolve.fail forward-from-peer', async () => {
         const svc = MeshService.getInstance();
         const target: MeshTarget = {
             nodeId: 7, stack: 'audit-mesh-proxy', service: 'echo',
@@ -970,11 +1234,7 @@ describe('MeshService.openCrossNode peer-recovery gating', () => {
             .openCrossNode(target, fakeSrc);
 
         const events = svc.getActivity({ limit: 50 });
-        const dispatch = events.find((e) => e.type === 'route.dispatch');
-        expect(dispatch).toBeDefined();
-
-        // The bug surface: a route.resolve.fail with direction=forward-from-peer
-        // would mean central wrongly went through the peer-recovery branch.
+        expect(events.some((e) => e.type === 'route.dispatch')).toBe(true);
         const wrongFail = events.find((e) =>
             e.type === 'route.resolve.fail'
             && (e.details as { direction?: string } | undefined)?.direction === 'forward-from-peer',
@@ -983,48 +1243,6 @@ describe('MeshService.openCrossNode peer-recovery gating', () => {
         expect(dialSpy).toHaveBeenCalledTimes(1);
         expect(fakeSrc.destroy).not.toHaveBeenCalled();
         fakeStream.emit('close');
-    });
-
-    it('proxy-peer (mesh_centrals row + no session) still emits route.resolve.fail forward-from-peer no_session', async () => {
-        const { MeshCentralRegistry } = await import('../services/MeshCentralRegistry');
-        const { PeerToCentralMeshSessionDialer } = await import('../services/PeerToCentralMeshSessionDialer');
-        MeshCentralRegistry.getInstance().upsert({
-            centralInstanceId: 'central-uuid-test',
-            centralApiUrl: 'https://central.example.com',
-            callbackJwt: 'eyJhbGciOiJIUzI1NiJ9.fake.token',
-            jwtIssuedAt: Math.floor(Date.now() / 1000),
-            jwtExpiresAt: Math.floor(Date.now() / 1000) + 90 * 24 * 3600,
-        });
-        const ensureSpy = vi.spyOn(
-            PeerToCentralMeshSessionDialer.getInstance(),
-            'ensureSession',
-        ).mockResolvedValue(null);
-
-        const svc = MeshService.getInstance();
-        const target: MeshTarget = {
-            nodeId: 1, stack: 'audit-mesh-central', service: 'echo',
-            port: 9000, alias: 'echo.audit-mesh-central.Local.sencho',
-        };
-        const dialSpy = vi.spyOn(
-            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
-            'dialMeshTcpStream',
-        );
-
-        const fakeSrc = makeFakeSocket();
-        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
-            .openCrossNode(target, fakeSrc);
-
-        const events = svc.getActivity({ limit: 50 });
-        const fail = events.find((e) =>
-            e.type === 'route.resolve.fail'
-            && (e.details as { direction?: string; reason?: string } | undefined)?.direction === 'forward-from-peer'
-            && (e.details as { reason?: string } | undefined)?.reason === 'no_session',
-        );
-        expect(fail).toBeDefined();
-        expect(ensureSpy).toHaveBeenCalled();
-        // Peer-recovery aborted dispatch before reaching dialMeshTcpStream.
-        expect(dialSpy).not.toHaveBeenCalled();
-        expect(fakeSrc.destroy).toHaveBeenCalled();
     });
 });
 

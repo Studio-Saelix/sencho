@@ -188,6 +188,72 @@ describe('TcpStreamSwitchboard.onTcpOpen (forward path)', () => {
         expect(consumed).toBe(true);
     });
 
+    it('buffers TcpData arriving during the resolveTarget await and flushes it on connect (F-9 race fix)', async () => {
+        const { port, server, firstConn } = await startEchoServer();
+        try {
+            // Resolver delayed by 50 ms simulates a real Dockerode inspect.
+            // Without the fix, the TcpData frame sent inside this window
+            // hits a missing this.tcpStreams entry and is silently dropped.
+            const { switchboard, sent } = makeSwitchboard({
+                resolve: () => new Promise((r) => setTimeout(() => r({ ok: true, host: '127.0.0.1', port }), 50)),
+            });
+
+            switchboard.handleJsonFrame({ t: 'tcp_open', s: 1, stack: 's', service: 'svc', port: 80 });
+            // Immediately push the "HTTP request" bytes before the resolver
+            // finishes. Reservation must catch them in pendingData.
+            const reqFrame = encodeBinaryFrame(BinaryFrameType.TcpData, 1, Buffer.from('GET / HTTP/1.1\r\n\r\n'));
+            switchboard.handleBinaryFrame(decodeBinaryFrame(reqFrame));
+
+            const targetSocket = await firstConn;
+            const echoed = new Promise<Buffer>((r) => {
+                let acc = Buffer.alloc(0);
+                targetSocket.on('data', (chunk: Buffer) => {
+                    acc = Buffer.concat([acc, chunk]);
+                    if (acc.length >= 'GET / HTTP/1.1\r\n\r\n'.length) r(acc);
+                });
+            });
+            const received = await echoed;
+            expect(received.toString()).toBe('GET / HTTP/1.1\r\n\r\n');
+
+            // tcp_open_ack should have followed (not preceded) the flush.
+            const ack = sent.map((s) => s.binary ? null : decodeJsonFrame(s.raw as string)).find((d) => d?.t === 'tcp_open_ack');
+            if (!ack || ack.t !== 'tcp_open_ack') throw new Error('no ack');
+            expect(ack.ok).toBe(true);
+
+            switchboard.cleanup('test');
+        } finally {
+            server.close();
+        }
+    });
+
+    it('caps pending-data buffer and sends tcp_close when a peer overflows it before resolve completes', async () => {
+        // Resolver that never resolves; reservation is held open and any
+        // queued bytes accumulate against the cap (1 MiB).
+        const { switchboard, sent } = makeSwitchboard({
+            resolve: () => new Promise(() => { /* never */ }),
+        });
+        try {
+            switchboard.handleJsonFrame({ t: 'tcp_open', s: 2, stack: 's', service: 'svc', port: 80 });
+            // 16 chunks of 96 KiB = 1.5 MiB total, crosses the 1 MiB cap on
+            // the chunk that pushes pendingBytes past the limit.
+            const chunkSize = 96 * 1024;
+            const payload = Buffer.alloc(chunkSize, 0x41);
+            for (let i = 0; i < 16; i++) {
+                const buf = encodeBinaryFrame(BinaryFrameType.TcpData, 2, payload);
+                switchboard.handleBinaryFrame(decodeBinaryFrame(buf));
+            }
+            await new Promise((r) => setImmediate(r));
+
+            const close = sent.map((s) => s.binary ? null : decodeJsonFrame(s.raw as string)).find((d) => d?.t === 'tcp_close' && d.s === 2);
+            expect(close).toBeDefined();
+            expect(switchboard.tcpStreamCount()).toBe(0);
+        } finally {
+            // Idle-timer + resolver closures both pin entry state across
+            // tests when the resolver never resolves; cleanup detaches them.
+            switchboard.cleanup('test');
+        }
+    });
+
     it('tcp_close on a forward stream destroys the socket and drops the entry', async () => {
         const { port, server, firstConn } = await startEchoServer();
         try {

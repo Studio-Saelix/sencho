@@ -16,8 +16,9 @@ function actorFor(req: Request): string {
 meshRouter.get('/status', async (_req: Request, res: Response): Promise<void> => {
     if (!requireAdmiral(_req, res)) return;
     try {
-        const status = await MeshService.getInstance().getStatus();
-        res.json({ nodes: status });
+        const mesh = MeshService.getInstance();
+        const status = await mesh.getStatus();
+        res.json({ nodes: status, localDataPlane: mesh.getDataPlaneStatus() });
     } catch (err) {
         console.warn('[mesh] /status failed:', sanitizeForLog((err as Error).message));
         res.status(500).json({ error: 'Failed to load mesh status' });

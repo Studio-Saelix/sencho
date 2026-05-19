@@ -34,6 +34,16 @@ export class PilotTunnelCapacityError extends Error {
 }
 
 /**
+ * Discriminator for the two flavors of bridge that share the `bridges`
+ * map: `'pilot'` is set by `registerTunnel` (agent-initiated long-lived
+ * tunnel); `'proxy'` is set by `registerProxyBridge` (central-initiated
+ * persistent bridge dialed by `MeshProxyTunnelDialer`). Used by the
+ * rejection-message formatter so a pilot tunnel and a proxy bridge for the
+ * same nodeId cannot coexist silently.
+ */
+export type BridgeKind = 'pilot' | 'proxy';
+
+/**
  * PilotTunnelManager: singleton registry of active mesh-capable bridges.
  *
  * Two flavors of bridge live in the same `bridges` map, keyed by nodeId:
@@ -68,15 +78,7 @@ export class PilotTunnelCapacityError extends Error {
 export class PilotTunnelManager extends EventEmitter {
     private static instance: PilotTunnelManager;
     private bridges: Map<number, PilotTunnelBridge> = new Map();
-    /**
-     * Parallel kind index for the `bridges` map. `'pilot'` is set by
-     * `registerTunnel` (agent-initiated long-lived tunnel); `'proxy'` is
-     * set by `registerProxyBridge` and `replaceOrRegisterProxyBridge`
-     * (central-initiated short-lived bridge). Used by
-     * `replaceOrRegisterProxyBridge` so a peer-initiated dial can supersede
-     * a previous proxy bridge but never shadow a live pilot tunnel.
-     */
-    private bridgeKinds: Map<number, 'pilot' | 'proxy'> = new Map();
+    private bridgeKinds: Map<number, BridgeKind> = new Map();
     private softWarned = false;
 
     private constructor() {
@@ -111,7 +113,7 @@ export class PilotTunnelManager extends EventEmitter {
      * Bypasses capacity / lifecycle hooks so unit tests can prime the
      * registry without owning a real WebSocket.
      */
-    public injectBridgeForTest(nodeId: number, bridge: PilotTunnelBridge, kind: 'pilot' | 'proxy'): void {
+    public injectBridgeForTest(nodeId: number, bridge: PilotTunnelBridge, kind: BridgeKind): void {
         this.bridges.set(nodeId, bridge);
         this.bridgeKinds.set(nodeId, kind);
     }
@@ -258,10 +260,9 @@ export class PilotTunnelManager extends EventEmitter {
     public registerProxyBridge(nodeId: number, bridge: PilotTunnelBridge): void {
         const existing = this.bridges.get(nodeId);
         if (existing) {
-            // A pilot tunnel for this node already exists. Proxy bridges
-            // should not silently shadow them; refuse the registration so
-            // the dialer can surface a clear error.
-            throw new Error(`pilot tunnel already registered for node ${nodeId}; proxy bridge refused`);
+            // Kind-accurate rejection so the dialer logs the actual conflict
+            // instead of always blaming a pilot tunnel.
+            throw new Error(this.formatBridgeConflict(nodeId, this.bridgeKinds.get(nodeId)));
         }
         if (this.bridges.size >= PILOT_TUNNEL_HARD_LIMIT) {
             PilotMetrics.increment('tunnels_rejected_capacity');
@@ -281,35 +282,16 @@ export class PilotTunnelManager extends EventEmitter {
     }
 
     /**
-     * Register a peer-initiated proxy bridge for an existing remote. If a proxy
-     * bridge already exists for this nodeId, close it (the new dial is the source
-     * of truth) and replace. If a pilot tunnel exists, refuse: pilot tunnels
-     * always win over peer-initiated proxy bridges.
+     * Single source of truth for the "slot already held" rejection
+     * message thrown by `registerProxyBridge`. Picks the bridge-kind
+     * subject and the rejection tail. `undefined` collapses to the pilot
+     * branch defensively; production code always sets `bridgeKinds`
+     * whenever `bridges` is set, so this is unreachable in practice.
      */
-    public replaceOrRegisterProxyBridge(nodeId: number, bridge: PilotTunnelBridge): void {
-        const existingKind = this.bridgeKinds.get(nodeId);
-        if (existingKind === 'pilot') {
-            throw new Error(`pilot tunnel already registered for node ${nodeId}; proxy bridge refused`);
-        }
-        if (existingKind === 'proxy') {
-            const old = this.bridges.get(nodeId);
-            this.bridges.delete(nodeId);
-            this.bridgeKinds.delete(nodeId);
-            try { old?.close(1000, 'replaced-by-newer-proxy'); } catch { /* best-effort cleanup */ }
-        }
-        if (this.bridges.size >= PILOT_TUNNEL_HARD_LIMIT) {
-            PilotMetrics.increment('tunnels_rejected_capacity');
-            throw new PilotTunnelCapacityError(PILOT_TUNNEL_HARD_LIMIT);
-        }
-        bridge.once('closed', () => {
-            if (this.bridges.get(nodeId) === bridge) {
-                this.bridges.delete(nodeId);
-                this.bridgeKinds.delete(nodeId);
-                this.emit('proxy-bridge-down', nodeId, 'remote_closed');
-            }
-        });
-        this.bridges.set(nodeId, bridge);
-        this.bridgeKinds.set(nodeId, 'proxy');
+    private formatBridgeConflict(nodeId: number, existingKind: BridgeKind | undefined): string {
+        return existingKind === 'proxy'
+            ? `proxy bridge already registered for node ${nodeId}; concurrent dial refused`
+            : `pilot tunnel already registered for node ${nodeId}; proxy bridge refused`;
     }
 
     /**

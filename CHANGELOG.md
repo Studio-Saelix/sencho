@@ -4,6 +4,113 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.82.0](https://github.com/Studio-Saelix/sencho/compare/v0.81.15...v0.82.0) (2026-05-19)
+
+
+### Added
+
+* **fleet:** add fleet-wide Docker prune to Fleet Actions ([#1104](https://github.com/Studio-Saelix/sencho/issues/1104)) ([1f67307](https://github.com/Studio-Saelix/sencho/commit/1f673073ca4f91ae69d39f84d6397250b6c9bc20))
+
+
+### Fixed
+
+* **stack-editor:** reset tab to compose.yaml when clicking edit ([#1107](https://github.com/Studio-Saelix/sencho/issues/1107)) ([3a839b7](https://github.com/Studio-Saelix/sencho/commit/3a839b781b17ef1b6d0ce2b8bb8028c423ca21ed))
+* **stacks:** return 404 for nonexistent stacks on deploy/down/update (F-7) ([#1108](https://github.com/Studio-Saelix/sencho/issues/1108)) ([523ba58](https://github.com/Studio-Saelix/sencho/commit/523ba5854caddebfc082865716f00e92be7f2c3b))
+
+## [0.81.15](https://github.com/Studio-Saelix/sencho/compare/v0.81.14...v0.81.15) (2026-05-19)
+
+
+### Fixed
+
+* **mesh:** clean up activeStreams on src socket close/error (F-10) ([#1105](https://github.com/Studio-Saelix/sencho/issues/1105)) ([0cffd60](https://github.com/Studio-Saelix/sencho/commit/0cffd60173a1f347862260062a8e107192419b7b))
+
+## [0.81.14](https://github.com/Studio-Saelix/sencho/compare/v0.81.13...v0.81.14) (2026-05-18)
+
+
+### Fixed
+
+* **security:** suppress CVE-2026-41567 and CVE-2026-42306 against vendored docker-compose moby library (VEX) ([#1102](https://github.com/Studio-Saelix/sencho/issues/1102)) ([596cce3](https://github.com/Studio-Saelix/sencho/commit/596cce35070c1bc868129236831992904c178256))
+
+## [0.81.13](https://github.com/Studio-Saelix/sencho/compare/v0.81.12...v0.81.13) (2026-05-18)
+
+
+### Fixed
+
+* **mesh:** probe upstream synchronously in route diagnostic (F-11) ([#1100](https://github.com/Studio-Saelix/sencho/issues/1100)) ([c460bb8](https://github.com/Studio-Saelix/sencho/commit/c460bb87a87cb4a39db11c6cec2ca9f1ffbb956f))
+
+## [0.81.12](https://github.com/Studio-Saelix/sencho/compare/v0.81.11...v0.81.12) (2026-05-18)
+
+
+### Fixed
+
+* **mesh:** surface stopped-stack opt-ins on routing node cards ([#1098](https://github.com/Studio-Saelix/sencho/issues/1098)) ([554f662](https://github.com/Studio-Saelix/sencho/commit/554f6625637c60562b0c5fc3858aa965acd60bb5))
+
+## [0.81.11](https://github.com/Studio-Saelix/sencho/compare/v0.81.10...v0.81.11) (2026-05-18)
+
+
+### Fixed
+
+* **mesh:** cascade opt-out when a stack is deleted (F-1 / F-14) ([#1096](https://github.com/Studio-Saelix/sencho/issues/1096)) ([9f238e1](https://github.com/Studio-Saelix/sencho/commit/9f238e187c228c717eef0e237339fb649b2b040f))
+
+## [0.81.10](https://github.com/Studio-Saelix/sencho/compare/v0.81.9...v0.81.10) (2026-05-18)
+
+
+### Fixed
+
+* **mesh:** route peer→central traffic over the existing forward WS ([#1094](https://github.com/Studio-Saelix/sencho/issues/1094)) ([f6e4253](https://github.com/Studio-Saelix/sencho/commit/f6e42535c8acda6e06facadf1fc5f41e00cd9a93))
+
+## [0.81.9](https://github.com/Studio-Saelix/sencho/compare/v0.81.8...v0.81.9) (2026-05-18)
+
+
+### Fixed
+
+* **http:** strip zstd from Accept-Encoding so compression sets Content-Encoding ([#1092](https://github.com/Studio-Saelix/sencho/issues/1092)) ([ed49ed6](https://github.com/Studio-Saelix/sencho/commit/ed49ed6165f33426064eb3e1d04f59b93eec0419))
+
+## [0.81.8](https://github.com/Studio-Saelix/sencho/compare/v0.81.7...v0.81.8) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** recompose previously-meshed containers when alias set changes ([#1090](https://github.com/Studio-Saelix/sencho/issues/1090)) ([1d7418a](https://github.com/Studio-Saelix/sencho/commit/1d7418a233796f61efc4739cd358298ab71f6438))
+
+## [0.81.7](https://github.com/Studio-Saelix/sencho/compare/v0.81.6...v0.81.7) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** surface data-plane failures in health, meta, and Routing tab ([#1088](https://github.com/Studio-Saelix/sencho/issues/1088)) ([578cac8](https://github.com/Studio-Saelix/sencho/commit/578cac89da005b57085d6ab4addbeee15d4ff17a))
+
+## [0.81.6](https://github.com/Studio-Saelix/sencho/compare/v0.81.5...v0.81.6) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** close data-plane race that dropped early TcpData frames ([#1086](https://github.com/Studio-Saelix/sencho/issues/1086)) ([a318e6b](https://github.com/Studio-Saelix/sencho/commit/a318e6b3c17a9aed734d8a8f5e309cc50b571ca3))
+
+## [0.81.5](https://github.com/Studio-Saelix/sencho/compare/v0.81.4...v0.81.5) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** cascade override regen across all meshed nodes on opt-in/opt-out ([#1079](https://github.com/Studio-Saelix/sencho/issues/1079)) ([a32183d](https://github.com/Studio-Saelix/sencho/commit/a32183d198e11ffa23bf26d3803129e2ee843962))
+* **stacks:** prevent right-side clipping in Create Stack modal ([#1081](https://github.com/Studio-Saelix/sencho/issues/1081)) ([24155ca](https://github.com/Studio-Saelix/sencho/commit/24155cad664e8b36d6f44ce0649ce1b72187ecc3))
+
+## [0.81.4](https://github.com/Studio-Saelix/sencho/compare/v0.81.3...v0.81.4) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** gate Trigger 2 re-bootstrap on actual api_token change ([#1076](https://github.com/Studio-Saelix/sencho/issues/1076)) ([9aaa857](https://github.com/Studio-Saelix/sencho/commit/9aaa8573c0ecceade58a613c209effeab52aeec0))
+* **mesh:** name actual bridge kind in proxy-bridge rejection ([#1075](https://github.com/Studio-Saelix/sencho/issues/1075)) ([7e3e221](https://github.com/Studio-Saelix/sencho/commit/7e3e22138bb7110d9316dfe67fd2dadb6b84bc66))
+* **mesh:** persist PilotMetrics counters across central restart ([#1078](https://github.com/Studio-Saelix/sencho/issues/1078)) ([6b72859](https://github.com/Studio-Saelix/sencho/commit/6b728599c471034761d6b3e48772eedc899d08eb))
+
+## [0.81.3](https://github.com/Studio-Saelix/sencho/compare/v0.81.2...v0.81.3) (2026-05-17)
+
+
+### Fixed
+
+* **mesh:** persist rotated handshake when peer bridge owns reverse-dialer slot ([#1073](https://github.com/Studio-Saelix/sencho/issues/1073)) ([3a20105](https://github.com/Studio-Saelix/sencho/commit/3a20105a337c5ec29bf6de36c3cfe8043c463ac1))
+
 ## [0.81.2](https://github.com/Studio-Saelix/sencho/compare/v0.81.1...v0.81.2) (2026-05-17)
 
 

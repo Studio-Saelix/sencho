@@ -4,6 +4,10 @@ import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
 
+function isPilotMode(): boolean {
+    return process.env.SENCHO_MODE === 'pilot';
+}
+
 export interface Agent {
     id?: number;
     type: 'discord' | 'slack' | 'webhook';
@@ -604,6 +608,8 @@ export interface ScanSummary {
 // always observe a consistent view.
 const AUDIT_LOG_FLUSH_INTERVAL_MS = 1_000;
 const AUDIT_LOG_FLUSH_THRESHOLD = 100;
+
+export const PILOT_METRICS_COUNTERS_KEY = 'pilot_metrics_counters';
 
 export class DatabaseService {
     private static instance: DatabaseService;
@@ -1460,38 +1466,36 @@ export class DatabaseService {
 
     private migrateMeshTables(): void {
         try {
-            this.db.prepare(`
-                CREATE TABLE IF NOT EXISTS mesh_stacks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    node_id INTEGER NOT NULL,
-                    stack_name TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    created_by TEXT,
-                    UNIQUE(node_id, stack_name),
-                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
-                )
-            `).run();
-            this.db.prepare('CREATE INDEX IF NOT EXISTS idx_mesh_stacks_node ON mesh_stacks(node_id)').run();
+            if (isPilotMode()) {
+                // Per C-3 design, mesh state lives on central. Pilots never write
+                // to mesh_stacks; alias data arrives via the D-1 override push
+                // and lives in MeshService.pilotAliasOverlay. Drop any leftover
+                // rows from a prior central-mode boot and skip the CREATE.
+                this.db.prepare('DROP TABLE IF EXISTS mesh_stacks').run();
+            } else {
+                this.db.prepare(`
+                    CREATE TABLE IF NOT EXISTS mesh_stacks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        node_id INTEGER NOT NULL,
+                        stack_name TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        created_by TEXT,
+                        UNIQUE(node_id, stack_name),
+                        FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                    )
+                `).run();
+                this.db.prepare('CREATE INDEX IF NOT EXISTS idx_mesh_stacks_node ON mesh_stacks(node_id)').run();
+            }
         } catch (e) {
-            console.warn('[DatabaseService] Could not create mesh_stacks:', (e as Error).message);
+            console.warn('[DatabaseService] mesh_stacks migration:', (e as Error).message);
         }
-        try {
-            this.db.prepare(`
-                CREATE TABLE IF NOT EXISTS mesh_centrals (
-                    central_instance_id  TEXT    PRIMARY KEY,
-                    central_api_url      TEXT    NOT NULL,
-                    callback_jwt         TEXT    NOT NULL,
-                    jwt_issued_at        INTEGER NOT NULL,
-                    jwt_expires_at       INTEGER NOT NULL,
-                    last_bootstrap_at    INTEGER NOT NULL,
-                    last_used_at         INTEGER,
-                    last_rejected_at     INTEGER,
-                    last_reject_reason   TEXT
-                )
-            `).run();
-        } catch (e) {
-            console.warn('[DatabaseService] Could not create mesh_centrals:', (e as Error).message);
-        }
+        // mesh_centrals was the peer-side cache of the reverse-callback JWT
+        // (central → peer bootstrap material). Peer→central traffic now
+        // multiplexes over the existing forward WS via `tcp_open_reverse`,
+        // so the table is no longer written or read. Drop it on every boot;
+        // idempotent.
+        try { this.db.prepare('DROP TABLE IF EXISTS mesh_centrals').run(); }
+        catch (e) { console.warn('[DatabaseService] Could not drop mesh_centrals:', (e as Error).message); }
         this.tryAddColumn('nodes', 'mesh_enabled', 'INTEGER NOT NULL DEFAULT 0');
     }
 
@@ -1598,6 +1602,7 @@ export class DatabaseService {
     // --- Sencho Mesh ---
 
     public listMeshStacks(nodeId?: number): Array<{ id: number; node_id: number; stack_name: string; created_at: number; created_by: string | null }> {
+        if (isPilotMode()) return [];
         const sql = nodeId !== undefined
             ? 'SELECT id, node_id, stack_name, created_at, created_by FROM mesh_stacks WHERE node_id = ?'
             : 'SELECT id, node_id, stack_name, created_at, created_by FROM mesh_stacks';
@@ -1608,17 +1613,23 @@ export class DatabaseService {
     }
 
     public isMeshStackEnabled(nodeId: number, stackName: string): boolean {
+        if (isPilotMode()) return false;
         const row = this.db.prepare('SELECT 1 FROM mesh_stacks WHERE node_id = ? AND stack_name = ?').get(nodeId, stackName);
         return !!row;
     }
 
     public insertMeshStack(nodeId: number, stackName: string, createdBy: string | null): void {
+        if (isPilotMode()) {
+            console.warn(`[DatabaseService] insertMeshStack ignored on pilot (node=${nodeId}, stack=${stackName})`);
+            return;
+        }
         this.db.prepare(
             'INSERT INTO mesh_stacks (node_id, stack_name, created_at, created_by) VALUES (?, ?, ?, ?)'
         ).run(nodeId, stackName, Date.now(), createdBy);
     }
 
     public deleteMeshStack(nodeId: number, stackName: string): void {
+        if (isPilotMode()) return;
         this.db.prepare('DELETE FROM mesh_stacks WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
@@ -1773,6 +1784,39 @@ export class DatabaseService {
 
     public setSystemState(key: string, value: string): void {
         this.db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)').run(key, value);
+    }
+
+    /**
+     * Persisted PilotMetrics counters. Returns the parsed JSON object (a
+     * numeric record keyed by counter name) or null when the row is missing
+     * or unparseable. Callers (PilotMetrics.load) handle per-field defaulting
+     * so a missing counter in the persisted blob does not break a new release
+     * that added the counter.
+     *
+     * This is the first JSON blob stored in `system_state`; mirror this
+     * parse/validate shape (object check + numeric filter) for any future
+     * JSON-shaped system_state row so an operator-edited row cannot crash
+     * boot.
+     */
+    public getPilotMetricsCounters(): Record<string, number> | null {
+        const raw = this.getSystemState(PILOT_METRICS_COUNTERS_KEY);
+        if (raw === null) return null;
+        try {
+            const parsed = JSON.parse(raw) as unknown;
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+            const out: Record<string, number> = {};
+            for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+                if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+            }
+            return out;
+        } catch (err) {
+            console.warn('[DatabaseService] pilot_metrics_counters JSON parse failed:', (err as Error).message);
+            return null;
+        }
+    }
+
+    public setPilotMetricsCounters(counters: Record<string, number>): void {
+        this.setSystemState(PILOT_METRICS_COUNTERS_KEY, JSON.stringify(counters));
     }
 
     /**

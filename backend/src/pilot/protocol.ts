@@ -50,6 +50,17 @@ export const MAX_STREAMS_PER_TUNNEL = 1024;
  */
 export const STREAM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * Per-stream cap on inbound `TcpData` bytes that a receiver buffers while
+ * waiting for its local socket to connect. `tcp_open` and `tcp_open_reverse`
+ * both trigger an async dial (resolveTarget + TCP handshake), and the
+ * protocol allows the peer to send data immediately. Anything received in
+ * that window is held in `pendingData` until the socket is ready; over
+ * this cap the stream is dropped and a `tcp_close` is sent back so a
+ * misbehaving (or compromised) peer cannot OOM the receiver.
+ */
+export const STREAM_PENDING_DATA_MAX_BYTES = 1024 * 1024;
+
 // --- Binary frame types (first byte of a binary WS frame) ---
 
 export enum BinaryFrameType {

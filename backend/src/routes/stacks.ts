@@ -6,6 +6,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
+import { MeshService } from '../services/MeshService';
 import { CacheService } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
@@ -34,6 +35,25 @@ function notifyActionSuccess(category: NotificationCategory, message: string, st
   NotificationService.getInstance()
     .dispatchAlert('info', category, message, { stackName, actor })
     .catch(err => console.error('[Stacks] Failed to dispatch activity for %s:', sanitizeForLog(stackName), err));
+}
+
+async function requireStackExists(nodeId: number, stackName: string, res: Response): Promise<boolean> {
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return false;
+  }
+  const fsSvc = FileSystemService.getInstance(nodeId);
+  const stackDir = path.join(fsSvc.getBaseDir(), stackName);
+  try {
+    if (!(await fsSvc.hasComposeFile(stackDir))) {
+      res.status(404).json({ error: 'Stack not found' });
+      return false;
+    }
+  } catch {
+    res.status(404).json({ error: 'Stack not found' });
+    return false;
+  }
+  return true;
 }
 
 export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
@@ -562,6 +582,24 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);
 
+    // Cascade a mesh opt-out so the mesh_stacks row, override file on disk,
+    // and derived aliases do not outlive the stack. optOutStack is idempotent
+    // (no-op when the stack was never opted in). Best-effort: a mesh cleanup
+    // failure must not regress the delete itself.
+    try {
+      await MeshService.getInstance().optOutStack(
+        req.nodeId,
+        stackName,
+        req.user?.username ?? 'system',
+      );
+    } catch (meshErr) {
+      console.warn(
+        '[Stacks] Mesh opt-out cascade failed for %s, continuing delete:',
+        sanitizeForLog(stackName),
+        meshErr,
+      );
+    }
+
     if (fsErr) throw fsErr;
 
     invalidateNodeCaches(req.nodeId);
@@ -601,6 +639,7 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
 stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
@@ -637,6 +676,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
 stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
     await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs());
     invalidateNodeCaches(req.nodeId);
@@ -783,6 +823,7 @@ stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Respons
 stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;

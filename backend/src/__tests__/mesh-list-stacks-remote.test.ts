@@ -17,13 +17,14 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 let tmpDir: string;
 let MeshService: typeof import('../services/MeshService').MeshService;
+let MeshError: typeof import('../services/MeshService').MeshError;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 let FileSystemService: typeof import('../services/FileSystemService').FileSystemService;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
-    ({ MeshService } = await import('../services/MeshService'));
+    ({ MeshService, MeshError } = await import('../services/MeshService'));
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ NodeRegistry } = await import('../services/NodeRegistry'));
     ({ FileSystemService } = await import('../services/FileSystemService'));
@@ -178,5 +179,65 @@ describe('MeshService.listStacksOnNode dispatch (F8)', () => {
         const out = await svc.listStacksOnNode(999_999);
         expect(out).toEqual([]);
         expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('catch arm swallows MeshError(no_target) and logs the no-proxy-target warning', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'list-stacks-no-target-code',
+            type: 'remote',
+            mode: 'pilot_agent',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: '',
+            api_token: '',
+        });
+
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        const out = await svc.listStacksOnNode(remoteNodeId);
+
+        expect(out).toEqual([]);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(String(warnSpy.mock.calls[0][0])).toContain('no proxy target for node');
+        expect(errorSpy).not.toHaveBeenCalled();
+
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('unexpected MeshError codes fall through to the remote-unreachable error path', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'list-stacks-push-failed-falls-through',
+            type: 'remote',
+            mode: 'proxy',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'https://remote.example.com:1852',
+            api_token: 'remote-tok',
+        });
+
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
+            apiUrl: 'https://remote.example.com:1852',
+            apiToken: 'remote-tok',
+        });
+        vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+            throw new MeshError('push_failed', 'simulated transport failure');
+        });
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        const out = await svc.listStacksOnNode(remoteNodeId);
+
+        expect(out).toEqual([]);
+        expect(warnSpy).not.toHaveBeenCalled();
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        expect(String(errorSpy.mock.calls[0][0])).toContain('remote unreachable');
+
+        db.deleteNode(remoteNodeId);
     });
 });

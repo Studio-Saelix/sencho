@@ -60,6 +60,7 @@ frontend/DESIGN.md
 
 # Local-only projects (separate repos)
 demo-video/
+trailer/
 website/
 
 # Internal engineering docs (not published)

@@ -823,7 +823,7 @@ export function EditorView({
                         envContent={envContent}
                         selectedEnvFile={selectedEnvFile}
                         gitSourcePending={Boolean(gitSourcePendingMap[stackName])}
-                        onEditCompose={() => setEditingCompose(true)}
+                        onEditCompose={() => { setEditingCompose(true); setActiveTab('compose'); }}
                         onOpenFiles={() => { setEditingCompose(true); setActiveTab('files'); }}
                         onOpenGitSource={() => setGitSourceOpen(true)}
                         onApplyUpdate={() => { void updateStack(); }}
