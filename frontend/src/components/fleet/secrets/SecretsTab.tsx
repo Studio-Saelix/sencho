@@ -107,7 +107,7 @@ export function SecretsTab() {
                                             <Button type="button" variant="ghost" size="icon" onClick={() => setEditing(s)} aria-label="Edit">
                                                 <Pencil className="w-4 h-4" />
                                             </Button>
-                                            <Button type="button" variant="ghost" size="icon" onClick={() => setPushing(s)} aria-label="Push">
+                                            <Button type="button" variant="ghost" size="icon" onClick={() => setPushing(s)} aria-label="Send">
                                                 <Send className="w-4 h-4" />
                                             </Button>
                                             <Button
