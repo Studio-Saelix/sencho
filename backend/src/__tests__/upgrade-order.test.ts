@@ -8,7 +8,7 @@
  * product paths. This test pins each position by observing behavior that
  * could only originate from the expected handler.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import WebSocket from 'ws';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -43,9 +43,21 @@ describe('WebSocket upgrade dispatch order', () => {
 
     const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
     sessionCookie = `sencho_token=${token}`;
+
+    // Existing /api/mesh/proxy-tunnel scope tests assume the receiver
+    // license clears the Admiral check. Set the license to Admiral so
+    // the credential-only assertions below still hold; the dedicated
+    // license-gating describe block flips and restores per-test.
+    DatabaseService.getInstance().setSystemState('license_status', 'active');
+    DatabaseService.getInstance().setSystemState('license_variant_type', 'admiral');
   });
 
   afterAll(async () => {
+    // Clear the Admiral state beforeAll set so this file does not leak
+    // license context into other tests sharing the same test DB.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().setSystemState('license_status', 'community');
+    DatabaseService.getInstance().setSystemState('license_variant_type', '');
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });
@@ -212,6 +224,69 @@ describe('WebSocket upgrade dispatch order', () => {
 
     it('rejects a session cookie at the upgrade with HTTP 403 (mesh is not a UI surface)', async () => {
       const ws = connect('/api/mesh/proxy-tunnel', { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+  });
+
+  describe('/api/mesh/proxy-tunnel Admiral entitlement gating', () => {
+    // The mesh data plane is Admiral-only on the *receiving* node, matching
+    // the HTTP mesh routes in routes/mesh.ts (every route calls
+    // requireAdmiral). These tests pin the parity so a future change to one
+    // surface cannot silently drift the other. The credential gate above
+    // still applies first; this block flips only the license to community
+    // or skipper while keeping a valid node_proxy or full-admin token.
+
+    async function setLicense(status: string, variantType: string | null): Promise<void> {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      DatabaseService.getInstance().setSystemState('license_status', status);
+      if (variantType === null) {
+        DatabaseService.getInstance().setSystemState('license_variant_type', '');
+      } else {
+        DatabaseService.getInstance().setSystemState('license_variant_type', variantType);
+      }
+    }
+
+    afterEach(async () => {
+      // Restore the Admiral state beforeAll established so subsequent
+      // tests in this file (and the proxy-tunnel scope block) keep passing.
+      await setLicense('active', 'admiral');
+    });
+
+    it('rejects a node_proxy Bearer with HTTP 403 when the receiver license is community', async () => {
+      await setLicense('community', null);
+      const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+      const ws = connect('/api/mesh/proxy-tunnel', { bearer: nodeProxyToken });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('rejects a node_proxy Bearer with HTTP 403 when the receiver license is paid but Skipper (not Admiral)', async () => {
+      await setLicense('active', 'skipper');
+      const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+      const ws = connect('/api/mesh/proxy-tunnel', { bearer: nodeProxyToken });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('rejects a full-admin api_token with HTTP 403 when the receiver license is community', async () => {
+      await setLicense('community', null);
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const rawToken = generateApiToken();
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
+      DatabaseService.getInstance().addApiToken({
+        token_hash: tokenHash,
+        name: `mesh-license-gate-${Date.now()}`,
+        scope: 'full-admin',
+        user_id: adminId,
+        created_at: Date.now(),
+        expires_at: null,
+      });
+      const ws = connect('/api/mesh/proxy-tunnel', { bearer: rawToken });
       const outcome = await waitForOutcome(ws);
       expect(outcome.kind).toBe('unexpected');
       if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);

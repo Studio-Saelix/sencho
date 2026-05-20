@@ -4,6 +4,7 @@ import type { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { DatabaseService, type UserRole } from '../services/DatabaseService';
+import { LicenseService } from '../services/LicenseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { COOKIE_NAME } from '../helpers/constants';
 import { handlePilotTunnel } from './pilotTunnel';
@@ -138,8 +139,20 @@ export function attachUpgrade(
       // decoded scope is undefined (isProxyToken=false, wsApiTokenScope=null).
       // Restricted api_token scopes (read-only, deploy-only) are blocked
       // earlier by the scope gate above before this branch is reached.
+      // The data plane additionally requires this node's own license to be
+      // Admiral so the WS and the HTTP mesh routes share one entitlement
+      // surface (HTTP mesh routes in routes/mesh.ts all call requireAdmiral).
+      // Read the local license directly rather than going through
+      // effectiveTier()/requireAdmiral: those consult req.proxyTier (trusted
+      // forwarded headers from a fronting Sencho), and a remote peer dialing
+      // in over WS cannot be trusted to assert our entitlement. The dialer
+      // sends only Authorization Bearer; tier is decided here on the receiver.
       if (pathname === '/api/mesh/proxy-tunnel') {
         if (!isProxyToken && wsApiTokenScope !== 'full-admin') {
+          return reject(socket, 403, 'Forbidden');
+        }
+        const license = LicenseService.getInstance();
+        if (license.getTier() !== 'paid' || license.getVariant() !== 'admiral') {
           return reject(socket, 403, 'Forbidden');
         }
         await handleMeshProxyTunnel(req, socket, head);
