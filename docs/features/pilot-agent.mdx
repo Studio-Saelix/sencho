@@ -77,6 +77,18 @@ What does NOT ride through the tunnel:
 | **Operator role** | Admin on the control instance. The Settings → Nodes panel is admin-only. |
 | **License tier** | None. Pilot Agent is Community-tier core surface. |
 
+### The control instance's public URL
+
+When the enrollment dialog generates the agent's compose file, it bakes the control instance's URL into `SENCHO_PRIMARY_URL` by reading the Host header on the admin's request. That works on a LAN, but it breaks when the pilot lives on a different network (a public cloud VPS, for example) and the admin happened to open the dialog at `http://127.0.0.1:1852` or a LAN address: the baked-in URL is then unreachable from the pilot.
+
+Set `SENCHO_PUBLIC_URL` on the control instance to lock in a publicly-routable URL the dialog should always use:
+
+```bash
+-e SENCHO_PUBLIC_URL=https://sencho.example.com
+```
+
+Any HTTPS hostname reachable from the pilot works: a Cloudflare Tunnel, a reverse proxy, a port-forwarded home network with DDNS. The control instance validates the value (must be `http(s)://`, no loopback) and falls back to the request Host when unset.
+
 ## Enrollment and lifecycle
 
 The end-to-end UI walkthrough for adding a Pilot Agent node (click paths, screenshots of the Add Node form, the Verify-the-tunnel step) lives in [Multi-Node Management](/features/multi-node#add-a-remote-node-pilot-agent). This section covers the underlying credential lifecycle, what happens during the connection, and how reconnects behave.
@@ -86,14 +98,44 @@ The end-to-end UI walkthrough for adding a Pilot Agent node (click paths, screen
 When you submit the Add Node form with Mode set to Pilot Agent, the control instance:
 
 1. Inserts the node into its registry with status `unknown` and no endpoint.
-2. Mints a one-time enrollment JWT scoped to that node. The token's hash is stored on the control instance so it cannot be replayed; the token itself is returned to the operator and embedded in a generated `docker run` command.
-3. Shows the command in an enrollment dialog with a 15-minute countdown.
+2. Mints a one-time enrollment JWT scoped to that node. The token's hash is stored on the control instance so it cannot be replayed; the token itself is returned to the operator and embedded in a generated Docker Compose file.
+3. Shows the compose file in an enrollment dialog with a 15-minute countdown.
 
 <Frame>
-  <img src="/images/pilot-agent/02-enrollment-dialog.png" alt="Enroll the pilot agent modal showing the docker run command with SENCHO_MODE=pilot, SENCHO_PRIMARY_URL, and SENCHO_ENROLL_TOKEN, an Expires 15m from now label, and a Copy command button." />
+  <img src="/images/pilot-agent/02-enrollment-dialog.png" alt="Enroll the pilot agent modal showing a Docker Compose file with SENCHO_MODE: pilot, SENCHO_PRIMARY_URL, and SENCHO_ENROLL_TOKEN baked in, an Expires 15m from now label, and a Copy button." />
 </Frame>
 
 The enrollment token is one-time and short-lived by design. If a token is intercepted or leaked, the window of risk is small and the slot is consumed on first use.
+
+The generated compose file looks like this, with the three pilot env vars already baked in:
+
+```yaml
+name: sencho-agent
+services:
+  agent:
+    image: saelix/sencho:latest
+    container_name: sencho-agent
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sencho-agent-data:/app/data
+      - /opt/docker/sencho:/app/compose
+    environment:
+      SENCHO_MODE: pilot
+      SENCHO_PRIMARY_URL: https://sencho.example.com
+      SENCHO_ENROLL_TOKEN: <short-lived token>
+
+volumes:
+  sencho-agent-data:
+```
+
+Save it as `compose.yaml` on the remote host and bring the agent up from the same directory:
+
+```bash
+docker compose -f compose.yaml up -d
+```
+
+Deploying through Compose also lets the control instance push over-the-air updates to the agent later from the Fleet view ([Remote Updates](/features/remote-updates)), without manual intervention on the remote host. Compose-managed containers carry the labels Sencho needs to recreate them in place.
 
 ### First connect
 
@@ -115,7 +157,7 @@ The control instance pings every connected agent every 30 seconds. Any stream wi
 
 - **Control instance restarts**: every agent's tunnel drops cleanly. Each agent reconnects within seconds. In-flight HTTP requests fail and the browser retries; long-lived WebSockets (logs, console) reconnect.
 - **Agent restarts**: the persisted token re-authenticates without operator intervention. Same reconnect-and-recover behavior.
-- **Operator deletes the node on the control instance**: the agent's existing tunnel is closed. The agent will keep trying to reconnect with its persisted token, which the control instance no longer accepts; the agent stays in a reconnect-backoff loop. To stop it, remove the `sencho-agent` container on the remote (or its persisted `pilot.jwt`).
+- **Operator deletes the node on the control instance**: the agent's existing tunnel is closed. The agent will keep trying to reconnect with its persisted token, which the control instance no longer accepts; the agent stays in a reconnect-backoff loop. To stop it, tear the agent down on the remote with `docker compose -f compose.yaml down -v`.
 
 ### Re-enrollment
 
@@ -153,23 +195,32 @@ The agent dials `wss://`. Certificate validation is on by default against the sy
 
 ### What rotating the JWT secret does
 
-The tunnel JWTs are signed with the control instance's `auth_jwt_secret`. If that secret rotates (because the control instance was rebuilt from scratch, restored into a different environment, or manually rotated), every existing tunnel JWT stops verifying. The agents will reconnect, fail authentication, and back off. Re-enroll each affected node (regenerate the enrollment token, then run a fresh `docker run` on the remote with the new token) to issue a new tunnel JWT signed by the current secret.
+The tunnel JWTs are signed with the control instance's `auth_jwt_secret`. If that secret rotates (because the control instance was rebuilt from scratch, restored into a different environment, or manually rotated), every existing tunnel JWT stops verifying. The agents will reconnect, fail authentication, and back off. Re-enroll each affected node (regenerate the enrollment token, then redeploy the agent on the remote with the refreshed compose file) to issue a new tunnel JWT signed by the current secret.
 
 ## Self-signed control-instance TLS certificates
 
 If your control instance terminates TLS with an internal CA that the agent's system trust store does not recognise, mount the CA bundle into the agent container and point `SENCHO_PILOT_CA_FILE` at it:
 
-```bash
-docker run -d --restart=unless-stopped --name sencho-agent \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v sencho-agent-data:/app/data \
-  -v /opt/docker/sencho:/app/compose \
-  -v /etc/ssl/internal-ca.pem:/etc/ssl/internal-ca.pem:ro \
-  -e SENCHO_MODE=pilot \
-  -e SENCHO_PRIMARY_URL=https://sencho.internal.example.com \
-  -e SENCHO_ENROLL_TOKEN=<short-lived token> \
-  -e SENCHO_PILOT_CA_FILE=/etc/ssl/internal-ca.pem \
-  saelix/sencho:latest
+```yaml
+name: sencho-agent
+services:
+  agent:
+    image: saelix/sencho:latest
+    container_name: sencho-agent
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sencho-agent-data:/app/data
+      - /opt/docker/sencho:/app/compose
+      - /etc/ssl/internal-ca.pem:/etc/ssl/internal-ca.pem:ro
+    environment:
+      SENCHO_MODE: pilot
+      SENCHO_PRIMARY_URL: https://sencho.internal.example.com
+      SENCHO_ENROLL_TOKEN: <short-lived token>
+      SENCHO_PILOT_CA_FILE: /etc/ssl/internal-ca.pem
+
+volumes:
+  sencho-agent-data:
 ```
 
 The agent uses the bundle as the only trust anchor for the tunnel WebSocket. TLS verification stays on.
@@ -191,7 +242,7 @@ An admin-only diagnostic endpoint, `GET /api/system/pilot-tunnels`, returns coun
 
 ## Environment variables
 
-These environment variables are read by the agent container at boot.
+These environment variables are read by the **agent** container at boot.
 
 | Variable | Required? | Default | Notes |
 |---|---|---|---|
@@ -202,6 +253,12 @@ These environment variables are read by the agent container at boot.
 | `DATA_DIR` | Optional | `/app/data` | Where the persisted `pilot.jwt` is stored. Override only if you are mounting a different volume layout. |
 | `COMPOSE_DIR` | Optional | `/app/compose` | Root directory on the agent host where compose stack folders live. The control instance reads and writes stacks under this path. |
 
+One variable is read on the **control instance** side, not the agent:
+
+| Variable | Required? | Default | Notes |
+|---|---|---|---|
+| `SENCHO_PUBLIC_URL` | Optional | request Host | Locks in the URL the enrollment dialog bakes into `SENCHO_PRIMARY_URL`. See [The control instance's public URL](#the-control-instances-public-url) above. Must be `http(s)://`, no loopback. |
+
 The agent does not currently expose tunables for the ping interval (30 s), the reconnect backoff (1–60 s), or the per-stream idle timeout (10 min). These are deliberate fixed values; if your environment requires different ones, open an issue.
 
 ## Limitations and non-goals
@@ -210,7 +267,7 @@ These are the boundaries operators should know about before designing a fleet ar
 
 - **No mode conversion.** The Edit dialog shows a Mode field for an enrolled node, but switching a node between Pilot Agent and Distributed API Proxy after enrollment leaves the credentials and connection state inconsistent. To change modes, delete the node and re-create it in the desired mode.
 - **No audit log entries for enrollment lifecycle.** Node creation, enrollment regeneration, and node deletion do not write to the audit log today. This is on the roadmap.
-- **`pilot.jwt` is not cleaned up on node deletion.** When you delete a node from the control instance, the agent's persisted token stays on the remote's data volume. The agent will fail to reconnect on next restart, but the file persists. If you are repurposing the host, remove the `sencho-agent` container and its volume manually.
+- **`pilot.jwt` is not cleaned up on node deletion.** When you delete a node from the control instance, the agent's persisted token stays on the remote's data volume. The agent will fail to reconnect on next restart, but the file persists. If you are repurposing the host, tear the agent down with `docker compose -f compose.yaml down -v` to remove the `sencho-agent-data` volume.
 - **JWT-secret rotation invalidates every tunnel.** Rebuilding the control instance from scratch or rotating `auth_jwt_secret` requires re-enrolling every agent. There is no out-of-band re-issuance flow.
 - **One tunnel per node.** Splitting a node's load across multiple control instances or running multiple agent containers against the same control instance for the same node is not supported.
 - **Mesh and pilot share the per-tunnel stream pool.** A node that runs heavy Sencho Mesh traffic counts those streams against the same 1024-stream cap as HTTP and WebSocket traffic.
@@ -241,6 +298,10 @@ The generic node-connectivity issues (a node showing Offline, a pilot agent stuc
     The agent sent a frame larger than the 8 MB ceiling, or the wire decoder rejected a malformed frame. Run the control instance with developer mode enabled (Settings → Developer) to surface the diagnostic decode log, then check the logs for `[PilotBridge:diag] Malformed frame from agent`. The agent reconnects automatically; persistent failures usually mean a version mismatch between the control instance and the agent image.
   </Accordion>
 
+  <Accordion title="I ran the enrollment command on the wrong host">
+    Tear the agent down on the wrong host (`docker compose -f compose.yaml down -v` from the directory you saved the compose file in), then regenerate the enrollment token on the control instance and deploy the new compose file on the correct host.
+  </Accordion>
+
   <Accordion title="HTTP 429 'Too many enrollment requests'">
     The enrollment endpoint is rate-limited to 10 requests per minute per operator (or per IP when unauthenticated). A script accidentally minting tokens in a loop trips this. Wait 60 seconds and retry. To bulk-enroll many nodes, space the requests out.
   </Accordion>
@@ -250,7 +311,7 @@ The generic node-connectivity issues (a node showing Offline, a pilot agent stuc
   </Accordion>
 
   <Accordion title="I deleted the node on the control instance but the agent keeps trying to reconnect">
-    Deleting the node removes the routing entry on the control instance but does not touch the remote. The agent still holds `/app/data/pilot.jwt` and will keep dialing. Stop the agent container on the remote (`docker stop sencho-agent && docker rm sencho-agent`) and remove the `sencho-agent-data` volume if you are repurposing the host.
+    Deleting the node removes the routing entry on the control instance but does not touch the remote. The agent still holds `/app/data/pilot.jwt` and will keep dialing. Tear the agent down on the remote (`docker compose -f compose.yaml down -v` from the directory holding the compose file) so the `sencho-agent-data` named volume that stores the persisted token is removed.
   </Accordion>
 
   <Accordion title="Stacks tab on a pilot node shows nothing or fails to list">

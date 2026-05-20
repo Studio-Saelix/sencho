@@ -15,7 +15,7 @@ This page covers the mechanism: prerequisites, what happens on a node during an 
 
 A node can self-update when all of the following are true:
 
-- It was deployed via **Docker Compose** with the published `saelix/sencho` image.
+- It was deployed via **Docker Compose** with the published `saelix/sencho` image (the canonical install for both control instances and pilot agents).
 - The Docker socket (`/var/run/docker.sock`) is mounted into the container so Sencho can drive Compose from inside.
 - It runs a Sencho version that advertises the `self-update` capability. See [Node Compatibility](/features/node-compatibility) for the full capability list.
 

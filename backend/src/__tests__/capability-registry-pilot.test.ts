@@ -4,9 +4,10 @@
  *  - fetchRemoteMeta omits the Authorization header when the apiToken is
  *    empty so the loopback bridge (used by pilot-agent proxy targets) is
  *    not handed a malformed `Bearer ` header.
- *  - applyPilotModeCapabilityFilter strips capabilities whose central->pilot
- *    path is not yet wired (host-console, self-update) so the frontend
- *    cannot offer them on a pilot-active session.
+ *  - applyPilotModeCapabilityFilter strips host-console (whose central->pilot
+ *    WS upgrade path is not yet wired) but leaves self-update in place so a
+ *    Compose-deployed pilot can advertise it and the Fleet Update flow can
+ *    route through NodeRegistry.getProxyTarget().
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
@@ -67,19 +68,25 @@ describe('fetchRemoteMeta Authorization header', () => {
 describe('applyPilotModeCapabilityFilter', () => {
   afterEach(() => {
     enableCapability('host-console');
-    enableCapability('self-update');
   });
 
-  it('removes host-console and self-update from active capabilities', () => {
+  it('removes host-console from active capabilities', () => {
     expect(CAPABILITIES).toContain('host-console');
-    expect(CAPABILITIES).toContain('self-update');
 
     applyPilotModeCapabilityFilter();
     const active = getActiveCapabilities();
 
     expect(active).not.toContain('host-console');
-    expect(active).not.toContain('self-update');
     expect(active).toContain('stacks');
+  });
+
+  it('leaves self-update in place so Compose-deployed pilots can advertise it', () => {
+    expect(CAPABILITIES).toContain('self-update');
+
+    applyPilotModeCapabilityFilter();
+    const active = getActiveCapabilities();
+
+    expect(active).toContain('self-update');
   });
 
   it('is idempotent (safe to call multiple times)', () => {
@@ -88,6 +95,6 @@ describe('applyPilotModeCapabilityFilter', () => {
     const active = getActiveCapabilities();
 
     expect(active).not.toContain('host-console');
-    expect(active.length).toBe(CAPABILITIES.length - 2);
+    expect(active.length).toBe(CAPABILITIES.length - 1);
   });
 });

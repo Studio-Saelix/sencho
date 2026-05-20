@@ -4,7 +4,7 @@
  * Backend integration is covered by pilot-tunnel-integration.test.ts and
  * the pilot-enrollment / pilot-enrollment-replay vitest suites. This file
  * exercises the parts only the browser sees: the mode selector, the
- * enrollment dialog, the docker run code block, and the regenerate
+ * enrollment dialog, the Compose file code block, and the regenerate
  * affordance on an existing pilot-mode node.
  *
  * Out of scope: simulating an agent connecting to flip the row to Online.
@@ -52,7 +52,7 @@ test.describe('Pilot Agent enrollment', () => {
     await deleteTestNodes(page);
   });
 
-  test('creating a pilot-agent node opens the enrollment dialog with a docker run command', async ({ page }) => {
+  test('creating a pilot-agent node opens the enrollment dialog with a compose file', async ({ page }) => {
     const nodeName = `${NAME_PREFIX}create-${Date.now()}`;
 
     const addBtn = page.getByRole('button', { name: /add node/i }).first();
@@ -77,20 +77,20 @@ test.describe('Pilot Agent enrollment', () => {
     await page.locator('#node-name').fill(nodeName);
     await page.getByRole('dialog').getByRole('button', { name: /add node/i }).click();
 
-    // Enrollment modal opens. The docker run command must contain the
-    // SENCHO_MODE flag and a JWT-shaped Bearer token.
-    await expect(page.getByText(/Run this command on/i)).toBeVisible({ timeout: 10_000 });
+    // Enrollment modal opens. The compose file must carry the SENCHO_MODE
+    // env entry and a JWT-shaped enrollment token.
+    await expect(page.getByText(/Deploy the pilot agent on/i)).toBeVisible({ timeout: 10_000 });
 
-    const dockerCommand = page.locator('pre').filter({ hasText: /SENCHO_MODE=pilot/ });
-    await expect(dockerCommand).toBeVisible();
+    const composeFile = page.locator('pre').filter({ hasText: /SENCHO_MODE: pilot/ });
+    await expect(composeFile).toBeVisible();
 
-    const cmd = await dockerCommand.innerText();
-    expect(cmd).toContain('SENCHO_MODE=pilot');
-    expect(cmd).toContain('SENCHO_PRIMARY_URL=');
-    expect(cmd).toMatch(/SENCHO_ENROLL_TOKEN=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+    const cmd = await composeFile.innerText();
+    expect(cmd).toContain('SENCHO_MODE: pilot');
+    expect(cmd).toContain('SENCHO_PRIMARY_URL:');
+    expect(cmd).toMatch(/SENCHO_ENROLL_TOKEN: [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
   });
 
-  test('regenerating the enrollment token issues a fresh docker run command', async ({ page }) => {
+  test('regenerating the enrollment token issues a fresh compose file', async ({ page }) => {
     const nodeName = `${NAME_PREFIX}regen-${Date.now()}`;
 
     const addBtn = page.getByRole('button', { name: /add node/i }).first();
@@ -105,10 +105,10 @@ test.describe('Pilot Agent enrollment', () => {
     await page.locator('#node-name').fill(nodeName);
     await page.getByRole('dialog').getByRole('button', { name: /add node/i }).click();
 
-    const firstCommand = page.locator('pre').filter({ hasText: /SENCHO_MODE=pilot/ });
-    await expect(firstCommand).toBeVisible({ timeout: 10_000 });
-    const firstText = await firstCommand.innerText();
-    const firstToken = firstText.match(/SENCHO_ENROLL_TOKEN=([A-Za-z0-9_.-]+)/)?.[1];
+    const firstCompose = page.locator('pre').filter({ hasText: /SENCHO_MODE: pilot/ });
+    await expect(firstCompose).toBeVisible({ timeout: 10_000 });
+    const firstText = await firstCompose.innerText();
+    const firstToken = firstText.match(/SENCHO_ENROLL_TOKEN: ([A-Za-z0-9_.-]+)/)?.[1];
     expect(firstToken).toBeTruthy();
 
     // Close the enrollment dialog (Escape lands on the row view).
@@ -120,10 +120,10 @@ test.describe('Pilot Agent enrollment', () => {
     await row.getByRole('button', { name: 'Edit node' }).click();
     await page.getByRole('button', { name: /regenerate enrollment token/i }).click();
 
-    const secondCommand = page.locator('pre').filter({ hasText: /SENCHO_MODE=pilot/ });
-    await expect(secondCommand).toBeVisible({ timeout: 10_000 });
-    const secondText = await secondCommand.innerText();
-    const secondToken = secondText.match(/SENCHO_ENROLL_TOKEN=([A-Za-z0-9_.-]+)/)?.[1];
+    const secondCompose = page.locator('pre').filter({ hasText: /SENCHO_MODE: pilot/ });
+    await expect(secondCompose).toBeVisible({ timeout: 10_000 });
+    const secondText = await secondCompose.innerText();
+    const secondToken = secondText.match(/SENCHO_ENROLL_TOKEN: ([A-Za-z0-9_.-]+)/)?.[1];
     expect(secondToken).toBeTruthy();
     expect(secondToken).not.toBe(firstToken);
   });

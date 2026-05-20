@@ -26,7 +26,7 @@ export interface NodeTestInfo {
 interface PilotEnrollment {
   token: string;
   expiresAt: number;
-  dockerRun: string;
+  composeYaml: string;
 }
 
 interface NodeFormData {
@@ -207,12 +207,12 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
   const copyEnrollment = async () => {
     if (!activeEnrollment) return;
     try {
-      await copyToClipboard(activeEnrollment.enrollment.dockerRun);
+      await copyToClipboard(activeEnrollment.enrollment.composeYaml);
       setEnrollmentCopied(true);
-      toast.success('Command copied to clipboard');
+      toast.success('Compose file copied to clipboard');
       setTimeout(() => setEnrollmentCopied(false), 2000);
     } catch {
-      toast.error('Could not copy automatically. Please select and copy the command manually.');
+      toast.error('Could not copy automatically. Please select and copy the compose file manually.');
     }
   };
 
@@ -470,27 +470,39 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
         <ModalHeader
           kicker="NODES · PILOT ENROLLMENT"
           title="Enroll the pilot agent"
-          description="Run the docker command on the remote host to connect the pilot agent."
+          description="Save the compose file on the remote host, then bring up the pilot agent."
         />
         <ModalBody>
           {activeEnrollment && (
-            <>
+            <div className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                Run this command on <strong>{activeEnrollment.nodeName}</strong> to start the pilot agent. The token below is valid for 15 minutes and can only be used once.
+                Deploy the pilot agent on <strong>{activeEnrollment.nodeName}</strong> with the Compose file below. The token is valid for 15 minutes and can only be used once.
               </p>
-              <div className="rounded-md border border-card-border bg-muted/50 p-3">
-                <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/90">{activeEnrollment.enrollment.dockerRun}</pre>
+
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-foreground/80">Step 1: save the file as <code className="font-mono text-[0.7rem] px-1 py-0.5 rounded bg-muted">compose.yaml</code></p>
+                <div className="rounded-md border border-card-border bg-muted/50 p-3">
+                  <pre className="text-xs font-mono whitespace-pre overflow-x-auto text-foreground/90">{activeEnrollment.enrollment.composeYaml}</pre>
+                </div>
               </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-foreground/80">Step 2: start the agent on the remote host</p>
+                <div className="rounded-md border border-card-border bg-muted/50 p-3">
+                  <code className="text-xs font-mono text-foreground/90">docker compose -f compose.yaml up -d</code>
+                </div>
+              </div>
+
               <div className="flex items-center justify-between">
                 <p className="text-xs text-muted-foreground">
                   Expires <span className="font-mono tabular-nums">{formatTimeUntil(activeEnrollment.enrollment.expiresAt)}</span> from now.
                 </p>
                 <Button size="sm" variant="outline" className="gap-1" onClick={copyEnrollment}>
                   {enrollmentCopied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
-                  {enrollmentCopied ? 'Copied' : 'Copy command'}
+                  {enrollmentCopied ? 'Copied' : 'Copy compose file'}
                 </Button>
               </div>
-            </>
+            </div>
           )}
         </ModalBody>
         <ModalFooter

@@ -17,6 +17,28 @@ interface HostMount {
   destination: string;
 }
 
+/** Narrow projection of the Dockerode mount entry we actually consume. */
+export type DockerMount = {
+  Type: 'bind' | 'volume' | 'tmpfs' | 'npipe' | 'cluster' | 'image';
+  Source: string;
+  Destination: string;
+};
+
+/**
+ * Find the host-side path Docker resolved for /app/data, regardless of whether
+ * the operator declared a bind or a named volume. The helper container uses
+ * this path to mount /app/data:rw so it can write UPDATE_ERROR_FILE when a
+ * compose recreate fails before the gateway can persist the error itself.
+ */
+export function findDataDirHost(mounts: ReadonlyArray<DockerMount>): string | null {
+  const match = mounts.find(m =>
+    m.Destination === '/app/data' &&
+    (m.Type === 'bind' || m.Type === 'volume') &&
+    !!m.Source,
+  );
+  return match?.Source ?? null;
+}
+
 interface ComposeContext {
   workingDir: string;
   configFiles: string;
@@ -86,14 +108,12 @@ class SelfUpdateService {
       // Collect all host bind mounts so the helper container can forward them.
       // This lets docker compose resolve env_file, configs, secrets, and any
       // other host-path references that live outside the compose working dir.
-      const rawMounts = (info.Mounts ?? []) as Array<{
-        Type: string; Source: string; Destination: string;
-      }>;
+      const rawMounts = (info.Mounts ?? []) as DockerMount[];
       const hostBindMounts: HostMount[] = rawMounts
         .filter(m => m.Type === 'bind' && m.Source && m.Destination)
         .map(m => ({ source: m.Source, destination: m.Destination }));
 
-      const dataDirHost = hostBindMounts.find(m => m.destination === '/app/data')?.source ?? null;
+      const dataDirHost = findDataDirHost(rawMounts);
       if (!dataDirHost) {
         console.log('[SelfUpdate] /app/data mount not found - update error recovery will be unavailable');
       }

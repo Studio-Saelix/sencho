@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.84.1](https://github.com/Studio-Saelix/sencho/compare/v0.84.0...v0.84.1) (2026-05-20)
+
+
+### Fixed
+
+* **fleet:** route remote update trigger through getProxyTarget ([#1123](https://github.com/Studio-Saelix/sencho/issues/1123)) ([0b50c88](https://github.com/Studio-Saelix/sencho/commit/0b50c88eb3727c4808e409b4639817b3128764a8))
+* **pilot:** let SENCHO_PUBLIC_URL override the request Host in enrollment ([#1122](https://github.com/Studio-Saelix/sencho/issues/1122)) ([282ab8d](https://github.com/Studio-Saelix/sencho/commit/282ab8d8440bc4afb9e560f97d38df5be412cc34))
+* **self-update:** resolve /app/data through bind or named volume ([#1124](https://github.com/Studio-Saelix/sencho/issues/1124)) ([ee891b0](https://github.com/Studio-Saelix/sencho/commit/ee891b093b593b43d39f2aa04e7ef14bd421b35f))
+
+## [0.84.0](https://github.com/Studio-Saelix/sencho/compare/v0.83.1...v0.84.0) (2026-05-20)
+
+
+### Added
+
+* **pilot:** make Docker Compose the canonical pilot enrollment payload ([#1121](https://github.com/Studio-Saelix/sencho/issues/1121)) ([3ad6ea9](https://github.com/Studio-Saelix/sencho/commit/3ad6ea9c5dfc1ca48d734bd8ff53315c1aa6d2a7))
+
+
+### Fixed
+
+* **fleet:** rename Traffic tab label to Routing for consistency ([#1119](https://github.com/Studio-Saelix/sencho/issues/1119)) ([0117556](https://github.com/Studio-Saelix/sencho/commit/0117556beab91e0845e81da079f1e3009df2a8d4))
+
 ## [0.83.1](https://github.com/Studio-Saelix/sencho/compare/v0.83.0...v0.83.1) (2026-05-19)
 
 
