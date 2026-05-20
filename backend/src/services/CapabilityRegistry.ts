@@ -101,10 +101,14 @@ export function getActiveCapabilities(): readonly string[] {
  * the central->pilot path for them is not yet wired through the reverse tunnel.
  * Surfacing them would let the frontend offer a tab whose click silently falls
  * through to central's local handler.
+ *
+ * `self-update` is intentionally NOT here: a pilot deployed via Docker Compose
+ * picks up the compose labels SelfUpdateService.initialize() needs and toggles
+ * the capability on locally; the Fleet Update flow then routes through
+ * NodeRegistry.getProxyTarget() so the tunnel carries the trigger.
  */
 const PILOT_DISABLED_CAPABILITIES: readonly Capability[] = [
   'host-console',
-  'self-update',
 ];
 
 /** Disable capabilities that require a central->pilot path that is not yet wired. */
