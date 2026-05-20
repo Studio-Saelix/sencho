@@ -182,8 +182,18 @@ export function attachUpgrade(
         return;
       }
 
-      if (node && node.type === 'remote' && node.api_url && node.api_token) {
-        await handleRemoteForwarder(req, socket, head, { node, pathname });
+      if (node && node.type === 'remote') {
+        // Resolve the proxy target through NodeRegistry so pilot-mode nodes
+        // (empty api_url + api_token, loopback bridge instead) and proxy-mode
+        // nodes share one dispatch path. Mirrors proxy/remoteNodeProxy.ts.
+        const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!target) {
+          // Pilot tunnel disconnected, or proxy-mode node missing credentials.
+          // Reject the upgrade cleanly; falling through to local handlers would
+          // serve gateway-local data for a request that named a remote node.
+          return reject(socket, 503, 'Service Unavailable');
+        }
+        await handleRemoteForwarder(req, socket, head, { pathname, target });
         return;
       }
 

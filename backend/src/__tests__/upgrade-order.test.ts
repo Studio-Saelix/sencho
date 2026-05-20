@@ -342,6 +342,45 @@ describe('WebSocket upgrade dispatch order', () => {
     });
   });
 
+  describe('remote dispatch via NodeRegistry.getProxyTarget', () => {
+    // Pilot-mode nodes carry empty `api_url` and `api_token` by design and
+    // expose their API on a per-tunnel loopback bridge that
+    // NodeRegistry.getProxyTarget resolves. The dispatch ladder must route
+    // through that abstraction so pilot and proxy modes share one code
+    // path, and must reject upgrades whose target is unresolvable rather
+    // than serving gateway-local data for a request that named a remote
+    // node.
+
+    let pilotNodeId: number;
+
+    beforeAll(async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      pilotNodeId = DatabaseService.getInstance().addNode({
+        name: `upgrade-order-pilot-${Date.now()}`,
+        type: 'remote',
+        mode: 'pilot_agent',
+        compose_dir: '/tmp/x',
+        is_default: false,
+        api_url: '',
+        api_token: '',
+      });
+    });
+
+    it('rejects a WS upgrade to a pilot-mode node with no active tunnel with HTTP 503 (not a fall-through to local handlers)', async () => {
+      const ws = connect(`/api/stacks/anything/logs?nodeId=${pilotNodeId}`, { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(503);
+    });
+
+    it('rejects /ws?nodeId=<pilot-without-tunnel> with HTTP 503 instead of dispatching to the local generic handler', async () => {
+      const ws = connect(`/ws?nodeId=${pilotNodeId}`, { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(503);
+    });
+  });
+
   it('dispatches /api/pilot/tunnel to the pilot handler (rejects non-pilot bearer before path-based dispatch)', async () => {
     // A plain session cookie is a valid *user* JWT but not a pilot JWT. The
     // pilot handler runs first (before the shared cookie/Bearer auth) and
