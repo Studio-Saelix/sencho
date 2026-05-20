@@ -148,4 +148,44 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         expect(fetchSpy).not.toHaveBeenCalled();
         db.deleteNode(remoteNodeId);
     });
+
+    it('logs an offline-shaped warn (not a generic error) when proxyFetch throws MeshError no_target', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'inspect-remote-no-target',
+            type: 'remote',
+            mode: 'pilot_agent',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: '',
+            api_token: '',
+        });
+
+        // getProxyTarget returns null -> proxyFetch raises MeshError('no_target').
+        // The catch branch must recognise no_target alongside push_failed and
+        // emit console.warn (operator-friendly), not console.error (which the
+        // Routing tab surfaces as an unexpected fault).
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => { /* swallow */ });
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => { /* swallow */ });
+
+        const out = await (svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> })
+            .inspectStackServices(remoteNodeId, 'audit-mesh-pilot');
+
+        expect(out).toEqual([]);
+        const warnedAboutNoTarget = warnSpy.mock.calls.some((args) =>
+            String(args[0] ?? '').includes('inspectStackServices: unreachable') &&
+            String(args[0] ?? '').includes('no_target'),
+        );
+        expect(warnedAboutNoTarget).toBe(true);
+        // No "remote unreachable" error log: that path is reserved for
+        // unexpected exceptions, not the known no_target / push_failed pair.
+        const erroredAsUnreachable = errorSpy.mock.calls.some((args) =>
+            String(args[0] ?? '').includes('inspectStackServices remote unreachable'),
+        );
+        expect(erroredAsUnreachable).toBe(false);
+
+        db.deleteNode(remoteNodeId);
+    });
 });

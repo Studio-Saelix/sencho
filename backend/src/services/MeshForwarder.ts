@@ -2,19 +2,17 @@ import net from 'net';
 import { sanitizeForLog } from '../utils/safeLog';
 
 /**
- * In-process mesh TCP forwarder. Owns per-port `net.Server` listeners on the
- * host network and delegates accepted sockets to the host (MeshService) for
- * resolve + splice. Replaces the separate `saelix/sencho-mesh` sidecar
- * container that previously did this job over a control WebSocket. The
- * resolve step is now a sync map lookup rather than a round-trip, so
- * MeshForwarder is just a thin lifecycle layer; all routing + splicing
- * lives on MeshService.
+ * In-process mesh TCP forwarder. Owns per-port `net.Server` listeners and
+ * delegates accepted sockets to the host (MeshService) for resolve +
+ * splice. All routing and splicing logic lives on MeshService;
+ * MeshForwarder is a thin lifecycle layer that opens and closes ports.
  *
- * Sencho's container must run in `network_mode: host` (Linux) for the
- * listeners to bind on the host's network where meshed containers'
- * `extra_hosts: <alias>:host-gateway` entries point. Without host network
- * mode, `net.createServer().listen(port)` lands inside the container's
- * namespace and inbound traffic from peers never reaches it.
+ * Sencho runs in standard Docker bridge mode and attaches its own
+ * container to the shared `sencho_mesh` network at a stable IP. Meshed
+ * user containers are attached to the same network, so they reach the
+ * forwarder by the Sencho IP without `network_mode: host` or the
+ * `extra_hosts: <alias>:host-gateway` indirection an older sidecar
+ * design required.
  */
 
 export interface MeshForwarderHost {
@@ -50,9 +48,10 @@ export class MeshForwarder {
                     const onListening = () => { server.removeListener('error', onError); resolve(); };
                     server.once('error', onError);
                     server.once('listening', onListening);
-                    // Bind on all interfaces. Under host network mode this is
-                    // the host's own network; under bridge mode (mesh disabled
-                    // at boot) this would be the container's namespace.
+                    // Bind on all interfaces inside the Sencho container's
+                    // networking namespace. The sencho_mesh bridge attaches
+                    // both Sencho and meshed user containers, so peers reach
+                    // this listener at Sencho's mesh-network IP.
                     server.listen(port, '0.0.0.0');
                 });
                 this.listeners.set(port, server);

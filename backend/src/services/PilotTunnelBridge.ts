@@ -91,6 +91,16 @@ interface ReverseLocalTcpStreamState extends StreamMeta {
 interface ReverseRelayTcpStreamState extends StreamMeta {
     kind: 'reverse_relay';
     target: TcpStream;
+    /**
+     * False between `acceptReverseRelay` swapping the reservation for this
+     * state and the target stream emitting `'open'`. `TcpData` frames
+     * arriving in that window are queued in `pendingData` rather than
+     * written into the target stream, whose own remote ack may not yet
+     * have landed.
+     */
+    targetOpen: boolean;
+    pendingData: Buffer[];
+    pendingBytes: number;
     bytesIn: number;
     bytesOut: number;
 }
@@ -639,7 +649,23 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 } else if (s.kind === 'reverse_relay') {
                     s.bytesIn += frame.payload.length;
                     this.refreshIdleTimer(frame.streamId, s);
-                    s.target.write(frame.payload);
+                    if (s.targetOpen) {
+                        s.target.write(frame.payload);
+                    } else {
+                        // Mirror the reverse_local pending-data path: between
+                        // the state swap in acceptReverseRelay and the target
+                        // stream's 'open' event, buffer up to the cap. Without
+                        // this, a peer that sends body bytes immediately after
+                        // tcp_open_reverse would drop them into a stream that
+                        // is still waiting for its remote ack.
+                        if (s.pendingBytes + frame.payload.length > STREAM_PENDING_DATA_MAX_BYTES) {
+                            this.removeStream(frame.streamId);
+                            this.sendJson({ t: 'tcp_close', s: frame.streamId });
+                            break;
+                        }
+                        s.pendingData.push(Buffer.from(frame.payload));
+                        s.pendingBytes += frame.payload.length;
+                    }
                 }
                 break;
             }
@@ -825,11 +851,12 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             if (targetNodeId === localNodeId) {
                 await this.acceptReverseLocal(s, { stack, service, port });
             } else {
-                // Relay path does not yet buffer early data (separate
-                // follow-up); drop the local-shaped reservation so the
-                // relay state machine starts from a clean slot. Any frames
-                // buffered up to this point are discarded with it.
-                if (this.streams.get(s) === reservation) this.removeStream(s);
+                // Leave the local-shaped reservation in place so any
+                // TcpData arriving while ensureBridge + openTcpStream
+                // resolve keeps buffering through the reverse_local
+                // branch in handleBinaryFrame. acceptReverseRelay
+                // transplants the buffered frames into the relay state
+                // and flushes them before the open ack.
                 await this.acceptReverseRelay(s, targetNodeId, { stack, service, port });
             }
         })().catch((err) => {
@@ -938,25 +965,62 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
     }
 
     private async acceptReverseRelay(s: number, targetNodeId: number, target: { stack: string; service: string; port: number }): Promise<void> {
+        // Pull the reverse_local-shaped reservation that handleTcpOpenReverse
+        // placed synchronously. Its pendingData buffer holds any TcpData
+        // frames that arrived while we were dispatching, which we transplant
+        // into the relay state so they can be flushed once the target stream
+        // opens.
+        const reservation = this.streams.get(s);
+        if (!reservation || reservation.kind !== 'reverse_local') return;
+
         const { PilotTunnelManager } = await import('./PilotTunnelManager');
         // ensureBridge resolves either an existing pilot tunnel or a fresh
         // proxy-mode tunnel dialed on demand, so proxy <-> proxy relays
         // succeed even when neither remote has a pilot agent.
         const targetBridge = await PilotTunnelManager.getInstance().ensureBridge(targetNodeId);
         if (!targetBridge) {
+            if (this.streams.get(s) === reservation) this.removeStream(s);
             this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
             return;
         }
+        // Reservation may have been evicted under the pending-bytes cap
+        // while ensureBridge was resolving. If so, the peer has already
+        // been told via tcp_close to tear down; bail out cleanly.
+        if (this.streams.get(s) !== reservation) return;
+
         const targetStream = targetBridge.openTcpStream(target);
         if (!targetStream) {
+            if (this.streams.get(s) === reservation) this.removeStream(s);
             this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
             return;
         }
-        const state: ReverseRelayTcpStreamState = { kind: 'reverse_relay', target: targetStream, bytesIn: 0, bytesOut: 0 };
+        const state: ReverseRelayTcpStreamState = {
+            kind: 'reverse_relay',
+            target: targetStream,
+            targetOpen: false,
+            pendingData: reservation.pendingData,
+            pendingBytes: reservation.pendingBytes,
+            bytesIn: reservation.bytesIn,
+            bytesOut: 0,
+        };
         this.streams.set(s, state);
         this.refreshIdleTimer(s, state);
 
         targetStream.once('open', () => {
+            const cur = this.streams.get(s);
+            if (!cur || cur.kind !== 'reverse_relay') return;
+            // Flush buffered early data into the target stream BEFORE
+            // acking so the peer sees a clean "ack + data" sequence and
+            // the upstream receives the request body ahead of anything
+            // that arrives post-ack.
+            if (cur.pendingData.length > 0) {
+                for (const buf of cur.pendingData) {
+                    try { cur.target.write(buf); } catch { /* ignore */ }
+                }
+                cur.pendingData = [];
+                cur.pendingBytes = 0;
+            }
+            cur.targetOpen = true;
             this.sendJson({ t: 'tcp_open_ack', s, ok: true });
         });
         targetStream.on('data', (chunk: Buffer) => {

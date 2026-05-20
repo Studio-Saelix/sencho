@@ -339,6 +339,118 @@ describe('MeshService.optInStack', () => {
     });
 });
 
+describe('MeshService.disableForNode', () => {
+    it('redeploys affected stacks and cascades across the fleet on node disable', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.setNodeMeshEnabled(localNodeId, true);
+        db.insertMeshStack(localNodeId, 'alpha', 'setup');
+        db.insertMeshStack(localNodeId, 'beta', 'setup');
+        db.insertMeshStack(remoteNodeId, 'gamma', 'setup');
+
+        const regenSpy = vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+        const cascadeSpy = vi.spyOn(
+            svc as unknown as { cascadeRecomposeAcrossFleet: (n: number | undefined, s: string | undefined, a: string) => void },
+            'cascadeRecomposeAcrossFleet',
+        ).mockImplementation(() => { /* noop */ });
+        const triggerSpy = vi.spyOn(svc, 'triggerRedeploy').mockImplementation(() => { /* noop */ });
+        const removeSpy = vi.spyOn(svc, 'removeOverrideFromNode').mockResolvedValue(undefined);
+
+        await svc.disableForNode(localNodeId, 'tester');
+
+        expect(db.getNodeMeshEnabled(localNodeId)).toBe(false);
+        // Disabled-node rows are deleted before the cascade so listMeshStacks
+        // does not return them. The other node's row stays.
+        expect(db.listMeshStacks(localNodeId)).toEqual([]);
+        expect(db.listMeshStacks(remoteNodeId).map((s) => s.stack_name)).toEqual(['gamma']);
+
+        expect(regenSpy).toHaveBeenCalledTimes(1);
+        // Cascade walks every remaining mesh_stacks row, no skip tuple.
+        expect(cascadeSpy).toHaveBeenCalledWith(undefined, undefined, 'tester');
+        // Each disabled-node stack triggers a direct redeploy so its
+        // container detaches from sencho_mesh. Cascade is mocked, so the
+        // only triggerRedeploy calls come from the disable loop itself
+        // (twice, not three: gamma stays put on the remote node).
+        expect(triggerSpy).toHaveBeenCalledTimes(2);
+        expect(triggerSpy).toHaveBeenCalledWith(localNodeId, 'alpha', 'tester');
+        expect(triggerSpy).toHaveBeenCalledWith(localNodeId, 'beta', 'tester');
+        // disableForNode routes through removeOverrideFromNode (not the
+        // local-only removeStackOverride) so remote nodes also have their
+        // pushed override files deleted via DELETE /api/mesh/local-override.
+        expect(removeSpy).toHaveBeenCalledTimes(2);
+        expect(removeSpy).toHaveBeenCalledWith(localNodeId, 'alpha');
+        expect(removeSpy).toHaveBeenCalledWith(localNodeId, 'beta');
+
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('dispatches removeOverrideFromNode for each stack when the disabled node is remote', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot-disable', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.setNodeMeshEnabled(remoteNodeId, true);
+        db.insertMeshStack(remoteNodeId, 'delta', 'setup');
+        db.insertMeshStack(remoteNodeId, 'epsilon', 'setup');
+
+        vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+        vi.spyOn(
+            svc as unknown as { cascadeRecomposeAcrossFleet: (n: number | undefined, s: string | undefined, a: string) => void },
+            'cascadeRecomposeAcrossFleet',
+        ).mockImplementation(() => { /* noop */ });
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation(() => { /* noop */ });
+        const removeSpy = vi.spyOn(svc, 'removeOverrideFromNode').mockResolvedValue(undefined);
+
+        await svc.disableForNode(remoteNodeId, 'tester');
+
+        expect(db.getNodeMeshEnabled(remoteNodeId)).toBe(false);
+        // Remote-node disable must dispatch the remote-aware helper so the
+        // override file pushed earlier via applyLocalOverride is deleted
+        // on the peer via DELETE /api/mesh/local-override/:stack.
+        expect(removeSpy).toHaveBeenCalledTimes(2);
+        expect(removeSpy).toHaveBeenCalledWith(remoteNodeId, 'delta');
+        expect(removeSpy).toHaveBeenCalledWith(remoteNodeId, 'epsilon');
+
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('defaults the actor when none is supplied so legacy callers still log a non-empty actor', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        db.setNodeMeshEnabled(localNodeId, true);
+        db.insertMeshStack(localNodeId, 'solo', 'setup');
+
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: () => Promise<void> }, 'regenerateOverridesAcrossFleet')
+            .mockResolvedValue(undefined);
+        const cascadeSpy = vi.spyOn(
+            svc as unknown as { cascadeRecomposeAcrossFleet: (n: number | undefined, s: string | undefined, a: string) => void },
+            'cascadeRecomposeAcrossFleet',
+        ).mockImplementation(() => { /* noop */ });
+        const triggerSpy = vi.spyOn(svc, 'triggerRedeploy').mockImplementation(() => { /* noop */ });
+        vi.spyOn(svc, 'removeOverrideFromNode').mockResolvedValue(undefined);
+
+        await svc.disableForNode(localNodeId);
+
+        expect(db.getNodeMeshEnabled(localNodeId)).toBe(false);
+        expect(cascadeSpy.mock.calls[0][2]).toBe('system:mesh.disable');
+        expect(triggerSpy.mock.calls[0][2]).toBe('system:mesh.disable');
+    });
+});
+
 describe('MeshService activity log', () => {
     it('keeps the most recent events under the 1000-cap', () => {
         const svc = MeshService.getInstance();
