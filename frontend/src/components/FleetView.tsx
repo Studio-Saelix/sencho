@@ -99,7 +99,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             {isAdmiral && (
                                 <TabsHighlightItem value="routing">
                                     <TabsTrigger value="routing">
-                                        <ArrowLeftRight className="w-4 h-4 mr-1.5" />Traffic
+                                        <ArrowLeftRight className="w-4 h-4 mr-1.5" />Routing
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
