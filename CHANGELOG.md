@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.84.2](https://github.com/Studio-Saelix/sencho/compare/v0.84.1...v0.84.2) (2026-05-20)
+
+
+### Fixed
+
+* **mesh:** address audit follow-ups (early-data, recompose, admiral gate, error codes, docs) ([#1126](https://github.com/Studio-Saelix/sencho/issues/1126)) ([982c783](https://github.com/Studio-Saelix/sencho/commit/982c7830b1a17734b38fd76e4453d44a7be63781))
+
 ## [0.84.1](https://github.com/Studio-Saelix/sencho/compare/v0.84.0...v0.84.1) (2026-05-20)
 
 
