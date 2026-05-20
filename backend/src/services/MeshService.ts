@@ -904,7 +904,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
     }
 
-    public async disableForNode(nodeId: number): Promise<void> {
+    public async disableForNode(
+        nodeId: number,
+        actor: string = 'system:mesh.disable',
+    ): Promise<void> {
         DatabaseService.getInstance().setNodeMeshEnabled(nodeId, false);
         const stacks = DatabaseService.getInstance().listMeshStacks(nodeId);
         for (const s of stacks) {
@@ -913,6 +916,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
         await this.refreshAliasCache();
         await this.syncForwarderListeners();
+        // Mirror optOutStack: regenerate every remaining node's override
+        // without the dropped aliases, recompose the rest of the fleet so
+        // their containers shed the stale extra_hosts, and redeploy the
+        // disabled node's own stacks so their containers detach from the
+        // sencho_mesh network and lose the alias entries they owned.
+        await this.regenerateOverridesAcrossFleet();
+        this.cascadeRecomposeAcrossFleet(undefined, undefined, actor);
+        for (const s of stacks) {
+            this.triggerRedeploy(nodeId, s.stack_name, actor);
+        }
         this.logActivity({
             source: 'mesh', level: 'info', type: 'mesh.disable',
             nodeId, message: `mesh disabled on node ${nodeId}`,

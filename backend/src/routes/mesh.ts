@@ -85,7 +85,7 @@ meshRouter.post('/nodes/:nodeId/disable', async (req: Request, res: Response): P
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
     try {
-        await MeshService.getInstance().disableForNode(nodeId);
+        await MeshService.getInstance().disableForNode(nodeId, actorFor(req));
         res.json({ ok: true });
     } catch (err) {
         res.status(500).json({ error: (err as Error).message });
