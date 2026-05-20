@@ -12,7 +12,7 @@ import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import SelfUpdateService from '../services/SelfUpdateService';
-import { fetchRemoteMeta, getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
+import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierGates';
 import { scheduleLocalUpdate } from './license';
@@ -837,6 +837,19 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
   }
 });
 
+// Pilot loopback targets carry an empty apiToken because the tunnel bridge
+// re-injects admin auth; sending a malformed `Bearer ` header would 401 on
+// the pilot's local Express. Omit the header in that case.
+function postSystemUpdate(target: { apiUrl: string; apiToken: string }) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
+  return fetch(`${target.apiUrl.replace(/\/$/, '')}/api/system/update`, {
+    method: 'POST',
+    headers,
+    signal: AbortSignal.timeout(10000),
+  });
+}
+
 fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
@@ -865,7 +878,7 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
 
     console.log('[Fleet] Update triggered for node', node.name, node.type);
     if (isDebugEnabled()) {
-      console.debug('[Fleet:debug] Update trigger details:', { nodeId, name: node.name, type: node.type, hasUrl: !!node.api_url, hasToken: !!node.api_token });
+      console.debug('[Fleet:debug] Update trigger details:', { nodeId, name: node.name, type: node.type, mode: node.mode });
     }
 
     if (node.type === 'local') {
@@ -878,12 +891,16 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       return;
     }
 
-    if (!node.api_url || !node.api_token) {
-      res.status(503).json({ error: 'Remote node not configured.' });
+    const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+    if (!target) {
+      const msg = node.mode === 'pilot_agent'
+        ? `Pilot tunnel to "${node.name}" is disconnected.`
+        : 'Remote node not configured.';
+      res.status(503).json({ error: msg });
       return;
     }
 
-    const meta = await fetchRemoteMeta(node.api_url, node.api_token);
+    const meta = await NodeRegistry.getInstance().fetchMetaForNode(node.id);
     if (isDebugEnabled()) {
       console.debug('[Fleet:debug] Remote meta for update:', { nodeId, online: meta.online, version: meta.version, capabilities: meta.capabilities, startedAt: meta.startedAt });
     }
@@ -896,14 +913,7 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       return;
     }
 
-    const response = await fetch(`${node.api_url.replace(/\/$/, '')}/api/system/update`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${node.api_token}`,
-        'Content-Type': 'application/json',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
+    const response = await postSystemUpdate(target);
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
@@ -939,11 +949,12 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
     console.log('[Fleet] Update-all triggered,', nodes.length, 'nodes registered');
     if (debug) console.debug('[Fleet:debug] Update-all compare target:', { gatewayVersion, compareVersion, compareValid });
 
+    const registry = NodeRegistry.getInstance();
     const candidates = nodes.filter(node => {
       if (node.type === 'local') return false;
       const tracker = updateTracker.get(node.id);
       if (tracker?.status === 'updating') return false;
-      if (!node.api_url || !node.api_token) return false;
+      if (registry.getProxyTarget(node.id) === null) return false;
       // Clear terminal states so they can be re-triggered.
       if (tracker && (tracker.status === 'timeout' || tracker.status === 'failed' || tracker.status === 'completed')) {
         updateTracker.delete(node.id);
@@ -952,7 +963,9 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
     });
 
     const results = await Promise.allSettled(candidates.map(async (node) => {
-      const meta = await fetchRemoteMeta(node.api_url!, node.api_token!);
+      const target = registry.getProxyTarget(node.id);
+      if (!target) return { name: node.name, triggered: false };
+      const meta = await registry.fetchMetaForNode(node.id);
       if (!meta.online) {
         return { name: node.name, triggered: false };
       }
@@ -962,11 +975,7 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
       if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
         return { name: node.name, triggered: false };
       }
-      const response = await fetch(`${node.api_url!.replace(/\/$/, '')}/api/system/update`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(10000),
-      });
+      const response = await postSystemUpdate(target);
       if (response.ok) {
         updateTracker.set(node.id, updateTracker.create('updating', meta.version, meta.startedAt));
         return { name: node.name, triggered: true };
