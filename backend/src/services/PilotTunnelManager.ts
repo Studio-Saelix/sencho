@@ -295,14 +295,28 @@ export class PilotTunnelManager extends EventEmitter {
     }
 
     /**
-     * Force-close a tunnel (e.g., on node deletion).
+     * Force-close a tunnel (e.g., on node deletion, enrollment regenerate).
+     *
+     * Mirrors the cleanup the bridge's natural `'closed'` event handler runs
+     * so explicit closure and natural disconnect produce identical state:
+     * pilot tunnels write `nodes.status='offline'` and emit `tunnel-down`;
+     * proxy bridges emit `proxy-bridge-down`. The maps are cleared before
+     * `bridge.close()` so the natural handler's `=== bridge` check
+     * short-circuits and we do not double-emit.
      */
     public closeTunnel(nodeId: number, code = 1000, reason = 'closed by primary'): void {
         const bridge = this.bridges.get(nodeId);
         if (!bridge) return;
-        bridge.close(code, reason);
+        const kind = this.bridgeKinds.get(nodeId);
         this.bridges.delete(nodeId);
         this.bridgeKinds.delete(nodeId);
+        if (kind === 'pilot') {
+            DatabaseService.getInstance().updateNodeStatus(nodeId, 'offline');
+            this.emit('tunnel-down', nodeId);
+        } else if (kind === 'proxy') {
+            this.emit('proxy-bridge-down', nodeId);
+        }
+        bridge.close(code, reason);
     }
 
 }
