@@ -35,20 +35,20 @@ The user-facing effect is `psql -h db.api.opsix.sencho` from a container on any 
 
 - An Admiral license on the central Sencho.
 - At least one [enrolled remote node](/features/multi-node) (Pilot Agent or Distributed API Proxy).
-- Functioning `sencho_mesh` data plane on every node that should participate. The Traffic tab shows a red banner if a node's data plane did not come up; the troubleshooting section below covers each cause.
+- Functioning `sencho_mesh` data plane on every node that should participate. The Routing tab shows a red banner if a node's data plane did not come up; the troubleshooting section below covers each cause.
 - Per-stack opt-in. Enabling mesh on a node does not automatically place every stack into the mesh; each stack is opted in individually.
 
 App-layer authentication is **not** in scope. Postgres still needs a password, Redis still needs an ACL, your internal HTTP API still needs whatever auth it normally uses. The mesh moves bytes; it does not authenticate the protocols inside those bytes.
 
 ## Enable the mesh
 
-Mesh lives under **Fleet → Traffic**.
+Mesh lives under **Fleet → Routing**.
 
-<Frame caption="Fleet → Traffic, Table view. Each node card shows mesh stack count, published aliases, per-alias Test probe, and an Add stack to mesh action.">
-  <img src="/images/sencho-mesh/routing-tab-overview.png" alt="Sencho Mesh Traffic tab Table view with node cards" />
+<Frame caption="Fleet → Routing, Table view. Each node card shows mesh stack count, published aliases, per-alias Test probe, and an Add stack to mesh action.">
+  <img src="/images/sencho-mesh/routing-tab-overview.png" alt="Sencho Mesh Routing tab Table view with node cards" />
 </Frame>
 
-1. Open **Fleet → Traffic**.
+1. Open **Fleet → Routing**.
 2. Flip the mesh toggle (`ON` / `OFF`) on each node that should participate.
 3. Click **Add stack to mesh** on a node and confirm one or more stacks.
 
@@ -91,7 +91,7 @@ Mesh runs in-process on each node; there is no separate mesh container to inspec
 
 ## Mesh activity log
 
-The Traffic-tab masthead has a **Mesh activity** button that opens a fleet-wide event log.
+The Routing-tab masthead has a **Mesh activity** button that opens a fleet-wide event log.
 
 <Frame caption="Mesh activity. Every route resolution, tunnel state change, opt-in or opt-out, probe, and forwarder event is recorded with a source, type, and message. Filterable by alias, type, or message.">
   <img src="/images/sencho-mesh/mesh-activity-sheet.png" alt="Sencho Mesh activity log sheet" />
@@ -101,7 +101,7 @@ The log is the first place to look when something flips state unexpectedly. It i
 
 ## Topology view
 
-The Traffic tab has a **Table** / **Graph** toggle. Graph mode draws the fleet as a node-and-edge diagram so the live state is visible at a glance.
+The Routing tab has a **Table** / **Graph** toggle. Graph mode draws the fleet as a node-and-edge diagram so the live state is visible at a glance.
 
 A second toggle picks what the edges encode.
 
@@ -134,7 +134,7 @@ Click any node card in graph mode to open its opt-in sheet.
 
 The "consumer nodes" column lists meshed peers that could reach this stack's aliases via DNS. Whether a container on a consumer actually dials an alias depends on that consumer's own opt-in stacks.
 
-The Traffic tab polls `/mesh/status` and `/mesh/aliases` every 30 seconds while the browser tab is in the foreground, so tunnel state changes and alias additions appear without a manual reload. Polling pauses automatically when the tab is hidden.
+The Routing tab polls `/mesh/status` and `/mesh/aliases` every 30 seconds while the browser tab is in the foreground, so tunnel state changes and alias additions appear without a manual reload. Polling pauses automatically when the tab is hidden.
 
 The graph is designed for fleet sizes typical of self-hosted Compose setups (up to roughly 50 nodes). Larger fleets render but become dense; the Table view is more readable for inventory at scale.
 
@@ -196,13 +196,13 @@ These are the explicit boundaries of the v1 mesh.
 
 **Two cloud nodes, blue and green.** Two VPSes each run a copy of a stateless app; both pull from a shared Redis stack on a third "infra" node. All three nodes are meshed. The two app nodes opt their app stacks in; the infra node opts its Redis stack in. Either app reaches Redis as `cache.redis.infra.sencho`. Promoting blue → green is a redeploy on the app node; nothing about the mesh changes.
 
-**Triage a "my app can't connect."** A developer reports their app stack can't reach `db.api.opsix.sencho`. Open Fleet → Traffic and click the Test button on the alias row. A green toast confirms the mesh path is healthy and the issue is inside the application. A red toast with `pilot_tunnel: ...` pushes you to the Diagnostics sheet on `opsix` and the Mesh activity log to chase the tunnel state.
+**Triage a "my app can't connect."** A developer reports their app stack can't reach `db.api.opsix.sencho`. Open Fleet → Routing and click the Test button on the alias row. A green toast confirms the mesh path is healthy and the issue is inside the application. A red toast with `pilot_tunnel: ...` pushes you to the Diagnostics sheet on `opsix` and the Mesh activity log to chase the tunnel state.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="Mesh data plane is down">
-    The Traffic tab shows a red banner when the local Sencho's `sencho_mesh` setup did not complete. The banner names the specific reason; the same reason appears in the mesh activity log and on `/api/health` as `mesh.dataPlane.reason`. The fix depends on which reason fired:
+    The Routing tab shows a red banner when the local Sencho's `sencho_mesh` setup did not complete. The banner names the specific reason; the same reason appears in the mesh activity log and on `/api/health` as `mesh.dataPlane.reason`. The fix depends on which reason fired:
 
     - `subnet_overlap`: the requested CIDR overlaps another Docker bridge network on this host. Run `docker network ls -q | xargs -L1 docker network inspect --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}'` to list every existing subnet, then set `SENCHO_MESH_SUBNET` to a free `/24` (for example `10.42.0.0/24`) and recreate the Sencho container.
     - `subnet_mismatch`: `sencho_mesh` already exists with a different subnet. Either remove the network (`docker network rm sencho_mesh` after detaching any containers) or set `SENCHO_MESH_SUBNET` to match the existing subnet.
@@ -253,7 +253,7 @@ These are the explicit boundaries of the v1 mesh.
     The stack is opted in but exposes no service ports. The stack joins `sencho_mesh` (other meshed containers can reach it directly by container name on that network) but no fleet-wide hostname is published. To publish an alias, declare a port on a service in the stack's compose file and redeploy.
   </Accordion>
 
-  <Accordion title="A stack on the Traffic tab shows a `suspended` pill">
+  <Accordion title="A stack on the Routing tab shows a `suspended` pill">
     The stack is opted into the mesh, but its services are not currently running, so there are no aliases to publish. The opt-in is sticky: when the stack starts again, its aliases reappear automatically on the next refresh (within roughly one minute) without needing a manual opt-out and re-opt-in. To clear the suspended state, start the stack from its **Overview** page. To remove the opt-in entirely, open the node card and use the opt-out action.
   </Accordion>
 
@@ -262,11 +262,11 @@ These are the explicit boundaries of the v1 mesh.
   </Accordion>
 
   <Accordion title="A `proxy` peer keeps failing immediately after a remote upgrade">
-    After upgrading the remote Sencho, central may cache a failed dial for up to 60 seconds. Click **Refresh** on the Traffic tab or wait one minute. If the failure persists, follow the `unreachable` entry above; check that the Node Token on the remote is still valid (Settings → Nodes → Generate Token).
+    After upgrading the remote Sencho, central may cache a failed dial for up to 60 seconds. Click **Refresh** on the Routing tab or wait one minute. If the failure persists, follow the `unreachable` entry above; check that the Node Token on the remote is still valid (Settings → Nodes → Generate Token).
   </Accordion>
 
   <Accordion title="Graph reflects a stale node state">
-    The Traffic tab polls `/mesh/status` and `/mesh/aliases` every 30 seconds while the browser tab is focused. To force an immediate refresh, toggle any stack's mesh state to trigger an action-driven refresh, or leave and return to the tab. Polling pauses when the tab is hidden, so a long-dormant tab catches up on the first poll after it regains focus.
+    The Routing tab polls `/mesh/status` and `/mesh/aliases` every 30 seconds while the browser tab is focused. To force an immediate refresh, toggle any stack's mesh state to trigger an action-driven refresh, or leave and return to the tab. Polling pauses when the tab is hidden, so a long-dormant tab catches up on the first poll after it regains focus.
   </Accordion>
 
   <Accordion title="Graph mode is hard to read with a large fleet">

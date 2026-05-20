@@ -555,6 +555,9 @@ export interface FleetSyncStatus {
     last_success_at: number | null;
     last_failure_at: number | null;
     last_error: string | null;
+    sticky_error_code: string | null;
+    sticky_error_expected: string | null;
+    sticky_error_got: string | null;
 }
 
 export interface CveSuppression {
@@ -659,6 +662,7 @@ export class DatabaseService {
         this.migrateAddNodeCordonFields();
         this.migrateAddBlueprintPinnedNode();
         this.migrateAutoHealNodeId();
+        this.migrateFleetSyncStickyError();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1579,6 +1583,12 @@ export class DatabaseService {
 
     private migrateAddBlueprintPinnedNode(): void {
         this.tryAddColumn('blueprints', 'pinned_node_id', 'INTEGER');
+    }
+
+    private migrateFleetSyncStickyError(): void {
+        this.tryAddColumn('fleet_sync_status', 'sticky_error_code', 'TEXT');
+        this.tryAddColumn('fleet_sync_status', 'sticky_error_expected', 'TEXT');
+        this.tryAddColumn('fleet_sync_status', 'sticky_error_got', 'TEXT');
     }
 
     private migrateAutoHealNodeId(): void {
@@ -3931,11 +3941,15 @@ export class DatabaseService {
         const now = Date.now();
         this.db
             .prepare(
-                `INSERT INTO fleet_sync_status (node_id, resource, last_success_at, last_failure_at, last_error)
-                 VALUES (?, ?, ?, NULL, NULL)
+                `INSERT INTO fleet_sync_status (node_id, resource, last_success_at, last_failure_at, last_error,
+                                                 sticky_error_code, sticky_error_expected, sticky_error_got)
+                 VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL)
                  ON CONFLICT(node_id, resource) DO UPDATE SET
                    last_success_at = excluded.last_success_at,
-                   last_error = NULL`,
+                   last_error = NULL,
+                   sticky_error_code = NULL,
+                   sticky_error_expected = NULL,
+                   sticky_error_got = NULL`,
             )
             .run(nodeId, resource, now);
     }
@@ -3953,6 +3967,64 @@ export class DatabaseService {
             .run(nodeId, resource, now, error);
     }
 
+    /**
+     * Mark a (node, resource) pair as having hit a non-retriable failure. The
+     * retry service skips sticky rows and the push paths short-circuit before
+     * any HTTP call. The first such failure still records `last_failure_at` +
+     * `last_error` via `recordFleetSyncFailure`; the sticky write is additive.
+     *
+     * `expected` and `got` carry the fingerprints from a 409
+     * CONTROL_IDENTITY_MISMATCH response so the UI can render
+     * "anchored to <expected>, this central is <got>" without parsing the
+     * error string.
+     */
+    public setFleetSyncSticky(
+        nodeId: number,
+        resource: string,
+        code: string,
+        expected: string | null,
+        got: string | null,
+    ): void {
+        this.db
+            .prepare(
+                `INSERT INTO fleet_sync_status (node_id, resource, sticky_error_code,
+                                                 sticky_error_expected, sticky_error_got)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(node_id, resource) DO UPDATE SET
+                   sticky_error_code = excluded.sticky_error_code,
+                   sticky_error_expected = excluded.sticky_error_expected,
+                   sticky_error_got = excluded.sticky_error_got`,
+            )
+            .run(nodeId, resource, code, expected, got);
+    }
+
+    public getFleetSyncStickyCode(nodeId: number, resource: string): string | null {
+        const row = this.db
+            .prepare(
+                `SELECT sticky_error_code FROM fleet_sync_status
+                 WHERE node_id = ? AND resource = ?`,
+            )
+            .get(nodeId, resource) as { sticky_error_code: string | null } | undefined;
+        return row?.sticky_error_code ?? null;
+    }
+
+    /**
+     * Clear every sticky-error row for one node id. Used by the
+     * reset-anchor endpoint after the peer has acknowledged a reanchor; the
+     * next push attempt re-tries normally.
+     */
+    public clearFleetSyncStickyForNode(nodeId: number): void {
+        this.db
+            .prepare(
+                `UPDATE fleet_sync_status
+                 SET sticky_error_code = NULL,
+                     sticky_error_expected = NULL,
+                     sticky_error_got = NULL
+                 WHERE node_id = ?`,
+            )
+            .run(nodeId);
+    }
+
     public getFailedSyncTargets(resource: string, maxAgeMs: number): FleetSyncStatus[] {
         const cutoff = Date.now() - maxAgeMs;
         return this.db
@@ -3960,7 +4032,8 @@ export class DatabaseService {
                 `SELECT * FROM fleet_sync_status
                  WHERE resource = ?
                    AND (last_failure_at IS NOT NULL AND last_failure_at > ?)
-                   AND (last_success_at IS NULL OR last_success_at < last_failure_at)`,
+                   AND (last_success_at IS NULL OR last_success_at < last_failure_at)
+                   AND sticky_error_code IS NULL`,
             )
             .all(resource, cutoff) as FleetSyncStatus[];
     }

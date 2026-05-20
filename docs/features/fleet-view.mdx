@@ -3,7 +3,7 @@ title: Fleet View
 description: Monitor every node in your Sencho deployment from one screen, drill into stacks and containers, and orchestrate Sencho version updates across the fleet.
 ---
 
-The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Status, Deployments, Traffic, Federation, Fleet Actions, Secrets), each linking out to its own dedicated page.
+The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Status, Deployments, Routing, Federation, Fleet Actions, Secrets), each linking out to its own dedicated page.
 
 <Note>
   Fleet is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
@@ -38,7 +38,7 @@ A single rail summarises the state of every registered node so you can read the 
 
 ### Tabs
 
-The Fleet view is a tab strip. Four tab triggers are visible to every tier; the Deployments, Traffic, Federation, and Secrets triggers only render when the active license unlocks them. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Four tab triggers are visible to every tier; the Deployments, Routing, Federation, and Secrets triggers only render when the active license unlocks them. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
@@ -46,7 +46,7 @@ The Fleet view is a tab strip. Four tab triggers are visible to every tier; the 
 | **Snapshots** | Community (manual) / Skipper (scheduled) | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
 | **Status** | Community | One card per node summarising which automations and security features are configured. Covered below. |
 | **Deployments** | Skipper | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
-| **Traffic** | Admiral | Cross-node routing rules. See [Notification Routing](/features/alerts-notifications). |
+| **Routing** | Admiral | Cross-node service routing via Sencho Mesh. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Admiral | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
 | **Fleet Actions** | Community trigger / Skipper content | The tab is visible to every tier; opening it on Community surfaces a Skipper upgrade prompt. See [Fleet Actions](/features/fleet-actions). |
 | **Secrets** | Skipper | Encrypted env-var bundles you push to labeled nodes. See [Fleet Secrets](/features/fleet-secrets). |

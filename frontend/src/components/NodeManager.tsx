@@ -9,7 +9,7 @@ import { Badge } from './ui/badge';
 import { Separator } from './ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
-import { Plus, Trash2, Wifi, WifiOff, Star, Pencil, Monitor, Globe, Copy, KeyRound, Check, Calendar, RefreshCw, Terminal } from 'lucide-react';
+import { AlertTriangle, Plus, Trash2, Wifi, WifiOff, Star, Pencil, Monitor, Globe, Copy, KeyRound, Check, Calendar, RefreshCw, Terminal } from 'lucide-react';
 import { formatTimeUntil, formatTimeAgo } from '@/lib/relativeTime';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
 import { useMastheadStats } from './settings/MastheadStatsContext';
@@ -17,6 +17,8 @@ import { NodeLabelPicker } from './blueprints/NodeLabelPicker';
 import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodeActions, type NodeTestInfo } from './nodes/useNodeActions';
+import { useFleetSyncStatus } from '@/hooks/useFleetSyncStatus';
+import { resetFleetSyncAnchor, STICKY_CONTROL_IDENTITY_MISMATCH } from '@/lib/fleetSyncApi';
 
 interface NodeSchedulingSummary {
   active_tasks: number;
@@ -59,6 +61,48 @@ export function NodeManager() {
   const { openCreate, openEdit, openDelete, NodeActionModals } = useNodeActions({
     onTestResult: (result) => setTestResult(result),
   });
+
+  const { statuses: syncStatuses, refresh: refreshSyncStatuses } = useFleetSyncStatus();
+  const [resettingAnchor, setResettingAnchor] = useState<number | null>(null);
+
+  // Per-node aggregate of CONTROL_IDENTITY_MISMATCH sticky errors. All resources
+  // for one peer share the same root cause (the peer's cached fingerprint), so
+  // collapse to one entry per node id and surface a single banner.
+  const anchorMismatches = useMemo(() => {
+    const byNode = new Map<number, { expected: string | null; got: string | null; resources: string[] }>();
+    for (const row of syncStatuses) {
+      if (row.sticky_error_code !== STICKY_CONTROL_IDENTITY_MISMATCH) continue;
+      const existing = byNode.get(row.node_id);
+      if (existing) {
+        existing.resources.push(row.resource);
+        if (!existing.expected && row.sticky_error_expected) existing.expected = row.sticky_error_expected;
+        if (!existing.got && row.sticky_error_got) existing.got = row.sticky_error_got;
+      } else {
+        byNode.set(row.node_id, {
+          expected: row.sticky_error_expected,
+          got: row.sticky_error_got,
+          resources: [row.resource],
+        });
+      }
+    }
+    return Array.from(byNode.entries()).map(([nodeId, agg]) => {
+      const node = nodes.find((n) => n.id === nodeId);
+      return { nodeId, node, ...agg };
+    }).filter((entry) => entry.node !== undefined);
+  }, [syncStatuses, nodes]);
+
+  const handleResetAnchor = async (nodeId: number) => {
+    setResettingAnchor(nodeId);
+    try {
+      await resetFleetSyncAnchor(nodeId);
+      toast.success('Anchor reset. Security policy sync will resume on the next push.');
+      refreshSyncStatuses();
+    } catch (error) {
+      toast.error((error as Error).message || 'Failed to reset anchor on peer');
+    } finally {
+      setResettingAnchor(null);
+    }
+  };
 
   const fetchSchedulingSummary = useCallback(async () => {
     try {
@@ -187,6 +231,51 @@ export function NodeManager() {
           </div>
         )}
       </div>
+
+      {/* Sync issues: surfaces FleetSync sticky errors (currently CONTROL_IDENTITY_MISMATCH). */}
+      {anchorMismatches.length > 0 && (
+        <div className="space-y-3">
+          {anchorMismatches.map(({ nodeId, node, expected, got, resources }) => (
+            <div
+              key={nodeId}
+              className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive flex items-start gap-3 shadow-card-bevel"
+            >
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" strokeWidth={1.75} />
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="font-medium">
+                  Node "{node?.name ?? `id ${nodeId}`}" is anchored to another central
+                </div>
+                <div className="text-xs leading-relaxed text-destructive/90">
+                  Security policy sync is paused for {resources.join(', ')}.
+                  {expected && got && (
+                    <> This peer is anchored to <span className="font-mono">{expected}</span>; this central is <span className="font-mono">{got}</span>.</>
+                  )}
+                  {' '}Reset the anchor on the peer to resume sync, or remove the node from this fleet.
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => handleResetAnchor(nodeId)}
+                    disabled={resettingAnchor === nodeId}
+                  >
+                    {resettingAnchor === nodeId ? 'Resetting...' : 'Reset anchor on peer'}
+                  </Button>
+                  {node && !node.is_default && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => openDelete(node)}
+                    >
+                      Remove node
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Nodes Table */}
       <div className="rounded-md border overflow-x-auto w-full">
