@@ -13,11 +13,11 @@ Sencho can update remote nodes directly from the dashboard. When a node is runni
 
 Remote updates work when each node meets these conditions:
 
-- Deployed via **Docker Compose** (the recommended method)
+- Deployed via **Docker Compose** (the canonical install for both primary instances and pilot agents)
 - The Docker socket (`/var/run/docker.sock`) is mounted into the container
 - Running a Sencho version that supports the `self-update` [capability](/features/node-compatibility)
 
-Nodes deployed with `docker run` or orchestrators like Kubernetes do not support self-update. These nodes show an error message when you attempt to update them.
+Nodes deployed by orchestrators like Kubernetes do not support self-update and need to be updated through the orchestrator's own deployment flow.
 
 ## Checking for updates
 

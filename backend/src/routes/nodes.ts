@@ -22,7 +22,7 @@ import { getErrorMessage } from '../utils/errors';
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
 
-function mintPilotEnrollment(nodeId: number, req: Request): { token: string; expiresAt: number; dockerRun: string } {
+function mintPilotEnrollment(nodeId: number, req: Request): { token: string; expiresAt: number; composeYaml: string } {
   const db = DatabaseService.getInstance();
   const jwtSecret = db.getGlobalSettings().auth_jwt_secret;
   if (!jwtSecret) throw new Error('JWT secret not configured');
@@ -44,17 +44,31 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
   const host = req.get('host') || 'localhost:1852';
   const primaryUrl = `${protocol}://${host}`;
 
-  const dockerRun =
-    `docker run -d --restart=unless-stopped --name sencho-agent ` +
-    `-v /var/run/docker.sock:/var/run/docker.sock ` +
-    `-v sencho-agent-data:/app/data ` +
-    `-v /opt/docker/sencho:/app/compose ` +
-    `-e SENCHO_MODE=pilot ` +
-    `-e SENCHO_PRIMARY_URL=${primaryUrl} ` +
-    `-e SENCHO_ENROLL_TOKEN=${token} ` +
-    `saelix/sencho:latest`;
+  // Top-level `name` plus `container_name` make the agent container's HOSTNAME
+  // equal to `sencho-agent`, which is how SelfUpdateService locates its own
+  // compose context to enable remote self-update.
+  const composeYaml = [
+    `name: sencho-agent`,
+    `services:`,
+    `  agent:`,
+    `    image: saelix/sencho:latest`,
+    `    container_name: sencho-agent`,
+    `    restart: unless-stopped`,
+    `    volumes:`,
+    `      - /var/run/docker.sock:/var/run/docker.sock`,
+    `      - sencho-agent-data:/app/data`,
+    `      - /opt/docker/sencho:/app/compose`,
+    `    environment:`,
+    `      SENCHO_MODE: pilot`,
+    `      SENCHO_PRIMARY_URL: ${primaryUrl}`,
+    `      SENCHO_ENROLL_TOKEN: ${token}`,
+    ``,
+    `volumes:`,
+    `  sencho-agent-data:`,
+    ``,
+  ].join('\n');
 
-  return { token, expiresAt, dockerRun };
+  return { token, expiresAt, composeYaml };
 }
 
 export const nodesRouter = Router();

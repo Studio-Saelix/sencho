@@ -23,6 +23,8 @@ Pick **Distributed API Proxy** (documented in [Multi-Node Management](/features/
 
 The agent runs inside a second container on the remote host, using the same `saelix/sencho:latest` image. Setting `SENCHO_MODE=pilot` plus a primary URL and a one-time enrollment token puts the container into agent mode. On boot it dials the primary at `wss://<primary>/api/pilot/tunnel` and holds that connection open. For every tunneled request the primary demultiplexes frames to an internal loopback server, which re-issues the request locally on the agent host against its Docker socket. License tier, role checks, and all other authorization continue to flow from the primary, exactly like proxy mode.
 
+Deploying with Docker Compose also lets the primary trigger over-the-air updates of the agent itself from the Fleet view, since Compose-managed containers carry the labels Sencho needs to recreate them in place.
+
 Only outbound HTTPS from the remote to the primary is required. Nothing else is exposed.
 
 ## Enrollment walkthrough
@@ -36,28 +38,45 @@ On your primary instance open **Settings → Nodes** and click **Add Node**.
 - **Name:** any label, for example `homelab-nuc`
 - **Compose Directory:** the folder on the remote host where stack folders will live
 
-Click **Add Node**. The form is replaced by an enrollment dialog with a one-line `docker run` command.
+Click **Add Node**. The form is replaced by an enrollment dialog with a Docker Compose snippet.
 
 <Frame>
-  <img src="/images/pilot-agent/enrollment-dialog.png" alt="Pilot Agent enrollment dialog with docker run command" />
+  <img src="/images/pilot-agent/enrollment-dialog.png" alt="Pilot Agent enrollment dialog with compose file" />
 </Frame>
 
-### 2. Run the command on the remote host
+### 2. Deploy the agent on the remote host
 
-Copy the command and paste it on the remote host. It looks like:
+Copy the compose file and save it as `compose.yaml` on the remote host. It looks like:
+
+```yaml
+name: sencho-agent
+services:
+  agent:
+    image: saelix/sencho:latest
+    container_name: sencho-agent
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sencho-agent-data:/app/data
+      - /opt/docker/sencho:/app/compose
+    environment:
+      SENCHO_MODE: pilot
+      SENCHO_PRIMARY_URL: https://sencho.example.com
+      SENCHO_ENROLL_TOKEN: <short-lived token>
+
+volumes:
+  sencho-agent-data:
+```
+
+Bring the agent up from the same directory:
 
 ```bash
-docker run -d --restart=unless-stopped --name sencho-agent \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v sencho-agent-data:/app/data \
-  -v /opt/docker/sencho:/app/compose \
-  -e SENCHO_MODE=pilot \
-  -e SENCHO_PRIMARY_URL=https://sencho.example.com \
-  -e SENCHO_ENROLL_TOKEN=<short-lived token> \
-  saelix/sencho:latest
+docker compose -f compose.yaml up -d
 ```
 
 The enrollment token is single-use and expires after 15 minutes. On first connect the agent exchanges it for a long-lived tunnel credential, persisted inside the container volume at `/app/data/pilot.jwt`. Subsequent restarts reconnect automatically without needing a new token.
+
+Deploying the agent through Docker Compose also lets the primary push remote updates to it from the Fleet view ([Remote Updates](/features/remote-updates)) without manual intervention on the remote host.
 
 ### 3. Confirm the node is online
 
@@ -77,19 +96,28 @@ If the agent container is destroyed before its first successful connect, or the 
 
 ## Self-signed primary TLS certs
 
-If your primary terminates TLS with an internal CA and the agent cannot validate the certificate against the system trust store, point the agent at the CA bundle with `SENCHO_PILOT_CA_FILE`. Mount the bundle into the agent container and add the env var:
+If your primary terminates TLS with an internal CA and the agent cannot validate the certificate against the system trust store, point the agent at the CA bundle with `SENCHO_PILOT_CA_FILE`. Add the bundle mount and the env var to the compose file:
 
-```bash
-docker run -d --restart=unless-stopped --name sencho-agent \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v sencho-agent-data:/app/data \
-  -v /opt/docker/sencho:/app/compose \
-  -v /etc/ssl/internal-ca.pem:/etc/ssl/internal-ca.pem:ro \
-  -e SENCHO_MODE=pilot \
-  -e SENCHO_PRIMARY_URL=https://sencho.internal.example.com \
-  -e SENCHO_ENROLL_TOKEN=<short-lived token> \
-  -e SENCHO_PILOT_CA_FILE=/etc/ssl/internal-ca.pem \
-  saelix/sencho:latest
+```yaml
+name: sencho-agent
+services:
+  agent:
+    image: saelix/sencho:latest
+    container_name: sencho-agent
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sencho-agent-data:/app/data
+      - /opt/docker/sencho:/app/compose
+      - /etc/ssl/internal-ca.pem:/etc/ssl/internal-ca.pem:ro
+    environment:
+      SENCHO_MODE: pilot
+      SENCHO_PRIMARY_URL: https://sencho.internal.example.com
+      SENCHO_ENROLL_TOKEN: <short-lived token>
+      SENCHO_PILOT_CA_FILE: /etc/ssl/internal-ca.pem
+
+volumes:
+  sencho-agent-data:
 ```
 
 The agent uses the bundle as the only trust anchor for the tunnel WebSocket. TLS verification stays on; there is no env var to disable verification globally because that would defeat the credential trust model.
@@ -119,7 +147,7 @@ Each tunnel has fixed protocol-level ceilings to keep one misbehaving agent from
   </Accordion>
 
   <Accordion title="I ran the enrollment command on the wrong host">
-    Stop and remove the agent container on the wrong host (`docker stop sencho-agent && docker rm sencho-agent`), then regenerate the enrollment token on the primary and run the command on the correct host.
+    Tear the agent down on the wrong host (`docker compose -f compose.yaml down -v` from the directory you saved the file in), then regenerate the enrollment token on the primary and deploy the new compose file on the correct host.
   </Accordion>
 
   <Accordion title="Primary was restored from backup and the agent will not reconnect">
