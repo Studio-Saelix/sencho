@@ -1,54 +1,73 @@
 ---
 title: Node Compatibility
-description: How Sencho handles version differences across nodes and gracefully degrades features that are not available on older instances.
+description: How Sencho handles version differences across nodes and gracefully gates features that are not available on the active node.
 ---
 
-When you manage [multiple nodes](/features/multi-node), each running its own Sencho instance, those instances may be on different versions. A node running an older version will not have features that shipped in a newer release. Sencho detects this automatically and disables features that the active node does not support, with no errors or broken pages.
+When you manage [multiple nodes](/features/multi-node), each running its own Sencho instance, those instances may be on different versions. A node running an older release will not have features that shipped in a newer one. Sencho detects this automatically and gates each feature on whether the active node advertises support for it, with no errors and no broken pages.
 
 ## How it works
 
-Every Sencho instance advertises a set of **capabilities**: feature flags describing what it supports. When you switch to a node, your primary instance fetches this metadata and caches it briefly. Features that require a capability the active node does not have are visually dimmed with an explanation overlay.
+Every Sencho instance exposes a public `GET /api/meta` endpoint that advertises its version and a list of **capabilities**, one flag per feature it implements. When you switch to a node, your control instance fetches that node's metadata and caches it for 5 minutes on success or 30 seconds on failure, so the version pill and the per-feature gates stay in sync without re-hitting the remote on every navigation.
 
-Core features like stack management, containers, and resource monitoring are always available on every Sencho version.
+Features whose capability is missing from the active node's list are replaced by a lock card naming the missing feature and prompting you to upgrade the node. Core features (stack management, containers, resources, logs) work on every Sencho version and are never gated this way.
+
+<Note>
+  Capabilities are flag-based, not version-based. Sencho never compares version numbers; it checks whether the active node explicitly advertises support for each feature. This keeps the system forward-compatible as new capabilities are added.
+</Note>
 
 ## What you will see
 
 ### Version in the node switcher
 
-The sidebar node switcher shows each node's Sencho version next to its name. If a node is too old to report its version, no version is shown.
+The node switcher popover shows each node's Sencho version next to its type chip, separated by a middle dot.
 
-### Disabled features
+<Frame>
+  <img src="/images/node-compatibility/node-switcher-versions.png" alt="Node switcher popover listing seven nodes. The Local row reads LOCAL · v0.81.11 with a star icon for the default node. Three remote rows read REMOTE · v0.81.11. The sencho-pilot-test row reads AGENT · SEEN 20M AGO · v0.76.9, calling out that this node is on an older release than the rest of the fleet." />
+</Frame>
 
-When you switch to a node that lacks a capability, the affected feature appears dimmed and blurred with a pill overlay explaining why. For example:
+A node's version pill appears once Sencho has fetched its metadata. The metadata cache populates the first time you visit a node, so freshly-enrolled remotes may show their type chip alone until you switch to them once. A node that does not return metadata at all shows no version pill on either visit.
 
-> "Fleet Management is not available - prod-server is running v0.28.0"
+### Lock card on unsupported features
 
-The feature content is still visible (blurred) so you can see what you are missing, but it is non-interactive. Switch to a node that supports the feature, or update the remote node to the latest Sencho version.
+When the active node does not advertise a capability that a feature needs, the feature panel is replaced by a centered lock card.
+
+<Frame>
+  <img src="/images/node-compatibility/lock-card.png" alt="Capability lock card centered in the editor area. A circular icon badge holds an Unplug glyph at the top. Below it, a title reads Host Console is not available on this node and a body line reads sencho-pilot-test is running v0.76.9. Upgrade the node to use this feature." />
+</Frame>
+
+The card carries the feature name, the node name, and (when known) the running version, so you can see at a glance what is missing and where. When the node has not reported a version, the body line drops the version and reads "*node-name* does not advertise this capability. Upgrade the node to use this feature." instead. The gated panel itself does not load; the lock card replaces it, which keeps slow capability-heavy views from briefly flashing into view before being hidden.
 
 ### Connection test details
 
-When you test a remote node's connection in **Settings → Nodes**, the result includes the remote Sencho version alongside Docker info, container counts, and system stats.
+When you test a remote node from **Settings · Nodes**, the Connection Details panel that appears under the table lists the node's running Sencho version alongside its OS, architecture, container count, image count, and CPU count.
+
+<Frame>
+  <img src="/images/node-compatibility/connection-test-version.png" alt="Connection Details panel for sencho-test-01 showing Instance: Remote Sencho, Sencho: v0.81.11, OS: Remote, Arch: Remote, Containers: 1, Images: 21, CPUs: 1, with a wifi-style icon in the heading." />
+</Frame>
+
+This is the most direct way to confirm what version a remote node is on without switching to it first.
 
 ## Capability list
 
-Every Sencho release includes a static list of capabilities. Here are the capabilities tracked as of the current version:
+Every Sencho release ships with a static list of capabilities. The current list is:
 
 | Capability | Feature |
 |-----------|---------|
 | `stacks` | Stack management (always available) |
 | `containers` | Container operations (always available) |
-| `resources` | Resource monitoring (always available) |
+| `resources` | Resource browser (always available) |
 | `templates` | App Store (always available) |
 | `global-logs` | Global log viewer (always available) |
-| `system-stats` | System statistics (always available) |
-| `fleet` | Fleet management |
-| `auto-updates` | Auto-update policies |
+| `system-stats` | Host system statistics (always available) |
+| `fleet` | Fleet management view |
+| `auto-updates` | Auto-Update Readiness policies |
 | `labels` | Stack labels |
-| `webhooks` | Webhooks |
+| `webhooks` | Webhook triggers |
 | `network-topology` | Network topology view |
 | `notifications` | Alert notifications |
 | `notification-routing` | Notification routing rules |
-| `host-console` | Host console |
+| `host-console` | Host Console |
+| `container-exec` | Container exec terminal |
 | `audit-log` | Audit log |
 | `scheduled-ops` | Scheduled operations |
 | `sso` | SSO authentication |
@@ -56,27 +75,28 @@ Every Sencho release includes a static list of capabilities. Here are the capabi
 | `users` | User management |
 | `registries` | Private registry management |
 | `self-update` | Self-update from the dashboard |
+| `vulnerability-scanning` | Image vulnerability scanning |
 
 <Note>
-  Capabilities are flag-based, not version-based. Sencho never compares version numbers; it checks whether the remote node explicitly advertises support for a feature. This means the system stays forward-compatible as new features are added.
+  `vulnerability-scanning` is advertised only when the Trivy binary is present on the node. If a node does not have Trivy installed, it omits this capability and the scanning UI is replaced by a lock card.
 </Note>
 
-## Handling older nodes
+## Handling nodes that do not advertise metadata
 
-Nodes running a Sencho version from before the compatibility system was introduced do not have the metadata endpoint. Sencho handles this gracefully:
+If a remote node does not respond to `/api/meta` (for example, an unreachable instance, a slow handshake, or one that does not implement the endpoint), Sencho falls back to an offline metadata record with no version and an empty capability list. In that state:
 
-- The version shows as blank in the node switcher
-- All gated features appear as unavailable on that node
-- Core features (stacks, containers, resources, logs) work normally
-- No errors are thrown; the UI degrades cleanly
+- The node's row in the switcher and the connection-test panel show no version pill.
+- Every capability-gated feature on that node shows the lock card.
+- Core features (stacks, containers, resources, logs) continue to work normally.
+- No errors are surfaced in the UI; the control instance retries the metadata fetch after a short backoff.
 
-The fix is straightforward: update the remote node to the latest Sencho version. See the [upgrade guide](/operations/upgrade) for instructions.
+If you expect a node to support a feature that is being gated, the fastest fix is to update that node to the latest Sencho release. See the [upgrade guide](/operations/upgrade) for instructions.
 
 ## Interaction with license tiers
 
-Some features require both a license tier (Skipper or Admiral) **and** node capability support. When both gates apply:
+Some features need both a license tier (Skipper or Admiral) **and** node capability support. The two gates evaluate in this order:
 
-1. The license gate is checked first. If you are on the Community tier, you see the upgrade prompt.
-2. If your license covers the feature but the node does not support it, you see the compatibility overlay instead.
+1. The license gate is checked first. On the wrong tier, the feature's entry point (sidebar item, top-nav button, settings section) is hidden entirely, so you never reach the panel.
+2. If you are on the right tier but the active node does not advertise the capability, the entry point is visible but the panel is replaced by the capability lock card.
 
-This means you will not see confusing "upgrade to unlock" messages for features that would not work on the active node anyway.
+The practical effect is that you only see the lock card for features your license already covers, so it is always actionable: upgrading the node will unlock the feature.

@@ -1,33 +1,39 @@
 ---
 title: Managing Two-Factor Authentication
-description: Reset a user's 2FA, configure per-user SSO enforcement, and recover from lockouts.
+description: Reset a user's 2FA, recover from lockouts, and understand the per-user vs per-provider MFA toggles.
 ---
 
-This guide is for administrators. For general 2FA usage, see [Two-Factor Authentication](/features/two-factor-authentication).
+<Note>
+  This page is for administrators handling 2FA on behalf of other operators. For general 2FA usage (enrolment, recovery codes, the sign-in challenge), see [Two-Factor Authentication](/features/two-factor-authentication).
+</Note>
 
 ## Reset a user's 2FA
 
-A user who has lost their authenticator app and all backup codes cannot sign in on their own. Any administrator can reset the affected account from the Settings UI.
+A user who has lost both their authenticator app and their remaining backup codes cannot sign in on their own. Any administrator can reset the affected account from the Settings UI.
 
-1. Open **Settings → Users**
-2. Find the user in the list. Users with 2FA enabled show a shield icon in the action column
-3. Click the shield icon and confirm the reset
+1. Open **Settings · Users**.
+2. Find the user in the list. Users with 2FA enabled show a shield-off icon (warning color) in the action column.
+3. Click the shield icon and confirm the reset.
 
 <Frame>
-  <img src="/images/two-factor-auth/admin-reset.png" alt="Administrator resetting a user's 2FA from the Users settings" />
+  <img src="/images/two-factor-auth/admin-reset.png" alt="Reset 2FA confirmation modal opened from the Users panel. The header shows the kicker USERS RESET 2FA and the italic display title Reset 2FA for viewer. The body reads Removes the user's authenticator enrolment and backup codes They will sign in with just their password on their next login and can re-enrol from their account settings Use this when a user has lost access to their authenticator. The footer has Cancel and Reset 2FA buttons." />
 </Frame>
 
-After the reset:
+The modal copy is verbatim:
 
-- The user can sign in with their password only, no second factor is required
-- Their existing sessions are invalidated, so any stale browser tabs have to sign in again
-- The action is recorded in the audit log with the administrator's username
+> Removes the user's authenticator enrolment and backup codes. They will sign in with just their password on their next login and can re-enrol from their account settings. Use this when a user has lost access to their authenticator.
 
-Instruct the user to enrol again from **Settings → Account & Security** as soon as they are back in. The account is unprotected until they do.
+After confirming:
+
+- The user can sign in with their password alone; no second factor is required.
+- The user's token version is bumped, so every existing session of theirs returns `401` on its next API request.
+- The action is recorded in the audit log under the administrator's username.
+
+Tell the user to re-enrol from **Settings · Account · Two-factor authentication · Set up 2FA** as soon as they are back in. The account is unprotected until they do.
 
 ## Emergency recovery from the command line
 
-If every administrator has lost access to 2FA and no one can sign in through the UI, reset the admin account directly from the host running Sencho.
+If every administrator has lost access to 2FA and no one can sign in through the UI, reset the admin account directly on the host running Sencho.
 
 From a shell on that host:
 
@@ -35,28 +41,37 @@ From a shell on that host:
 docker compose exec sencho node dist/cli/resetMfa.js <username>
 ```
 
-Replace `<username>` with the admin's account name. On success the command prints a confirmation line and exits 0. Sign in with the password, then re-enrol immediately.
+Replace `<username>` with the admin's account name. On success the command prints a confirmation line and exits with code 0. Sign in with the password, then re-enrol immediately.
 
-The command respects the container's `DATA_DIR`, so it always acts on the same SQLite database the application uses. It writes an audit log entry attributed to `cli` so the action is auditable after the fact.
+The command respects the container's `DATA_DIR`, so it always acts on the same SQLite database the application uses. It writes an audit-log entry attributed to `cli` so the action is auditable after the fact.
 
 <Note>
-Turning on **Developer Mode** in **Settings → Developer** surfaces additional authentication diagnostics in the backend logs. These are helpful when investigating a 2FA support ticket, and can be turned off again once the issue is resolved.
+  Enabling **Developer Mode** under **Settings · Developer** surfaces additional `[MFA:diag]` lines in the backend logs. They are helpful when investigating a 2FA support ticket and can be turned off again once the issue is resolved.
 </Note>
 
-## Per-user SSO enforcement
+## SSO and 2FA: two independent toggles
 
-When SSO (LDAP or OIDC) is configured, users with 2FA enabled sign in through SSO without a second factor by default. SSO is already an authenticated flow, and requiring a TOTP on top is extra friction that most teams do not need.
+When SSO (LDAP or OIDC) is configured, users with 2FA enabled sign in through SSO **without** a second factor by default. SSO is already an authenticated flow, and a TOTP on top is extra friction most teams do not need.
 
-Each user can opt into stricter behaviour by flipping **Require 2FA even when signing in via SSO** on their own Account & Security screen. There is no admin-wide override, every user decides for themselves.
+Two separate toggles let you change this, and they are independent:
 
-If your organisation needs to force 2FA for every SSO sign-in for every user, raise this with the Sencho team, it is not exposed as a global policy today.
+| Toggle | Where it lives | Tier | What it does |
+|--------|----------------|------|--------------|
+| **Require 2FA on SSO sign-in** | Each user's own **Settings · Account · Two-factor authentication** section | All tiers | Per-user opt-in. When on, that one user's SSO sign-ins also require a TOTP after the SSO flow returns. Helper text: `By default, SSO logins skip the second factor. Enforce it here to require both.` |
+| **Require MFA** (per provider) | The provider config under **Settings · SSO** | Admiral (LDAP), Skipper (preset OIDC), Community (Custom OIDC) | Admin-set, fleet-wide for that provider. When on, every SSO-provisioned user must enrol TOTP after their first successful sign-in before they can use the rest of the console. |
+
+The per-user toggle decides *whether a TOTP is asked for on every SSO sign-in*. The per-provider toggle decides *whether new SSO users are forced to enrol TOTP at all*. Both can be on at once: the per-provider toggle ensures enrolment, the per-user toggle then asks for the TOTP on every sign-in.
+
+If your organisation needs a fleet-wide policy that asks every SSO user for a TOTP on every sign-in, raise this with the Sencho team; it is not exposed as a global setting today. The closest workaround is to enable both toggles for every user.
+
+For the user-facing view of the per-user toggle, see [Two-Factor Authentication · SSO sign-in](/features/two-factor-authentication#sso-sign-in). For provider configuration and the per-provider toggle, see [SSO Authentication](/features/sso).
 
 ## What a reset changes in the database
 
-For completeness, a reset does the following to the target user:
+For completeness, an administrator reset performs the following on the target user:
 
-- Clears the stored TOTP secret and all remaining backup codes
-- Rotates the user's session version, which invalidates any outstanding session cookies
-- Leaves the account otherwise unchanged, the username, password hash, role, and audit history are preserved
+- Clears the stored TOTP secret and all remaining backup codes.
+- Rotates the user's token version, invalidating any outstanding session cookies and Bearer tokens bound to that user.
+- Leaves everything else untouched: the username, password hash, role, scoped permissions, and audit history are preserved.
 
-Nothing about the user's SSO bindings changes. If the user was signing in with SSO plus 2FA, they simply resume SSO-only sign-in after the reset.
+Nothing about the user's SSO bindings changes. If the user was signing in with SSO plus enforced 2FA, they resume SSO-only sign-in after the reset (until they re-enrol, at which point the same toggles apply again).

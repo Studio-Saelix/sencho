@@ -1,64 +1,113 @@
 ---
 title: Pilot Agent
-description: Add remote nodes behind NAT, residential networks, or corporate firewalls without exposing any inbound port.
+description: Connect a remote Sencho node to your control instance through a single outbound WebSocket tunnel. No inbound ports, no TLS certificates, no public URL on the remote host.
 ---
 
-Pilot Agent mode connects a remote server to your primary Sencho instance through a single outbound WebSocket tunnel. Every request the primary sends to that node, HTTP or WebSocket, rides through this tunnel. The remote host never opens an inbound port and never needs a TLS certificate.
+Pilot Agent is one of Sencho's two remote-node modes. A small agent container runs on the remote host, dials your control instance over a single outbound WebSocket, and holds that connection open. Every request the control instance sends to that node rides through the same tunnel, whether it's HTTP, WebSocket, or Sencho Mesh TCP. The remote host never opens an inbound port and never needs a TLS certificate of its own.
+
+This page is the architecture-and-operations reference for Pilot Agent. For the step-by-step UI walkthrough that adds a remote node, see [Multi-Node Management](/features/multi-node).
 
 <Card title="Sencho Mesh" icon="link" href="/features/sencho-mesh">
-  Once a node is enrolled, you can wire stacks across nodes by hostname using Sencho Mesh, which rides on this same tunnel.
+  Once a node is enrolled, you can wire stacks across nodes by hostname using Sencho Mesh. Mesh traffic rides on the same pilot tunnel.
 </Card>
 
-## When to use Pilot Agent
+## How Pilot Agent fits Sencho
 
-Pick Pilot Agent when the remote host:
-- Sits behind NAT or a residential router.
+Sencho splits responsibilities between a **control instance** (the browser-facing Sencho your operators log into) and **nodes** (Docker hosts you manage from that control instance). The local node is always the control instance's own Docker socket. Remote nodes are other Sencho installations that the control instance manages on your behalf.
+
+There are two remote modes, chosen per node when you register it:
+
+<Frame>
+  <img src="/images/pilot-agent/01-add-node-pilot.png" alt="Add remote node modal with Type set to Remote and the Mode dropdown open, showing the Pilot Agent option above the Distributed API Proxy option." />
+</Frame>
+
+- **Pilot Agent** (this page). The remote dials the control instance. Outbound HTTPS from the remote is the only network requirement.
+- **Distributed API Proxy** ([documented under Multi-Node Management](/features/multi-node)). The control instance dials the remote. The remote must expose a reachable URL.
+
+Both modes are first-class. They can coexist on the same control instance, one per node. Pilot Agent is part of Sencho's Community-tier core surface; there is no license gate on using it.
+
+## When to choose Pilot Agent
+
+Pilot Agent is the right choice when the remote host:
+
+- Sits behind NAT or a residential router with no port forwarding.
 - Lives on a corporate network that blocks inbound connections.
-- Roams between networks (laptops, mobile hotspots, rotating cloud IPs).
-- Would otherwise need a reverse proxy, a dynamic DNS entry, or a self-signed TLS certificate just to be reachable.
+- Has a rotating cloud IP, a CG-NAT'd mobile uplink, or roams between networks.
+- Has only outbound internet access (a typical homelab or office workstation).
+- Would otherwise need a reverse proxy, dynamic DNS, or a self-signed TLS certificate purely to be reachable.
 
-Pick **Distributed API Proxy** (documented in [Multi-Node Management](/features/multi-node)) when the remote host already has a stable, reachable URL, for example a VPS with a public IP or a LAN server on a home network. Both modes are supported side-by-side, one per node.
+Choose **Distributed API Proxy** instead when the remote already has a stable, reachable URL (a VPS with a public IP, a LAN server with a static address, or a Tailscale node you have already terminated TLS on). The [Multi-Node Management](/features/multi-node) page compares both modes side by side.
+
+You do not have to pick one mode for the whole fleet. Mix and match per node.
 
 ## How it works
 
-The agent runs inside a second container on the remote host, using the same `saelix/sencho:latest` image. Setting `SENCHO_MODE=pilot` plus a primary URL and a one-time enrollment token puts the container into agent mode. On boot it dials the primary at `wss://<primary>/api/pilot/tunnel` and holds that connection open. For every tunneled request the primary demultiplexes frames to an internal loopback server, which re-issues the request locally on the agent host against its Docker socket. License tier, role checks, and all other authorization continue to flow from the primary, exactly like proxy mode.
+Conceptually, the agent reverses the usual client/server direction.
 
-Deploying with Docker Compose also lets the primary trigger over-the-air updates of the agent itself from the Fleet view, since Compose-managed containers carry the labels Sencho needs to recreate them in place.
+1. The agent container starts on the remote host with three environment variables: a mode flag, the control instance URL, and a short-lived enrollment token.
+2. It dials `wss://<control-instance>/api/pilot/tunnel` and holds the WebSocket open for as long as the container runs.
+3. For every request the control instance needs to make against that node (listing containers, deploying a stack, streaming logs, opening a console, forwarding mesh traffic), frames are multiplexed over that single connection.
+4. On the agent side, those frames are demultiplexed and replayed locally against the host's Docker socket and filesystem.
 
-Only outbound HTTPS from the remote to the primary is required. Nothing else is exposed.
+Inside the control instance, the tunnel terminates at a **loopback bridge**: a tiny HTTP server on `127.0.0.1:<random-port>` per active tunnel. Every other Sencho feature (the existing HTTP proxy, WebSocket forwarder, mesh dialer, license-tier propagation) treats the bridge as just another remote URL. That is why a pilot-mode node behaves identically to a proxy-mode node from the operator's point of view. Once enrolled, it shows up in the same Nodes table, the same node switcher, the same dashboard.
 
-## Setting the primary's public URL
+<Frame>
+  <img src="/images/pilot-agent/03-nodes-table-tunnel.png" alt="Settings · System · Nodes table showing a Local row and a Pilot Agent row. The pilot row has Mode badge 'Pilot Agent', Endpoint 'tunnel (seen 45m ago)', and Status badge 'Online'." />
+</Frame>
 
-The enrollment dialog bakes the primary's URL into the compose file under `SENCHO_PRIMARY_URL`. The primary infers that URL from the request the admin's browser sent, which works on a LAN but breaks when the pilot lives on a different network (a public cloud VPS, for example) and the admin happened to open the dialog at `http://127.0.0.1:1852` or a LAN address.
+What rides through the tunnel:
 
-Set `SENCHO_PUBLIC_URL` on the primary to lock in a publicly-routable URL:
+- HTTP requests (every API call and stream).
+- WebSockets (live logs, host console, container exec, notifications).
+- Sencho Mesh TCP streams (cross-node service-to-service traffic).
+
+What does NOT ride through the tunnel:
+
+- Nothing inbound. The agent opens no listening port.
+- The agent serves no UI of its own. Operators always work from the control instance.
+- The agent's internal `/api/health` endpoint is reachable only from the tunnel's loopback bridge, not from outside the agent container.
+
+## Prerequisites
+
+| Requirement | Detail |
+|---|---|
+| **Remote host** | Docker installed and a user that can run containers. About 1 GB free on the volume that backs `/app/data` and whatever you point `/app/compose` at. |
+| **Network from remote → control instance** | Outbound TCP to the control instance's HTTPS port (whatever your reverse proxy or Sencho exposes). Nothing inbound. |
+| **Network at the control instance** | The path from the remote to the control instance must allow WebSocket upgrades end-to-end. If you terminate TLS at a reverse proxy in front of Sencho, that proxy needs `Upgrade: websocket` passthrough. |
+| **Operator role** | Admin on the control instance. The Settings → Nodes panel is admin-only. |
+| **License tier** | None. Pilot Agent is Community-tier core surface. |
+
+### The control instance's public URL
+
+When the enrollment dialog generates the agent's compose file, it bakes the control instance's URL into `SENCHO_PRIMARY_URL` by reading the Host header on the admin's request. That works on a LAN, but it breaks when the pilot lives on a different network (a public cloud VPS, for example) and the admin happened to open the dialog at `http://127.0.0.1:1852` or a LAN address: the baked-in URL is then unreachable from the pilot.
+
+Set `SENCHO_PUBLIC_URL` on the control instance to lock in a publicly-routable URL the dialog should always use:
 
 ```bash
 -e SENCHO_PUBLIC_URL=https://sencho.example.com
 ```
 
-Any HTTPS hostname reachable from the pilot works: a Cloudflare Tunnel, a reverse proxy, a port-forwarded home network with DDNS. The primary validates the value (must be `http(s)://`, no loopback) and falls back to the request host when unset.
+Any HTTPS hostname reachable from the pilot works: a Cloudflare Tunnel, a reverse proxy, a port-forwarded home network with DDNS. The control instance validates the value (must be `http(s)://`, no loopback) and falls back to the request Host when unset.
 
-## Enrollment walkthrough
+## Enrollment and lifecycle
 
-### 1. Add the node on the primary
+The end-to-end UI walkthrough for adding a Pilot Agent node (click paths, screenshots of the Add Node form, the Verify-the-tunnel step) lives in [Multi-Node Management](/features/multi-node#add-a-remote-node-pilot-agent). This section covers the underlying credential lifecycle, what happens during the connection, and how reconnects behave.
 
-On your primary instance open **Settings → Nodes** and click **Add Node**.
+### Enrollment
 
-- **Type:** Remote
-- **Mode:** Pilot Agent (the default for remote nodes)
-- **Name:** any label, for example `homelab-nuc`
-- **Compose Directory:** the folder on the remote host where stack folders will live
+When you submit the Add Node form with Mode set to Pilot Agent, the control instance:
 
-Click **Add Node**. The form is replaced by an enrollment dialog with a Docker Compose snippet.
+1. Inserts the node into its registry with status `unknown` and no endpoint.
+2. Mints a one-time enrollment JWT scoped to that node. The token's hash is stored on the control instance so it cannot be replayed; the token itself is returned to the operator and embedded in a generated Docker Compose file.
+3. Shows the compose file in an enrollment dialog with a 15-minute countdown.
 
 <Frame>
-  <img src="/images/pilot-agent/enrollment-dialog.png" alt="Pilot Agent enrollment dialog with compose file" />
+  <img src="/images/pilot-agent/02-enrollment-dialog.png" alt="Enroll the pilot agent modal with kicker 'NODES · PILOT ENROLLMENT'. Step 1 saves a Docker Compose file as 'compose.yaml' with the env block showing SENCHO_MODE: pilot, SENCHO_PRIMARY_URL: https://sencho.example.com, and SENCHO_ENROLL_TOKEN: <short-lived token>. Step 2 shows the 'docker compose -f compose.yaml up -d' command. Footer reads 'Expires 14m from now' alongside a 'Copy compose file' button." />
 </Frame>
 
-### 2. Deploy the agent on the remote host
+The enrollment token is one-time and short-lived by design. If a token is intercepted or leaked, the window of risk is small and the slot is consumed on first use.
 
-Copy the compose file and save it as `compose.yaml` on the remote host. It looks like:
+The generated compose file looks like this, with the three pilot env vars already baked in:
 
 ```yaml
 name: sencho-agent
@@ -80,35 +129,77 @@ volumes:
   sencho-agent-data:
 ```
 
-Bring the agent up from the same directory:
+Save it as `compose.yaml` on the remote host and bring the agent up from the same directory:
 
 ```bash
 docker compose -f compose.yaml up -d
 ```
 
-The enrollment token is single-use and expires after 15 minutes. On first connect the agent exchanges it for a long-lived tunnel credential, persisted inside the container volume at `/app/data/pilot.jwt`. Subsequent restarts reconnect automatically without needing a new token.
+Deploying through Compose also lets the control instance push over-the-air updates to the agent later from the Fleet view ([Remote Updates](/features/remote-updates)), without manual intervention on the remote host. Compose-managed containers carry the labels Sencho needs to recreate them in place.
 
-Deploying the agent through Docker Compose also lets the primary push remote updates to it from the Fleet view ([Remote Updates](/features/remote-updates)) without manual intervention on the remote host.
+### First connect
 
-### 3. Confirm the node is online
+The agent boots, reads the three env vars, and dials `wss://<control-instance>/api/pilot/tunnel` carrying the enrollment token in an `Authorization: Bearer` header.
 
-The node flips to **Online** in the primary within a few seconds of the agent container starting. The **Endpoint** column shows `tunnel` alongside the time the primary last saw a frame from the agent.
+The control instance verifies the token, marks the enrollment slot consumed, and replies with a `hello` frame followed by a control frame that carries a **long-lived tunnel JWT** (365-day expiry). The agent writes that token to its data volume at `/app/data/pilot.jwt`. The original enrollment token is now useless: the agent does not need it again, and the control instance refuses to accept it a second time.
 
-Open the node in the sidebar switcher and use it exactly like any other node: deploy stacks, tail logs, open container terminals, watch host stats.
+The tunnel is now active. The Endpoint column in the Nodes table flips from `tunnel (waiting)` to `tunnel (seen Xs ago)` and the node's status badge turns Online.
 
-## Day-to-day operation
+### Subsequent reconnects
 
-Once enrolled, a Pilot Agent node is indistinguishable from a proxy-mode node in the UI. The same switcher, the same stacks page, the same editor, the same host console, the same dashboard.
+On every later boot, restart, or transient network drop, the agent reads `pilot.jwt` from disk and dials with that. No new operator action is needed. The persisted token is good for a year from the original enrollment.
 
-The agent reconnects automatically if the tunnel drops (transient network blip, primary restart, remote host reboot). It applies an exponential backoff between retries starting at 1 second and capping at 60 seconds, so reconnect traffic stays bounded even during long outages.
+The reconnect loop uses exponential backoff from 1 second to 60 seconds with up to 500 ms of jitter. The backoff resets only after a successful `hello` round-trip, so an agent that always fails the handshake (wrong URL, revoked token, version mismatch) cannot tight-loop and burn resources.
 
-## Regenerating enrollment
+The control instance pings every connected agent every 30 seconds. Any stream with no activity for 10 minutes is closed and reclaimed.
 
-If the agent container is destroyed before its first successful connect, or the enrollment token expires before you paste it on the remote, open the node's edit dialog on the primary and click **Regenerate enrollment token**. A fresh 15-minute token is issued and the previous tunnel (if any) is disconnected so the new agent replaces it cleanly.
+### Primary restart, agent restart
 
-## Self-signed primary TLS certs
+- **Control instance restarts**: every agent's tunnel drops cleanly. Each agent reconnects within seconds. In-flight HTTP requests fail and the browser retries; long-lived WebSockets (logs, console) reconnect.
+- **Agent restarts**: the persisted token re-authenticates without operator intervention. Same reconnect-and-recover behavior.
+- **Operator deletes the node on the control instance**: the agent's existing tunnel is closed. The agent will keep trying to reconnect with its persisted token, which the control instance no longer accepts; the agent stays in a reconnect-backoff loop. To stop it, tear the agent down on the remote with `docker compose -f compose.yaml down -v`.
 
-If your primary terminates TLS with an internal CA and the agent cannot validate the certificate against the system trust store, point the agent at the CA bundle with `SENCHO_PILOT_CA_FILE`. Add the bundle mount and the env var to the compose file:
+### Re-enrollment
+
+If the agent container is destroyed before its first successful connect, the enrollment token expires unused, the control instance is restored from a backup with a different JWT secret, or you simply want to rotate the credential, open the node's Edit dialog and click **Regenerate enrollment token**.
+
+<Frame>
+  <img src="/images/pilot-agent/04-regenerate-token.png" alt="Edit node modal for a pilot-agent node showing a Re-enroll the agent helper text and a Regenerate enrollment token button." />
+</Frame>
+
+A fresh 15-minute token is issued and the previous tunnel (if any) is closed immediately so the new agent replaces it cleanly.
+
+## Security and trust model
+
+### Tokens
+
+Two JWT scopes, both signed with the control instance's `auth_jwt_secret`:
+
+| Token | Lifetime | Where it lives | Use |
+|---|---|---|---|
+| **Enrollment** | 15 min, one-time | Returned to the operator; SHA-256 hash stored on the control instance | Bootstraps the first connect |
+| **Tunnel** | 365 days | Agent's container volume at `/app/data/pilot.jwt` | Every reconnect after the first |
+
+Enrollment is rate-limited to 10 requests per minute per operator (per source IP if unauthenticated) so a runaway script cannot exhaust the database with pending tokens.
+
+### TLS
+
+The agent dials `wss://`. Certificate validation is on by default against the system trust store. There is no flag to disable verification; that would defeat the credential model. For internal CAs, mount your bundle into the agent container and set `SENCHO_PILOT_CA_FILE` to the in-container path. See [Self-signed control-instance TLS certificates](#self-signed-control-instance-tls-certificates) below for a worked example.
+
+### Trust boundaries
+
+- **The control instance trusts the agent.** A connected agent's frames are believed. A compromised remote can flood frames; the per-tunnel resource limits documented below bound the blast radius.
+- **The agent trusts the control instance.** The control instance proves its identity by producing a valid JWT under the secret it shares with itself. A compromised control instance can ask the agent to do anything the agent could do directly on its host, and the agent holds the Docker socket, so that is effectively root on the remote.
+- **Tier-trust headers (`x-sencho-tier`, `x-sencho-variant`) are only honored for bearer tokens with `node_proxy` or `pilot_tunnel` scope.** Browser session cookies cannot spoof them.
+- **The agent exposes nothing inbound.** No port. No UI. No directly reachable health endpoint.
+
+### What rotating the JWT secret does
+
+The tunnel JWTs are signed with the control instance's `auth_jwt_secret`. If that secret rotates (because the control instance was rebuilt from scratch, restored into a different environment, or manually rotated), every existing tunnel JWT stops verifying. The agents will reconnect, fail authentication, and back off. Re-enroll each affected node (regenerate the enrollment token, then redeploy the agent on the remote with the refreshed compose file) to issue a new tunnel JWT signed by the current secret.
+
+## Self-signed control-instance TLS certificates
+
+If your control instance terminates TLS with an internal CA that the agent's system trust store does not recognise, mount the CA bundle into the agent container and point `SENCHO_PILOT_CA_FILE` at it:
 
 ```yaml
 name: sencho-agent
@@ -132,53 +223,133 @@ volumes:
   sencho-agent-data:
 ```
 
-The agent uses the bundle as the only trust anchor for the tunnel WebSocket. TLS verification stays on; there is no env var to disable verification globally because that would defeat the credential trust model.
+The agent uses the bundle as the only trust anchor for the tunnel WebSocket. TLS verification stays on.
 
 ## Resource limits
 
-Each tunnel has fixed protocol-level ceilings to keep one misbehaving agent from impacting the primary:
+Each pilot tunnel has fixed protocol-level ceilings so one misbehaving agent cannot impact the control instance or its peers.
 
-- **Frame size:** individual WebSocket frames are capped at 8 MB. Single requests and responses larger than that are rejected and the tunnel reconnects.
-- **Concurrent streams:** at most 1024 multiplexed HTTP and WebSocket streams per tunnel (mesh TCP streams share the same pool). Above the cap the bridge returns 503 and the agent rejects new incoming streams with a typed error frame.
-- **Stream idle:** any stream with no activity for 10 minutes is closed and removed.
-- **System-wide tunnels:** a single primary accepts up to 256 concurrent pilot tunnels. Past the soft warning at 128 the primary logs a WARN; past the hard cap of 256 new tunnels are refused with WebSocket close code 1013 (Try Again Later) so the agent backs off rather than tight-looping.
+| Limit | Value | What it caps | Why it matters |
+|---|---|---|---|
+| **Frame size** | 8 MB | Individual WebSocket frame, including a single HTTP request or response body chunk | A request or response body larger than 8 MB is rejected and the tunnel reconnects. Stream HTTP responses are chunked, so normal traffic stays well under this. |
+| **Concurrent streams per tunnel** | 1024 | HTTP, WebSocket, and Sencho Mesh TCP streams share the same pool | New streams above the cap are rejected with 503 from the bridge and a typed error frame from the agent. A runaway script or a long-poll session that leaks streams can exhaust this; reload the affected tab or throttle the caller. |
+| **Stream idle timeout** | 10 minutes | Per-stream inactivity before teardown | Idle WebSockets and forgotten HTTP streams are reclaimed automatically. |
+| **System-wide tunnels** | 256, soft-warn at 128 | Concurrent pilot tunnels on a single control instance | Past the soft warning the control instance logs WARN. Past the hard cap, new tunnels are refused with WebSocket close code 1013 ("Try Again Later"); the agent backs off rather than tight-looping. |
+| **Tunnel write buffer pause** | 4 MB | High-water mark for the agent-bound write queue | When the control instance's queue is over the mark, inbound HTTP request bodies are paused and resumed on drain. Backpressure rather than memory growth. |
+| **Enrollment rate** | 10 per minute | Operator-issued enrollment tokens | Protects the database against a script accidentally minting tokens in a loop. |
+
+An admin-only diagnostic endpoint, `GET /api/system/pilot-tunnels`, returns counters and a per-node breakdown of active tunnels (open stream count and `bufferedAmount` for each). Useful for triaging a single sticky tunnel inside an otherwise healthy fleet.
+
+## Environment variables
+
+These environment variables are read by the **agent** container at boot.
+
+| Variable | Required? | Default | Notes |
+|---|---|---|---|
+| `SENCHO_MODE` | Yes | none | Must be `pilot`. Putting any other value here causes the container to start as a normal Sencho instance, not as an agent. |
+| `SENCHO_PRIMARY_URL` | Yes | none | The base URL of your control instance (e.g. `https://sencho.example.com`). The agent appends `/api/pilot/tunnel` and dials `wss://`. |
+| `SENCHO_ENROLL_TOKEN` | First boot only | none | The 15-minute enrollment token issued by the control instance. Ignored on subsequent boots once `pilot.jwt` is on disk. |
+| `SENCHO_PILOT_CA_FILE` | Optional | unset | Absolute path inside the container to a PEM bundle. Use when your control instance's TLS chain is rooted in a private CA. |
+| `DATA_DIR` | Optional | `/app/data` | Where the persisted `pilot.jwt` is stored. Override only if you are mounting a different volume layout. |
+| `COMPOSE_DIR` | Optional | `/app/compose` | Root directory on the agent host where compose stack folders live. The control instance reads and writes stacks under this path. |
+
+One variable is read on the **control instance** side, not the agent:
+
+| Variable | Required? | Default | Notes |
+|---|---|---|---|
+| `SENCHO_PUBLIC_URL` | Optional | request Host | Locks in the URL the enrollment dialog bakes into `SENCHO_PRIMARY_URL`. See [The control instance's public URL](#the-control-instances-public-url) above. Must be `http(s)://`, no loopback. |
+
+The agent does not currently expose tunables for the ping interval (30 s), the reconnect backoff (1–60 s), or the per-stream idle timeout (10 min). These are deliberate fixed values; if your environment requires different ones, open an issue.
+
+## Limitations and non-goals
+
+These are the boundaries operators should know about before designing a fleet around Pilot Agent.
+
+- **No mode conversion.** The Edit dialog shows a Mode field for an enrolled node, but switching a node between Pilot Agent and Distributed API Proxy after enrollment leaves the credentials and connection state inconsistent. To change modes, delete the node and re-create it in the desired mode.
+- **No audit log entries for enrollment lifecycle.** Node creation, enrollment regeneration, and node deletion do not write to the audit log today. This is on the roadmap.
+- **`pilot.jwt` is not cleaned up on node deletion.** When you delete a node from the control instance, the agent's persisted token stays on the remote's data volume. The agent will fail to reconnect on next restart, but the file persists. If you are repurposing the host, tear the agent down with `docker compose -f compose.yaml down -v` to remove the `sencho-agent-data` volume.
+- **JWT-secret rotation invalidates every tunnel.** Rebuilding the control instance from scratch or rotating `auth_jwt_secret` requires re-enrolling every agent. There is no out-of-band re-issuance flow.
+- **One tunnel per node.** Splitting a node's load across multiple control instances or running multiple agent containers against the same control instance for the same node is not supported.
+- **Mesh and pilot share the per-tunnel stream pool.** A node that runs heavy Sencho Mesh traffic counts those streams against the same 1024-stream cap as HTTP and WebSocket traffic.
+- **The agent has no UI of its own.** All operation flows through the control instance. The agent's container logs (`docker logs sencho-agent`) are the only direct visibility into agent-side behaviour.
+
+## Sencho Mesh on Pilot Agent
+
+Sencho Mesh works identically across both remote modes. On a Pilot Agent node, mesh traffic rides the existing long-lived tunnel instead of opening a separate connection. Stack opt-in to the mesh is per stack per node and is not affected by the transport choice. See [Sencho Mesh](/features/sencho-mesh) for the full mesh model.
 
 ## Troubleshooting
 
+The generic node-connectivity issues (a node showing Offline, a pilot agent stuck on `tunnel (waiting)`, 401 Unauthorized on Test Connection) are covered in the [Multi-Node Management troubleshooting section](/features/multi-node#troubleshooting). The entries below cover failure modes that are specific to Pilot Agent.
+
 <AccordionGroup>
-  <Accordion title="Node stays Offline after starting the agent container">
-    Check the agent container's logs for the first `[Pilot]` line. It prints the primary URL it is dialing and the reason for any failed connect. Common causes: the primary URL is wrong or unreachable from the remote host, the enrollment token expired, or the primary is behind a reverse proxy that strips WebSocket upgrades.
+  <Accordion title="Tunnel keeps disconnecting every ~30 seconds">
+    The control instance pings the agent every 30 seconds; a reconnect that lines up with the ping interval almost always means an HTTP proxy or load balancer between the agent and the control instance is closing idle WebSockets faster than the ping cadence. Raise the proxy's WebSocket idle timeout above 30 seconds (a 90-second floor is safe). If you terminate TLS at a reverse proxy, also confirm that the proxy forwards the `Upgrade: websocket` header end-to-end.
   </Accordion>
 
-  <Accordion title="Tunnel keeps disconnecting and reconnecting">
-    Usually caused by an HTTP proxy or load balancer in front of the primary with a short idle timeout. The tunnel sends a ping every 30 seconds, so raise the proxy's WebSocket idle timeout above that (90 seconds is a safe floor). If you terminate TLS on the proxy, make sure WebSocket upgrade passthrough is enabled.
+  <Accordion title="Tunnel rejected with WebSocket close code 1013 (Try Again Later)">
+    The control instance has reached the system-wide hard cap of 256 concurrent pilot tunnels. A reconnect storm or a runaway enrollment is the usual cause. Inspect the control instance's logs for the `[Pilot] Active tunnel count at soft limit` warning that fires at 128 to spot the trend, and check `GET /api/system/pilot-tunnels` (admin-only) for the per-node breakdown to identify the flapping agent. The agent backs off and retries automatically once headroom returns.
   </Accordion>
 
-  <Accordion title="Enrollment token expired before I ran the docker command">
-    Open **Settings → Nodes** on the primary, click the pencil icon on the pending node, then **Regenerate enrollment token**. The dialog shows a fresh command with a new token.
+  <Accordion title="Loopback bridge returns 503 'pilot tunnel: stream cap reached'">
+    A single tunnel has hit the per-tunnel 1024-stream cap. The most common trigger is a browser session that opened many long-poll streams without closing them, or a script firing parallel API calls without bound. Reload the affected tab so its WebSocket and SSE streams reset. If the cap is being hit by automation, throttle the caller. Sencho Mesh streams share the same pool, so a runaway mesh workload can also push the count up.
+  </Accordion>
+
+  <Accordion title="Tunnel closes with WebSocket close code 1002 (protocol error)">
+    The agent sent a frame larger than the 8 MB ceiling, or the wire decoder rejected a malformed frame. Run the control instance with developer mode enabled (Settings → Developer) to surface the diagnostic decode log, then check the logs for `[PilotBridge:diag] Malformed frame from agent`. The agent reconnects automatically; persistent failures usually mean a version mismatch between the control instance and the agent image.
   </Accordion>
 
   <Accordion title="I ran the enrollment command on the wrong host">
-    Tear the agent down on the wrong host (`docker compose -f compose.yaml down -v` from the directory you saved the file in), then regenerate the enrollment token on the primary and deploy the new compose file on the correct host.
-  </Accordion>
-
-  <Accordion title="Primary was restored from backup and the agent will not reconnect">
-    The agent's persisted tunnel credential is signed with the primary's JWT secret. If that secret is rotated or the primary is rebuilt from scratch, existing tunnels stop verifying. Regenerate enrollment for the affected node and restart the agent container so it consumes the fresh token.
-  </Accordion>
-
-  <Accordion title="Tunnel rejected with 'pilot tunnel cap reached' (close code 1013)">
-    The primary is at the system-wide concurrent tunnel cap of 256. A reconnect storm or runaway enrollment is the usual cause. Inspect the primary's logs for the `[Pilot] Active tunnel count at soft limit` warning that fires at 128 to find the trend, and check `GET /api/system/pilot-tunnels` (admin-only) for the per-node breakdown to identify a flapping agent. The agent backs off and retries automatically once headroom returns.
-  </Accordion>
-
-  <Accordion title="Bridge returns 503 'pilot tunnel: stream cap reached'">
-    A single tunnel is at the 1024 concurrent stream cap. The most common trigger is a UI session that opened many long-poll streams and never closed them, or a script firing parallel API calls without bound. Reload the affected browser tab so its WebSocket and SSE streams reset. If the cap is being hit by automation, throttle the caller; the cap protects the primary's memory from a runaway agent or proxy.
-  </Accordion>
-
-  <Accordion title="Tunnel closes immediately with 'protocol error' (close code 1002)">
-    The agent sent a frame larger than the 8 MB ceiling, or the wire decoder rejected a malformed frame. Run the agent with developer mode enabled on the primary (Settings → Developer) to surface the diagnostic decode log, then check the primary's logs for `[PilotBridge:diag] Malformed frame from agent`. The agent reconnects automatically; persistent failures usually mean a version mismatch between primary and agent images.
+    Tear the agent down on the wrong host (`docker compose -f compose.yaml down -v` from the directory you saved the compose file in), then regenerate the enrollment token on the control instance and deploy the new compose file on the correct host.
   </Accordion>
 
   <Accordion title="HTTP 429 'Too many enrollment requests'">
-    Enrollment endpoints are rate-limited to 10 requests per minute per user (or per IP, when unauthenticated) so a script accidentally minting tokens in a loop cannot exhaust the database. Wait sixty seconds and retry. If you genuinely need to bulk-enroll many nodes, space the requests out or contact the operator who runs the primary about raising the limit.
+    The enrollment endpoint is rate-limited to 10 requests per minute per operator (or per IP when unauthenticated). A script accidentally minting tokens in a loop trips this. Wait 60 seconds and retry. To bulk-enroll many nodes, space the requests out.
+  </Accordion>
+
+  <Accordion title="Control instance was restored from backup and the agent will not reconnect">
+    The persisted tunnel credential is signed with the control instance's `auth_jwt_secret`. If that secret was not part of the backup (or has been rotated for any other reason), existing tunnels stop verifying. Regenerate enrollment for each affected node from Settings → Nodes and restart the agent containers so they consume the fresh tokens. There is no global re-issuance command.
+  </Accordion>
+
+  <Accordion title="I deleted the node on the control instance but the agent keeps trying to reconnect">
+    Deleting the node removes the routing entry on the control instance but does not touch the remote. The agent still holds `/app/data/pilot.jwt` and will keep dialing. Tear the agent down on the remote (`docker compose -f compose.yaml down -v` from the directory holding the compose file) so the `sencho-agent-data` named volume that stores the persisted token is removed.
+  </Accordion>
+
+  <Accordion title="Stacks tab on a pilot node shows nothing or fails to list">
+    The agent's compose directory is missing or not writable. Verify the host path you mounted at `/app/compose` exists, is owned by a user the agent container can write as, and matches the Compose Directory configured for the node in Settings → Nodes. If the host path has moved, edit the node and update the Compose Directory field.
+  </Accordion>
+
+  <Accordion title="I changed the Mode on a pilot node in Edit and now it is broken">
+    The Edit dialog shows the Mode field, but switching from Pilot Agent to Distributed API Proxy (or back) after enrollment is not a clean flow; the persisted credentials and the new mode end up inconsistent. Delete the node, re-create it in the mode you want, and re-enroll or re-paste the API token.
   </Accordion>
 </AccordionGroup>
+
+## Common questions
+
+<AccordionGroup>
+  <Accordion title="Do I need port forwarding or a public IP on the remote?">
+    No. The agent dials outbound; the remote needs no inbound port, no public IP, no DNS entry, and no TLS certificate of its own.
+  </Accordion>
+
+  <Accordion title="Is Pilot Agent the same as a VPN or Tailscale?">
+    No. A VPN gives every host on the network a routable address for arbitrary peer-to-peer traffic. Pilot Agent is a single-purpose tunnel between one agent and one control instance, carrying only Sencho's own protocol. The two are complementary; you can run Sencho over a VPN (using Distributed API Proxy mode against the VPN address) if you prefer.
+  </Accordion>
+
+  <Accordion title="Does my data go through Sencho's servers?">
+    No. The tunnel is a direct WebSocket between your remote host and your control instance. There is no Sencho-operated relay.
+  </Accordion>
+
+  <Accordion title="Can I run multiple agents on the same host?">
+    Yes. Each agent needs its own container name and its own data volume so the persisted `pilot.jwt` files do not collide. Enroll each one against a distinct node entry on the control instance.
+  </Accordion>
+
+  <Accordion title="Does the control instance need a public domain?">
+    No. The agent only needs to reach the control instance over whatever path your network provides: LAN, VPC, VPN, public internet, or a private tunnel. Set `SENCHO_PRIMARY_URL` to whatever URL works from the agent's vantage point.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [Multi-Node Management](/features/multi-node): the operator walkthrough for adding remote nodes in either mode, the Nodes table reference, and the cross-mode comparison.
+- [Sencho Mesh](/features/sencho-mesh): cross-node networking that rides on the pilot tunnel.
+- [Fleet view](/features/fleet-view): fleet-wide aggregation and node health across both modes.
+- [Security architecture](/security): credential model and trust posture across the rest of Sencho.

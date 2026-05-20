@@ -1,39 +1,81 @@
 ---
 title: Atomic Deployments
-description: Zero-downtime deployments with automatic rollback for Skipper and Admiral users.
+description: Wrap every deploy and update in a backup, a 3-second health probe, and an automatic rollback when a container crashes.
 ---
 
-<Note>
-  Atomic Deployments require a **Sencho Skipper** or **Admiral** license. Community Edition uses standard deployments without backup or rollback.
-</Note>
+Sencho wraps every protected deploy in a four-step safety net: it copies the current `compose.yaml` and `.env` to a writable backup directory, runs the requested compose action, waits 3 seconds for the new containers to settle, then checks them for a non-zero exit code. If any container has crashed, Sencho restores the backed-up files and re-deploys automatically.
 
-Sencho wraps every deployment in a safety net on Skipper and Admiral tiers. Before applying changes, it backs up your current configuration. If the deployment fails, it automatically rolls back to the previous working state.
+The same backup also powers the **Rollback** action in the stack editor, so you can roll a stack back to its last good configuration on demand.
+
+<Note>
+  Atomic Deployments require a Sencho **Skipper** or **Admiral** license. Community Edition runs the same compose actions without a backup or automatic rollback.
+</Note>
 
 ## How it works
 
-1. **Backup** - Before a deploy or update, Sencho copies your `compose.yaml` and `.env` files to a safe internal location
-2. **Deploy** - Sencho runs the requested compose operation (up, pull + recreate, etc.)
-3. **Health probe** - After deployment, Sencho waits briefly, then checks whether any containers exited with a non-zero exit code
-4. **Auto-rollback** - If a crash is detected, Sencho restores the backed-up files and re-deploys automatically
+1. **Backup.** Before the action runs, Sencho copies `compose.yaml` (or `compose.yml` / `docker-compose.yaml` / `docker-compose.yml`) and `.env`, if present, into the backup directory. The deploy progress modal streams `=== Backup created for atomic deployment ===` once the copy completes, before any `docker compose` output.
+2. **Run the action.** Sencho executes the requested compose action: `up -d` for a deploy, or a pull-then-`up -d` recreate for an update.
+3. **Health probe.** Sencho waits 3 seconds, then lists every container with the `com.docker.compose.project=<stack>` label and checks each one for a non-zero exit code. Any container that has exited with a non-zero status counts as a crash.
+4. **Auto-rollback on failure.** When a crash is detected, Sencho streams `=== Deployment failed - rolling back to previous version ===`, restores the backed-up files, and re-runs `docker compose up -d` with the restored configuration. On success it streams `=== Rolled back successfully ===`. The original deploy error is preserved and reported as the deploy result, so a failed-then-rolled-back deploy still registers as a failure in the deploy progress modal.
 
-This entire sequence happens transparently. You see a single deploy action; Sencho handles the safety logic behind the scenes.
+If the rollback itself fails (for example, the re-deploy step cannot pull a previously available image, or the file restore is blocked by filesystem permissions), Sencho streams `=== Rollback failed - manual intervention may be required ===`. The backup files remain at `<DATA_DIR>/backups/<stack>/` so you can copy them back manually.
 
 ## Which operations are protected
 
-Atomic deployments apply to:
+Atomic deployments wrap:
 
-- **Deploy** from the stack editor (compose down + up)
-- **Update** from the stack editor (pull latest images + recreate)
-- **Webhook triggers** for deploy and pull actions
-- **Scheduled tasks** that perform deploys or updates
-- **App Store installs** when deploying a new stack
+- **Deploy** and **Update** from the stack editor's action bar.
+- **App Store** installs of a new stack.
+- **Webhook** triggers for deploy and pull actions.
+- **Image auto-updates** triggered by an auto-update policy.
+
+Scheduled tasks invoke `docker compose` without the atomic wrapper, so a deploy or update launched from a schedule runs without a backup or auto-rollback. If you need atomic safety on a recurring deploy, trigger it through a webhook on a cron rather than through Scheduled Tasks.
 
 ## Manual rollback
 
-You can manually roll back to the previous deployment at any time by clicking the **Rollback** button in the stack editor's action bar. The button only appears when a backup exists from a prior deployment.
+The stack editor's action bar carries a **More actions** overflow menu (the three-dot icon next to **Update**). Open it on a Skipper or Admiral instance and you'll see **Rollback** at the top, with the timestamp of the most recent backup rendered beneath the label. Selecting it restores the backed-up files and re-runs `docker compose up -d` non-atomically, to avoid nesting a rollback inside another atomic wrapper and overwriting the good backup with the broken state from the just-failed deploy.
 
-Hover over the Rollback button to see a tooltip with the timestamp of the last backup. Clicking it restores the backed-up `compose.yaml` and `.env` files, then re-deploys the stack with the restored configuration.
+<Frame>
+  <img src="/images/atomic-deployments/rollback-menu.png" alt="Stack editor action bar with the More actions overflow menu open, showing the Rollback entry at the top with the backup timestamp rendered beneath the label, followed by Scan config and Delete entries" />
+</Frame>
+
+The menu entry is hidden when no backup exists for the stack, for example on a freshly created stack that has never been deployed atomically, and on a Community Edition instance. The endpoint additionally requires the `stack:deploy` permission, so a user without it will see the menu entry but receive a permission error if they invoke it.
+
+## Where backups are stored
+
+Backups live under `<DATA_DIR>/backups/<stack>/`, in the same writable volume Sencho uses for its database and other persisted state. They are intentionally kept outside the user's compose folder, so the operation works even when a container has chowned its bind-mounted stack directory to root.
+
+Each backup is a flat copy of the compose file Sencho found, plus `.env` if it exists, plus a `.timestamp` marker that records when the backup was taken. There is one backup slot per stack: every protected deploy or update overwrites the previous backup, so the **Rollback** menu always reverts to the configuration that was on disk immediately before the most recent run.
 
 ## Community Edition behavior
 
-Community users continue to use the standard deploy flow: no backup is created and no rollback is available. Upgrading to Skipper or Admiral enables atomic deployments immediately with no configuration required.
+On Community Edition, Sencho runs the same `docker compose` commands without the atomic wrapper. There is no backup, no health probe, and no automatic rollback, and the **Rollback** menu entry is hidden. On a Skipper or Admiral license, atomic deployments are active immediately for every protected action; no configuration is required.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The Rollback option is not in the More actions menu">
+    Sencho hides the entry whenever a rollback is not possible. The most common reasons are:
+
+    - The stack has never been deployed atomically, so no backup file exists yet. Run **Deploy** or **Update** once and the entry will appear.
+    - The instance is on Community Edition. Atomic Deployments require Skipper or Admiral.
+
+    A user without the `stack:deploy` permission will still see the menu entry; the rejection comes from the backend with a permission error after they click. Ask an admin to grant `stack:deploy` through **Settings · Roles & Access** if that happens.
+  </Accordion>
+  <Accordion title="The deploy succeeded but a service crashed seconds later">
+    The health probe is a 3-second window after `docker compose up -d` returns. Crashes that happen after that window are out of scope for atomic rollback by design, because Sencho cannot tell whether a late exit is a real failure or a normal restart. For ongoing health, use **Auto-Heal Policies** to restart unhealthy containers automatically and **Alert Rules** to page you when a container exits unexpectedly.
+  </Accordion>
+  <Accordion title="The deploy progress modal showed 'Rollback failed - manual intervention may be required'">
+    This message means the auto-rollback attempted to restore the backup and re-deploy, but the restore step or the re-deploy itself errored out. The backup files are still at `<DATA_DIR>/backups/<stack>/`. To recover:
+
+    1. Copy `compose.yaml` (or the variant Sencho backed up) and `.env` from `<DATA_DIR>/backups/<stack>/` back into the stack directory.
+    2. Open the stack in the editor and click **Deploy** to re-run with the restored configuration.
+
+    The most common causes are filesystem permissions on the stack directory and a missing image in a private registry that the original deploy could not pull.
+  </Accordion>
+  <Accordion title="Rollback ran but the stack still has the broken configuration">
+    Sencho keeps a single backup per stack. If you ran two atomic deploys back to back, the second deploy overwrote the first backup with the broken configuration before it failed. **Rollback** then restores that broken configuration, because as far as Sencho is concerned it is the most recent known state.
+
+    To recover, edit the compose file or `.env` directly in the editor, fix the bad change, and click **Deploy**. The next protected deploy will write a fresh backup of the now-good configuration.
+  </Accordion>
+</AccordionGroup>

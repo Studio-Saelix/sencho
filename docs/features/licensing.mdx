@@ -11,112 +11,158 @@ Sencho uses an open-core model. The **Community** tier is free forever with unli
 
 ## Plans
 
-| Tier | Price | Accounts |
-|------|-------|----------|
-| **Community** | Free | 1 admin |
-| **Skipper** | $5.99/month billed annually, $7.99/month, or $249 lifetime | 1 admin + 3 viewers |
-| **Admiral** | $41.99/month billed annually, $49.99/month, or $1,499 lifetime | Unlimited |
+| Tier | Annual (per mo, billed yearly) | Monthly | Lifetime (EA) | Seats |
+|------|--------------------------------|---------|---------------|-------|
+| **Community** | Free | Free | Free | 1 admin |
+| **Skipper** | $11.99 | $14.99 | $449 | 1 admin + 3 viewers |
+| **Admiral** | $69.99 | $89.99 | $2,499 | Unlimited |
 
-Lifetime pricing is an early-adopter offer available for a limited time only.
+For larger deployments, an **Enterprise** tier is available from $3,500 per year with SLA, priority support, security questionnaires, and custom contracts. See [the pricing page](https://sencho.io/pricing) for the full comparison.
+
+Lifetime pricing is an Early Access offer available for a limited time.
 
 ### Feature breakdown
 
 **Community** includes:
-- Unlimited nodes, compose editor, global logs, app store, alerts, and more
-- Fleet View with search, sort, filters, node-card expand, and topology
-- Stack labels
-- Network topology graph
-- Manual fleet snapshots (create, browse, restore, delete)
-- Per-node Sencho updates and the Check Updates view
-- Vulnerability scanning: install/update/uninstall Trivy, on-demand scans (vulnerabilities, secrets, misconfigurations), scan comparison, and CVE suppressions
-- Two-factor authentication (TOTP)
-- Custom OIDC single sign-on (works with Authelia, Keycloak, Authentik, Zitadel, Pocket ID, or any spec-compliant OIDC identity provider)
+
+- Unlimited nodes, the Monaco compose editor, and the App Store with 199+ one-click templates
+- Real-time container stats, global logs, the interactive network topology graph, and stack labels
+- Git sources for compose stacks
+- Multi-node management in both Proxy and Pilot Agent modes
+- Manual fleet snapshots (create, browse, restore, delete) and per-node Sencho updates
+- Vulnerability scanning: install, update, and uninstall Trivy, on-demand scans for vulnerabilities, secrets, and misconfigurations, plus scan comparison
+- CVE suppressions
+- Alert rules with Discord, Slack, and webhook targets
+- Two-factor authentication (TOTP plus backup codes)
+- Custom OIDC single sign-on (works with Authelia, Keycloak, Authentik, Zitadel, Pocket ID, or any spec-compliant OIDC provider)
 
 **Skipper** includes everything in Community, plus:
-- Webhooks
-- Bulk actions on a label (deploy, stop, or restart every stack tagged with it)
-- Atomic deployments
-- Bulk **Update All** across the fleet, scheduled scans, scheduled updates, and scheduled fleet snapshots
-- Scan policies with `block_on_deploy` enforcement, SBOM (SPDX, CycloneDX), and SARIF export
+
+- Fleet View with search, sort, filter, and node-card drill-down
+- Webhooks (incoming, to trigger deploys from CI/CD)
+- Atomic deployments with rollback
 - Auto-update policies for stack images
-- One-click Google, GitHub, and Okta SSO presets
+- Auto-heal policies
+- Scheduled tasks for stack updates, vulnerability scans, and fleet snapshots
+- Scan policies with `block_on_deploy` deploy enforcement, SBOM (SPDX, CycloneDX), and SARIF export
+- Bulk actions on a label (deploy, stop, or restart every stack tagged with it)
+- Remote OTA node updates from the control instance
+- Fleet Actions (bulk update all, bulk restart Sencho)
+- Blueprints and Fleet Secrets
+- Preset SSO for Google, GitHub, and Okta
+- Viewer accounts (1 admin plus 3 viewers)
 
 **Admiral** includes everything in Skipper, plus:
-- Unlimited admin and viewer accounts
-- Scoped RBAC (deployer, node-admin, auditor roles)
-- LDAP / Active Directory authentication
-- Audit log and host console
-- API tokens and private registries
-- Notification routing
-- Auto-update of the managed Trivy binary
-- All other scheduled operations (restart, prune, etc.)
 
-<Tip>
-  **SSO is available on every tier.** Community users can integrate any OIDC-compliant identity provider through the Custom OIDC option. Paid tiers add turnkey presets (Google, GitHub, Okta) and LDAP / Active Directory.
-</Tip>
+- Unlimited admin and viewer accounts with the full role set (deployer, node-admin, auditor)
+- LDAP / Active Directory authentication
+- Audit log with CSV export
+- Host Console (a browser-based terminal on the Sencho host)
+- API tokens for CI/CD scripts
+- Private and custom registry credentials
+- Notification routing
+- Sencho Mesh (cross-node container networking)
+- Sencho Cloud Backup
+- Auto-update of the managed Trivy binary
+- All other scheduled task actions (restart, prune, and more)
 
 ## Free trial
 
-Sencho offers a **14-day Admiral trial** on monthly and annual Admiral plans so you can evaluate the flagship features (Host Console, Scheduled Operations, LDAP / Active Directory, audit log, unlimited accounts) with your real infrastructure before committing.
+Sencho offers a **14-day Admiral trial** so you can evaluate the flagship features (Host Console, Sencho Mesh, scheduled operations, LDAP / Active Directory, audit log, unlimited accounts) with your real infrastructure before committing. The trial is offered on the monthly and annual Admiral plans; the lifetime plan does not include a trial.
 
 To start a trial:
 
-1. In the Sencho dashboard, go to **Settings > License**, or visit the [pricing page](https://sencho.io/pricing).
-2. Click **Start monthly trial** or **Start annual trial**.
-3. Complete the Lemon Squeezy checkout. A valid card is required for verification; you are not charged until the trial ends.
-4. Lemon Squeezy will email your license key within a few minutes.
-5. Paste the key into the **Have a license key?** field on the License page and click **Activate**.
+1. Visit the [pricing page](https://sencho.io/pricing).
+2. Switch to the **Annual** or **Monthly** billing tab.
+3. Click **Start 14-day trial** on the **Admiral** card.
+4. Complete the checkout. A valid card is required for verification; you are not charged until the trial ends.
+5. Your license key is emailed to you within a few minutes.
+6. Activate the key in the Sencho dashboard as described in [Activating your license](#activating-your-license).
 
-When your trial ends, Lemon Squeezy automatically charges the card you provided and your plan continues as a paid Admiral subscription. To avoid being charged, cancel from the **Manage Subscription** button (or from the Lemon Squeezy receipt email) any time before day 14.
+When your trial ends, the card you provided is automatically charged and your plan continues as a paid Admiral subscription. To avoid being charged, cancel from the **Manage subscription** button in **Settings → License** (or from your receipt email) any time before day 14.
 
 <Tip>
   Fresh installs land on the **Community** tier until you activate a license key. All Community features (unlimited nodes, compose editor, global logs, alerts, Custom OIDC, and more) are available immediately.
 </Tip>
 
-## Upgrading your plan
-
-You can upgrade directly from **Settings > License** in your Sencho dashboard. The upgrade cards shown depend on your current tier:
-
-- **Community users** see both **Skipper** and **Admiral** options with feature highlights and direct checkout links.
-- **Skipper users** see an **Admiral** upgrade card for when you need unlimited accounts and team features.
-- **Admiral users** are on the highest tier, so no upgrade cards are shown.
-
-Clicking an upgrade button opens the Lemon Squeezy checkout in a new tab. After completing the purchase, you will receive a license key by email.
-
-<Frame>
-  <img src="/images/licensing/license-community.png" alt="License settings showing Skipper and Admiral upgrade cards for Community users" />
-</Frame>
-
 ## Activating your license
 
-1. Go to **Settings > License** in your Sencho dashboard.
-2. Paste your key into the **License Key** field at the bottom of the page.
-3. Click **Activate**.
+Open **Settings → License** in the Sencho dashboard. When the license is not active, the **Activate** section sits below the Plan card:
 
-Sencho validates the key against Lemon Squeezy and unlocks your tier's features immediately.
+<Frame>
+  <img src="/images/licensing/license-activate-section.png" alt="The Activate section of the License page on a Community-tier instance, with a License key input field and an Activate button on the right" />
+</Frame>
 
-## License validation
+1. Paste your key into the **License key** field.
+2. Click **Activate**.
 
-Active licenses are re-validated every **72 hours** against the Lemon Squeezy API. If your instance goes offline, there is a **30-day grace period** before it degrades to the Community tier.
+Sencho validates the key and unlocks your tier. If activation fails, the toast surfaces the verbatim error; common causes are an invalid key, a typo, or an activation limit reached on a previous instance.
+
+## The Plan section
+
+When a license is active, **Settings → License** opens on the **Plan** section. The page masthead at the top exposes three stat pills, and the section below lists the metadata for the active license.
+
+<Frame>
+  <img src="/images/licensing/license-admiral-active.png" alt="License page showing an Admiral lifetime plan with the masthead stat strip listing SCOPE, PLAN, and DURATION, then the Plan section with the Customer, Product, and masked License key fields and the Deactivate button" />
+</Frame>
+
+The masthead pills are:
+
+| Pill | Meaning |
+|------|---------|
+| **SCOPE** | Reads `operator` when you are signed in as an admin. |
+| **PLAN** | The current tier: `community`, `skipper`, or `admiral`. Trial licenses show the trial tier (typically `admiral`). |
+| **DURATION** / **RENEWS** / **TRIAL** / **STATUS** | `DURATION: lifetime` for lifetime licenses, `RENEWS: <date>` for active subscriptions, `TRIAL: Xd left` for trials, and `STATUS: expired` for expired licenses. |
+
+The **Plan** card lists:
+
+- **Tier name** (e.g. `Sencho Admiral`) with a short status line, such as "Active license on this control plane", "Trial: X days remaining", or "Your license has expired."
+- **Customer**: the customer name on the purchase.
+- **Product**: the purchased product variant (e.g. `Sencho Admiral`).
+- **License key**: the last four characters of your key, displayed as `****-****-****-XXXX`. The full key is never re-displayed after activation.
 
 ## Managing your subscription
 
-Once your license is active, you can manage your subscription in two ways:
+When the license is an active subscription (not lifetime), the Plan section action row exposes **Manage subscription** alongside **Deactivate**. **Manage subscription** opens the billing portal in a new tab, where you can update your payment method, view invoices, cancel, or switch plans.
 
-- **From the License page:** Go to **Settings > License** and click **Manage Subscription**. This opens the Lemon Squeezy billing portal where you can update your payment method, view invoices, cancel, or switch plans.
-- **From the profile menu:** Click your profile icon in the top bar and select **Billing** for quick access to the same portal. This option is hidden for lifetime licenses.
+The same portal is reachable from the profile menu in the top-right corner of the app:
 
 <Frame>
-  <img src="/images/licensing/license-admiral-active.png" alt="License settings showing an active Admiral subscription with Manage Subscription button" />
+  <img src="/images/licensing/profile-menu.png" alt="Profile dropdown popover showing an identity header with the admin role and Admiral tier badges, a navigation strip with Settings, Documentation, and Feedback entries, an Appearance theme picker, and a Log Out button" />
 </Frame>
+
+Click your initials in the top-right corner to open the popover. For active subscription licenses, a **Billing** row appears between **Settings** and **Documentation** that opens the same portal as **Manage subscription**. Lifetime licenses have no recurring subscription to manage, so the **Billing** row is hidden.
 
 ### Lifetime licenses
 
-Lifetime licenses do not have a recurring subscription, so the **Manage Subscription** button is not shown. Instead, the license card displays **Duration: Lifetime** to confirm your license never expires. All other features (deactivation, multi-node enforcement, validation) work the same as subscription licenses.
+Lifetime licenses have no recurring subscription, so the **Manage subscription** button and the profile menu **Billing** row are both hidden, and the masthead shows `DURATION: lifetime` instead of a renewal date. Deactivation, multi-node enforcement, and periodic validation work the same as for subscription licenses.
+
+## License validation
+
+Active licenses are re-validated every **72 hours**. If your instance goes offline, there is a **30-day grace period** before it degrades to the Community tier.
+
+## License states
+
+The License page renders differently depending on the license status:
+
+| Status | Plan section | Activate section | Pricing section |
+|--------|--------------|------------------|-----------------|
+| **Community** | `Sencho Community` with "Free tier with the core experience." | Visible | Visible |
+| **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a paid key can replace the trial) | Hidden |
+| **Active subscription** | Tier name with Customer, Product, License key, plus `Manage subscription` and `Deactivate` | Hidden | Hidden |
+| **Active lifetime** | Tier name with Customer, Product, License key, plus `Deactivate` only | Hidden | Hidden |
+| **Expired** | `Sencho Community` with "Your license has expired. Renew to restore paid features." and a destructive **Status: Expired** field | Visible | Visible |
+| **Disabled** | `Sencho Community` with "Your license has been disabled. Contact support for assistance." | Visible | Visible |
+
+The **Pricing** section, when visible, holds a single **See pricing** button that opens [the pricing page](https://sencho.io/pricing) in a new tab so you can pick a tier and billing cadence.
+
+<Frame>
+  <img src="/images/licensing/license-community.png" alt="License page on a Community-tier instance, with the masthead showing SCOPE operator and PLAN community, then the Plan section reading 'Sencho Community · Free tier with the core experience.', the Activate section with the License key input, and the Pricing section with the See pricing button" />
+</Frame>
 
 ## Multi-node license enforcement
 
-If you manage multiple servers through Sencho's [multi-node feature](/features/multi-node), you only need a license on your **primary instance**. All remote nodes automatically inherit the primary's license tier for proxied requests. No per-node activation is required.
+If you manage multiple servers through Sencho's [multi-node feature](/features/multi-node), you only need a license on your **control instance**. All remote nodes automatically inherit the control instance's license tier for proxied requests. No per-node activation is required.
 
 For details on how this works, see [License enforcement across nodes](/features/multi-node#license-enforcement-across-nodes).
 
@@ -124,9 +170,9 @@ For details on how this works, see [License enforcement across nodes](/features/
 
 To transfer your license to a different instance:
 
-1. Go to **Settings > License**.
-2. Click **Deactivate License**.
-3. On your new instance, activate the same license key.
+1. Go to **Settings → License**.
+2. Click **Deactivate** in the Plan section.
+3. On your new instance, paste the same license key into **License key** and click **Activate**.
 
 Deactivation reverts the current instance to the Community tier immediately.
 

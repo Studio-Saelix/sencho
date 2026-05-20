@@ -1,10 +1,10 @@
 ---
 title: Audit Log
-description: Track all mutating actions across your Sencho instance with a searchable, exportable audit trail for team accountability.
+description: Track every mutating action on your Sencho instance with a searchable, exportable trail for team accountability.
 ---
 
 <Note>
-  The Audit Log requires a Sencho **Admiral** license. Skipper and Community Edition do not include this feature.
+  The Audit Log requires a Sencho **Admiral** license. Skipper and Community do not include this feature.
 </Note>
 
 <Note>
@@ -23,86 +23,85 @@ Every `POST`, `PUT`, `DELETE`, and `PATCH` request to the Sencho API is automati
 | **User** | The authenticated username that performed the action |
 | **Method** | HTTP method (`POST`, `PUT`, `DELETE`, `PATCH`), shown as a color-coded badge |
 | **Action** | Human-readable summary (e.g., "Deployed stack: nginx-proxy") |
-| **Status** | HTTP response status code, color-coded by result (green for success, yellow for client errors, red for server errors) |
-| **Node** | Which node the action targeted, or `-` for local-only actions |
+| **Status** | HTTP response status code, color-coded by result (green for success, amber for client errors, rose for server errors) |
+| **Node** | Numeric node ID the action targeted, or `-` for local-only actions |
 
-Expanding a row reveals additional detail:
+Expanding a row in the Table view reveals additional detail:
 
 | Field | Description |
 |-------|-------------|
 | **Request Path** | Full API path of the request |
-| **IP Address** | Client IP address |
+| **IP Address** | Client IP address as recorded by the gateway |
 | **Node ID** | Numeric node ID, or "Local" for local actions |
 | **Entry ID** | Unique identifier for the audit entry |
 
 ### Example actions tracked
 
 - Stack lifecycle: deploy, stop, start, restart, update, rollback, delete
-- Stack creation, file edits, and env file changes
+- Stack creation, file edits, env file changes, label changes
+- Per-service lifecycle (start, stop, restart of an individual compose service)
 - Container operations: start, stop, restart
-- Node management: add, update, delete
-- User management: create, delete, role assignment and removal
+- Node management: add, update, delete, cordon, uncordon
+- Fleet operations: backup creation, restore, deletion, single-node and fleet-wide updates
+- Fleet replica role changes (re-anchor, demote to control)
+- Fleet Secrets: create, update, delete, import-from-stack, push (and push preview)
+- Blueprint federation pin updates
+- Sencho Cloud Backup: config update, connection test, provisioning, snapshot upload, snapshot deletion
+- User management: create, update, delete, role assignment and removal
 - Password changes and node token generation
-- Settings changes
-- System prune operations (general, orphans, system)
-- Image, volume, and network deletion
-- Network creation
-- License activation/deactivation
+- License activation and deactivation
 - Webhook and notification agent configuration
 - Notification route management and testing
-- Fleet backup creation, restoration, and deletion
-- Fleet node updates (individual and fleet-wide)
-- Scheduled task management
-- Registry credential management
 - SSO configuration changes and connection tests
 - API token creation and revocation
-- Label management and bulk actions
-- Template deployments
+- Registry credential management
+- Scheduled task management and manual triggers
+- Settings changes
 - Auto-update execution
+- Template deployments
 - Console token generation
+- System prune (general, orphans, system), image / volume / network deletion, network creation
 
 ## Viewing the audit log
 
-Navigate to the **Audit** tab in the sidebar. This tab is visible to users with the **Admin** or **Auditor** role on an Admiral license.
+Navigate to the **Audit** tab in the sidebar. The tab is visible on Admiral to users with the **Admin** or **Auditor** role.
 
-The Audit Log has two views, toggled from the header: **Stream** (default) and **Table**.
+The page has two views, toggled from the segmented control in the card header: **Stream** (default) and **Table**. The card subtitle reports the total number of entries that match the current filters.
 
 ### Stream view
 
 Stream gives you an at-a-glance read on activity. A signal rail at the top summarizes the last 24 hours across four tiles, and the feed below groups entries by day with severity dots, relative times, and inline anomaly callouts.
 
 <Frame>
-  <img src="/images/audit-log/audit-stream.png" alt="Audit Log Stream view showing the signal rail with events, actors, failure rate, and peak hour tiles above a day-banded chronological feed" />
+  <img src="/images/audit-log/audit-stream.png" alt="Audit Log Stream view with the four-tile signal rail (Events 111 +91% vs 7d avg, Actors 1, Failure rate 9% with sparkline, Peak hour 06:00) above a day-banded chronological feed of admin POST and DELETE entries." />
 </Frame>
 
 **Signal rail tiles:**
 
 | Tile | What it shows |
 |------|---------------|
-| **Events · 24h** | Count of audit entries in the last 24 hours, with a percent change versus the prior 7-day average |
-| **Actors** | Unique users active in the last 24 hours; notes the count of new IP addresses when present |
-| **Failure rate** | Share of 24-hour requests with 4xx or 5xx responses, rendered with an inline sparkline of the hourly failure trend |
-| **Peak hour** | The hour with the highest activity, flagged in amber when it falls outside 08:00-18:00 |
+| **Events · 24h** | Count of audit entries in the last 24 hours, with a percent change versus the prior 7-day daily average |
+| **Actors** | Unique users active in the last 24 hours; the detail line names a sample actor and the count of new IP addresses when any new IPs are seen for an existing user |
+| **Failure rate** | Share of 24-hour requests with 4xx or 5xx responses, rendered with an inline sparkline of the hourly failure trend; tints amber at 5% and above, rose at 20% and above |
+| **Peak hour** | The hour with the highest activity. Renders blank when the peak sits inside working hours (08:00 to 17:59); flips to amber and shows the hour when the peak falls outside that window |
 
-**Feed entries:** each row shows the relative time (e.g. `58m ago`), a severity dot (green for 2xx, amber for 3xx, rose for 4xx/5xx), the actor and action summary, a meta line with exact timestamp, node, status code, IP, and any anomaly flags, and the method and path on the right.
+**Feed entries:** each row shows the relative time (e.g. `58m ago`), a severity dot (green for 2xx, amber for 3xx, rose for 4xx and 5xx), the actor and action summary, a meta line with the exact timestamp, the node, the status code, the IP, and any anomaly flags, plus the method and path on the right.
 
 Rows colored in rose or amber indicate failures; the tinting makes spikes of errors visible at a glance.
 
 ### Table view
 
-Table keeps the full-featured detail grid for power users: exact timestamps, method badges, action summaries, and status codes in sortable columns. Clicking any row expands it to show the full request path, IP address, node ID, and entry ID.
+Table keeps the full-featured detail grid for power users: exact timestamps, method badges, action summaries, and status codes in fixed columns. Clicking any row expands it to show the full request path, IP address, node ID, and entry ID.
 
 <Frame>
-  <img src="/images/audit-log/audit-log-overview.png" alt="Audit Log Table view showing the action table with search filters, color-coded method badges, and export controls" />
+  <img src="/images/audit-log/audit-log-overview.png" alt="Audit Log Table view with a filter strip (search box, All Methods dropdown, From and To date pickers) above a six-column table of admin POST, PUT, and DELETE entries against /api/blueprints, /api/notifications, and /api/stacks." />
 </Frame>
 
 <Frame>
-  <img src="/images/audit-log/audit-log-expanded.png" alt="Audit Log Table view with an expanded row showing request path, IP address, node ID, and entry ID" />
+  <img src="/images/audit-log/audit-log-expanded.png" alt="Audit Log Table view with the second row expanded to reveal Request Path /api/stacks/plex/restart, IP Address ::ffff:192.0.2.10, Node ID 1, and Entry ID #820 in a four-cell detail strip." />
 </Frame>
 
-The header displays the total number of matching entries and provides **Refresh** and **Export** controls in both views.
-
-Results are paginated at 50 entries per page. Navigation controls appear at the bottom of the feed or table when there are multiple pages.
+Both views share the **Refresh** button and the **Export** dropdown in the card header, and both paginate at 50 entries per page with chevron controls at the bottom of the feed or table.
 
 ## Anomaly detection
 
@@ -110,53 +109,55 @@ In Stream view, Sencho annotates individual entries with lightweight anomaly fla
 
 | Flag | When it fires |
 |------|---------------|
-| **unusual hour** | The entry's hour sits outside the actor's typical activity window, computed from the central 90% of their last 7 days. Requires a baseline of at least 5 prior entries to avoid flagging new users. |
-| **new ip** | The IP address on this entry has not been seen for this actor in the last 30 days, and the actor already has prior history. |
+| **unusual hour** | The entry's hour sits outside the central 90% of the actor's typical activity window, computed from the last 7 days. Requires a baseline of at least 5 prior entries to avoid flagging new users. |
+| **new ip** | The IP address on this entry has not been seen for this actor in the last 30 days, and the actor already has at least one prior IP on record. |
 | **first seen** | The actor has no prior entries in the 30-day history window. Useful for spotting brand-new service accounts, CLI tools, or compromised sessions. |
 
 Flags are computed at read time against your existing audit history. No new tables, no per-entry storage overhead, and the logic is cache-friendly, so enabling Stream view does not slow down the audit log endpoint.
 
 ## Filtering and search
 
-The audit log provides several ways to find specific entries:
+Filters live in the **Table view only**. Switching to Stream hides the filter strip; the Stream feed always shows the most recent unfiltered entries grouped by day.
 
-- **Full-text search** - Search across action summaries, API paths, and usernames
-- **Method filter** - Filter by HTTP method (POST, PUT, DELETE, PATCH) using the dropdown
-- **Date range** - Set a start and/or end date to narrow results to a specific time window
+In Table view you can combine:
 
-All filters work together and are applied server-side with pagination.
+- **Full-text search** across action summaries, API paths, and usernames
+- **Method** filter (POST, PUT, DELETE, PATCH) via the dropdown
+- **Date range** with **From** and **To** pickers, narrowing results to a specific time window
+
+All filters AND together and are applied server-side with pagination.
 
 ## Export
 
-Export the currently filtered audit log dataset as **CSV** or **JSON** using the **Export** dropdown in the header. The export respects all active filters, so you can narrow down to a date range or specific user before exporting.
+Export the currently filtered audit log as **CSV** or **JSON** using the **Export** dropdown in the card header. The export respects every active filter, so you can narrow down to a date range or specific user before exporting.
 
-Exports are capped at 10,000 entries per download.
+Exports are capped at 10,000 entries per download. To export a larger window, narrow the date range and download in chunks.
 
 ## Auditor role
 
 The **Auditor** role provides read-only access to the audit log without granting any administrative privileges. Auditors can:
 
 - View the full audit log
-- Search and filter entries
+- Search and filter entries (Table view)
 - Export audit data as CSV or JSON
 - View stacks and nodes (read-only)
 
-Auditors **cannot** modify settings, manage users, deploy stacks, or perform any other administrative actions. This role is ideal for compliance officers, security reviewers, or team leads who need visibility into system activity without operational access.
+Auditors **cannot** modify settings, manage users, deploy stacks, or perform any other administrative action. The role is ideal for compliance officers, security reviewers, or team leads who need visibility into system activity without operational access.
 
-To create an Auditor user, go to **Settings > Users** and select the **Auditor** role when creating a new user.
+To create an Auditor user, go to **Settings · Users** and select the **Auditor** role when creating a new user.
 
 ## Configurable data retention
 
-Audit log entries are automatically cleaned up based on your configured retention period. The default is **90 days**.
+Audit log entries are automatically pruned based on your configured retention period. The default is **90 days**.
 
 To change the retention period:
 
-1. Go to **Settings > Developer > Data Retention**
-2. Set the **Audit Log Retention** value (1-365 days)
-3. Click **Save Developer Settings**
+1. Open **Settings · Developer**
+2. In the **Data retention** card, set the **Audit log** value (1 to 365 days)
+3. Click **Save settings**
 
 <Frame>
-  <img src="/images/audit-log/data-retention.png" alt="Data Retention settings showing Audit Log Retention set to 90 days" />
+  <img src="/images/audit-log/data-retention.png" alt="Data retention card with three rows: Container metrics 24 hrs, Notification log 30 days, and Audit log 90 days." />
 </Frame>
 
 Cleanup runs automatically as part of Sencho's periodic maintenance cycle.
@@ -164,3 +165,23 @@ Cleanup runs automatically as part of Sencho's periodic maintenance cycle.
 ## Security at rest
 
 Sensitive database values (such as remote node API tokens) are encrypted at rest. The encryption key is stored separately from the database, ensuring that database file exposure alone does not compromise secrets.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The Audit tab is missing from the sidebar">
+    The tab is visible only on **Admiral**, and only to users whose role grants the `system:audit` permission. By default that means **Admin** or **Auditor**. If your license is Community or Skipper, the tab is gated by the audit-log capability and will not render. If you are signed in as a Deployer or Viewer on an Admiral instance, ask an admin to assign you the Auditor role from **Settings · Users**.
+  </Accordion>
+  <Accordion title="Stream view shows everything but I want to filter to a specific user, action, or date">
+    Filters live in **Table view only**. Toggle the segmented control in the card header from **Stream** to **Table** and the search box, method dropdown, and From / To date pickers will appear above the grid. Switching back to Stream clears the filter strip but does not remember the last filter.
+  </Accordion>
+  <Accordion title="An anomaly flag did not fire on a login I expected to be flagged">
+    The three flags have intentional baseline thresholds so they do not fire on incomplete data. **first seen** requires the actor to have zero entries in the prior 30 days; if you have any history at all, you will not be flagged again. **new ip** requires the actor to already have at least one stored IP in the prior 30 days; the very first IP for an actor is implicit in **first seen**, not surfaced as **new ip**. **unusual hour** requires at least 5 prior entries in the last 7 days to build a baseline; sparse actors will not flag at all until they have built up history.
+  </Accordion>
+  <Accordion title="Export came back smaller than the row count in the table">
+    Each export is capped at 10,000 entries. If your filter selects more than that, narrow the date range using the **From** and **To** pickers and download in chunks. The cap protects the API from generating very large CSVs in a single response; for full archives, schedule periodic exports from your own tooling.
+  </Accordion>
+  <Accordion title="Old entries vanished even though I never deleted anything">
+    Cleanup runs automatically against the **Audit log** retention value in **Settings · Developer · Data retention** (default 90 days). Entries older than the configured window are pruned on the next maintenance tick. Increase the value (up to 365 days) before the next cleanup runs to retain a longer history; the change applies forward only and cannot bring back already-pruned entries.
+  </Accordion>
+</AccordionGroup>

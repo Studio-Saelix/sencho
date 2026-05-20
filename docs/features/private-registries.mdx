@@ -1,100 +1,123 @@
 ---
 title: Private Registries
-description: Store credentials for private Docker registries so Sencho can automatically authenticate during deploy, pull, and image update checks.
+description: Store credentials for private Docker registries so Sencho can authenticate automatically during deploy, pull, and image-update checks.
 ---
 
 <Note>
-  Private Registry Management requires a Sencho **Admiral** license. Skipper and Community Edition do not include this feature.
+  Private Registries is an **Admiral** tier, admin-only feature. Credentials are managed centrally on the control instance and applied fleet-wide; the Registries section is hidden when you are viewing a remote node.
 </Note>
 
-Sencho can store credentials for your private Docker registries and inject them automatically whenever it runs `docker compose pull` or `docker compose up`. This means your stacks can reference private images without needing to manually `docker login` on the host.
+Sencho stores credentials for your private Docker registries and injects them automatically whenever it runs `docker compose pull` or `docker compose up`. Stacks can reference private images without anyone having to run `docker login` on the host.
+
+<Frame>
+  <img src="/images/private-registries/registries-overview.png" alt="Registries section in Settings showing one configured GHCR registry card with the global scope masthead stat" />
+</Frame>
 
 ## Supported registry types
 
 | Type | Description | Credentials |
 |------|-------------|-------------|
 | **Docker Hub** | Private Docker Hub organizations and repositories | Username + access token |
-| **GHCR** | GitHub Container Registry (`ghcr.io`) | GitHub username + personal access token (PAT) |
-| **AWS ECR** | Amazon Elastic Container Registry | AWS Access Key ID + Secret Access Key |
-| **Custom** | Any self-hosted Docker V2 registry | Username + password or token |
+| **GitHub Container Registry (GHCR)** | `ghcr.io` images for users and organizations | GitHub username + personal access token (PAT) |
+| **AWS Elastic Container Registry (ECR)** | Amazon ECR private registries | AWS Access Key ID + Secret Access Key (+ region) |
+| **Custom / Self-hosted** | Any Docker V2 compatible registry | Username + password or token |
+
+## Where to find it
+
+Open **Settings → System → Registries**. The section appears only on the control instance and only to admin operators on an Admiral tier license.
 
 ## Adding a registry
 
-1. Open **Settings Hub** and navigate to the **Registries** tab (visible to Admiral admins only).
-2. Click **Add Registry**.
-3. Select the registry type. When you switch types, the URL field auto-fills with the standard endpoint for Docker Hub and GHCR.
-4. Enter a descriptive name, the registry URL, and your credentials.
-5. For **ECR** registries, also provide the AWS region (e.g., `us-east-1`).
-6. Click **Test connection** to verify the credentials work before saving. Sencho talks to the registry's `/v2/` endpoint (or the AWS STS API for ECR) and reports success or the specific failure reason.
-7. Click **Add** to store the credentials.
+1. Click **Add registry**. The form expands inline above the registry list.
+2. Pick a **Registry Type**. The form rearranges to match: for ECR an **AWS Region** field appears and the credential fields are relabelled to **AWS Access Key ID** and **AWS Secret Access Key**; for GHCR the **Registry URL** is pre-filled with `ghcr.io`.
+3. Enter a descriptive **Name**.
+4. Enter the **Registry URL**. For Docker Hub the field is read-only and the canonical `https://index.docker.io/v1/` value is used automatically.
+5. Enter the credentials (username + secret, or AWS keys for ECR).
+6. For ECR, fill in the **AWS Region** (e.g., `us-east-1`).
+7. Click **Test connection** to probe the registry before saving. For Docker, GHCR, and self-hosted registries this hits the `/v2/` endpoint; for ECR it calls AWS STS `GetAuthorizationToken`.
+8. Click **Add** to store the credentials.
 
 <Frame>
-  <img src="/images/private-registries/registries-with-entry.png" alt="Private Registries management view in Settings Hub showing a configured Docker Hub registry" />
+  <img src="/images/private-registries/registries-empty.png" alt="Empty Registries section with the Add registry button and the 'No private registries configured' callout" />
 </Frame>
 
 <Frame>
-  <img src="/images/private-registries/registries-add-form.png" alt="Add Registry form with type selector, credentials, and URL fields" />
+  <img src="/images/private-registries/registries-add-form.png" alt="Add registry form expanded with Registry Type set to Docker Hub, the Registry URL field locked to the canonical value, and credential fields below" />
 </Frame>
 
 ## Managing registries
 
-Each configured registry appears as a card showing:
+Each saved registry renders as a card:
 
-- **Name** and **type badge** (e.g., Docker Hub, GHCR, AWS ECR, Custom)
-- **Registry URL** (monospaced)
-- **Username**
-- **Secret status** (whether a secret is stored)
-- **AWS Region**, if the registry is an ECR type
-- **Created date**
+<Frame>
+  <img src="/images/private-registries/registries-card-detail.png" alt="Registry card showing a GHCR entry with type badge, URL, username, Secret stored pill, created date, and Test connection, Edit, and Delete icon buttons" />
+</Frame>
 
-Each card has three action buttons:
+The card surfaces:
 
-- **Test connection** (checkmark icon) to verify credentials
-- **Edit** (pencil icon) to modify the registry name, URL, credentials, or type
-- **Delete** (trash icon) to remove the registry after confirmation
+- **Name** and **type badge** (`Docker Hub`, `GitHub (GHCR)`, `AWS ECR`, or `Custom`).
+- **Registry URL** in a monospaced font.
+- **Username**.
+- **Secret stored** (or **No secret**) with a status icon.
+- **Region**, when the registry is an ECR type.
+- **Created** date.
 
-When editing a registry, you can leave the secret field blank to keep the existing stored secret. Only fill it in if you want to replace it.
+Three icon actions sit on the right of the card:
+
+- **Test connection** (checkmark icon) re-runs the live probe against the saved credentials.
+- **Edit** (pencil icon) re-opens the form with the existing values. The **Secret / Token** field shows `(leave blank to keep current)` as its placeholder; type a new value only if you want to rotate the credential.
+- **Delete** (trash icon) opens a destructive confirmation dialog.
+
+<Frame>
+  <img src="/images/private-registries/registries-delete-confirm.png" alt="Delete registry confirmation dialog warning that stacks using images from this registry will fail to pull until credentials are re-added" />
+</Frame>
+
+Deleting a registry removes the credential record immediately. Any stack that references images from that registry will start failing its pull step on the next deploy until you add the registry back.
 
 ### Testing connectivity
 
-You can test credentials at two points:
+You can verify credentials at two points:
 
-- **Before saving**, using the **Test connection** button inside the add or edit form. This is useful for confirming a token or password works without committing it to storage first.
-- **After saving**, by clicking the checkmark icon on any registry card. This re-decrypts the stored secret and re-runs the same probe.
+- **Before saving**, from the **Test connection** button inside the add or edit form. The probe runs against the values currently in the form and never persists them, so you can confirm a token or password works before committing it.
+- **After saving**, from the **Test connection** icon on any registry card. Sencho decrypts the stored secret and re-runs the same probe.
 
-For standard registries, Sencho authenticates against `/v2/` using Basic auth and falls back to the registry's token endpoint if it receives a `401` with a `WWW-Authenticate` challenge. For ECR registries, the test verifies that the AWS credentials can successfully obtain an authorization token.
+For Docker Hub, GHCR, and self-hosted registries, the probe authenticates against `/v2/` with Basic auth and follows a token-endpoint redirect on a 401 `WWW-Authenticate` challenge. For ECR, the probe asks AWS for an authorization token and returns success once the call succeeds.
 
 ## How credentials are applied
 
 ### Deploy and pull operations
 
-When you deploy or update a stack, Sencho:
+For every deploy or update Sencho:
 
-1. Resolves credentials for all configured registries.
-2. For ECR registries, reuses a cached authorization token when one is still valid; otherwise fetches a fresh token from AWS. Cached tokens are refreshed a few minutes before AWS reports them as expired, so deploys never fail on a borderline token.
-3. Writes a temporary Docker config file with all registry auth entries.
-4. Sets the `DOCKER_CONFIG` environment variable so `docker compose` uses the temporary config.
+1. Resolves credentials for every configured registry.
+2. For ECR, reuses a cached authorization token when one is still valid; otherwise fetches a fresh one from AWS. Cached tokens are refreshed a few minutes before the AWS-reported expiry, so deploys do not fail on a borderline token.
+3. Writes a temporary Docker config file containing all the resolved auth entries.
+4. Sets the `DOCKER_CONFIG` environment variable so `docker compose` reads from the temporary config instead of the host's `~/.docker/config.json`.
 5. Runs the compose operation (pull and/or up).
-6. Cleans up the temporary config file immediately after.
+6. Deletes the temporary config immediately after the operation finishes.
 
-This approach ensures credentials are never persisted on disk beyond the duration of the operation.
+Credentials are never persisted to disk on the host beyond the duration of a single operation.
 
-If a stored secret cannot be decrypted at deploy time (for example, because the encryption key file was replaced), Sencho skips that one registry, records a warning in the deploy log stream prefixed with `[Sencho] Warning:`, and continues. This lets public-image deploys succeed even when one private registry is misconfigured, while making the failure visible so you can re-save the credentials.
+If a stored secret cannot be decrypted at deploy time (for example because the encryption key file was replaced), Sencho skips that one registry, writes a warning to the deploy log stream prefixed with `[Sencho] Warning:`, and continues. Public-image deploys still succeed when one private registry is misconfigured, and the failure is visible so the operator can re-save the credentials.
 
 ### Image update checks
 
-Sencho's background image update checker also uses stored registry credentials. When checking for newer image versions, it passes your credentials to the registry's authentication endpoint so it can compare local and remote digests for private images.
+The background image-update checker uses the same stored credentials. When it polls a registry to compare local and remote digests for a private image, it authenticates with the registry-specific credentials configured here.
 
 ## ECR setup
 
-AWS ECR uses short-lived authentication tokens (valid for 12 hours) derived from your IAM credentials. Sencho handles this automatically:
+AWS ECR uses short-lived authentication tokens (valid for 12 hours) derived from IAM credentials. Sencho handles the token lifecycle automatically:
 
-1. Store your **AWS Access Key ID** and **Secret Access Key** as the username and secret.
-2. Specify the **AWS Region** where your ECR registry lives.
-3. On every deploy or pull, Sencho reuses a cached authorization token when one is still valid, or calls the AWS `GetAuthorizationToken` API to obtain a fresh one.
+1. Store the **AWS Access Key ID** and **Secret Access Key** as the credential pair.
+2. Set the **AWS Region** where the registry lives.
+3. On every deploy or pull, Sencho reuses a cached authorization token while it is valid, or calls the AWS `GetAuthorizationToken` API to obtain a fresh one.
+
+<Frame>
+  <img src="/images/private-registries/registries-ecr-form.png" alt="Add registry form with type set to AWS Elastic Container Registry (ECR), showing the relabelled AWS Access Key ID and AWS Secret Access Key inputs and the AWS Region field" />
+</Frame>
 
 <Warning>
-  Use an IAM user or role with only the `ecr:GetAuthorizationToken` and `ecr:BatchGetImage` permissions. Avoid using root account credentials.
+  Use an IAM user or role limited to the ECR read permissions below. Do not paste root account credentials.
 </Warning>
 
 ### IAM policy example
@@ -121,49 +144,54 @@ AWS ECR uses short-lived authentication tokens (valid for 12 hours) derived from
 
 | Registry | URL to use |
 |----------|-----------|
-| Docker Hub | `https://index.docker.io/v1/` |
+| Docker Hub | `https://index.docker.io/v1/` (set automatically) |
 | GHCR | `ghcr.io` |
 | AWS ECR | `{account_id}.dkr.ecr.{region}.amazonaws.com` |
 | Self-hosted | Your registry hostname, e.g. `registry.example.com` |
 
 ## Security
 
-- **Encrypted storage** - Registry secrets are encrypted at rest, using the same encryption layer as remote node tokens and SSO secrets.
-- **No persistent Docker login** - Credentials are written to a temporary file for the duration of each operation and immediately deleted afterward.
-- **Secrets never exposed** - The API never returns decrypted secrets. The UI shows only whether a secret is stored.
-- **Audit trail** - Registry create, update, and delete operations are recorded in the [Audit Log](/features/audit-log).
-- **Admin-only access** - Only admin users with an Admiral license can manage registry credentials.
+- **Encrypted storage.** Registry secrets are encrypted at rest with the same encryption layer used for remote-node tokens and SSO secrets.
+- **No persistent Docker login.** Credentials are written to a temporary file for the duration of each compose operation and deleted afterward.
+- **Secrets never exposed.** The API never returns decrypted secrets. The UI shows only whether a secret is stored.
+- **Admin role required.** Registry management is restricted to admin operators, even on Admiral. Viewers and operators with non-admin roles cannot see the section.
+- **API tokens cannot manage registries.** Registry credentials can only be created, edited, or deleted from an admin browser session. Automation tokens are scoped away from this surface so a leaked CI key cannot rewrite pull credentials.
+- **Audit trail.** Registry create, update, and delete operations are recorded in the [Audit Log](/features/audit-log).
 
-## Multi-node behavior
+## Fleet-wide application
 
-Registry credentials are stored per Sencho instance. When managing remote nodes, each node runs its own Sencho instance with its own registry credentials. Configure private registries on each node that needs access to private images.
+Registry credentials live on the control instance and are applied to every node it manages. When the control deploys to a remote node, the resolved Docker config is injected through the same secure channel used for the deploy itself; remote nodes never store registry credentials locally, and the Registries section is hidden from their own Settings pane.
+
+That means you configure each private registry once on the control instance and every stack across the fleet picks up the credentials automatically.
 
 ## Troubleshooting
 
-### Pull fails with a 401 even though the credentials saved successfully
+<AccordionGroup>
+  <Accordion title="Pull fails with a 401 even though the credentials saved successfully">
+    The most common cause is a URL format mismatch. Use the values from the **Registry URL reference** table above. For Docker Hub the value is set automatically; for GHCR use `ghcr.io` exactly. If the URL is correct, open the registry, re-enter the secret, and click **Test connection** inside the form. Some providers rotate tokens silently, and the card view cannot tell you a stored token was revoked without an active probe.
+  </Accordion>
 
-The most common cause is a URL format mismatch. Use the forms in the **Registry URL reference** table above, and note that the URL is case-sensitive for most registries. For Docker Hub, any URL you enter is stored as the canonical `https://index.docker.io/v1/` because that is the key the Docker CLI expects.
+  <Accordion title="An ECR registry works for a while and then stops pulling">
+    AWS ECR authorization tokens are valid for 12 hours. Sencho caches the token in memory and refreshes it automatically a few minutes before the AWS-reported expiry, so no operator action is needed in steady state. If pulls still fail, confirm the IAM user still has `ecr:GetAuthorizationToken` and that the AWS Access Key ID has not been rotated. Click **Test connection** on the card to force a fresh token fetch.
+  </Accordion>
 
-If the URL is correct, re-open the registry, re-enter the secret, and click **Test connection** inside the form. Some providers rotate tokens silently, and the card view cannot tell you that the stored token was revoked without attempting a live probe.
+  <Accordion title='The deploy log shows `[Sencho] Warning: Registry "X" credentials unavailable`'>
+    Sencho could not decrypt the stored secret for that registry. The deploy continues without that registry's credentials, which is fine if the stack pulls only public images. To fix it, open the registry, re-enter the secret, and save. If the same warning appears for every registry at once, the encryption key file in your data directory has been replaced or lost and every stored secret needs to be re-entered.
+  </Accordion>
 
-### An ECR registry works for a while and then stops pulling
+  <Accordion title="Test connection says it failed but deploys still pull images successfully">
+    Some registries, notably certain self-hosted mirrors and proxy caches, restrict access to the `/v2/` discovery endpoint while still allowing pulls. Sencho uses `/v2/` as the probe target, so a failure there does not always indicate broken credentials. If your deploys succeed, the test result can be ignored. The probe is a best-effort check, not a save-time gate.
+  </Accordion>
 
-AWS ECR authorization tokens are valid for 12 hours. Sencho caches the token in memory and refreshes it automatically a few minutes before the AWS-reported expiry, so no action is needed on your part.
+  <Accordion title="The Registries section is not visible">
+    The section is shown only on the control instance, and only when the control's license is Admiral and the signed-in operator has the admin role. On a remote node viewed through the node switcher, the section is hidden by design; manage registries on the control instead. If a non-admin operator should be able to manage registries, change their role under **Settings → Identity → Users** first.
+  </Accordion>
 
-If pulls still fail, confirm the IAM user still has the `ecr:GetAuthorizationToken` permission and that the AWS Access Key ID has not been rotated. Click **Test connection** on the registry card to force a fresh token fetch.
+  <Accordion title="A node displays a 'Private Registries is not available on this node' lock card">
+    The selected node is on a Sencho version too old to surface this feature. Upgrade the node to a current Sencho release. Until then, credentials configured on the control still apply to that node's deploys through the injection path; only the management UI is hidden.
+  </Accordion>
 
-### The deploy log shows `[Sencho] Warning: Registry "X" credentials unavailable`
-
-Sencho could not decrypt the stored secret for that registry. The deploy continues without that registry's credentials, which is fine if the stack pulls only public images.
-
-To fix the registry, open it in the Registries tab, re-enter the secret, and save. If the same warning appears for every registry, the encryption key file at your data directory has been replaced or lost, and every stored secret needs to be re-entered.
-
-### Test connection says it failed, but deploys still pull images successfully
-
-Some registries (notably certain self-hosted mirrors and proxy caches) restrict access to the `/v2/` discovery endpoint while still allowing pulls. Sencho uses `/v2/` as the probe target, so a failure there does not always indicate broken credentials.
-
-If your deploys succeed, you can safely ignore the test result. The test is a best-effort check, not a gate on saving.
-
-### Credentials work on the local node but not on a remote node
-
-Registry credentials are stored per Sencho instance, not shared across nodes. Open the remote node from the node switcher and configure the same registry on that node's Registries tab.
+  <Accordion title="An API token cannot create or update registries">
+    Registry management is restricted to admin browser sessions; API tokens are not scoped for this surface. Use a signed-in browser for the create, edit, and delete flow and reserve API tokens for the operations they are designed for.
+  </Accordion>
+</AccordionGroup>
