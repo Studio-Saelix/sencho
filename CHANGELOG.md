@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.84.0](https://github.com/Studio-Saelix/sencho/compare/v0.83.1...v0.84.0) (2026-05-20)
+
+
+### Added
+
+* **pilot:** make Docker Compose the canonical pilot enrollment payload ([#1121](https://github.com/Studio-Saelix/sencho/issues/1121)) ([3ad6ea9](https://github.com/Studio-Saelix/sencho/commit/3ad6ea9c5dfc1ca48d734bd8ff53315c1aa6d2a7))
+
+
+### Fixed
+
+* **fleet:** rename Traffic tab label to Routing for consistency ([#1119](https://github.com/Studio-Saelix/sencho/issues/1119)) ([0117556](https://github.com/Studio-Saelix/sencho/commit/0117556beab91e0845e81da079f1e3009df2a8d4))
+
 ## [0.83.1](https://github.com/Studio-Saelix/sencho/compare/v0.83.0...v0.83.1) (2026-05-19)
 
 
