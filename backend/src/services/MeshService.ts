@@ -1428,11 +1428,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             const body = await res.json() as { services?: Array<{ service: string; ports: number[] }> };
             return body.services ?? [];
         } catch (err) {
-            // proxyFetch throws MeshError('push_failed') when getProxyTarget
-            // returns null (e.g. pilot tunnel offline). Treat the same as a
-            // non-OK response: empty list.
-            if (err instanceof MeshError && err.code === 'push_failed') {
-                console.warn(`[MeshService] inspectStackServices: no proxy target for node ${nodeId} (${sanitizeForLog(node.name)})`);
+            // proxyFetch throws MeshError('no_target') when getProxyTarget
+            // returns null (pilot tunnel offline, proxy bridge unreachable)
+            // and MeshError('push_failed') on a non-OK HTTP response. Treat
+            // both as a soft "no services to report" so the Routing tab does
+            // not surface a stack trace for a node that is simply offline.
+            if (err instanceof MeshError && (err.code === 'no_target' || err.code === 'push_failed')) {
+                console.warn(`[MeshService] inspectStackServices: unreachable node ${nodeId} (${sanitizeForLog(node.name)}): ${err.code}`);
                 return [];
             }
             console.error('[MeshService] inspectStackServices remote unreachable:', sanitizeForLog((err as Error).message));
