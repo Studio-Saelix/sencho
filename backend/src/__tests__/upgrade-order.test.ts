@@ -15,6 +15,7 @@ import crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 describe('WebSocket upgrade dispatch order', () => {
   let tmpDir: string;
@@ -287,16 +288,12 @@ describe('WebSocket upgrade dispatch order', () => {
     it('rejects a full-admin api_token with HTTP 403 when the receiver license is community (forwarded headers ignored on api_token path)', async () => {
       await setLicense('community', null);
       const { DatabaseService } = await import('../services/DatabaseService');
-      const rawToken = generateApiToken();
-      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
       const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
-      DatabaseService.getInstance().addApiToken({
-        token_hash: tokenHash,
-        name: `mesh-license-gate-${Date.now()}`,
+      const rawToken = createTestApiToken({
+        db: DatabaseService,
         scope: 'full-admin',
-        user_id: adminId,
-        created_at: Date.now(),
-        expires_at: null,
+        userId: adminId,
+        name: `mesh-license-gate-${Date.now()}`,
       });
       // Header is set but must be ignored: the full-admin api_token is a
       // local-entitlement credential, not a node_proxy forwarder.
