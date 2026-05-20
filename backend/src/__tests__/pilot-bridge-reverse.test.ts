@@ -212,4 +212,67 @@ describe('PilotTunnelBridge handles tcp_open_reverse (Phase B)', () => {
         bridge.close();
         vi.restoreAllMocks();
     });
+
+    it('buffers TcpData arriving during ensureBridge and flushes it on target open (reverse-relay early-data fix)', async () => {
+        const mockWs = makeMockTunnelWs();
+        const bridge = new PilotTunnelBridge(1, mockWs as unknown as WebSocket);
+        await bridge.start();
+
+        // Fake target stream: an EventEmitter with a write() method that
+        // captures bytes. We control when 'open' fires to widen the
+        // race window the fix guards.
+        const writes: Buffer[] = [];
+        const fakeTargetStream = new EventEmitter() as EventEmitter & {
+            write: (b: Buffer) => void;
+        };
+        fakeTargetStream.write = (b: Buffer) => { writes.push(b); };
+
+        const fakeTargetBridge = {
+            openTcpStream: vi.fn(() => fakeTargetStream),
+            getBufferedAmount: () => 0,
+        };
+
+        const { PilotTunnelManager } = await import('../services/PilotTunnelManager');
+        // Delay ensureBridge so a TcpData frame fired back-to-back with
+        // tcp_open_reverse lands while acceptReverseRelay is still
+        // waiting on the target bridge. Without the fix the bytes are
+        // dropped at the lookup-miss path in handleBinaryFrame.
+        vi.spyOn(PilotTunnelManager.getInstance(), 'ensureBridge')
+            .mockImplementation(() => new Promise((r) => setTimeout(() => r(fakeTargetBridge as never), 50)));
+
+        const { NodeRegistry } = await import('../services/NodeRegistry');
+        const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const remoteTargetNodeId = localNodeId + 99;
+
+        const s = AGENT_REVERSE_ID_BASE + 7;
+        mockWs.emit('message', encodeJsonFrame({
+            t: 'tcp_open_reverse', s,
+            targetNodeId: remoteTargetNodeId, stack: 'real', service: 'svc', port: 8080,
+        }), false);
+        // Immediately push the request bytes while ensureBridge is in flight.
+        mockWs.emit('message',
+            encodeBinaryFrame(BinaryFrameType.TcpData, s, Buffer.from('POST /hook HTTP/1.1\r\n\r\n')),
+            true);
+
+        // Wait for the relay to call openTcpStream on the fake bridge.
+        await waitFor(() => (fakeTargetBridge.openTcpStream.mock.calls.length > 0) ? true : undefined);
+        // Fire 'open' on the fake target so the relay flushes its pending buffer.
+        fakeTargetStream.emit('open');
+
+        const ack = await waitFor(() => findAck(mockWs, s));
+        expect(ack.ok).toBe(true);
+        // Buffered bytes were delivered exactly once, intact, in order.
+        const combined = Buffer.concat(writes).toString();
+        expect(combined).toBe('POST /hook HTTP/1.1\r\n\r\n');
+
+        // Subsequent post-open writes also flow.
+        mockWs.emit('message',
+            encodeBinaryFrame(BinaryFrameType.TcpData, s, Buffer.from('trailer')),
+            true);
+        await waitFor(() => (writes.length >= 2) ? true : undefined);
+        expect(Buffer.concat(writes).toString()).toBe('POST /hook HTTP/1.1\r\n\r\ntrailer');
+
+        bridge.close();
+        vi.restoreAllMocks();
+    });
 });
