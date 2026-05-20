@@ -102,7 +102,7 @@ When you submit the Add Node form with Mode set to Pilot Agent, the control inst
 3. Shows the compose file in an enrollment dialog with a 15-minute countdown.
 
 <Frame>
-  <img src="/images/pilot-agent/02-enrollment-dialog.png" alt="Enroll the pilot agent modal showing a Docker Compose file with SENCHO_MODE: pilot, SENCHO_PRIMARY_URL, and SENCHO_ENROLL_TOKEN baked in, an Expires 15m from now label, and a Copy button." />
+  <img src="/images/pilot-agent/02-enrollment-dialog.png" alt="Enroll the pilot agent modal with kicker 'NODES · PILOT ENROLLMENT'. Step 1 saves a Docker Compose file as 'compose.yaml' with the env block showing SENCHO_MODE: pilot, SENCHO_PRIMARY_URL: https://sencho.example.com, and SENCHO_ENROLL_TOKEN: <short-lived token>. Step 2 shows the 'docker compose -f compose.yaml up -d' command. Footer reads 'Expires 14m from now' alongside a 'Copy compose file' button." />
 </Frame>
 
 The enrollment token is one-time and short-lived by design. If a token is intercepted or leaked, the window of risk is small and the slot is consumed on first use.
