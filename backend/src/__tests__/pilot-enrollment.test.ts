@@ -134,6 +134,71 @@ describe('POST /api/nodes (pilot_agent mode)', () => {
   });
 });
 
+describe('SENCHO_PUBLIC_URL override in mintPilotEnrollment', () => {
+  const ORIGINAL = process.env.SENCHO_PUBLIC_URL;
+  afterAll(() => {
+    if (ORIGINAL === undefined) delete process.env.SENCHO_PUBLIC_URL;
+    else process.env.SENCHO_PUBLIC_URL = ORIGINAL;
+  });
+
+  it('bakes the env-var URL into composeYaml when set and valid', async () => {
+    process.env.SENCHO_PUBLIC_URL = 'https://sencho.example.com';
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-public-url-set', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    expect(parsed.services.agent.environment.SENCHO_PRIMARY_URL).toBe('https://sencho.example.com');
+  });
+
+  it('strips a trailing slash from the env-var URL', async () => {
+    process.env.SENCHO_PUBLIC_URL = 'https://sencho.example.com/';
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-public-url-trailing', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    expect(parsed.services.agent.environment.SENCHO_PRIMARY_URL).toBe('https://sencho.example.com');
+  });
+
+  it('falls back to request host when env var is unset', async () => {
+    delete process.env.SENCHO_PUBLIC_URL;
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-public-url-unset', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    // Supertest sends requests with host = `127.0.0.1:<ephemeral-port>`,
+    // so the fallback URL must reflect that, not the env-var override.
+    expect(parsed.services.agent.environment.SENCHO_PRIMARY_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+
+  it('falls back to request host when env var is malformed', async () => {
+    process.env.SENCHO_PUBLIC_URL = 'not a url';
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-public-url-bad', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    expect(parsed.services.agent.environment.SENCHO_PRIMARY_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+
+  it('rejects a loopback URL and falls back to the request host', async () => {
+    process.env.SENCHO_PUBLIC_URL = 'http://127.0.0.1:1852';
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-public-url-loopback', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    expect(parsed.services.agent.environment.SENCHO_PRIMARY_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+});
+
 describe('POST /api/nodes/:id/pilot/enroll', () => {
   it('regenerates the enrollment for an existing pilot node', async () => {
     const create = await request(app)

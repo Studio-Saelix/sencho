@@ -27,6 +27,18 @@ Deploying with Docker Compose also lets the primary trigger over-the-air updates
 
 Only outbound HTTPS from the remote to the primary is required. Nothing else is exposed.
 
+## Setting the primary's public URL
+
+The enrollment dialog bakes the primary's URL into the compose file under `SENCHO_PRIMARY_URL`. The primary infers that URL from the request the admin's browser sent, which works on a LAN but breaks when the pilot lives on a different network (a public cloud VPS, for example) and the admin happened to open the dialog at `http://127.0.0.1:1852` or a LAN address.
+
+Set `SENCHO_PUBLIC_URL` on the primary to lock in a publicly-routable URL:
+
+```bash
+-e SENCHO_PUBLIC_URL=https://sencho.example.com
+```
+
+Any HTTPS hostname reachable from the pilot works: a Cloudflare Tunnel, a reverse proxy, a port-forwarded home network with DDNS. The primary validates the value (must be `http(s)://`, no loopback) and falls back to the request host when unset.
+
 ## Enrollment walkthrough
 
 ### 1. Add the node on the primary

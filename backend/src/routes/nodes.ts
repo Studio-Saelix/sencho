@@ -22,6 +22,27 @@ import { getErrorMessage } from '../utils/errors';
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
 
+/**
+ * Pick the URL the pilot agent should dial. SENCHO_PUBLIC_URL wins when set
+ * and well-formed, because the request Host header is only reachable from
+ * the network the operator opened the dialog from. Pilots on a public cloud
+ * cannot dial a LAN or loopback address, so an explicit public URL is the
+ * only thing that lets the enrolled YAML work unmodified.
+ */
+function resolvePrimaryUrl(req: Request): string {
+  const override = process.env.SENCHO_PUBLIC_URL?.trim();
+  if (override) {
+    const check = isValidRemoteUrl(override);
+    if (check.valid) return override.replace(/\/$/, '');
+    console.warn(`[Enrollment] SENCHO_PUBLIC_URL is set but invalid (${check.reason}); falling back to request host.`);
+  }
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const protoHeader = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  const protocol = protoHeader || req.protocol || 'http';
+  const host = req.get('host') || 'localhost:1852';
+  return `${protocol}://${host}`;
+}
+
 function mintPilotEnrollment(nodeId: number, req: Request): { token: string; expiresAt: number; composeYaml: string } {
   const db = DatabaseService.getInstance();
   const jwtSecret = db.getGlobalSettings().auth_jwt_secret;
@@ -38,11 +59,7 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
   db.createPilotEnrollment(nodeId, tokenHash, expiresAt);
 
-  const forwardedProto = req.headers['x-forwarded-proto'];
-  const protoHeader = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
-  const protocol = protoHeader || req.protocol || 'http';
-  const host = req.get('host') || 'localhost:1852';
-  const primaryUrl = `${protocol}://${host}`;
+  const primaryUrl = resolvePrimaryUrl(req);
 
   // Top-level `name` plus `container_name` make the agent container's HOSTNAME
   // equal to `sencho-agent`, which is how SelfUpdateService locates its own
