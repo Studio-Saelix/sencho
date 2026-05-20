@@ -49,7 +49,7 @@ Conceptually, the agent reverses the usual client/server direction.
 3. For every request the control instance needs to make against that node (listing containers, deploying a stack, streaming logs, opening a console, forwarding mesh traffic), frames are multiplexed over that single connection.
 4. On the agent side, those frames are demultiplexed and replayed locally against the host's Docker socket and filesystem.
 
-Inside the control instance, the tunnel terminates at a **loopback bridge**: a tiny HTTP server on `127.0.0.1:<random-port>` per active tunnel. Every other Sencho feature (the existing HTTP proxy, WebSocket forwarder, mesh dialer, license-tier propagation) treats the bridge as just another remote URL. That is why a pilot-mode node behaves identically to a proxy-mode node from the operator's point of view. Once enrolled, it shows up in the same Nodes table, the same node switcher, the same dashboard.
+Inside the control instance, the tunnel terminates at a **loopback bridge**: a tiny HTTP server on `127.0.0.1:<random-port>` per active tunnel. Every other Sencho feature (the existing HTTP proxy, WebSocket forwarder, mesh dialer, license-tier propagation) treats the bridge as just another remote URL. Once enrolled, the pilot node shows up in the same Nodes table, the same node switcher, and the same dashboard as a proxy-mode node, with the same shipped capabilities except where pilot mode intentionally narrows the surface (see below).
 
 <Frame>
   <img src="/images/pilot-agent/03-nodes-table-tunnel.png" alt="Settings · System · Nodes table showing a Local row and a Pilot Agent row. The pilot row has Mode badge 'Pilot Agent', Endpoint 'tunnel (seen 45m ago)', and Status badge 'Online'." />
@@ -58,7 +58,7 @@ Inside the control instance, the tunnel terminates at a **loopback bridge**: a t
 What rides through the tunnel:
 
 - HTTP requests (every API call and stream).
-- WebSockets (live logs, host console, container exec, notifications).
+- WebSockets (live logs, container exec, notifications).
 - Sencho Mesh TCP streams (cross-node service-to-service traffic).
 
 What does NOT ride through the tunnel:
@@ -66,6 +66,13 @@ What does NOT ride through the tunnel:
 - Nothing inbound. The agent opens no listening port.
 - The agent serves no UI of its own. Operators always work from the control instance.
 - The agent's internal `/api/health` endpoint is reachable only from the tunnel's loopback bridge, not from outside the agent container.
+
+### Intentional non-parity with proxy mode
+
+Pilot mode narrows the operator surface in a couple of places where parity with proxy mode would be misleading:
+
+- **Host console is not available on pilot nodes.** A pilot agent runs as a container with no useful shell into the underlying host, so the in-app host console is disabled at the capability level. If you need a host shell on a remote, use proxy mode for that node, or SSH in directly.
+- **Self-update on pilot nodes recreates the agent container in place via the compose file the operator wrote during enrollment.** This is the same code path proxy-mode nodes use; it works as long as the host runs the compose file from the same directory across updates.
 
 ## Prerequisites
 
