@@ -254,23 +254,40 @@ describe('PilotTunnelBridge handles tcp_open_reverse (Phase B)', () => {
             encodeBinaryFrame(BinaryFrameType.TcpData, s, Buffer.from('POST /hook HTTP/1.1\r\n\r\n')),
             true);
 
-        // Wait for the relay to call openTcpStream on the fake bridge.
-        await waitFor(() => (fakeTargetBridge.openTcpStream.mock.calls.length > 0) ? true : undefined);
+        // Wait until acceptReverseRelay has actually swapped the reservation
+        // to kind:'reverse_relay' (and targetOpen is still false because the
+        // target hasn't emitted 'open'). Polling the bridge's stream state
+        // directly is more deterministic than polling openTcpStream.mock
+        // calls, since the state swap is synchronous after openTcpStream
+        // returns but the JS scheduler decides when the test sees it.
+        const bridgeStreams = (bridge as unknown as { streams: Map<number, { kind: string; targetOpen?: boolean }> }).streams;
+        await waitFor(() => {
+            const cur = bridgeStreams.get(s);
+            return (cur?.kind === 'reverse_relay' && cur.targetOpen === false) ? true : undefined;
+        });
+        // Second TcpData frame in the targetOpen===false window after the
+        // state swap. Without the reverse_relay branch's pendingData buffer,
+        // these bytes would be silently dropped.
+        mockWs.emit('message',
+            encodeBinaryFrame(BinaryFrameType.TcpData, s, Buffer.from('mid-window')),
+            true);
         // Fire 'open' on the fake target so the relay flushes its pending buffer.
         fakeTargetStream.emit('open');
 
         const ack = await waitFor(() => findAck(mockWs, s));
         expect(ack.ok).toBe(true);
-        // Buffered bytes were delivered exactly once, intact, in order.
+        // Both pre-openTcpStream and post-state-swap buffered bytes were
+        // flushed exactly once, intact, in order.
+        await waitFor(() => (Buffer.concat(writes).toString().includes('mid-window')) ? true : undefined);
         const combined = Buffer.concat(writes).toString();
-        expect(combined).toBe('POST /hook HTTP/1.1\r\n\r\n');
+        expect(combined).toBe('POST /hook HTTP/1.1\r\n\r\nmid-window');
 
         // Subsequent post-open writes also flow.
         mockWs.emit('message',
             encodeBinaryFrame(BinaryFrameType.TcpData, s, Buffer.from('trailer')),
             true);
-        await waitFor(() => (writes.length >= 2) ? true : undefined);
-        expect(Buffer.concat(writes).toString()).toBe('POST /hook HTTP/1.1\r\n\r\ntrailer');
+        await waitFor(() => (Buffer.concat(writes).toString().endsWith('trailer')) ? true : undefined);
+        expect(Buffer.concat(writes).toString()).toBe('POST /hook HTTP/1.1\r\n\r\nmid-windowtrailer');
 
         bridge.close();
         vi.restoreAllMocks();

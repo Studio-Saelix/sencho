@@ -362,8 +362,7 @@ describe('MeshService.disableForNode', () => {
             'cascadeRecomposeAcrossFleet',
         ).mockImplementation(() => { /* noop */ });
         const triggerSpy = vi.spyOn(svc, 'triggerRedeploy').mockImplementation(() => { /* noop */ });
-        vi.spyOn(svc as unknown as { removeStackOverride: (n: number, s: string) => Promise<void> }, 'removeStackOverride')
-            .mockResolvedValue(undefined);
+        const removeSpy = vi.spyOn(svc, 'removeOverrideFromNode').mockResolvedValue(undefined);
 
         await svc.disableForNode(localNodeId, 'tester');
 
@@ -383,6 +382,47 @@ describe('MeshService.disableForNode', () => {
         expect(triggerSpy).toHaveBeenCalledTimes(2);
         expect(triggerSpy).toHaveBeenCalledWith(localNodeId, 'alpha', 'tester');
         expect(triggerSpy).toHaveBeenCalledWith(localNodeId, 'beta', 'tester');
+        // disableForNode routes through removeOverrideFromNode (not the
+        // local-only removeStackOverride) so remote nodes also have their
+        // pushed override files deleted via DELETE /api/mesh/local-override.
+        expect(removeSpy).toHaveBeenCalledTimes(2);
+        expect(removeSpy).toHaveBeenCalledWith(localNodeId, 'alpha');
+        expect(removeSpy).toHaveBeenCalledWith(localNodeId, 'beta');
+
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('dispatches removeOverrideFromNode for each stack when the disabled node is remote', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-pilot-disable', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.setNodeMeshEnabled(remoteNodeId, true);
+        db.insertMeshStack(remoteNodeId, 'delta', 'setup');
+        db.insertMeshStack(remoteNodeId, 'epsilon', 'setup');
+
+        vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+        vi.spyOn(
+            svc as unknown as { cascadeRecomposeAcrossFleet: (n: number | undefined, s: string | undefined, a: string) => void },
+            'cascadeRecomposeAcrossFleet',
+        ).mockImplementation(() => { /* noop */ });
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation(() => { /* noop */ });
+        const removeSpy = vi.spyOn(svc, 'removeOverrideFromNode').mockResolvedValue(undefined);
+
+        await svc.disableForNode(remoteNodeId, 'tester');
+
+        expect(db.getNodeMeshEnabled(remoteNodeId)).toBe(false);
+        // Remote-node disable must dispatch the remote-aware helper so the
+        // override file pushed earlier via applyLocalOverride is deleted
+        // on the peer via DELETE /api/mesh/local-override/:stack.
+        expect(removeSpy).toHaveBeenCalledTimes(2);
+        expect(removeSpy).toHaveBeenCalledWith(remoteNodeId, 'delta');
+        expect(removeSpy).toHaveBeenCalledWith(remoteNodeId, 'epsilon');
 
         db.deleteNode(remoteNodeId);
     });
@@ -401,8 +441,7 @@ describe('MeshService.disableForNode', () => {
             'cascadeRecomposeAcrossFleet',
         ).mockImplementation(() => { /* noop */ });
         const triggerSpy = vi.spyOn(svc, 'triggerRedeploy').mockImplementation(() => { /* noop */ });
-        vi.spyOn(svc as unknown as { removeStackOverride: (n: number, s: string) => Promise<void> }, 'removeStackOverride')
-            .mockResolvedValue(undefined);
+        vi.spyOn(svc, 'removeOverrideFromNode').mockResolvedValue(undefined);
 
         await svc.disableForNode(localNodeId);
 

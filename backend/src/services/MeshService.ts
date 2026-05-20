@@ -242,9 +242,8 @@ interface ActiveStreamRecord {
 
 /**
  * Sencho Mesh orchestrator. Owns:
- *   - in-process TCP forwarder (`MeshForwarder`) that binds host-network
- *     listeners on alias ports. Replaces the prior separate sidecar
- *     container; one container per node now.
+ *   - in-process TCP forwarder (`MeshForwarder`) that binds per-alias
+ *     listeners on Sencho's `sencho_mesh` bridge-network IP.
  *   - opt-in / opt-out persistence and cascading override regeneration
  *   - global alias aggregation (across the fleet via the existing HTTP
  *     proxy chain, see `inspectStackServices`)
@@ -258,8 +257,6 @@ interface ActiveStreamRecord {
  *     Docker bridge network. Meshed user services join `sencho_mesh` so
  *     that IP is reachable from inside their containers without any
  *     host-firewall coordination.
- *   - cross-node mesh routing is central → pilot in this phase. Pilot →
- *     central and pilot ↔ pilot via central relay land in Phase B.
  */
 export class MeshService extends EventEmitter implements MeshForwarderHost {
     private static instance: MeshService;
@@ -912,8 +909,18 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const stacks = DatabaseService.getInstance().listMeshStacks(nodeId);
         for (const s of stacks) {
             DatabaseService.getInstance().deleteMeshStack(nodeId, s.stack_name);
-            await this.removeStackOverride(nodeId, s.stack_name);
         }
+        // Dispatch DELETE /api/mesh/local-override/:stack for remote nodes
+        // (pilot or proxy) so the override file pushed earlier via
+        // applyLocalOverride is removed; falls back to local deletion for
+        // local nodes. Parallelize per the regenerateOverridesForNode
+        // rationale: each remote call is its own HTTP round-trip, so
+        // awaiting sequentially turns N stacks into N serialised DELETEs.
+        // `allSettled` so a single failure does not abort the others
+        // (removeOverrideFromNode already swallows errors internally).
+        await Promise.allSettled(
+            stacks.map((s) => this.removeOverrideFromNode(nodeId, s.stack_name)),
+        );
         await this.refreshAliasCache();
         await this.syncForwarderListeners();
         // Mirror optOutStack: regenerate every remaining node's override
@@ -1705,12 +1712,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
     /**
      * Same-node forward: dial the target container's bridge IP directly.
-     * Sencho runs in `network_mode: host` so it sees the docker bridge
-     * networks and can reach container IPs without going through any
-     * host-port publish. Looks up the container by Compose's
-     * `<project>-<service>-<index>` naming convention; falls back to a
-     * label-filtered listContainers if the conventional name is absent
-     * (e.g. when the operator overrode the project name).
+     * Sencho joins the `sencho_mesh` Docker bridge network alongside the
+     * meshed user containers, so it can reach their bridge IPs without
+     * going through any host-port publish. Looks up the container by
+     * Compose's `<project>-<service>-<index>` naming convention; falls
+     * back to a label-filtered listContainers if the conventional name
+     * is absent (e.g. when the operator overrode the project name).
      */
     private async openSameNode(target: MeshTarget, src: net.Socket): Promise<void> {
         const ip = await this.resolveContainerIp(target);
@@ -2259,13 +2266,6 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private isLocalForwarderActive(): boolean {
         return this.started && this.forwarder.getListenerPorts().length > 0;
     }
-
-    // mintSidecarToken / verifySidecarToken / spawnSidecar / stopSidecar /
-    // isSidecarRunning / handleSidecarResolve / sendSidecar /
-    // attachSidecarSocket are gone: the in-process MeshForwarder replaces
-    // the entire sidecar layer. Routing decisions happen via direct
-    // MeshService calls — no JWT minting, no separate container, no control
-    // WebSocket. See `docs/internal/architecture/mesh.md` for the new flow.
 }
 
 export type MeshErrorCode =

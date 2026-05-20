@@ -9,6 +9,8 @@ import { httpUrlToWs } from '../utils/wsUrl';
 import { isDebugEnabled } from '../utils/debug';
 import { PilotMetrics } from './PilotMetrics';
 import type { MeshActivityType } from './MeshService';
+import { LicenseService } from './LicenseService';
+import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 
 /**
  * Central-side dialer for proxy-mode mesh tunnels.
@@ -234,10 +236,23 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         // the peer falls back to its local DB default (always 1) and treats
         // cross-node aliases as same-node.
         const wsUrl = httpUrlToWs(target.apiUrl) + `/api/mesh/proxy-tunnel?nodeId=${nodeId}`;
+        // Forward central's tier and variant so the receiver enforces Admiral
+        // against the *central's* license (matching the HTTP mesh routes,
+        // which all gate on `requireAdmiral` against `req.proxyTier`). Without
+        // these the receiver falls back to its own local license, which would
+        // both reject Admiral centrals talking to Community remotes and let
+        // Community centrals dial locally-Admiral remotes. The headers are
+        // trusted on the receiver only when the WS carries a node_proxy /
+        // pilot_tunnel credential (see middleware/auth.ts:117-135).
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         let ws: WebSocket;
         try {
             ws = new WebSocket(wsUrl, {
-                headers: { Authorization: `Bearer ${target.apiToken}` },
+                headers: {
+                    Authorization: `Bearer ${target.apiToken}`,
+                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                    [PROXY_VARIANT_HEADER]: proxyHeaders.variant || '',
+                },
                 handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
                 maxPayload: MAX_FRAME_SIZE_BYTES,
             });
