@@ -3,8 +3,10 @@
  *
  * Covers:
  *   - POST /api/nodes with mode=pilot_agent mints an enrollment token, persists
- *     the SHA256 hash into pilot_enrollments, and returns a docker run command
- *     containing the bearer token.
+ *     the SHA256 hash into pilot_enrollments, and returns a Docker Compose
+ *     snippet containing the bearer token.
+ *   - The composeYaml parses as valid YAML and carries the structural pieces
+ *     SelfUpdateService needs to advertise self-update after the agent boots.
  *   - consumePilotEnrollment is one-shot: a second consume on the same hash
  *     returns null (replay protection).
  *   - Expired enrollments are not consumable.
@@ -14,7 +16,22 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import crypto from 'crypto';
+import { parse as parseYaml } from 'yaml';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+
+interface ComposeService {
+  image: string;
+  container_name: string;
+  restart: string;
+  volumes: string[];
+  environment: Record<string, string>;
+}
+
+interface ComposeFile {
+  name: string;
+  services: { agent: ComposeService };
+  volumes: Record<string, unknown>;
+}
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -31,7 +48,7 @@ beforeAll(async () => {
 afterAll(() => cleanupTestDb(tmpDir));
 
 describe('POST /api/nodes (pilot_agent mode)', () => {
-  it('mints an enrollment token and returns a docker run command', async () => {
+  it('mints an enrollment token and returns a compose file', async () => {
     const res = await request(app)
       .post('/api/nodes')
       .set('Cookie', adminCookie)
@@ -41,9 +58,11 @@ describe('POST /api/nodes (pilot_agent mode)', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.enrollment).toBeDefined();
     expect(res.body.enrollment.token).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
-    expect(res.body.enrollment.dockerRun).toContain('SENCHO_MODE=pilot');
-    expect(res.body.enrollment.dockerRun).toContain(`SENCHO_ENROLL_TOKEN=${res.body.enrollment.token}`);
+    expect(typeof res.body.enrollment.composeYaml).toBe('string');
+    expect(res.body.enrollment.composeYaml).toContain('SENCHO_MODE: pilot');
+    expect(res.body.enrollment.composeYaml).toContain(`SENCHO_ENROLL_TOKEN: ${res.body.enrollment.token}`);
     expect(res.body.enrollment.expiresAt).toBeGreaterThan(Date.now());
+    expect(res.body.enrollment).not.toHaveProperty('dockerRun');
   });
 
   it('persists the token hash, not the raw token', async () => {
@@ -69,6 +88,49 @@ describe('POST /api/nodes (pilot_agent mode)', () => {
       .post('/api/nodes')
       .send({ name: 'pilot-anon', type: 'remote', mode: 'pilot_agent' });
     expect(res.status).toBe(401);
+  });
+
+  it('composeYaml parses cleanly and matches the structure SelfUpdateService expects', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-yaml', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+
+    expect(parsed.name).toBe('sencho-agent');
+    expect(parsed.services.agent.container_name).toBe('sencho-agent');
+    expect(parsed.services.agent.image).toBe('saelix/sencho:latest');
+    expect(parsed.services.agent.restart).toBe('unless-stopped');
+  });
+
+  it('composeYaml carries the three required volume mounts', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-mounts', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    const volumes = parsed.services.agent.volumes;
+
+    expect(volumes).toContain('/var/run/docker.sock:/var/run/docker.sock');
+    expect(volumes).toContain('sencho-agent-data:/app/data');
+    expect(volumes).toContain('/opt/docker/sencho:/app/compose');
+    expect(parsed.volumes).toHaveProperty('sencho-agent-data');
+  });
+
+  it('composeYaml embeds the three pilot env vars with the enrollment token', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-env', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    const env = parsed.services.agent.environment;
+
+    expect(env.SENCHO_MODE).toBe('pilot');
+    expect(env.SENCHO_PRIMARY_URL).toMatch(/^https?:\/\//);
+    expect(env.SENCHO_ENROLL_TOKEN).toBe(res.body.enrollment.token);
   });
 });
 
