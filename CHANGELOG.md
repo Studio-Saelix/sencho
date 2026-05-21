@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.0](https://github.com/Studio-Saelix/sencho/compare/v0.84.3...v0.85.0) (2026-05-21)
+
+
+### Added
+
+* **api-tokens:** make API tokens available on every tier ([#1136](https://github.com/Studio-Saelix/sencho/issues/1136)) ([d0e1404](https://github.com/Studio-Saelix/sencho/commit/d0e140444af4702e2d9b0c28d7ff2f2da60121f5))
+* **fleet:** redesign Fleet Action cards to the System Sheet recipe ([#1137](https://github.com/Studio-Saelix/sencho/issues/1137)) ([6f301e0](https://github.com/Studio-Saelix/sencho/commit/6f301e005a8a82f00d38fa41c15749945a6754e7))
+* **routing:** redesign node cards to the System Sheet recipe ([#1133](https://github.com/Studio-Saelix/sencho/issues/1133)) ([cdb9cd4](https://github.com/Studio-Saelix/sencho/commit/cdb9cd414e60717f3a98a40c4ba3ca0d49798743))
+
 ## [0.84.3](https://github.com/Studio-Saelix/sencho/compare/v0.84.2...v0.84.3) (2026-05-21)
 
 
