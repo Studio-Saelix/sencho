@@ -195,9 +195,7 @@ export class SchedulerService {
             await this.maybeRedetectTrivy();
 
             const ls = LicenseService.getInstance();
-            const isPaid = ls.getTier() === 'paid';
-            const isAdmiral = isPaid && ls.getVariant() === 'admiral';
-            if (!isPaid) return;
+            if (ls.getTier() !== 'paid') return;
 
             const now = Date.now();
             const dueTasks = db.getDueScheduledTasks(now);
@@ -211,10 +209,6 @@ export class SchedulerService {
             db.deleteOldScans(90 * 24 * 60 * 60 * 1000);
 
             for (const task of dueTasks) {
-                if (!isAdmiral && task.action !== 'update' && task.action !== 'scan' && task.action !== 'snapshot') {
-                    if (isDebugEnabled()) console.log(`[SchedulerService] Task ${task.id} skipped: action "${task.action}" requires Admiral tier`);
-                    continue;
-                }
                 if (this.runningTasks.has(task.id)) {
                     if (isDebugEnabled()) console.log(`[SchedulerService] Task ${task.id} skipped: already running`);
                     continue;

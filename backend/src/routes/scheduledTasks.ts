@@ -1,9 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService, type ScheduledTask } from '../services/DatabaseService';
-import { LicenseService } from '../services/LicenseService';
 import { SchedulerService } from '../services/SchedulerService';
-import { requirePaid, requireAdmin, requireScheduledTaskTier, SKIPPER_SCHEDULED_ACTIONS } from '../middleware/tierGates';
+import { requirePaid, requireAdmin } from '../middleware/tierGates';
 import { escapeCsvField } from '../utils/csv';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
@@ -109,11 +108,6 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
   if (!requirePaid(req, res)) return;
   try {
     let tasks = DatabaseService.getInstance().getScheduledTasks();
-    // Skipper users see v1 fleet-maintenance tasks; Admiral sees all.
-    const ls = LicenseService.getInstance();
-    if (ls.getVariant() !== 'admiral') {
-      tasks = tasks.filter(t => SKIPPER_SCHEDULED_ACTIONS.has(t.action));
-    }
     // Split Auto-Update and Scheduled Operations into distinct views.
     const actionFilter = typeof req.query.action === 'string' ? req.query.action : undefined;
     const excludeAction = typeof req.query.exclude_action === 'string' ? req.query.exclude_action : undefined;
@@ -142,6 +136,7 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
 
 scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run } = req.body;
 
@@ -154,7 +149,6 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     if (!(VALID_ACTIONS as readonly string[]).includes(action)) {
       res.status(400).json({ error: 'Invalid action. Must be restart, snapshot, prune, update, scan, auto_backup, auto_stop, auto_down, or auto_start.' }); return;
     }
-    if (!requireScheduledTaskTier(action, req, res)) return;
 
     const targetErr = validateActionTarget(action, target_type);
     if (targetErr) { res.status(400).json({ error: targetErr }); return; }
@@ -222,7 +216,6 @@ scheduledTasksRouter.get('/:id', (req: Request, res: Response): void => {
     if (id === null) return;
     const task = DatabaseService.getInstance().getScheduledTask(id);
     if (!task) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireScheduledTaskTier(task.action, req, res)) return;
     res.json(task);
   } catch (error) {
     console.error('[ScheduledTasks] Get error:', error);
@@ -240,7 +233,6 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireScheduledTaskTier(existing.action, req, res)) return;
 
     const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run } = req.body;
 
@@ -322,7 +314,6 @@ scheduledTasksRouter.delete('/:id', (req: Request, res: Response): void => {
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireScheduledTaskTier(existing.action, req, res)) return;
 
     db.deleteScheduledTask(id);
     console.log(`[ScheduledTasks] Deleted task id=${id}`);
@@ -343,7 +334,6 @@ scheduledTasksRouter.patch('/:id/toggle', (req: Request, res: Response): void =>
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireScheduledTaskTier(existing.action, req, res)) return;
 
     const newEnabled = existing.enabled ? 0 : 1;
     const nextRun = newEnabled ? SchedulerService.getInstance().calculateNextRun(existing.cron_expression) : null;
@@ -373,7 +363,6 @@ scheduledTasksRouter.post('/:id/run', (req: Request, res: Response): void => {
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireScheduledTaskTier(existing.action, req, res)) return;
 
     const scheduler = SchedulerService.getInstance();
     if (scheduler.isTaskRunning(id)) {
@@ -404,7 +393,6 @@ scheduledTasksRouter.get('/:id/runs/export', (req: Request, res: Response): void
     const db = DatabaseService.getInstance();
     const task = db.getScheduledTask(id);
     if (!task) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireScheduledTaskTier(task.action, req, res)) return;
 
     const runs = db.getAllScheduledTaskRuns(id);
 
@@ -440,7 +428,6 @@ scheduledTasksRouter.get('/:id/runs', (req: Request, res: Response): void => {
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireScheduledTaskTier(existing.action, req, res)) return;
 
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100);
     const offset = Math.max(parseInt(req.query.offset as string, 10) || 0, 0);

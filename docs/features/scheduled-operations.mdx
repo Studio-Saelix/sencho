@@ -6,7 +6,7 @@ description: Automate stack lifecycle, image updates, vulnerability scans, fleet
 Schedules is a unified surface for every recurring maintenance operation Sencho knows how to run: stack restarts, per-node and fleet-wide image updates, lifecycle events (stop, take down, start, backup), system prunes, and vulnerability scans. The default view is a next-24-hour Timeline of upcoming runs across five lanes; an All tasks table view lists every schedule regardless of when it next fires.
 
 <Note>
-  Available to admins on Skipper and Admiral. Skipper unlocks **Auto-update Stack**, **Auto-update All Stacks**, **Vulnerability Scan**, and **Fleet Snapshot**. The remaining actions (Restart Stack, System Prune, Backup Stack Files, Stop / Take Down / Start Stack) require Admiral. The action picker hides operations your tier cannot run.
+  Available to admins on Skipper and Admiral.
 </Note>
 
 <Note>
@@ -56,22 +56,22 @@ The All tasks toggle swaps the lane track for a sortable table.
 
 ## Supported actions
 
-| Action | Tier | Target | What it does |
-|---|---|---|---|
-| **Restart Stack** | Admiral | A specific stack (optionally specific services) on a specific node | Restarts all or selected containers in the stack. |
-| **Auto-update Stack** | Skipper | A specific stack on a specific node | Checks each image in the stack for a newer tag and recreates the stack if any image has an update. See [Auto-Update Readiness](/features/auto-update-policies) for the companion review board. |
-| **Auto-update All Stacks** | Skipper | A specific node | Runs the auto-update check across every stack on the node that has auto-updates enabled. Stacks with auto-updates turned off are skipped. |
-| **Fleet Snapshot** | Skipper | The whole fleet | Creates a versioned, fleet-wide snapshot of every node's compose files and `.env` files. See [Fleet Backups](/features/fleet-backups). |
-| **System Prune** | Admiral | The selected node | Prunes containers, images, networks, and volumes (any subset), optionally filtered by a Docker label. |
-| **Vulnerability Scan** | Skipper | A specific node | Runs Trivy against every image on the node and persists the results. Requires Trivy to be installed on the target node ([Installing Trivy](/operations/trivy-setup)). |
-| **Backup Stack Files** | Admiral | A specific stack on a specific node | Copies the stack's compose file and `.env` to `<DATA_DIR>/backups/<stack>/`. One slot per stack; each run overwrites the previous backup. For a versioned archive use a Fleet Snapshot instead. |
-| **Stop Stack** | Admiral | A specific stack on a specific node | Runs `docker compose stop`. Containers are stopped but preserved. Use for off-hours power saving when you want a fast restart later. |
-| **Take Stack Down** | Admiral | A specific stack on a specific node | Runs `docker compose down`. Containers are removed. Use to fully release resources when the stack is not needed for an extended period. |
-| **Start Stack** | Admiral | A specific stack on a specific node | Runs `docker compose up -d`. Works for both stopped and removed containers: if they exist they are started, if not they are created from the compose file. |
+| Action | Target | What it does |
+|---|---|---|
+| **Restart Stack** | A specific stack (optionally specific services) on a specific node | Restarts all or selected containers in the stack. |
+| **Auto-update Stack** | A specific stack on a specific node | Checks each image in the stack for a newer tag and recreates the stack if any image has an update. See [Auto-Update Readiness](/features/auto-update-policies) for the companion review board. |
+| **Auto-update All Stacks** | A specific node | Runs the auto-update check across every stack on the node that has auto-updates enabled. Stacks with auto-updates turned off are skipped. |
+| **Fleet Snapshot** | The whole fleet | Creates a versioned, fleet-wide snapshot of every node's compose files and `.env` files. See [Fleet Backups](/features/fleet-backups). |
+| **System Prune** | The selected node | Prunes containers, images, networks, and volumes (any subset), optionally filtered by a Docker label. |
+| **Vulnerability Scan** | A specific node | Runs Trivy against every image on the node and persists the results. Requires Trivy to be installed on the target node ([Installing Trivy](/operations/trivy-setup)). |
+| **Backup Stack Files** | A specific stack on a specific node | Copies the stack's compose file and `.env` to `<DATA_DIR>/backups/<stack>/`. One slot per stack; each run overwrites the previous backup. For a versioned archive use a Fleet Snapshot instead. |
+| **Stop Stack** | A specific stack on a specific node | Runs `docker compose stop`. Containers are stopped but preserved. Use for off-hours power saving when you want a fast restart later. |
+| **Take Stack Down** | A specific stack on a specific node | Runs `docker compose down`. Containers are removed. Use to fully release resources when the stack is not needed for an extended period. |
+| **Start Stack** | A specific stack on a specific node | Runs `docker compose up -d`. Works for both stopped and removed containers: if they exist they are started, if not they are created from the compose file. |
 
 ## Creating a scheduled task
 
-Click **New Schedule** in the header. The form opens in a centered modal. The Action picker only shows operations your tier can run, so Skipper admins see four options and Admiral admins see all ten.
+Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation.
 
 <Frame>
   <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown lists Restart Stack, Auto-update Stack, Auto-update All Stacks, Fleet Snapshot, System Prune, and Vulnerability Scan as the first six entries. Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />

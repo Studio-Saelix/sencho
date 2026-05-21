@@ -14,13 +14,14 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 let adminCookie: string;
 let viewerCookie: string;
 let variantSpy: ReturnType<typeof vi.spyOn>;
+let tierSpy: ReturnType<typeof vi.spyOn>;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
   const { LicenseService } = await import('../services/LicenseService');
-  vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+  tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
   variantSpy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
   vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
@@ -90,7 +91,7 @@ describe('GET /api/scheduled-tasks', () => {
     expect(Array.isArray(res.body[0].next_runs)).toBe(true);
   });
 
-  it('shows scan and snapshot tasks to Skipper users', async () => {
+  it('shows every action to Skipper users', async () => {
     const db = DatabaseService.getInstance();
     const now = Date.now();
     db.createScheduledTask({
@@ -154,7 +155,7 @@ describe('GET /api/scheduled-tasks', () => {
 
     const res = await request(app).get('/api/scheduled-tasks').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
-    expect(res.body.map((t: { action: string }) => t.action).sort()).toEqual(['scan', 'snapshot']);
+    expect(res.body.map((t: { action: string }) => t.action).sort()).toEqual(['prune', 'scan', 'snapshot']);
   });
 });
 
@@ -441,16 +442,35 @@ describe('POST /api/scheduled-tasks - Skipper tier gating', () => {
     expect(res.body.action).toBe('snapshot');
   });
 
-  for (const action of ['restart', 'prune', 'auto_backup', 'auto_stop', 'auto_down', 'auto_start']) {
-    it(`rejects Skipper admins from creating ${action} tasks with 403`, async () => {
+  for (const action of ['restart', 'auto_backup', 'auto_stop', 'auto_down', 'auto_start']) {
+    it(`allows Skipper admins to create ${action} tasks`, async () => {
       const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
         name: `skipper-${action}`, target_type: 'stack', target_id: 'my-stack', node_id: 1,
         action, cron_expression: '0 3 * * *', enabled: true,
       });
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
+      expect(res.status).toBe(201);
+      expect(res.body.action).toBe(action);
     });
   }
+
+  it('allows Skipper admins to create prune tasks', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'skipper-prune', target_type: 'system', node_id: 1,
+      action: 'prune', cron_expression: '0 4 * * *', enabled: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.action).toBe('prune');
+  });
+
+  it('rejects Community admins from creating any scheduled task with 403', async () => {
+    tierSpy.mockReturnValueOnce('community');
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'community-update', target_type: 'stack', target_id: 'my-stack', node_id: 1,
+      action: 'update', cron_expression: '0 3 * * *', enabled: true,
+    });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
 });
 
 describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
