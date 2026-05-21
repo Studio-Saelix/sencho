@@ -4,7 +4,7 @@ description: Generate scoped API tokens for CI/CD pipelines, scripts, and automa
 ---
 
 <Note>
-  API Tokens require a Sencho **Admiral** license. Skipper and Community Edition do not include this feature.
+  API tokens are available on every Sencho tier. Each user can create up to 25 active tokens.
 </Note>
 
 API tokens let you authenticate external tools (CI/CD pipelines, deployment scripts, monitoring integrations) without sharing user credentials. Each token is scoped to a specific permission level so you can follow the principle of least privilege.
@@ -40,7 +40,7 @@ These restrictions ensure that API tokens cannot escalate privileges or modify t
 
 ## Creating a token
 
-1. Open **Settings Hub** and navigate to the **API Tokens** tab (visible to Admiral admins only).
+1. Open **Settings Hub** and navigate to the **API Tokens** tab (admin-only).
 2. Click **Create Token**.
 3. Fill in the creation form:
    - **Name**: A descriptive label (e.g., "GitHub Actions deploy")
@@ -49,7 +49,7 @@ These restrictions ensure that API tokens cannot escalate privileges or modify t
 4. Click **Create**. A green banner appears with the raw token value. Copy it immediately using the copy button.
 
 <Note>
-  Each user can have up to **25 active API tokens**. Token names must be unique among your active tokens. If you need to reuse a name, revoke the existing token first.
+  Token names must be unique among your active tokens. If you need to reuse a name, revoke the existing token first.
 </Note>
 
 <Frame>
