@@ -22,14 +22,17 @@ export function FleetActionsTab({ nodes }: Props) {
     return <EmptyState />;
   }
 
-  // Grid breakpoints per audit §18.7: 1 / 2 / 3 columns at 760 / 1280. The
-  // 4-column breakpoint is reserved for when a 4th card lands; v1 has three
-  // so it is intentionally omitted to avoid a hanging gap on wide displays.
+  // Grid: 1 col under lg, 2 cols at lg and above. auto-rows-fr distributes
+  // available height evenly across the auto-created rows, and each card uses
+  // `flex flex-col h-full` (in <FleetActionCard>) with a `flex-1` body so it
+  // fills its grid cell. Result: all three cards render at the same height,
+  // with shorter cards growing their body whitespace before the footer pins.
+  // Order: Prune top-left, Bulk top-right, Stop on row 2.
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-[18px] items-start auto-rows-min">
-      <LabelFleetStopCard nodes={nodes} />
-      <BulkLabelAssignCard nodes={nodes} />
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-[18px] auto-rows-fr">
       <FleetPruneCard nodes={nodes} />
+      <BulkLabelAssignCard nodes={nodes} />
+      <LabelFleetStopCard nodes={nodes} />
     </div>
   );
 }

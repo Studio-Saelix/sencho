@@ -12,6 +12,14 @@ export type FleetActionClass = 'destructive' | 'transformative' | 'maintenance';
 export type BlastRadiusTone = 'warning' | 'success' | 'muted';
 export type PrimaryActionVariant = 'primary' | 'destructive';
 
+/**
+ * System-Sheet recipe card for the Fleet Actions tab (audit §18, DESIGN §10).
+ *
+ * Layout note: the outer <Card> is `flex flex-col h-full` and the body slot
+ * is `flex-1`, so when a parent gives the card explicit height (e.g. the
+ * equalized-row wrapper in FleetActionsTab.tsx), the body grows and the
+ * footer pins to the bottom. In a content-sized parent this is a no-op.
+ */
 export interface FleetActionCardProps {
   /** Crumb segments. Last segment renders in --stat-title; the rest in --stat-subtitle with separators. */
   crumb: string[];
@@ -107,7 +115,7 @@ export function FleetActionCard(props: FleetActionCardProps) {
   const headCrumbs = crumb.slice(0, -1);
 
   return (
-    <Card className="relative overflow-hidden p-0">
+    <Card className="relative overflow-hidden p-0 flex flex-col h-full">
       <span
         aria-hidden="true"
         className="absolute inset-y-0 left-0 w-[3px] bg-brand"
@@ -166,7 +174,7 @@ export function FleetActionCard(props: FleetActionCardProps) {
         />
       </div>
 
-      <div className="px-6">
+      <div className="px-6 flex-1">
         {children}
       </div>
 
