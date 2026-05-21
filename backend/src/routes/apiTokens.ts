@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import crypto from 'crypto';
 import { DatabaseService, type ApiTokenScope } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { isDebugEnabled } from '../utils/debug';
 import { parseIntParam } from '../utils/parseIntParam';
@@ -17,7 +17,6 @@ export const apiTokensRouter = Router();
 apiTokensRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, API_TOKEN_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
   try {
     const { name, scope, expires_in } = req.body;
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -81,7 +80,6 @@ apiTokensRouter.post('/', authMiddleware, async (req: Request, res: Response): P
 apiTokensRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, API_TOKEN_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
   try {
     const user = DatabaseService.getInstance().getUserByUsername(req.user!.username);
     if (!user) { res.status(500).json({ error: 'User not found.' }); return; }
@@ -98,7 +96,6 @@ apiTokensRouter.get('/', authMiddleware, async (req: Request, res: Response): Pr
 apiTokensRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, API_TOKEN_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'token ID');
     if (id === null) return;

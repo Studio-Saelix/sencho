@@ -39,10 +39,10 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
-  // Mock LicenseService to return paid/admiral for Admiral-gated routes
+  // Suite runs at Community tier to prove token routes work without a paid license.
   const { LicenseService } = await import('../services/LicenseService');
-  vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
+  vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue(null);
   vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
@@ -270,6 +270,28 @@ describe('API token creation validation', () => {
         .set('Cookie', authCookie)
         .send({ name: `test-expiry-${days}-${Date.now()}`, scope: 'read-only', expires_in: days });
       expect(res.status).toBe(201);
+    }
+  });
+});
+
+// --- Tier Accessibility (Community) ---
+
+describe('API token tier accessibility', () => {
+  it('Community tier mints all three scopes via POST /api/api-tokens', async () => {
+    const db = DatabaseService.getInstance();
+    const user = db.getUserByUsername('testadmin')!;
+    // Reset to avoid hitting the 25-token cap from prior suites.
+    for (const t of db.getApiTokensByUser(user.id)) {
+      if (!t.revoked_at) db.revokeApiToken(t.id);
+    }
+
+    for (const scope of ['read-only', 'deploy-only', 'full-admin'] as const) {
+      const res = await request(app)
+        .post('/api/api-tokens')
+        .set('Cookie', authCookie)
+        .send({ name: `community-${scope}-${Date.now()}`, scope });
+      expect(res.status).toBe(201);
+      expect(res.body.token).toMatch(/^sen_sk_/);
     }
   });
 });

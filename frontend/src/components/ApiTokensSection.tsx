@@ -9,7 +9,6 @@ import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
-import { AdmiralGate } from './AdmiralGate';
 import { CapabilityGate } from './CapabilityGate';
 import { Zap, Plus, Copy, Trash2, CheckCircle, RefreshCw, Clock } from 'lucide-react';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
@@ -142,8 +141,7 @@ export function ApiTokensSection() {
     };
 
     return (
-        <AdmiralGate>
-          <CapabilityGate capability="api-tokens" featureName="API Tokens">
+        <CapabilityGate capability="api-tokens" featureName="API Tokens">
             <div className="space-y-6">
                 <div className="flex justify-end">
                     <SettingsPrimaryButton size="sm" onClick={() => setShowForm(!showForm)}>
@@ -291,7 +289,6 @@ export function ApiTokensSection() {
                     </p>
                 </ConfirmModal>
             </div>
-          </CapabilityGate>
-        </AdmiralGate>
+        </CapabilityGate>
     );
 }
