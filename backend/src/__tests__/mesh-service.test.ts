@@ -1303,6 +1303,77 @@ describe('MeshService.openCrossNode (BUG-4)', () => {
 
         expect(activeStreams.size).toBe(0);
     });
+
+    // Pins the ordering contract for protocols that send immediately after
+    // connect (HTTP, TLS, Redis, Postgres): src bytes arriving between
+    // dial and tcp_open_ack must reach the upstream in order, ahead of any
+    // post-ack writes. Without local buffering the first packet would race
+    // the ack on the wire and land on a stream the agent has not yet dialed.
+    it('buffers src bytes until tcpStream opens, then flushes them in order before any post-open writes', async () => {
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(60);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeEmittingSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        // Push data before the stream is open. Nothing should be written
+        // through to the tunnel.
+        fakeSrc.emit('data', Buffer.from('GET /healthz HTTP/1.1\r\n'));
+        fakeSrc.emit('data', Buffer.from('Host: echo.local\r\n\r\n'));
+        expect(fakeStream.write).not.toHaveBeenCalled();
+
+        // Open the stream. The pre-open buffer must flush in order, ahead
+        // of any post-open writes.
+        fakeStream.emit('open');
+
+        const writeCalls = (fakeStream.write as unknown as { mock: { calls: Buffer[][] } }).mock.calls;
+        expect(writeCalls.length).toBe(2);
+        expect(writeCalls[0][0].toString()).toBe('GET /healthz HTTP/1.1\r\n');
+        expect(writeCalls[1][0].toString()).toBe('Host: echo.local\r\n\r\n');
+
+        // Post-open data writes through directly (still in order).
+        fakeSrc.emit('data', Buffer.from('post-open'));
+        expect(writeCalls.length).toBe(3);
+        expect(writeCalls[2][0].toString()).toBe('post-open');
+
+        // Cleanup so the open-timer does not keep the worker alive.
+        fakeStream.emit('close');
+    });
+
+    it('tears down both sockets when buffered bytes exceed STREAM_PENDING_DATA_MAX_BYTES before open', async () => {
+        const { STREAM_PENDING_DATA_MAX_BYTES } = await import('../pilot/protocol');
+        const svc = MeshService.getInstance();
+        const target: MeshTarget = {
+            nodeId: 14, stack: 'audit-mesh-pilot', service: 'echo',
+            port: 9001, alias: 'echo.audit-mesh-pilot.sencho-pilot-test.sencho',
+        };
+        const fakeStream = makeFakeStream(61);
+        vi.spyOn(
+            svc as unknown as { dialMeshTcpStream: (t: MeshTarget) => MeshTcpStreamLike | null },
+            'dialMeshTcpStream',
+        ).mockReturnValue(fakeStream);
+
+        const fakeSrc = makeEmittingSocket();
+        await (svc as unknown as { openCrossNode: (t: MeshTarget, s: unknown) => Promise<void> })
+            .openCrossNode(target, fakeSrc);
+
+        // Overflow the per-stream cap in one shot. The handler must destroy
+        // both sockets and not call write on the stream.
+        fakeSrc.emit('data', Buffer.alloc(STREAM_PENDING_DATA_MAX_BYTES + 1));
+
+        expect(fakeStream.write).not.toHaveBeenCalled();
+        expect(fakeSrc.destroy).toHaveBeenCalled();
+        expect(fakeStream.destroy).toHaveBeenCalled();
+    });
 });
 
 describe('MeshService.openCrossNode without reverseDialer', () => {

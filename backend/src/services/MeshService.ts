@@ -15,6 +15,7 @@ import { PilotTunnelManager } from './PilotTunnelManager';
 import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDialer';
 import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
 import { lookupContainerIp } from '../mesh/containerLookup';
+import { STREAM_PENDING_DATA_MAX_BYTES } from '../pilot/protocol';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
@@ -1893,6 +1894,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const record = this.registerActiveStream(target.alias, tcpStream.streamId);
         const t0 = Date.now();
 
+        // Hold src bytes until tcp_open_ack arrives. Writing through to the
+        // tunnel before 'open' fires races the first packet ahead of the
+        // ack, which breaks protocols that send immediately after connect
+        // (HTTP, TLS, Redis, Postgres). Cap matches the bridge's reservation
+        // cap so a misbehaving source cannot exhaust gateway memory.
+        let tcpOpen = false;
+        const pending: Buffer[] = [];
+        let pendingBytes = 0;
+
         // Timer guards against the agent never returning a tcp_open_ack
         // (broken pilot, frame dropped, dial stuck after handshake).
         // Without this the stream sits forever and the operator sees
@@ -1929,6 +1939,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 message: `cross-node connect to ${target.alias}`,
             });
             this.routeLatencyMap.set(target.alias, Date.now() - t0);
+            // Flush any bytes that arrived before tcp_open_ack so the upstream
+            // sees them in order, ahead of anything that lands post-ack.
+            for (const buf of pending) {
+                try { tcpStream.write(buf); } catch { /* ignore */ }
+            }
+            pending.length = 0;
+            pendingBytes = 0;
+            tcpOpen = true;
         });
         tcpStream.on('data', (chunk: Buffer) => {
             record.bytesIn += chunk.length;
@@ -1949,7 +1967,17 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         });
         src.on('data', (chunk: Buffer) => {
             record.bytesOut += chunk.length;
-            tcpStream.write(chunk);
+            if (tcpOpen) {
+                tcpStream.write(chunk);
+                return;
+            }
+            if (pendingBytes + chunk.length > STREAM_PENDING_DATA_MAX_BYTES) {
+                try { src.destroy(); } catch { /* ignore */ }
+                try { tcpStream.destroy(); } catch { /* ignore */ }
+                return;
+            }
+            pending.push(Buffer.from(chunk));
+            pendingBytes += chunk.length;
         });
         src.on('end', () => tcpStream.end());
         src.on('close', () => { cleanupRecord(); try { tcpStream.destroy(); } catch { /* ignore */ } });
