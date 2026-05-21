@@ -59,15 +59,6 @@ export const requireNodeProxy = (req: Request, res: Response): boolean => {
   return true;
 };
 
-/** Scheduled task actions a Skipper-tier license may create and view. All other actions are Admiral-only. */
-export const SKIPPER_SCHEDULED_ACTIONS: ReadonlySet<string> = new Set(['update', 'scan', 'snapshot']);
-
-/** Tier gate for scheduled tasks: SKIPPER_SCHEDULED_ACTIONS require Skipper+, everything else requires Admiral. */
-export const requireScheduledTaskTier = (action: string, req: Request, res: Response): boolean => {
-  if (SKIPPER_SCHEDULED_ACTIONS.has(action)) return requirePaid(req, res);
-  return requireAdmiral(req, res);
-};
-
 /**
  * Tier gate for SSO providers. The split is by delivery (turnkey vs self-configured), not by
  * protocol: Custom OIDC stays free so self-hosters can wire any OIDC IdP (Authelia, Keycloak,

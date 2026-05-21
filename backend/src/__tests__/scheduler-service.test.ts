@@ -292,15 +292,17 @@ describe('SchedulerService - license gating', () => {
     expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
   });
 
-  it('skips non-update/scan/snapshot tasks for non-admiral pro', async () => {
+  it('executes restart tasks for non-admiral pro (Skipper)', async () => {
     mockGetTier.mockReturnValue('paid');
     mockGetVariant.mockReturnValue('individual');
     mockGetDueScheduledTasks.mockReturnValue([makeTask({ action: 'restart' })]);
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }]);
 
     const svc = SchedulerService.getInstance();
     await (svc as any).tick();
 
-    expect(mockCreateScheduledTaskRun).not.toHaveBeenCalled();
+    await new Promise(r => setTimeout(r, 50));
+    expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
   });
 
   it('allows snapshot tasks for non-admiral pro (Skipper)', async () => {
@@ -1525,7 +1527,7 @@ describe('SchedulerService - lifecycle actions', () => {
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
   });
 
-  it('non-admiral paid tier skips lifecycle actions', async () => {
+  it('non-admiral paid tier executes lifecycle actions', async () => {
     mockGetTier.mockReturnValue('paid');
     mockGetVariant.mockReturnValue('standard');
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop'));
@@ -1534,7 +1536,8 @@ describe('SchedulerService - lifecycle actions', () => {
     const svc = SchedulerService.getInstance();
     await (svc as any).tick();
 
-    expect(mockRunCommand).not.toHaveBeenCalled();
+    await new Promise(r => setTimeout(r, 50));
+    expect(mockRunCommand).toHaveBeenCalled();
   });
 });
 

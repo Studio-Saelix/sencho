@@ -13,21 +13,10 @@ import { Clock, Plus, Pencil, Trash2, History, RefreshCw, Play, ChevronLeft, Che
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { Combobox } from '@/components/ui/combobox';
-import { useLicense } from '@/context/LicenseContext';
 import type { ScheduledTask, TaskRun, NodeOption } from '@/types/scheduling';
 import { getCronDescription, formatTimestamp } from '@/lib/scheduling';
 
 const UPDATE_FLEET_ACTION = 'update-fleet' as const;
-
-// Mirrors backend `SKIPPER_SCHEDULED_ACTIONS` in tierGates.ts. Picker options
-// whose backend action falls outside this set are Admiral-only and hidden from
-// Skipper users so the Combobox never offers a choice the API will reject.
-const SKIPPER_BACKEND_ACTIONS: ReadonlySet<string> = new Set(['update', 'scan', 'snapshot']);
-
-function isActionAllowedForVariant(option: { value: string; backendAction?: string }, variant: string | null | undefined): boolean {
-  if (variant === 'admiral') return true;
-  return SKIPPER_BACKEND_ACTIONS.has(option.backendAction ?? option.value);
-}
 
 const ACTION_OPTIONS: Array<{
   value: string;
@@ -86,11 +75,6 @@ interface ScheduledOperationsViewProps {
 }
 
 export default function ScheduledOperationsView({ filterNodeId, onClearFilter, prefill, onPrefillConsumed }: ScheduledOperationsViewProps) {
-  const { license } = useLicense();
-  const visibleActionOptions = useMemo(
-    () => ACTION_OPTIONS.filter(o => isActionAllowedForVariant(o, license?.variant)),
-    [license?.variant]
-  );
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<'timeline' | 'table'>('timeline');
@@ -225,7 +209,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     const nodeId = prefillData?.nodeId ?? (filterNodeId != null ? String(filterNodeId) : '');
     setEditingTask(null);
     setFormName('');
-    setFormAction(visibleActionOptions[0]?.value ?? 'restart');
+    setFormAction(ACTION_OPTIONS[0]?.value ?? 'restart');
     setFormTargetId(prefillData?.stackName ?? '');
     setFormNodeId(nodeId);
     setFormCron('0 3 * * *');
@@ -692,7 +676,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
             <div className="space-y-2">
               <Label>Action</Label>
               <Combobox
-                options={visibleActionOptions.map(o => ({ value: o.value, label: o.label }))}
+                options={ACTION_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
                 value={formAction}
                 onValueChange={(val) => { setFormAction(val); setFormTargetId(''); setFormNodeId(''); setFormTargetServices([]); setFormPruneLabelFilter(''); }}
                 placeholder="Select action..."
