@@ -1,20 +1,23 @@
 /**
  * File explorer E2E tests.
  *
- * Two scenarios are covered:
+ * The file explorer is available on every Sencho tier; writes are gated on
+ * `stack:edit` permission (admin role), not on the license tier. Two scenarios
+ * are covered:
  *
- * 1. Community flow (read-only): the license endpoint is intercepted so the
- *    frontend believes the instance is community tier. Only viewing files is
- *    allowed; the upgrade pill is visible in the left pane and the Save button
- *    is absent from the editor toolbar.
+ * 1. Community admin (full read+write under a mocked community license): the
+ *    license endpoint is intercepted to force `tier: 'community'` on the
+ *    frontend, then the suite asserts that an admin still sees the Upload
+ *    affordance and the editor opens in write mode. This guards against
+ *    regressing to a tier-based gate.
  *
- * 2. Skipper+ flow (full CRUD): the real license state (paid) is used.
- *    Upload, edit-and-save, delete, and download are exercised end-to-end.
- *    These tests skip gracefully when the instance is community tier (CI).
+ * 2. Admin full CRUD (real license state): upload, edit-and-save, delete, and
+ *    download are exercised end-to-end. Runs on every tier because writes are
+ *    role-based, not tier-based.
  *
  * Fixture files (config/app.conf and assets/logo.png) are seeded once via
- * direct filesystem writes in a beforeAll hook so seeding works on any tier.
- * The entire test stack is torn down in afterAll.
+ * direct filesystem writes in a beforeAll hook. The entire test stack is torn
+ * down in afterAll.
  */
 import * as fs from 'node:fs/promises';
 import * as nodePath from 'node:path';
@@ -47,9 +50,9 @@ async function dismissUpgradeOverlays(page: Page): Promise<void> {
 
 /**
  * Click the test stack in the sidebar, then click the "files" button in the
- * anatomy panel header to enter the Files tab. This works regardless of the
- * current license tier because the Files panel itself is always rendered
- * (isPaid only gates edit/upload/delete within the panel).
+ * anatomy panel header to enter the Files tab. Writes inside the panel are
+ * gated on `canEdit` (the `stack:edit` RBAC permission); the panel itself
+ * always renders for any authenticated session.
  */
 async function openFilesTab(page: Page): Promise<void> {
   await waitForStacksLoaded(page);
@@ -169,10 +172,10 @@ async function mockCommunityLicense(context: BrowserContext): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Community flow (read-only)
+// Community admin (full read+write under a mocked community license)
 // ---------------------------------------------------------------------------
 
-test.describe('File explorer - community (read-only)', () => {
+test.describe('File explorer - community admin (full read+write)', () => {
   // Increase timeout: seeding + navigation add overhead
   test.setTimeout(60_000);
 
@@ -196,11 +199,11 @@ test.describe('File explorer - community (read-only)', () => {
     await context.unroute('/api/license');
   });
 
-  test('upload control is absent in community tier', async ({ page }) => {
-    await expect(page.getByLabel('Upload file')).toHaveCount(0, { timeout: 1_000 });
+  test('upload control is visible for a community admin', async ({ page }) => {
+    await expect(page.getByLabel('Upload file').first()).toBeVisible({ timeout: 5_000 });
   });
 
-  test('can expand config/ and click config/app.conf - Save button is absent', async ({ page }) => {
+  test('opening config/app.conf as a community admin shows Save (write mode)', async ({ page }) => {
     // The config/ directory should be visible in the tree
     const configNode = page.locator('span.font-mono').filter({ hasText: /^config$/ }).first();
     await expect(configNode).toBeVisible({ timeout: 8_000 });
@@ -213,39 +216,30 @@ test.describe('File explorer - community (read-only)', () => {
     await expect(appConfNode).toBeVisible({ timeout: 8_000 });
     await appConfNode.click();
 
-    // The editor header should show "Read-only" badge (isPaid is false)
-    await expect(page.getByText('Read-only')).toBeVisible({ timeout: 10_000 });
-
-    // The Save button must NOT be present in community mode
-    await expect(page.getByRole('button', { name: /^save$/i })).not.toBeVisible();
+    // Editor opens in write mode for any admin (stack:edit); the `Read-only`
+    // chip is reserved for viewer accounts and must not appear here.
+    await expect(page.getByRole('button', { name: /^save$/i })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Read-only')).toHaveCount(0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Skipper+ flow (full CRUD)
+// Admin full CRUD (real license state, runs on every tier)
 // ---------------------------------------------------------------------------
 
-test.describe('File explorer - skipper+ (full CRUD)', () => {
+test.describe('File explorer - admin (full CRUD)', () => {
   test.setTimeout(60_000);
 
   test.beforeAll(async ({ browser }) => { await seedSuite(browser); });
-  test.afterAll(async ({ browser }) => { await teardownSuite(browser, 'skipper'); });
+  test.afterAll(async ({ browser }) => { await teardownSuite(browser, 'admin'); });
 
   test.beforeEach(async ({ page }) => {
     await loginAs(page);
-    // Skip when the instance is community tier: upload/edit/delete/download
-    // all require Skipper+ and would 403. Same pattern as auto-heal-policies.
-    const tier = await page.evaluate(async () => {
-      const res = await fetch('/api/license', { credentials: 'include' });
-      const json = await res.json() as { tier?: string };
-      return json.tier;
-    });
-    test.skip(tier !== 'paid', 'Skipper+ tier required; instance is community.');
     await openFilesTab(page);
   });
 
   test('upload a text file and verify it appears in the tree', async ({ page }) => {
-    // Guard: paid users see the upload dropzone, not the upgrade pill.
+    // Admins with stack:edit see the upload dropzone on every tier.
     await expect(
       page.locator('[role="button"]').filter({ hasText: /upload file/i }).first()
     ).toBeVisible({ timeout: 5_000 });
