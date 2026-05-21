@@ -29,6 +29,12 @@ export function isProxyExemptPath(path: string): boolean {
 // nodeId resolves to a remote node so a script/curl call cannot trick the
 // proxy into forwarding hub-only authority across a node boundary.
 //
+// Entries are stored with a trailing slash; the matcher accepts the exact
+// collection path (without the trailing slash) AND any sub-path under it,
+// so e.g. `/api/scheduled-tasks` and `/api/scheduled-tasks/42` both match.
+// A bare startsWith() would let the collection path silently fall through
+// and be forwarded by the remote proxy.
+//
 // Frontend nav surfaces are gated separately via `HUB_ONLY_VIEWS` in
 // useViewNavigationState.ts; this list is the backend defense-in-depth.
 //
@@ -44,6 +50,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
 export function isHubOnlyPath(path: string): boolean {
   for (const prefix of HUB_ONLY_PREFIXES) {
     if (path.startsWith(prefix)) return true;
+    if (path === prefix.slice(0, -1)) return true;
   }
   return false;
 }
