@@ -1,7 +1,6 @@
 import { useRef } from 'react';
 import { UploadCloud } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
-import { useLicense } from '@/context/LicenseContext';
 import { uploadStackFile } from '@/lib/stackFilesApi';
 
 const MAX_BYTES = 25 * 1024 * 1024; // 25 MB
@@ -19,10 +18,9 @@ export function FileUploadDropzone({
   canEdit,
   onUploaded,
 }: FileUploadDropzoneProps) {
-  const { isPaid } = useLicense();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  if (!isPaid || !canEdit) return null;
+  if (!canEdit) return null;
 
   const handleFile = async (file: File) => {
     if (file.size > MAX_BYTES) {

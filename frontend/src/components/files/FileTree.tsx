@@ -18,7 +18,6 @@ interface FileTreeProps {
   onNavigateToEnv?: () => void;
   // Context menu wiring
   canEdit?: boolean;
-  isPaid?: boolean;
   onContextMenuRename?: (relPath: string) => void;
   onContextMenuNewFile?: (dirRelPath: string) => void;
   onContextMenuNewFolder?: (dirRelPath: string) => void;
@@ -39,7 +38,6 @@ export function FileTree({
   onNavigateToCompose,
   onNavigateToEnv,
   canEdit = false,
-  isPaid = false,
   onContextMenuRename = () => undefined,
   onContextMenuNewFile = () => undefined,
   onContextMenuNewFolder = () => undefined,
@@ -173,7 +171,6 @@ export function FileTree({
                   }
                 }}
                 canEdit={canEdit}
-                isPaid={isPaid}
                 onContextMenuRename={onContextMenuRename}
                 onContextMenuNewFile={onContextMenuNewFile}
                 onContextMenuNewFolder={onContextMenuNewFolder}

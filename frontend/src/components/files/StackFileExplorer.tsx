@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { Trash2, FolderPlus, Download, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
-import { useLicense } from '@/context/LicenseContext';
 import { downloadStackFile, listStackDirectory } from '@/lib/stackFilesApi';
 import { FileTree } from './FileTree';
 import { FileViewer } from './FileViewer';
@@ -29,7 +28,6 @@ export function StackFileExplorer({
   onNavigateToCompose,
   onNavigateToEnv,
 }: StackFileExplorerProps) {
-  const { isPaid } = useLicense();
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedEntry, setSelectedEntry] = useState<FileEntry | null>(null);
   const [currentDir, setCurrentDir] = useState('');
@@ -154,7 +152,7 @@ export function StackFileExplorer({
               onUploaded={refresh}
             />
           </div>
-          {isPaid && canEdit && (
+          {canEdit && (
             <Button
               variant="ghost"
               size="icon"
@@ -180,7 +178,6 @@ export function StackFileExplorer({
             onNavigateToCompose={onNavigateToCompose}
             onNavigateToEnv={onNavigateToEnv}
             canEdit={canEdit}
-            isPaid={isPaid}
             onContextMenuRename={handleContextMenuRename}
             onContextMenuNewFile={handleContextMenuNewFile}
             onContextMenuNewFolder={handleContextMenuNewFolder}
@@ -192,7 +189,7 @@ export function StackFileExplorer({
 
       {/* Right pane: action bar + viewer */}
       <div className="flex flex-col flex-1 min-h-0 min-w-0">
-        {selectedPath !== null && isPaid && (
+        {selectedPath !== null && (
           <div className="flex items-center justify-end gap-1 px-2 py-1 border-b border-glass-border shrink-0">
             <Button
               variant="ghost"
@@ -299,7 +296,6 @@ export function StackFileExplorer({
         stackName={stackName}
         relPath={permissionsRelPath}
         entryName={permissionsEntryName}
-        isPaid={isPaid}
         canEdit={canEdit}
       />
     </div>

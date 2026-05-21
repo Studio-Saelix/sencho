@@ -63,11 +63,6 @@ vi.mock('@/lib/monacoLanguages', () => ({
   extensionToLanguage: () => 'plaintext',
 }));
 
-const licenseState = { isPaid: true };
-vi.mock('@/context/LicenseContext', () => ({
-  useLicense: () => licenseState,
-}));
-
 import { readStackFile } from '@/lib/stackFilesApi';
 import { FileViewer } from '../FileViewer';
 
@@ -93,7 +88,6 @@ const defaultProps = {
 
 beforeEach(() => {
   mockReadFile.mockReset();
-  licenseState.isPaid = true;
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -150,7 +144,7 @@ describe('FileViewer', () => {
     expect(screen.queryByTestId('monaco-editor')).not.toBeInTheDocument();
   });
 
-  it('shows Download button when user has a paid tier', async () => {
+  it('shows the Download button for binary files', async () => {
     mockReadFile.mockResolvedValue(binaryResult());
 
     render(<FileViewer {...defaultProps} selectedPath="data.bin" />);
@@ -158,16 +152,6 @@ describe('FileViewer', () => {
     await screen.findByText(/binary file/i);
     const downloadBtn = screen.getByRole('button', { name: /download/i });
     expect(downloadBtn).not.toBeDisabled();
-  });
-
-  it('hides Download button for community tier', async () => {
-    licenseState.isPaid = false;
-    mockReadFile.mockResolvedValue(binaryResult());
-
-    render(<FileViewer {...defaultProps} selectedPath="data.bin" />);
-
-    await screen.findByText(/binary file/i);
-    expect(screen.queryByRole('button', { name: /download/i })).not.toBeInTheDocument();
   });
 
   it('re-fetches when selectedPath changes', async () => {

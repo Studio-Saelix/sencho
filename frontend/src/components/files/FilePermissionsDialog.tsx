@@ -49,7 +49,6 @@ interface FilePermissionsDialogProps {
   stackName: string;
   relPath: string;
   entryName: string;
-  isPaid: boolean;
   canEdit: boolean;
 }
 
@@ -59,7 +58,6 @@ export function FilePermissionsDialog({
   stackName,
   relPath,
   entryName,
-  isPaid,
   canEdit,
 }: FilePermissionsDialogProps) {
   const [mode, setMode] = useState<number>(0o644);
@@ -103,7 +101,7 @@ export function FilePermissionsDialog({
   };
 
   const octal = mode.toString(8).padStart(3, '0');
-  const canModify = isPaid && canEdit;
+  const canModify = canEdit;
 
   return (
     <Modal open={open} onOpenChange={handleClose} size="sm">

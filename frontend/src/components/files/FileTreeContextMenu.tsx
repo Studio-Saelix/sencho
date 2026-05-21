@@ -13,7 +13,6 @@ interface FileTreeContextMenuProps {
   entry: FileEntry;
   relPath: string;
   canEdit: boolean;
-  isPaid: boolean;
   onRequestRename: (relPath: string) => void;
   onRequestNewFile: (dirRelPath: string) => void;
   onRequestNewFolder: (dirRelPath: string) => void;
@@ -26,7 +25,6 @@ export function FileTreeContextMenu({
   entry,
   relPath,
   canEdit,
-  isPaid,
   onRequestRename,
   onRequestNewFile,
   onRequestNewFolder,
@@ -35,7 +33,7 @@ export function FileTreeContextMenu({
   children,
 }: FileTreeContextMenuProps) {
   const isDir = entry.type === 'directory';
-  const canWrite = canEdit && isPaid;
+  const canWrite = canEdit;
 
   return (
     <ContextMenu>

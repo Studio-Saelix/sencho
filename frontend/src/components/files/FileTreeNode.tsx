@@ -13,7 +13,6 @@ interface FileTreeNodeProps {
   onClick: () => void;
   // Context menu wiring
   canEdit: boolean;
-  isPaid: boolean;
   onContextMenuRename: (relPath: string) => void;
   onContextMenuNewFile: (dirRelPath: string) => void;
   onContextMenuNewFolder: (dirRelPath: string) => void;
@@ -30,7 +29,6 @@ export function FileTreeNode({
   isLoading,
   onClick,
   canEdit,
-  isPaid,
   onContextMenuRename,
   onContextMenuNewFile,
   onContextMenuNewFolder,
@@ -44,7 +42,6 @@ export function FileTreeNode({
       entry={entry}
       relPath={relPath}
       canEdit={canEdit}
-      isPaid={isPaid}
       onRequestRename={onContextMenuRename}
       onRequestNewFile={onContextMenuNewFile}
       onRequestNewFolder={onContextMenuNewFolder}

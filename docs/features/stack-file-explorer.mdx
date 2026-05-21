@@ -21,16 +21,7 @@ The file explorer gives you direct access to everything inside a stack's directo
 
 The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files tab in one click.
 
-## Tiers at a glance
-
-<CardGroup cols={2}>
-  <Card title="Community" icon="eye">
-    Browse the directory tree, view text files in read-only mode, and inspect file permissions.
-  </Card>
-  <Card title="Skipper" icon="pencil">
-    Full read and write: upload, download, edit and save, create files and folders, rename, change permissions, and delete. Admiral inherits the same access.
-  </Card>
-</CardGroup>
+The file explorer is available on every Sencho tier. Write actions (upload, download, edit, create, rename, change permissions, delete) require **stack edit** permission on your account. Viewer accounts can browse the tree, preview text files, and inspect permissions in read-only mode.
 
 ## Layout
 
@@ -68,14 +59,12 @@ When you click a text file, its contents appear in the editor on the right. The 
 | File type | Behaviour |
 |-----------|-----------|
 | Text file up to 2 MB | Rendered inline with syntax highlighting. |
-| Text file over 2 MB | Panel with the filename and size, plus a **Download** button on Skipper+. |
+| Text file over 2 MB | Panel with the filename, size, and a **Download** button. |
 | Binary file | Same panel layout, label is `Binary file`. |
 
-On Community, the panel for over-2-MB and binary files omits the Download button. To pull oversized or binary files from Community, use a host shell or `docker cp`.
+## Editing and saving
 
-## Editing and saving (Skipper+)
-
-When you have stack edit permission and a paid tier, the editor opens in write mode. The toolbar shows the filename and a **Save** button that activates as soon as there are unsaved changes.
+When you have stack edit permission, the editor opens in write mode. The toolbar shows the filename and a **Save** button that activates as soon as there are unsaved changes.
 
 When you do not, the toolbar shows a `Read-only` chip and the editor refuses input.
 
@@ -89,11 +78,11 @@ Click **Save** to write the file to disk. Navigating away from the file before s
   Editing a file does not restart any containers. If your stack reads the file at runtime (for example, a config file mounted as a volume), restart the relevant service after saving so the container picks up the new content.
 </Warning>
 
-## Creating files and folders (Skipper+)
+## Creating files and folders
 
-The toolbar **New folder** button at the top of the tree creates a folder in the currently selected directory (the parent of the file you have open, or the stack root if nothing is open). The button is hidden on Community.
+The toolbar **New folder** button at the top of the tree creates a folder in the currently selected directory (the parent of the file you have open, or the stack root if nothing is open).
 
-Right-click any folder for **New File** and **New Folder** entries that scope to the right-clicked folder. These write controls appear only when your account has stack edit permission and the active tier is Skipper or Admiral.
+Right-click any folder for **New File** and **New Folder** entries that scope to the right-clicked folder. These write controls appear only when your account has stack edit permission.
 
 <Frame>
   <img src="/images/stack-file-explorer/new-file-dialog.png" alt="New file modal scoped to the nginx folder, with the file name field populated and a Create button" />
@@ -101,7 +90,7 @@ Right-click any folder for **New File** and **New Folder** entries that scope to
 
 Filenames cannot be empty, cannot contain `/` or `\`, and cannot be `.` or `..`. The Create button stays disabled until the input passes validation.
 
-## Uploading files (Skipper+)
+## Uploading files
 
 The dashed **Upload file** affordance at the top of the tree opens a file picker. Uploads are one file at a time.
 
@@ -111,21 +100,21 @@ The dashed **Upload file** affordance at the top of the tree opens a file picker
 | Target directory | The currently selected directory, or the stack root if no file is open. |
 | Same-name files | Overwritten without prompt. |
 
-On Community, and for users without stack edit permission, the upload affordance is hidden entirely.
+The upload affordance is hidden for users without stack edit permission.
 
 <Tip>
   For bulk transfers or files above 25 MB, use `scp` or `rsync` from your workstation directly to the stack directory on the host.
 </Tip>
 
-## Downloading files (Skipper+)
+## Downloading files
 
-When a file is selected on Skipper+, the right pane action bar shows **Download**. Files stream straight to your browser. Files that exceed the inline preview limit also expose a Download button inside the oversized-file panel itself.
+When a file is selected, the right pane action bar shows **Download**. Files stream straight to your browser. Files that exceed the inline preview limit also expose a Download button inside the oversized-file panel itself.
 
-## Renaming (Skipper+)
+## Renaming
 
 Right-click any file or folder and choose **Rename**. The dialog accepts a new name following the same rules as creation.
 
-Rename appears only when your account has stack edit permission and the active tier is Skipper or Admiral. The rename is in-place; cross-directory moves are not supported. To move an entry between directories, copy it via the host shell or upload to the new location and delete the original.
+Rename appears only when your account has stack edit permission. The rename is in-place; cross-directory moves are not supported. To move an entry between directories, copy it via the host shell or upload to the new location and delete the original.
 
 ## Permissions (chmod)
 
@@ -135,15 +124,15 @@ Right-click any file and choose **Permissions** to inspect or edit its Unix mode
   <img src="/images/stack-file-explorer/permissions-dialog.png" alt="Permissions modal for a file showing the rwx grid for Owner, Group, and Other plus the octal value 644" />
 </Frame>
 
-On Community the dialog opens read-only: the toggles render the current state and the footer shows only **Close**. On Skipper+ the toggles are interactive and the footer adds **Save**.
+When your account has stack edit permission, the toggles are interactive and the footer adds **Save**. For viewer accounts the dialog opens read-only: the toggles render the current state and the footer shows only **Close**.
 
 <Note>
   Permissions are applied with `chmod`. Symlinks may not honour the change depending on the host kernel.
 </Note>
 
-## Deleting (Skipper+)
+## Deleting
 
-There are three delete entry points. All three require stack edit permission and a Skipper or Admiral tier, and all three open the same confirmation modal.
+There are three delete entry points. All three require stack edit permission, and all three open the same confirmation modal.
 
 - **Toolbar delete.** With a file open in the viewer, click **Delete** in the right-pane action bar.
 - **Context-menu delete.** Right-click any file or folder in the tree and choose **Delete**.
@@ -169,12 +158,12 @@ When the entry is one of the five protected names, the modal asks you to type th
   <img src="/images/stack-file-explorer/context-menu-file.png" alt="Right-click menu on a file showing Rename, Permissions, and Delete entries" />
 </Frame>
 
-| Right-click target | Skipper+ entries | Community admin entries |
+| Right-click target | Admin entries (with stack edit) | Viewer entries |
 |---|---|---|
 | Folder | New File, New Folder, Rename, Delete | No write entries |
-| File | Rename, Permissions, Delete | Permissions |
+| File | Rename, Permissions, Delete | Permissions (read-only) |
 
-On Community, write actions are hidden in the file explorer. The Permissions dialog opens for everyone, but only Skipper and Admiral users can save changes.
+The Permissions dialog opens for everyone; only users with stack edit permission can save changes.
 
 ## Troubleshooting
 
@@ -192,12 +181,12 @@ On Community, write actions are hidden in the file explorer. The Permissions dia
     The container caches the file at startup, or the mount is configured read-only inside the container. Restart the service after saving so the container picks up the new file.
   </Accordion>
   <Accordion title="Download button is missing">
-    You are on the Community tier. Downloads are a Skipper+ feature. To pull large or binary files from Community, use a host terminal or `docker cp`.
+    Confirm you are signed in to an account with **stack edit** permission. Viewer accounts can browse and preview but cannot download. To pull files from a viewer-only login, use a host terminal or `docker cp`.
   </Accordion>
   <Accordion title="The tree shows 'Showing 500 of N - refine in shell'">
     Each directory render is capped at 500 entries to keep the tree responsive. The first 500 entries alphabetically are shown. To work with the entries past the cap, drop into a host shell with `cd` into the stack directory.
   </Accordion>
   <Accordion title="Write controls are missing">
-    Upload, create, rename, chmod save, and delete require stack edit permission and a Skipper or Admiral tier. Community users can browse, preview text files, and inspect permissions in read-only mode.
+    Upload, create, rename, chmod save, and delete require **stack edit** permission. Viewer accounts can browse, preview text files, and inspect permissions in read-only mode.
   </Accordion>
 </AccordionGroup>
