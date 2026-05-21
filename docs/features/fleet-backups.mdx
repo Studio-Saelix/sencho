@@ -87,7 +87,7 @@ Admins can delete snapshots from the list view by clicking the trash icon on the
 ## Cloud Backup
 
 <Note>
-  Cloud Backup requires an Admiral license. Configure it in **Settings → System → Cloud Backup**.
+  Custom S3-compatible storage is available on every tier. Sencho Cloud Backup is an Admiral feature. Configure either in **Settings → System → Cloud Backup**.
 </Note>
 
 Cloud Backup mirrors every fleet snapshot to off-site storage so your snapshots survive local disk failure. The Cloud Backup settings page (reached via **Settings → System → Cloud Backup**) shows a header with your current scope, provider, storage used, and total snapshot count in the cloud. Two storage modes are supported.
@@ -146,7 +146,7 @@ For in-place rollback, use the **Restore** action on the snapshot detail view as
 | Delete cloud snapshot | Yes | No | No | No | No |
 
 <Note>
-  Cloud backup actions (upload, delete cloud snapshots) also require an Admiral license.
+  Cloud backup actions to Sencho Cloud Backup require an Admiral license. Cloud backup actions to a Custom S3-compatible target work on every tier.
 </Note>
 
 ## Storage

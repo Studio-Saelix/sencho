@@ -10,6 +10,22 @@ const SCOPE_MESSAGE = 'API tokens cannot manage cloud backup configuration.';
 const SECRET_REDACTED = '***';
 const VALID_PROVIDERS = new Set(['disabled', 'sencho', 'custom']);
 
+// Provider-aware tier gates. The managed Sencho Cloud Backup target requires
+// Admiral; the bring-your-own-bucket Custom S3 target is available on every
+// tier. These wrappers short-circuit to requireAdmiral only when the operation
+// actually touches the 'sencho' provider.
+
+function gateForCurrentProvider(req: Request, res: Response): boolean {
+    const provider = CloudBackupService.getInstance().getProvider();
+    if (provider === 'sencho') return requireAdmiral(req, res);
+    return true;
+}
+
+function gateForRequestedProvider(req: Request, res: Response, requested: string): boolean {
+    if (requested === 'sencho') return requireAdmiral(req, res);
+    return true;
+}
+
 function parseSnapshotIdParam(req: Request, res: Response): number | null {
     const raw = req.params.id as string | undefined;
     const parsed = parseInt(raw ?? '', 10);
@@ -43,7 +59,6 @@ export const cloudBackupRouter = Router();
 
 cloudBackupRouter.get('/config', (req: Request, res: Response): void => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
-    if (!requireAdmiral(req, res)) return;
     try {
         const db = DatabaseService.getInstance();
         const settings = db.getGlobalSettings();
@@ -72,7 +87,6 @@ cloudBackupRouter.get('/config', (req: Request, res: Response): void => {
 cloudBackupRouter.put('/config', (req: Request, res: Response): void => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
     if (!requireAdmin(req, res)) return;
-    if (!requireAdmiral(req, res)) return;
     try {
         const body = req.body ?? {};
         const provider = body.provider as string | undefined;
@@ -80,6 +94,7 @@ cloudBackupRouter.put('/config', (req: Request, res: Response): void => {
             res.status(400).json({ error: 'provider must be one of: disabled, sencho, custom' });
             return;
         }
+        if (!gateForRequestedProvider(req, res, provider)) return;
         const db = DatabaseService.getInstance();
         const crypto = CryptoService.getInstance();
         db.updateGlobalSetting('cloud_backup_provider', provider);
@@ -125,7 +140,7 @@ cloudBackupRouter.put('/config', (req: Request, res: Response): void => {
 cloudBackupRouter.post('/test', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
     if (!requireAdmin(req, res)) return;
-    if (!requireAdmiral(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
     try {
         const result = await CloudBackupService.getInstance().testConnection();
         res.json(result);
@@ -171,7 +186,7 @@ cloudBackupRouter.get('/usage', async (req: Request, res: Response): Promise<voi
 
 cloudBackupRouter.get('/snapshots', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
-    if (!requireAdmiral(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
     try {
         const entries = await CloudBackupService.getInstance().listCloudSnapshots();
         res.json(entries);
@@ -184,7 +199,7 @@ cloudBackupRouter.get('/snapshots', async (req: Request, res: Response): Promise
 cloudBackupRouter.post('/upload/:id', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
     if (!requireAdmin(req, res)) return;
-    if (!requireAdmiral(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
     const id = parseSnapshotIdParam(req, res);
     if (id == null) return;
     try {
@@ -203,7 +218,7 @@ cloudBackupRouter.post('/upload/:id', async (req: Request, res: Response): Promi
 
 cloudBackupRouter.get('/status/:id', (req: Request, res: Response): void => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
-    if (!requireAdmiral(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
     const id = parseSnapshotIdParam(req, res);
     if (id == null) return;
     res.json(CloudBackupService.getInstance().getUploadStatus(id));
@@ -211,7 +226,7 @@ cloudBackupRouter.get('/status/:id', (req: Request, res: Response): void => {
 
 cloudBackupRouter.get('/object/:keyB64/download', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
-    if (!requireAdmiral(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
     const objectKey = decodeObjectKey(req, res);
     if (!objectKey) return;
     try {
@@ -230,7 +245,7 @@ cloudBackupRouter.get('/object/:keyB64/download', async (req: Request, res: Resp
 cloudBackupRouter.delete('/object/:keyB64', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
     if (!requireAdmin(req, res)) return;
-    if (!requireAdmiral(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
     const objectKey = decodeObjectKey(req, res);
     if (!objectKey) return;
     try {

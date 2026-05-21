@@ -148,7 +148,7 @@ export function buildLocalConfigurationStatus(
     backup: {
       provider: cloudProvider,
       autoUpload: cloudAutoUpload,
-      locked: !isAdmiral,
+      locked: false,
       requiredTier: 'admiral',
     },
   };

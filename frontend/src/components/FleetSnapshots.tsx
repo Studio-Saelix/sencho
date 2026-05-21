@@ -17,7 +17,6 @@ import { ConfirmModal } from '@/components/ui/modal';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { toast } from '@/components/ui/toast-store';
 
 // --- Types ---
@@ -64,9 +63,8 @@ const PAGE_SIZE = 10;
 
 export default function FleetSnapshots() {
     const { isAdmin } = useAuth();
-    const { license, isPaid } = useLicense();
-    const isAdmiral = isPaid && license?.variant === 'admiral';
 
+    const [cloudEnabled, setCloudEnabled] = useState(false);
     const [snapshots, setSnapshots] = useState<FleetSnapshot[]>([]);
     const [loading, setLoading] = useState(true);
     const [creating, setCreating] = useState(false);
@@ -114,8 +112,19 @@ export default function FleetSnapshots() {
         fetchSnapshots();
     }, [fetchSnapshots]);
 
+    const fetchCloudConfig = useCallback(async () => {
+        try {
+            const res = await apiFetch('/cloud-backup/config', { localOnly: true });
+            if (!res.ok) return;
+            const data = await res.json() as { provider: 'disabled' | 'sencho' | 'custom' };
+            setCloudEnabled(data.provider !== 'disabled');
+        } catch {
+            // best-effort; cloud affordances stay hidden on failure
+        }
+    }, []);
+
     const fetchCloudSnapshots = useCallback(async () => {
-        if (!isAdmiral) return;
+        if (!cloudEnabled) return;
         try {
             const res = await apiFetch('/cloud-backup/snapshots', { localOnly: true });
             if (!res.ok) return;
@@ -124,7 +133,11 @@ export default function FleetSnapshots() {
         } catch {
             // best-effort; cloud indicators stay hidden on failure
         }
-    }, [isAdmiral]);
+    }, [cloudEnabled]);
+
+    useEffect(() => {
+        fetchCloudConfig();
+    }, [fetchCloudConfig]);
 
     useEffect(() => {
         fetchCloudSnapshots();
@@ -611,7 +624,7 @@ export default function FleetSnapshots() {
                                                     <Eye className="w-3.5 h-3.5 mr-1" strokeWidth={1.5} />
                                                     View
                                                 </Button>
-                                                {isAdmin && isAdmiral && !cloudSnapshotIds.has(snapshot.id) && (
+                                                {isAdmin && cloudEnabled && !cloudSnapshotIds.has(snapshot.id) && (
                                                     <Button
                                                         variant="ghost"
                                                         size="sm"
