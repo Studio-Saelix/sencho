@@ -9,7 +9,7 @@ import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
-import { AdmiralGate } from '@/components/AdmiralGate';
+import { useLicense } from '@/context/LicenseContext';
 import { Cloud, CloudOff, RefreshCw, CheckCircle2, Loader2, Trash2, Download, ChevronLeft, ChevronRight } from 'lucide-react';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
@@ -56,17 +56,23 @@ const EMPTY_CUSTOM: CustomConfig = {
     auto_upload: false,
 };
 
-const PROVIDER_OPTIONS = [
+const BASE_PROVIDER_OPTIONS = [
     { value: 'disabled', label: 'Disabled' },
-    { value: 'sencho', label: 'Sencho Cloud Backup (included)' },
     { value: 'custom', label: 'Custom S3 (BYOB)' },
 ];
+
+const SENCHO_PROVIDER_OPTION = { value: 'sencho', label: 'Sencho Cloud Backup (included)' };
 
 const PANEL_CLASS = 'rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 space-y-3';
 
 const PAGE_SIZE = 10;
 
 export function CloudBackupSection() {
+    const { license, isPaid } = useLicense();
+    const isAdmiral = isPaid && license?.variant === 'admiral';
+    const providerOptions = isAdmiral
+        ? [BASE_PROVIDER_OPTIONS[0], SENCHO_PROVIDER_OPTION, BASE_PROVIDER_OPTIONS[1]]
+        : BASE_PROVIDER_OPTIONS;
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [provider, setProvider] = useState<Provider>('disabled');
@@ -292,263 +298,261 @@ export function CloudBackupSection() {
     const usageColor = usagePercent >= 90 ? 'var(--destructive)' : usagePercent >= 80 ? 'var(--warning)' : 'var(--brand)';
 
     return (
-        <AdmiralGate>
-            <div className="space-y-6">
-                <div className={PANEL_CLASS}>
-                    <Label className="text-sm">Storage Mode</Label>
-                    <Combobox
-                        options={PROVIDER_OPTIONS}
-                        value={provider}
-                        onValueChange={handleProviderChange}
-                        disabled={saving}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                        Choose where fleet snapshots are replicated. Sencho Cloud Backup is included with the Admiral tier.
-                    </p>
-                </div>
+        <div className="space-y-6">
+            <div className={PANEL_CLASS}>
+                <Label className="text-sm">Storage Mode</Label>
+                <Combobox
+                    options={providerOptions}
+                    value={provider}
+                    onValueChange={handleProviderChange}
+                    disabled={saving}
+                />
+                <p className="text-xs text-muted-foreground">
+                    Choose where fleet snapshots are replicated.
+                </p>
+            </div>
 
-                {provider === 'sencho' && !senchoProvisioned && (
-                    <div className={PANEL_CLASS}>
+            {isAdmiral && provider === 'sencho' && !senchoProvisioned && (
+                <div className={PANEL_CLASS}>
+                    <div className="flex items-center gap-2">
+                        <Cloud className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
+                        <span className="font-medium text-sm">Activate Sencho Cloud Backup</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                        Activates a 500 MB allowance backed by Cloudflare R2, scoped to this Admiral license.
+                    </p>
+                    <SettingsPrimaryButton size="sm" onClick={handleProvision} disabled={provisioning}>
+                        {provisioning ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : <Cloud className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.5} />}
+                        Activate
+                    </SettingsPrimaryButton>
+                </div>
+            )}
+
+            {isAdmiral && provider === 'sencho' && senchoProvisioned && (
+                <div className={PANEL_CLASS}>
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                            <CheckCircle2 className="w-4 h-4 text-success" strokeWidth={1.5} />
+                            <span className="font-medium text-sm">Sencho Cloud Backup</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <Button size="sm" variant="outline" onClick={handleTest} disabled={testing}>
+                                {testing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
+                                Test
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={handleProvision} disabled={provisioning}>
+                                <RefreshCw className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.5} />
+                                Reprovision
+                            </Button>
+                        </div>
+                    </div>
+
+                    {usage && (
+                        <div className="rounded-lg border border-glass-border px-3 py-2.5 space-y-2">
+                            <div className="flex items-center justify-between text-sm">
+                                <span className="font-medium">Storage used</span>
+                                <span className="text-stat-subtitle font-mono text-xs">
+                                    {formatBytes(usage.used_bytes)} / {formatBytes(usage.quota_bytes)} ({usage.object_count} objects)
+                                </span>
+                            </div>
+                            <div className="h-1.5 rounded-full bg-muted/60 overflow-hidden">
+                                <div
+                                    className="h-full rounded-full transition-all duration-500"
+                                    style={{
+                                        width: `${usagePercent}%`,
+                                        backgroundColor: usageColor,
+                                        boxShadow: `0 0 8px ${usageColor}`,
+                                    }}
+                                />
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="flex items-start gap-2 rounded-lg border border-glass-border bg-muted/30 px-3 py-2.5">
+                        <Cloud className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} />
+                        <p className="text-xs text-muted-foreground">
+                            Auto-upload is on for Sencho Cloud Backup. Every fleet snapshot is replicated within seconds.
+                        </p>
+                    </div>
+                </div>
+            )}
+
+            {provider === 'custom' && (
+                <div className={PANEL_CLASS}>
+                    <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2">
                             <Cloud className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                            <span className="font-medium text-sm">Activate Sencho Cloud Backup</span>
+                            <span className="font-medium text-sm">Custom S3 Configuration</span>
                         </div>
-                        <p className="text-xs text-muted-foreground">
-                            Activates a 500 MB allowance backed by Cloudflare R2, scoped to this Admiral license.
-                        </p>
-                        <SettingsPrimaryButton size="sm" onClick={handleProvision} disabled={provisioning}>
-                            {provisioning ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : <Cloud className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.5} />}
-                            Activate
-                        </SettingsPrimaryButton>
+                        <div className="flex items-center gap-2">
+                            <Button size="sm" variant="outline" onClick={handleTest} disabled={testing || saving}>
+                                {testing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
+                                Test
+                            </Button>
+                            <SettingsPrimaryButton size="sm" onClick={handleSaveCustom} disabled={saving}>
+                                {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} /> : null}
+                                Save
+                            </SettingsPrimaryButton>
+                        </div>
                     </div>
-                )}
 
-                {provider === 'sencho' && senchoProvisioned && (
-                    <div className={PANEL_CLASS}>
-                        <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                                <CheckCircle2 className="w-4 h-4 text-success" strokeWidth={1.5} />
-                                <span className="font-medium text-sm">Sencho Cloud Backup</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <Button size="sm" variant="outline" onClick={handleTest} disabled={testing}>
-                                    {testing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
-                                    Test
-                                </Button>
-                                <Button size="sm" variant="ghost" onClick={handleProvision} disabled={provisioning}>
-                                    <RefreshCw className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.5} />
-                                    Reprovision
-                                </Button>
-                            </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                            <Label className="text-xs">Endpoint URL</Label>
+                            <Input
+                                placeholder="https://s3.us-east-1.amazonaws.com"
+                                value={custom.endpoint}
+                                onChange={e => setCustom({ ...custom, endpoint: e.target.value })}
+                            />
                         </div>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs">Region</Label>
+                            <Input
+                                placeholder="us-east-1"
+                                value={custom.region}
+                                onChange={e => setCustom({ ...custom, region: e.target.value })}
+                            />
+                        </div>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs">Bucket</Label>
+                            <Input
+                                placeholder="my-sencho-backups"
+                                value={custom.bucket}
+                                onChange={e => setCustom({ ...custom, bucket: e.target.value })}
+                            />
+                        </div>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs">Path Prefix</Label>
+                            <Input
+                                placeholder="sencho/"
+                                value={custom.path_prefix}
+                                onChange={e => setCustom({ ...custom, path_prefix: e.target.value })}
+                            />
+                        </div>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs">Access Key ID</Label>
+                            <Input
+                                placeholder="AKIA..."
+                                value={custom.access_key}
+                                onChange={e => setCustom({ ...custom, access_key: e.target.value })}
+                            />
+                        </div>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs">Secret Access Key</Label>
+                            <Input
+                                type="password"
+                                placeholder={originalSecretSaved && !custom.secret_key ? '•••• saved ••••' : ''}
+                                value={custom.secret_key}
+                                onChange={e => setCustom({ ...custom, secret_key: e.target.value })}
+                            />
+                        </div>
+                    </div>
 
-                        {usage && (
-                            <div className="rounded-lg border border-glass-border px-3 py-2.5 space-y-2">
-                                <div className="flex items-center justify-between text-sm">
-                                    <span className="font-medium">Storage used</span>
-                                    <span className="text-stat-subtitle font-mono text-xs">
-                                        {formatBytes(usage.used_bytes)} / {formatBytes(usage.quota_bytes)} ({usage.object_count} objects)
+                    <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
+                        <div>
+                            <Label className="text-sm">Auto-upload</Label>
+                            <p className="text-xs text-muted-foreground">Automatically upload every fleet snapshot to this bucket.</p>
+                        </div>
+                        <TogglePill checked={custom.auto_upload} onChange={handleAutoUploadToggle} />
+                    </div>
+                </div>
+            )}
+
+            {provider !== 'disabled' && (
+                <div className={PANEL_CLASS}>
+                    <div className="flex items-center justify-between">
+                        <span className="font-medium text-sm">Cloud Snapshots</span>
+                        <div className="flex items-center gap-1.5">
+                            {needsPagination && (
+                                <>
+                                    <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage === 0} onClick={() => setPage(safePage - 1)} aria-label="Previous page">
+                                        <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                    </Button>
+                                    <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
+                                        {safePage + 1} / {totalPages}
                                     </span>
-                                </div>
-                                <div className="h-1.5 rounded-full bg-muted/60 overflow-hidden">
-                                    <div
-                                        className="h-full rounded-full transition-all duration-500"
-                                        style={{
-                                            width: `${usagePercent}%`,
-                                            backgroundColor: usageColor,
-                                            boxShadow: `0 0 8px ${usageColor}`,
-                                        }}
-                                    />
-                                </div>
-                            </div>
-                        )}
-
-                        <div className="flex items-start gap-2 rounded-lg border border-glass-border bg-muted/30 px-3 py-2.5">
-                            <Cloud className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} />
-                            <p className="text-xs text-muted-foreground">
-                                Auto-upload is on for Sencho Cloud Backup. Every fleet snapshot is replicated within seconds.
-                            </p>
+                                    <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)} aria-label="Next page">
+                                        <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                    </Button>
+                                </>
+                            )}
+                            <Button size="sm" variant="ghost" onClick={loadSnapshots}>
+                                <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.5} />
+                            </Button>
                         </div>
                     </div>
-                )}
-
-                {provider === 'custom' && (
-                    <div className={PANEL_CLASS}>
-                        <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                                <Cloud className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                                <span className="font-medium text-sm">Custom S3 Configuration</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <Button size="sm" variant="outline" onClick={handleTest} disabled={testing || saving}>
-                                    {testing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
-                                    Test
-                                </Button>
-                                <SettingsPrimaryButton size="sm" onClick={handleSaveCustom} disabled={saving}>
-                                    {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} /> : null}
-                                    Save
-                                </SettingsPrimaryButton>
-                            </div>
+                    {snapshots.length === 0 ? (
+                        <div className="flex items-start gap-2 text-xs text-muted-foreground py-2">
+                            <CloudOff className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+                            No cloud snapshots yet. The next fleet snapshot will appear here.
                         </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div className="space-y-1.5">
-                                <Label className="text-xs">Endpoint URL</Label>
-                                <Input
-                                    placeholder="https://s3.us-east-1.amazonaws.com"
-                                    value={custom.endpoint}
-                                    onChange={e => setCustom({ ...custom, endpoint: e.target.value })}
-                                />
-                            </div>
-                            <div className="space-y-1.5">
-                                <Label className="text-xs">Region</Label>
-                                <Input
-                                    placeholder="us-east-1"
-                                    value={custom.region}
-                                    onChange={e => setCustom({ ...custom, region: e.target.value })}
-                                />
-                            </div>
-                            <div className="space-y-1.5">
-                                <Label className="text-xs">Bucket</Label>
-                                <Input
-                                    placeholder="my-sencho-backups"
-                                    value={custom.bucket}
-                                    onChange={e => setCustom({ ...custom, bucket: e.target.value })}
-                                />
-                            </div>
-                            <div className="space-y-1.5">
-                                <Label className="text-xs">Path Prefix</Label>
-                                <Input
-                                    placeholder="sencho/"
-                                    value={custom.path_prefix}
-                                    onChange={e => setCustom({ ...custom, path_prefix: e.target.value })}
-                                />
-                            </div>
-                            <div className="space-y-1.5">
-                                <Label className="text-xs">Access Key ID</Label>
-                                <Input
-                                    placeholder="AKIA..."
-                                    value={custom.access_key}
-                                    onChange={e => setCustom({ ...custom, access_key: e.target.value })}
-                                />
-                            </div>
-                            <div className="space-y-1.5">
-                                <Label className="text-xs">Secret Access Key</Label>
-                                <Input
-                                    type="password"
-                                    placeholder={originalSecretSaved && !custom.secret_key ? '•••• saved ••••' : ''}
-                                    value={custom.secret_key}
-                                    onChange={e => setCustom({ ...custom, secret_key: e.target.value })}
-                                />
-                            </div>
-                        </div>
-
-                        <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
-                            <div>
-                                <Label className="text-sm">Auto-upload</Label>
-                                <p className="text-xs text-muted-foreground">Automatically upload every fleet snapshot to this bucket.</p>
-                            </div>
-                            <TogglePill checked={custom.auto_upload} onChange={handleAutoUploadToggle} />
-                        </div>
-                    </div>
-                )}
-
-                {provider !== 'disabled' && (
-                    <div className={PANEL_CLASS}>
-                        <div className="flex items-center justify-between">
-                            <span className="font-medium text-sm">Cloud Snapshots</span>
-                            <div className="flex items-center gap-1.5">
-                                {needsPagination && (
-                                    <>
-                                        <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage === 0} onClick={() => setPage(safePage - 1)} aria-label="Previous page">
-                                            <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                        </Button>
-                                        <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
-                                            {safePage + 1} / {totalPages}
-                                        </span>
-                                        <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)} aria-label="Next page">
-                                            <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                        </Button>
-                                    </>
-                                )}
-                                <Button size="sm" variant="ghost" onClick={loadSnapshots}>
-                                    <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                </Button>
-                            </div>
-                        </div>
-                        {snapshots.length === 0 ? (
-                            <div className="flex items-start gap-2 text-xs text-muted-foreground py-2">
-                                <CloudOff className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
-                                No cloud snapshots yet. The next fleet snapshot will appear here.
-                            </div>
-                        ) : (
-                            <ul className="space-y-1.5">
-                                {pagedSnapshots.map(s => (
-                                    <li key={s.objectKey} className="flex items-center justify-between gap-2 rounded-md border border-glass-border px-3 py-2">
-                                        <div className="min-w-0 flex-1">
-                                            <div className="text-xs font-mono truncate">{s.objectKey.split('/').pop()}</div>
-                                            <div className="text-[10px] text-stat-subtitle font-mono">
-                                                {formatBytes(s.sizeBytes)} {s.lastModified ? `· ${new Date(s.lastModified).toLocaleString()}` : ''}
-                                            </div>
+                    ) : (
+                        <ul className="space-y-1.5">
+                            {pagedSnapshots.map(s => (
+                                <li key={s.objectKey} className="flex items-center justify-between gap-2 rounded-md border border-glass-border px-3 py-2">
+                                    <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-mono truncate">{s.objectKey.split('/').pop()}</div>
+                                        <div className="text-[10px] text-stat-subtitle font-mono">
+                                            {formatBytes(s.sizeBytes)} {s.lastModified ? `· ${new Date(s.lastModified).toLocaleString()}` : ''}
                                         </div>
-                                        <div className="flex items-center gap-1 shrink-0">
-                                            <Button
-                                                size="icon"
-                                                variant="ghost"
-                                                className="h-7 w-7"
-                                                onClick={async () => {
-                                                    const encoded = btoa(s.objectKey).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-                                                    try {
-                                                        const res = await apiFetch(`/cloud-backup/object/${encoded}/download`);
-                                                        if (!res.ok) {
-                                                            const err = await res.json().catch(() => ({}));
-                                                            throw new Error(err?.error || `Download failed (${res.status})`);
-                                                        }
-                                                        const blob = await res.blob();
-                                                        const link = document.createElement('a');
-                                                        link.href = URL.createObjectURL(blob);
-                                                        link.download = s.objectKey.split('/').pop() || 'snapshot.tar.gz';
-                                                        link.click();
-                                                        URL.revokeObjectURL(link.href);
-                                                    } catch (err) {
-                                                        toast.error((err as Error)?.message || 'Download failed.');
+                                    </div>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                        <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            className="h-7 w-7"
+                                            onClick={async () => {
+                                                const encoded = btoa(s.objectKey).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                                                try {
+                                                    const res = await apiFetch(`/cloud-backup/object/${encoded}/download`);
+                                                    if (!res.ok) {
+                                                        const err = await res.json().catch(() => ({}));
+                                                        throw new Error(err?.error || `Download failed (${res.status})`);
                                                     }
-                                                }}
-                                                title="Download"
-                                            >
-                                                <Download className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                            </Button>
-                                            <Button
-                                                size="icon"
-                                                variant="ghost"
-                                                className="h-7 w-7"
-                                                onClick={() => setDeleteKey(s.objectKey)}
-                                                title="Delete"
-                                            >
-                                                <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                            </Button>
-                                        </div>
-                                    </li>
-                                ))}
-                            </ul>
-                        )}
-                    </div>
-                )}
+                                                    const blob = await res.blob();
+                                                    const link = document.createElement('a');
+                                                    link.href = URL.createObjectURL(blob);
+                                                    link.download = s.objectKey.split('/').pop() || 'snapshot.tar.gz';
+                                                    link.click();
+                                                    URL.revokeObjectURL(link.href);
+                                                } catch (err) {
+                                                    toast.error((err as Error)?.message || 'Download failed.');
+                                                }
+                                            }}
+                                            title="Download"
+                                        >
+                                            <Download className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                        </Button>
+                                        <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            className="h-7 w-7"
+                                            onClick={() => setDeleteKey(s.objectKey)}
+                                            title="Delete"
+                                        >
+                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                        </Button>
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </div>
+            )}
 
-                <ConfirmModal
-                    open={!!deleteKey}
-                    onOpenChange={open => !open && setDeleteKey(null)}
-                    variant="destructive"
-                    kicker="CLOUD · DELETE · IRREVERSIBLE"
-                    title="Delete cloud snapshot"
-                    confirmLabel="Delete"
-                    onConfirm={confirmDelete}
-                >
-                    <p className="text-sm text-stat-subtitle">
-                        Permanently removes the archive from your bucket. The local SQLite copy is unaffected.
-                    </p>
-                </ConfirmModal>
-            </div>
-        </AdmiralGate>
+            <ConfirmModal
+                open={!!deleteKey}
+                onOpenChange={open => !open && setDeleteKey(null)}
+                variant="destructive"
+                kicker="CLOUD · DELETE · IRREVERSIBLE"
+                title="Delete cloud snapshot"
+                confirmLabel="Delete"
+                onConfirm={confirmDelete}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Permanently removes the archive from your bucket. The local SQLite copy is unaffected.
+                </p>
+            </ConfirmModal>
+        </div>
     );
 }

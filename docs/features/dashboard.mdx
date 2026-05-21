@@ -114,11 +114,11 @@ The Automation block only renders on Skipper or Admiral.
 
 | Row | What it shows |
 |-----|---------------|
-| **Cloud Backup** (Admiral) | The active cloud backup target: `Sencho Cloud`, `Custom S3` (with ` (auto)` appended when auto-upload is enabled), or `Disabled` |
+| **Cloud Backup** | The active cloud backup target: `Sencho Cloud` (Admiral only), `Custom S3` (with ` (auto)` appended when auto-upload is enabled), or `Disabled` |
 | **Alert thresholds** | The current host thresholds, formatted `CPU x% · RAM y% · Disk z%` |
 | **Crash detection** | `On` when global container-crash notifications are enabled, `Off` otherwise |
 
-Click any row to jump directly to the settings section that manages it. Rows that require a higher tier than the active license are not rendered at all; you do not see a locked placeholder. The section headers (Notifications, Automation, Security, Backups & Thresholds) only render when at least one of their rows is visible, so a Community node sees a tighter card with no Automation block and no Cloud Backup row.
+Click any row to jump directly to the settings section that manages it. Rows that require a higher tier than the active license are not rendered at all; you do not see a locked placeholder. The section headers (Notifications, Automation, Security, Backups & Thresholds) only render when at least one of their rows is visible.
 
 The data refreshes automatically every 60 seconds and immediately on any container start/stop/restart event broadcast over the live notification stream, so the card stays in lockstep with what the rest of the UI shows.
 

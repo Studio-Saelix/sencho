@@ -120,7 +120,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         label: 'Cloud Backup',
         description: 'Mirror fleet snapshots to Sencho Cloud Backup or any S3-compatible storage.',
         keywords: ['cloud', 'backup', 'snapshot', 's3', 'r2', 'minio', 'storage', 'offsite'],
-        tier: 'admiral',
+        tier: null,
         scope: 'global',
         adminOnly: true,
         hiddenOnRemote: true,

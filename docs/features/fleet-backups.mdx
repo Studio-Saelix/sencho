@@ -38,7 +38,7 @@ The snapshot list shows each snapshot in a table with the following columns:
 - **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Cloud Backup is configured, an upload icon in this column marks snapshots that have been mirrored off-site.
 - **Scope** - how many nodes and stacks were captured (e.g. "3 nodes, 21 stacks")
 - **Warnings** - a warning icon with a count if any nodes were skipped, or "None"
-- **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored (Admiral only), and a delete button for admins
+- **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored to a configured Cloud Backup target, and a delete button for admins
 
 <Frame>
   <img src="/images/fleet-backups/browse-snapshots.png" alt="Snapshot list showing paginated rows with date, description with cloud upload indicator, scope, warnings, and action buttons" />
@@ -87,7 +87,7 @@ Admins can delete snapshots from the list view by clicking the trash icon on the
 ## Cloud Backup
 
 <Note>
-  Cloud Backup requires an Admiral license. Configure it in **Settings → System → Cloud Backup**.
+  Custom S3-compatible storage is available on every tier. Sencho Cloud Backup is an Admiral feature. Configure either in **Settings → System → Cloud Backup**.
 </Note>
 
 Cloud Backup mirrors every fleet snapshot to off-site storage so your snapshots survive local disk failure. The Cloud Backup settings page (reached via **Settings → System → Cloud Backup**) shows a header with your current scope, provider, storage used, and total snapshot count in the cloud. Two storage modes are supported.
@@ -146,7 +146,7 @@ For in-place rollback, use the **Restore** action on the snapshot detail view as
 | Delete cloud snapshot | Yes | No | No | No | No |
 
 <Note>
-  Cloud backup actions (upload, delete cloud snapshots) also require an Admiral license.
+  Cloud backup actions to Sencho Cloud Backup require an Admiral license. Cloud backup actions to a Custom S3-compatible target work on every tier.
 </Note>
 
 ## Storage
