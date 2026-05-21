@@ -1,19 +1,16 @@
-import { useEffect, useState } from 'react';
-import type { LucideIcon } from 'lucide-react';
-import { Loader2, AlertTriangle } from 'lucide-react';
-import { Card, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
+import { FleetActionCard } from '@/components/ui/fleet-action-card';
+import { SheetSection } from '@/components/ui/system-sheet';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import type { FleetNode } from '@/components/FleetView/types';
 import type { Label } from '@/components/label-types';
 import { ResultsList, type ResultRow } from '../ResultsList';
-import { TONE_RAIL, TONE_BG, type AccentTone } from './tone';
 
-interface NodeStackResult { stackName: string; success: boolean; error?: string }
+interface NodeStackResult { stackName: string; success: boolean; error?: string; dryRun?: boolean }
 interface FleetStopNodeResult {
   nodeId: number;
   nodeName: string;
@@ -21,21 +18,31 @@ interface FleetStopNodeResult {
   stackResults: NodeStackResult[];
 }
 
+interface MatchPreviewNode { nodeId: number; nodeName: string; stackCount: number; stackNames: string[] }
+interface MatchPreviewResponse { matchedNodes: number; matchedStacks: number; perNode: MatchPreviewNode[] }
+
+type PreviewState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'unavailable' }
+  | { kind: 'ready'; data: MatchPreviewResponse };
+
 interface Props {
   nodes: FleetNode[];
-  icon: LucideIcon;
-  accentTone: AccentTone;
 }
 
-export function LabelFleetStopCard({ nodes, icon: Icon, accentTone }: Props) {
+const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
+const PREVIEW_ROW_LIMIT = 6;
+
+export function LabelFleetStopCard({ nodes }: Props) {
   const [labelName, setLabelName] = useState('');
   const [knownLabelNames, setKnownLabelNames] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
+  const [preview, setPreview] = useState<PreviewState>({ kind: 'idle' });
 
-  // Aggregate label names across reachable nodes for autocomplete. Offline
-  // nodes are skipped so the page-load fanout doesn't hang on dead remotes.
+  // Aggregate label names across reachable nodes for autocomplete.
   useEffect(() => {
     let cancelled = false;
     async function loadSuggestions() {
@@ -48,7 +55,7 @@ export function LabelFleetStopCard({ nodes, icon: Icon, accentTone }: Props) {
           const list = (await res.json()) as Label[];
           for (const l of list) names.add(l.name);
         } catch {
-          /* ignore — this node is unreachable, not user-facing */
+          /* unreachable node, not user-facing */
         }
       }));
       if (!cancelled) setKnownLabelNames(Array.from(names).sort());
@@ -57,16 +64,68 @@ export function LabelFleetStopCard({ nodes, icon: Icon, accentTone }: Props) {
     return () => { cancelled = true; };
   }, [nodes]);
 
-  async function run() {
+  // Debounced live preview. The blast-radius readout and the preview section
+  // both read from the same state.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const trimmed = labelName.trim();
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (trimmed.length === 0) {
+      setPreview({ kind: 'idle' });
+      return;
+    }
+    setPreview({ kind: 'loading' });
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const res = await apiFetch('/fleet/labels/match-preview', {
+          method: 'POST',
+          body: JSON.stringify({ labelName: trimmed }),
+        });
+        if (res.status === 404) {
+          setPreview({ kind: 'unavailable' });
+          return;
+        }
+        if (!res.ok) {
+          setPreview({ kind: 'unavailable' });
+          return;
+        }
+        const data = (await res.json()) as MatchPreviewResponse;
+        setPreview({ kind: 'ready', data });
+      } catch {
+        setPreview({ kind: 'unavailable' });
+      }
+    }, 500);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [labelName]);
+
+  const blastValue = useMemo(() => {
+    const trimmed = labelName.trim();
+    if (trimmed.length === 0) return 'awaiting target';
+    if (preview.kind === 'loading') return 'resolving…';
+    if (preview.kind === 'unavailable') return 'preview unavailable';
+    if (preview.kind === 'ready') {
+      const { matchedNodes, matchedStacks } = preview.data;
+      if (matchedStacks === 0 || matchedNodes === 0) return '0 nodes match';
+      return `${matchedStacks} stacks · ${matchedNodes} nodes`;
+    }
+    return 'awaiting target';
+  }, [labelName, preview]);
+
+  const blastTone = preview.kind === 'loading' || preview.kind === 'unavailable' ? 'muted' as const : undefined;
+
+  async function run(opts: { dryRun: boolean }) {
     const trimmed = labelName.trim();
     if (!trimmed) return;
-    const toastId = toast.loading(`Stopping stacks labeled "${trimmed}" across the fleet…`);
+    const verb = opts.dryRun ? 'Dry-running' : 'Stopping';
+    const toastId = toast.loading(`${verb} stacks labeled "${trimmed}" across the fleet…`);
     setRunning(true);
     setResults([]);
     try {
       const res = await apiFetch('/fleet/labels/fleet-stop', {
         method: 'POST',
-        body: JSON.stringify({ labelName: trimmed }),
+        body: JSON.stringify({ labelName: trimmed, dryRun: opts.dryRun }),
       });
       const body = await res.json().catch(() => ({}));
       toast.dismiss(toastId);
@@ -78,7 +137,7 @@ export function LabelFleetStopCard({ nodes, icon: Icon, accentTone }: Props) {
       const rows: ResultRow[] = apiResults.map((node) => ({
         key: `node-${node.nodeId}`,
         label: node.matched
-          ? `${node.nodeName} · ${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}`
+          ? `${node.nodeName} · ${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}${opts.dryRun ? ' (dry run)' : ''}`
           : `${node.nodeName} (no matching label)`,
         success: node.matched && node.stackResults.every(s => s.success),
         error: node.matched ? undefined : 'Label not present',
@@ -95,6 +154,7 @@ export function LabelFleetStopCard({ nodes, icon: Icon, accentTone }: Props) {
       const ok = stacksTouched.filter(s => s.success).length;
       const failed = stacksTouched.length - ok;
       if (matchedNodes === 0) toast.info('No nodes have a label by that name.');
+      else if (opts.dryRun) toast.success(`Dry run: would stop ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
       else if (failed === 0 && ok > 0) toast.success(`Stopped ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
       else if (ok === 0 && failed === 0) toast.info('Label matched but no stacks were assigned to it.');
       else toast.warning(`${ok} stopped, ${failed} failed. See results below.`);
@@ -107,92 +167,144 @@ export function LabelFleetStopCard({ nodes, icon: Icon, accentTone }: Props) {
     }
   }
 
+  const trimmed = labelName.trim();
+  const previewSection = renderPreviewSection(preview, trimmed);
+
+  // Freshness placeholder: until a run-record store exists, the footer carries
+  // reversibility alone. Add freshness once a /fleet/labels/last-fleet-stop
+  // endpoint or equivalent ships.
+  // TODO(freshness): emit "last fleet-stop {age}" once the run-record source lands.
+  const footerContext = 'Reversible · no';
+
   return (
-    <Card className="relative overflow-hidden bg-card shadow-card-bevel">
-      <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px]', TONE_RAIL[accentTone])} />
-      <CardContent className="p-6">
-        <div className="flex items-start gap-3 mb-4">
-          <span className={cn('inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md', TONE_BG[accentTone])}>
-            <Icon className="h-5 w-5" strokeWidth={1.5} />
-          </span>
-          <div className="flex-1">
-            <h3 className="text-base font-medium text-stat-value">Stop fleet by label</h3>
-            <p className="mt-1 text-xs text-stat-subtitle">
-              Stop every stack labeled with this name on every node. Labels are matched by name across the fleet.
-            </p>
-          </div>
-        </div>
+    <>
+      <FleetActionCard
+        crumb={['Fleet', 'Actions', 'Stop by label']}
+        name="Stop by label."
+        meta="label-match · per-node fan-out · reports per-stack results"
+        actionClass="destructive"
+        blastRadius={{ value: blastValue, tone: blastTone }}
+        secondaryAction={{
+          label: running ? 'Running…' : 'Dry run',
+          onClick: () => run({ dryRun: true }),
+          disabled: running || trimmed.length === 0,
+        }}
+        primaryAction={{
+          label: 'Stop fleet',
+          onClick: () => setConfirmOpen(true),
+          variant: 'destructive',
+          disabled: running || trimmed.length === 0,
+        }}
+        footerContext={footerContext}
+      >
+        <SheetSection
+          title="Label · target"
+          meta={`auto-suggested · ${knownLabelNames.length} known`}
+        >
+          <Input
+            id="fleet-stop-label-input"
+            list="fleet-stop-label-suggestions"
+            value={labelName}
+            onChange={(e) => setLabelName(e.target.value)}
+            placeholder="e.g. production"
+            className="h-9 text-sm"
+            disabled={running}
+          />
+          <datalist id="fleet-stop-label-suggestions">
+            {knownLabelNames.map(n => <option key={n} value={n} />)}
+          </datalist>
+        </SheetSection>
 
-        <div className="space-y-3">
-          <div>
-            <label htmlFor="fleet-stop-label-input" className="block text-[10px] uppercase tracking-wide text-stat-subtitle mb-1.5">
-              Label name
-            </label>
-            <Input
-              id="fleet-stop-label-input"
-              list="fleet-stop-label-suggestions"
-              value={labelName}
-              onChange={(e) => setLabelName(e.target.value)}
-              placeholder="e.g. production"
-              className="h-9 text-sm"
-              disabled={running}
-            />
-            <datalist id="fleet-stop-label-suggestions">
-              {knownLabelNames.map(n => <option key={n} value={n} />)}
-            </datalist>
-          </div>
+        {previewSection}
 
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={running || labelName.trim().length === 0}
-              onClick={() => setConfirmOpen(true)}
-              className="gap-2"
-            >
-              {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.5} /> : <Icon className="h-3.5 w-3.5" strokeWidth={1.5} />}
-              Stop matching stacks
-            </Button>
-            {!running && results.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setResults([])}
-                className="text-xs text-stat-subtitle hover:text-stat-value"
-              >
-                Clear results
-              </button>
-            )}
-          </div>
+        {results.length > 0 && (
+          <SheetSection title="Per-node breakdown">
+            <ResultsList results={results} />
+          </SheetSection>
+        )}
+      </FleetActionCard>
 
-          {results.length === 0 && !running && (
-            <div className="rounded-md border border-card-border/40 bg-glass-highlight/30 p-3 text-xs text-stat-subtitle">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
-                <span>
-                  Different nodes can have their own label rows. Stops are dispatched per node and report
-                  per-stack results below.
-                </span>
-              </div>
-            </div>
-          )}
+      <ConfirmModal
+        open={confirmOpen}
+        onOpenChange={(open) => { if (!open) setConfirmOpen(false); }}
+        variant="destructive"
+        kicker="Fleet stop"
+        title={`Stop all stacks labeled "${trimmed}"?`}
+        description="Sencho will stop every stack on every node that has a label with this name. Services will be unavailable until restarted."
+        confirmLabel="Stop fleet"
+        confirming={running}
+        onConfirm={() => run({ dryRun: false })}
+      />
+    </>
+  );
+}
 
-          {results.length > 0 && (
-            <ResultsList title="Per-node breakdown" results={results} />
-          )}
-        </div>
+function renderPreviewSection(preview: PreviewState, trimmed: string) {
+  if (trimmed.length === 0) return null;
+  if (preview.kind === 'loading') {
+    return (
+      <SheetSection title="Preview" meta="resolving…">
+        <div className={cn(KICKER, 'text-stat-icon')}>looking up label across the fleet</div>
+      </SheetSection>
+    );
+  }
+  if (preview.kind === 'unavailable') {
+    return (
+      <SheetSection title="Preview" meta="unavailable">
+        <div className={cn(KICKER, 'text-stat-icon')}>preview endpoint did not respond</div>
+      </SheetSection>
+    );
+  }
+  if (preview.kind === 'ready') {
+    const { matchedStacks, matchedNodes, perNode } = preview.data;
+    if (matchedStacks === 0) {
+      return (
+        <SheetSection title="Preview" meta="0 stacks">
+          <div className={cn(KICKER, 'text-stat-icon')}>no node has a label by that name</div>
+        </SheetSection>
+      );
+    }
+    return (
+      <SheetSection
+        title={`Preview · ${matchedStacks} stack${matchedStacks === 1 ? '' : 's'}`}
+        meta={`across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}`}
+      >
+        <PreviewWell perNode={perNode} />
+      </SheetSection>
+    );
+  }
+  return null;
+}
 
-        <ConfirmModal
-          open={confirmOpen}
-          onOpenChange={(open) => { if (!open) setConfirmOpen(false); }}
-          variant="destructive"
-          kicker="Fleet stop"
-          title={`Stop all stacks labeled "${labelName.trim()}"?`}
-          description="Sencho will stop every stack on every node that has a label with this name. Services will be unavailable until restarted."
-          confirmLabel="Stop fleet"
-          confirming={running}
-          onConfirm={run}
-        />
-      </CardContent>
-    </Card>
+interface PreviewWellProps {
+  perNode: MatchPreviewNode[];
+}
+
+function PreviewWell({ perNode }: PreviewWellProps) {
+  const flat = perNode.flatMap(n => n.stackNames.map(s => ({ stack: s, node: n.nodeName })));
+  const visible = flat.slice(0, PREVIEW_ROW_LIMIT);
+  const remaining = flat.length - visible.length;
+  const remainingNodes = remaining > 0
+    ? new Set(flat.slice(PREVIEW_ROW_LIMIT).map(r => r.node)).size
+    : 0;
+  return (
+    <div className="rounded border border-card-border/60 bg-card/40 shadow-[inset_0_2px_4px_0_oklch(0_0_0_/_0.35)] p-2">
+      <ul className="space-y-1">
+        {visible.map((row, i) => (
+          <li key={`${row.node}-${row.stack}-${i}`} className="flex items-center gap-2">
+            <span className={cn(KICKER, 'inline-flex items-center px-1 py-0.5 rounded-sm border border-success/40 bg-success/10 text-success shrink-0')}>
+              UP
+            </span>
+            <span className="flex-1 min-w-0 truncate font-mono text-[11px] text-stat-value">{row.stack}</span>
+            <span className={cn(KICKER, 'shrink-0 text-stat-subtitle')}>{row.node}</span>
+          </li>
+        ))}
+        {remaining > 0 && (
+          <li className={cn(KICKER, 'text-stat-icon pt-1')}>
+            + {remaining} more across {remainingNodes} node{remainingNodes === 1 ? '' : 's'}
+          </li>
+        )}
+      </ul>
+    </div>
   );
 }

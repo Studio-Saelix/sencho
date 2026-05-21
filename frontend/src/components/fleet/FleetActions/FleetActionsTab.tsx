@@ -1,4 +1,4 @@
-import { Square, Tags, Eraser } from 'lucide-react';
+import { Tags } from 'lucide-react';
 import { useLicense } from '@/context/LicenseContext';
 import type { FleetNode } from '@/components/FleetView/types';
 import { LabelFleetStopCard } from './cards/LabelFleetStopCard';
@@ -19,22 +19,24 @@ export function FleetActionsTab({ nodes }: Props) {
   }
 
   if (!isPaid) {
-    // Every action is Skipper+. Community users see a calm empty state with
-    // upgrade context rather than a stripped-down launcher.
-    return (
-      <EmptyState />
-    );
+    return <EmptyState />;
   }
 
+  // Grid breakpoints per audit §18.7: 1 / 2 / 3 columns at 760 / 1280. The
+  // 4-column breakpoint is reserved for when a 4th card lands; v1 has three
+  // so it is intentionally omitted to avoid a hanging gap on wide displays.
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-      <LabelFleetStopCard nodes={nodes} accentTone="rose" icon={Square} />
-      <BulkLabelAssignCard nodes={nodes} accentTone="purple" icon={Tags} />
-      <FleetPruneCard nodes={nodes} accentTone="amber" icon={Eraser} />
+    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-[18px] items-start auto-rows-min">
+      <LabelFleetStopCard nodes={nodes} />
+      <BulkLabelAssignCard nodes={nodes} />
+      <FleetPruneCard nodes={nodes} />
     </div>
   );
 }
 
+// Note: the §18.8 Community-tier "single full-width card with cyan rail + locked
+// footer (shell only, no upsell)" redesign is deferred to a follow-up PR.
+// Tracked in docs/internal/refactor/fleet-action-card-migration.md.
 function EmptyState() {
   return (
     <div className="rounded-lg border border-card-border/60 bg-card p-8 text-center">

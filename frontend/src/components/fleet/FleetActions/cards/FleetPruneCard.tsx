@@ -1,16 +1,14 @@
-import { useState } from 'react';
-import type { LucideIcon } from 'lucide-react';
-import { Loader2, AlertTriangle } from 'lucide-react';
-import { Card, CardContent } from '@/components/ui/card';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ConfirmModal } from '@/components/ui/modal';
+import { FleetActionCard } from '@/components/ui/fleet-action-card';
+import { SheetSection } from '@/components/ui/system-sheet';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { cn, formatBytes } from '@/lib/utils';
 import type { FleetNode } from '@/components/FleetView/types';
 import { ResultsList, type ResultRow } from '../ResultsList';
-import { TONE_RAIL, TONE_BG, type AccentTone } from './tone';
 
 type PruneTarget = 'images' | 'volumes' | 'networks';
 type PruneScope = 'managed' | 'all';
@@ -21,24 +19,35 @@ const ALL_TARGETS: ReadonlyArray<{ id: PruneTarget; label: string }> = [
   { id: 'networks', label: 'Networks' },
 ];
 
-interface TargetResult { target: PruneTarget; success: boolean; reclaimedBytes: number; error?: string }
+interface TargetResult { target: PruneTarget; success: boolean; reclaimedBytes: number; error?: string; dryRun?: boolean }
 interface FleetPruneNodeResult {
   nodeId: number; nodeName: string; reachable: boolean; error?: string; targets: TargetResult[];
 }
 
+interface PruneEstimateNode { nodeId: number; nodeName: string; reclaimableBytes: number; reachable: boolean; error?: string }
+interface PruneEstimateResponse { totalBytes: number; perNode: PruneEstimateNode[] }
+
+type EstimateState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'unavailable' }
+  | { kind: 'ready'; data: PruneEstimateResponse };
+
 interface Props {
   nodes: FleetNode[];
-  icon: LucideIcon;
-  accentTone: AccentTone;
 }
 
-export function FleetPruneCard({ nodes, icon: Icon, accentTone }: Props) {
+const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
+const ESTIMATE_ROW_LIMIT = 6;
+
+export function FleetPruneCard({ nodes }: Props) {
   const nodeCount = nodes.length;
   const [targets, setTargets] = useState<Set<PruneTarget>>(new Set(['images']));
   const [scope, setScope] = useState<PruneScope>('managed');
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
+  const [estimate, setEstimate] = useState<EstimateState>({ kind: 'idle' });
 
   const toggleTarget = (target: PruneTarget) => {
     setTargets(prev => {
@@ -49,16 +58,53 @@ export function FleetPruneCard({ nodes, icon: Icon, accentTone }: Props) {
     });
   };
 
-  async function run() {
+  // Re-estimate when the operator's choices change. Debounced because each
+  // tick fans out per-target HTTP to every remote node; back-to-back clicks
+  // on the target checkboxes would otherwise pile concurrent fleet-wide fans
+  // onto the backend.
+  const estimateDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (estimateDebounceRef.current) clearTimeout(estimateDebounceRef.current);
+    if (targets.size === 0) {
+      setEstimate({ kind: 'idle' });
+      return;
+    }
+    let cancelled = false;
+    setEstimate({ kind: 'loading' });
+    estimateDebounceRef.current = setTimeout(async () => {
+      try {
+        const res = await apiFetch('/fleet/prune/estimate', {
+          method: 'POST',
+          body: JSON.stringify({ targets: Array.from(targets), scope }),
+        });
+        if (cancelled) return;
+        if (res.status === 404 || !res.ok) {
+          setEstimate({ kind: 'unavailable' });
+          return;
+        }
+        const data = (await res.json()) as PruneEstimateResponse;
+        if (!cancelled) setEstimate({ kind: 'ready', data });
+      } catch {
+        if (!cancelled) setEstimate({ kind: 'unavailable' });
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      if (estimateDebounceRef.current) clearTimeout(estimateDebounceRef.current);
+    };
+  }, [targets, scope]);
+
+  async function run(opts: { dryRun: boolean }) {
     if (targets.size === 0) return;
     const selected = Array.from(targets);
-    const toastId = toast.loading(`Pruning ${selected.join(', ')} across the fleet…`);
+    const verb = opts.dryRun ? 'Dry-running prune of' : 'Pruning';
+    const toastId = toast.loading(`${verb} ${selected.join(', ')} across the fleet…`);
     setRunning(true);
     setResults([]);
     try {
       const res = await apiFetch('/fleet/labels/fleet-prune', {
         method: 'POST',
-        body: JSON.stringify({ targets: selected, scope }),
+        body: JSON.stringify({ targets: selected, scope, dryRun: opts.dryRun }),
       });
       const body = await res.json().catch(() => ({}));
       toast.dismiss(toastId);
@@ -73,7 +119,7 @@ export function FleetPruneCard({ nodes, icon: Icon, accentTone }: Props) {
         return {
           key: `node-${node.nodeId}`,
           label: node.reachable
-            ? `${node.nodeName} · ${formatBytes(totalBytes)}`
+            ? `${node.nodeName} · ${formatBytes(totalBytes)}${opts.dryRun ? ' (dry run)' : ''}`
             : `${node.nodeName} (unreachable)`,
           success: allOk,
           error: node.reachable ? undefined : node.error,
@@ -92,7 +138,9 @@ export function FleetPruneCard({ nodes, icon: Icon, accentTone }: Props) {
         (sum, n) => sum + n.targets.reduce((s, t) => s + (t.reclaimedBytes ?? 0), 0),
         0,
       );
-      if (okNodes === totalNodes && totalNodes > 0) {
+      if (opts.dryRun) {
+        toast.success(`Dry run: ${formatBytes(totalReclaimed)} would be reclaimed across ${totalNodes} node${totalNodes === 1 ? '' : 's'}.`);
+      } else if (okNodes === totalNodes && totalNodes > 0) {
         toast.success(`Reclaimed ${formatBytes(totalReclaimed)} across ${totalNodes} node${totalNodes === 1 ? '' : 's'}.`);
       } else if (okNodes === 0) {
         toast.error('Prune failed on every node. See results below.');
@@ -108,130 +156,171 @@ export function FleetPruneCard({ nodes, icon: Icon, accentTone }: Props) {
     }
   }
 
-  const targetCount = targets.size;
   const isAllScope = scope === 'all';
 
+  const blastValue = useMemo(() => {
+    if (targets.size === 0) return 'awaiting target';
+    if (estimate.kind === 'loading') return '~ estimating…';
+    if (estimate.kind === 'unavailable') return '~ estimate unavailable';
+    if (estimate.kind === 'ready') {
+      const { totalBytes } = estimate.data;
+      if (totalBytes === 0) return '0 reclaimable';
+      return `~ ${formatBytes(totalBytes)} reclaimable`;
+    }
+    return 'awaiting target';
+  }, [targets.size, estimate]);
+
+  const blastTone = estimate.kind === 'loading' || estimate.kind === 'unavailable' ? 'muted' as const : undefined;
+
   return (
-    <Card className="relative overflow-hidden bg-card shadow-card-bevel">
-      <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px]', TONE_RAIL[accentTone])} />
-      <CardContent className="p-6">
-        <div className="flex items-start gap-3 mb-4">
-          <span className={cn('inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md', TONE_BG[accentTone])}>
-            <Icon className="h-5 w-5" strokeWidth={1.5} />
-          </span>
-          <div className="flex-1">
-            <h3 className="text-base font-medium text-stat-value">Prune Docker resources fleet-wide</h3>
-            <p className="mt-1 text-xs text-stat-subtitle">
-              Reclaim space on {nodeCount} node{nodeCount === 1 ? '' : 's'} by removing unused images, volumes, and networks. Reclaimed bytes are approximate.
-            </p>
-          </div>
-        </div>
-
-        <div className="space-y-3">
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-stat-subtitle mb-1.5">Targets</div>
-            <div className="flex flex-wrap gap-3">
-              {ALL_TARGETS.map(t => (
-                <label
-                  key={t.id}
-                  className="flex items-center gap-2 py-1 px-2 rounded hover:bg-glass-highlight cursor-pointer"
-                >
-                  <Checkbox
-                    checked={targets.has(t.id)}
-                    onCheckedChange={() => toggleTarget(t.id)}
-                    disabled={running}
-                  />
-                  <span className="text-xs text-stat-value">{t.label}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-stat-subtitle mb-1.5">Scope</div>
-            <div className="inline-flex rounded-md border border-card-border/60 overflow-hidden">
-              <Button
-                type="button"
-                variant={scope === 'managed' ? 'default' : 'outline'}
-                size="sm"
-                disabled={running}
-                onClick={() => setScope('managed')}
-                className="rounded-none border-0 h-8 px-3 text-xs"
+    <>
+      <FleetActionCard
+        crumb={['Fleet', 'Actions', 'Prune resources']}
+        name="Prune fleet-wide."
+        meta="images · volumes · networks · serial per node"
+        actionClass="maintenance"
+        blastRadius={{ value: blastValue, tone: blastTone }}
+        secondaryAction={{
+          label: running ? 'Running…' : 'Dry run',
+          onClick: () => run({ dryRun: true }),
+          disabled: running || targets.size === 0,
+        }}
+        primaryAction={{
+          label: 'Prune fleet',
+          onClick: () => setConfirmOpen(true),
+          variant: 'destructive',
+          // Block the destructive confirm until the operator has actually
+          // seen what the readout says will be reclaimed. Falling back to a
+          // confirm modal with no estimate context is the audit §F20.3 problem.
+          disabled: running || targets.size === 0 || estimate.kind !== 'ready',
+        }}
+        footerContext={`Reversible · no · serial across ${nodeCount} node${nodeCount === 1 ? '' : 's'}`}
+      >
+        <SheetSection
+          title={`Targets · ${targets.size} / ${ALL_TARGETS.length}`}
+          meta={targets.size === 0 ? 'pick at least one' : undefined}
+        >
+          <div className="flex flex-wrap gap-3">
+            {ALL_TARGETS.map(t => (
+              <label
+                key={t.id}
+                className="flex items-center gap-2 py-1 px-2 rounded hover:bg-glass-highlight cursor-pointer"
               >
-                Managed only
-              </Button>
-              <Button
-                type="button"
-                variant={scope === 'all' ? 'default' : 'outline'}
-                size="sm"
-                disabled={running}
-                onClick={() => setScope('all')}
-                className="rounded-none border-0 h-8 px-3 text-xs"
-              >
-                All unused
-              </Button>
-            </div>
-            <p className="mt-1.5 text-[11px] text-stat-subtitle">
-              {scope === 'managed'
-                ? 'Restricts to resources owned by stacks Sencho manages.'
-                : 'Removes every unused resource, including workloads Sencho does not manage.'}
-            </p>
+                <Checkbox
+                  checked={targets.has(t.id)}
+                  onCheckedChange={() => toggleTarget(t.id)}
+                  disabled={running}
+                />
+                <span className="text-xs text-stat-value">{t.label}</span>
+              </label>
+            ))}
           </div>
+        </SheetSection>
 
-          <div className="flex items-center gap-2">
+        <SheetSection title="Scope" meta={scope === 'managed' ? 'sencho-owned only' : 'all unused'}>
+          <div className="inline-flex rounded-md border border-card-border/60 overflow-hidden">
             <Button
-              variant="outline"
+              type="button"
+              variant={scope === 'managed' ? 'default' : 'outline'}
               size="sm"
-              disabled={running || targetCount === 0}
-              onClick={() => setConfirmOpen(true)}
-              className="gap-2"
+              disabled={running}
+              onClick={() => setScope('managed')}
+              className="rounded-none border-0 h-8 px-3 text-xs"
             >
-              {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.5} /> : <Icon className="h-3.5 w-3.5" strokeWidth={1.5} />}
-              Prune across fleet
+              Managed only
             </Button>
-            {!running && results.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setResults([])}
-                className="text-xs text-stat-subtitle hover:text-stat-value"
-              >
-                Clear results
-              </button>
-            )}
+            <Button
+              type="button"
+              variant={scope === 'all' ? 'default' : 'outline'}
+              size="sm"
+              disabled={running}
+              onClick={() => setScope('all')}
+              className="rounded-none border-0 h-8 px-3 text-xs"
+            >
+              All unused
+            </Button>
           </div>
+          <p className="mt-2 text-[11px] text-stat-subtitle">
+            {scope === 'managed'
+              ? 'Restricts to resources owned by stacks Sencho manages.'
+              : 'Removes every unused resource, including workloads Sencho does not manage.'}
+          </p>
+        </SheetSection>
 
-          {results.length === 0 && !running && (
-            <div className="rounded-md border border-card-border/40 bg-glass-highlight/30 p-3 text-xs text-stat-subtitle">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
-                <span>
-                  Prune is destructive and cannot be undone. Each target is run serially per node; reclaimed bytes appear per node and per target below.
-                </span>
-              </div>
-            </div>
+        {targets.size > 0 && <EstimateSection estimate={estimate} />}
+
+        {results.length > 0 && (
+          <SheetSection title="Per-node breakdown">
+            <ResultsList results={results} />
+          </SheetSection>
+        )}
+      </FleetActionCard>
+
+      <ConfirmModal
+        open={confirmOpen}
+        onOpenChange={(open) => { if (!open) setConfirmOpen(false); }}
+        variant="destructive"
+        kicker="Fleet prune"
+        title={isAllScope ? 'Prune ALL unused resources across the fleet?' : 'Prune managed resources across the fleet?'}
+        description={
+          isAllScope
+            ? 'This runs docker prune --all on every reachable node. Any image, volume, or network not currently in use will be deleted, including resources from workloads Sencho does not manage. This cannot be undone.'
+            : 'Sencho will remove unused Docker resources owned by stacks known to this fleet on every reachable node. Active resources are not touched.'
+        }
+        confirmLabel={isAllScope ? 'Prune everything unused' : 'Prune managed'}
+        confirming={running}
+        onConfirm={() => run({ dryRun: false })}
+      />
+    </>
+  );
+}
+
+function EstimateSection({ estimate }: { estimate: EstimateState }) {
+  if (estimate.kind === 'idle' || estimate.kind === 'loading') {
+    return (
+      <SheetSection title="Estimate · per node" meta={estimate.kind === 'loading' ? 'computing…' : undefined}>
+        <div className={cn(KICKER, 'text-stat-icon')}>walking each node's docker daemon</div>
+      </SheetSection>
+    );
+  }
+  if (estimate.kind === 'unavailable') {
+    return (
+      <SheetSection title="Estimate · per node" meta="unavailable">
+        <div className={cn(KICKER, 'text-stat-icon')}>estimate endpoint did not respond</div>
+      </SheetSection>
+    );
+  }
+  const { perNode } = estimate.data;
+  const visible = perNode.slice(0, ESTIMATE_ROW_LIMIT);
+  const remaining = perNode.length - visible.length;
+  return (
+    <SheetSection title="Estimate · per node" meta={`${perNode.length} node${perNode.length === 1 ? '' : 's'}`}>
+      <div className="rounded border border-card-border/60 bg-card/40 shadow-[inset_0_2px_4px_0_oklch(0_0_0_/_0.35)] p-2">
+        <ul className="space-y-1">
+          {visible.map((n) => (
+            <li key={n.nodeId} className="flex items-center gap-2">
+              <span className={cn(
+                KICKER,
+                'inline-flex items-center px-1 py-0.5 rounded-sm border shrink-0',
+                n.reachable
+                  ? 'border-success/40 bg-success/10 text-success'
+                  : 'border-stat-subtitle/40 bg-card text-stat-subtitle',
+              )}>
+                {n.reachable ? 'OK' : '--'}
+              </span>
+              <span className="flex-1 min-w-0 truncate font-mono text-[11px] text-stat-value">{n.nodeName}</span>
+              <span className={cn(KICKER, 'shrink-0 tabular-nums', n.reachable ? 'text-stat-subtitle' : 'text-stat-icon')}>
+                {n.reachable ? formatBytes(n.reclaimableBytes) : (n.error ?? 'unreachable')}
+              </span>
+            </li>
+          ))}
+          {remaining > 0 && (
+            <li className={cn(KICKER, 'text-stat-icon pt-1')}>
+              + {remaining} more node{remaining === 1 ? '' : 's'}
+            </li>
           )}
-
-          {results.length > 0 && (
-            <ResultsList title="Per-node breakdown" results={results} />
-          )}
-        </div>
-
-        <ConfirmModal
-          open={confirmOpen}
-          onOpenChange={(open) => { if (!open) setConfirmOpen(false); }}
-          variant="destructive"
-          kicker="Fleet prune"
-          title={isAllScope ? 'Prune ALL unused resources across the fleet?' : 'Prune managed resources across the fleet?'}
-          description={
-            isAllScope
-              ? 'This runs docker prune --all on every reachable node. Any image, volume, or network not currently in use will be deleted, including resources from workloads Sencho does not manage. This cannot be undone.'
-              : 'Sencho will remove unused Docker resources owned by stacks known to this fleet on every reachable node. Active resources are not touched.'
-          }
-          confirmLabel={isAllScope ? 'Prune everything unused' : 'Prune managed'}
-          confirming={running}
-          onConfirm={run}
-        />
-      </CardContent>
-    </Card>
+        </ul>
+      </div>
+    </SheetSection>
   );
 }

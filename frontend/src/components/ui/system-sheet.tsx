@@ -299,15 +299,22 @@ export interface SheetSectionProps {
   title: string;
   /** Hide the title rule + label (useful when a section is the only one in a tab). */
   hideHeader?: boolean;
+  /** Optional right-aligned mono meta on the section header row (count, scope, freshness). */
+  meta?: string;
   className?: string;
   children: React.ReactNode;
 }
 
-export function SheetSection({ title, hideHeader, className, children }: SheetSectionProps) {
+export function SheetSection({ title, hideHeader, meta, className, children }: SheetSectionProps) {
   return (
     <section className={cn('first:pt-0 first:border-t-0 -mx-6 px-6 py-4 border-t border-card-border/40', className)}>
       {!hideHeader && (
-        <h3 className={cn(KICKER_CLASS, 'text-stat-subtitle mb-3 leading-none')}>{title}</h3>
+        <div className="mb-3 flex items-baseline justify-between gap-3 leading-none">
+          <h3 className={cn(KICKER_CLASS, 'text-stat-subtitle')}>{title}</h3>
+          {meta && (
+            <span className={cn(KICKER_CLASS, 'text-stat-subtitle/80 shrink-0')}>{meta}</span>
+          )}
+        </div>
       )}
       {children}
     </section>

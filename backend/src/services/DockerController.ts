@@ -386,6 +386,69 @@ class DockerController {
     return { success: true, reclaimedBytes };
   }
 
+  /**
+   * Non-destructive sibling of `pruneManagedOnly` used by the dry-run path and
+   * the `/api/system/prune/estimate` route. Walks the same filter rules but
+   * does not call `.remove()`. Kept structurally parallel to the destructive
+   * method so the two stay in lockstep when the enumeration logic changes.
+   */
+  public async estimateManagedReclaim(
+    target: 'images' | 'volumes' | 'networks',
+    knownStackNames: string[],
+  ): Promise<{ reclaimableBytes: number }> {
+    const knownSet = new Set(knownStackNames);
+    const projectToStack = await DockerController.resolveProjectNameMap(knownStackNames);
+    let reclaimableBytes = 0;
+
+    if (target === 'volumes') {
+      const rawVolumeData = await this.docker.listVolumes();
+      const rawVolumes: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
+      const prunable = rawVolumes.filter((v: any) => {
+        return !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
+          && (v.UsageData?.RefCount ?? 1) === 0;
+      });
+      for (const vol of prunable) reclaimableBytes += vol.UsageData?.Size ?? 0;
+    } else if (target === 'networks') {
+      // Networks have no on-disk size; the dry-run still reports 0 so the
+      // shape matches the destructive path.
+    } else if (target === 'images') {
+      const allContainers = await this.docker.listContainers({ all: true });
+      const resolvedBase = path.resolve(COMPOSE_DIR);
+      const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
+      const unmanagedImageIds = new Set<string>();
+      for (const c of allContainers as any[]) {
+        const stack = DockerController.resolveContainerStack(
+          c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
+        );
+        if (!stack) unmanagedImageIds.add(c.ImageID);
+      }
+      const rawImages = await this.docker.listImages({ all: false });
+      const prunable = (rawImages as any[]).filter((img: any) =>
+        img.Containers === 0 && !unmanagedImageIds.has(img.Id),
+      );
+      for (const img of prunable) reclaimableBytes += img.Size ?? 0;
+    }
+
+    return { reclaimableBytes };
+  }
+
+  /**
+   * Non-destructive estimate for the `all` (system) prune scope. Reuses the
+   * same disk-usage source as the resources page so the readout matches what
+   * the operator already sees there.
+   */
+  public async estimateSystemReclaim(
+    target: 'containers' | 'images' | 'networks' | 'volumes',
+    knownStackNames: string[],
+  ): Promise<{ reclaimableBytes: number }> {
+    const df = await this.getDiskUsageClassified(knownStackNames);
+    if (target === 'images') return { reclaimableBytes: df.reclaimableImages };
+    if (target === 'containers') return { reclaimableBytes: df.reclaimableContainers };
+    if (target === 'volumes') return { reclaimableBytes: df.reclaimableVolumes };
+    // Networks have no on-disk size.
+    return { reclaimableBytes: 0 };
+  }
+
   public async getDiskUsageClassified(knownStackNames: string[]): Promise<{
     reclaimableImages: number;
     reclaimableContainers: number;

@@ -122,6 +122,12 @@
   --label-custom: var(--label-amber);
   --label-custom-bg: var(--label-amber-bg);
 
+  /* Fleet Action card action-class chip / blast-dot colors.
+     Closed set per audit §18.3: destructive (rose) / transformative (purple) / maintenance (amber).
+     Two of the three reuse existing semantic tokens; transformative gets its own
+     alias so component code does not reach for --label-purple directly. */
+  --action-transformative: var(--label-purple);
+
   /* Chart grid & axis */
   --chart-grid: oklch(0 0 0 / 0.06);
   --chart-tick: oklch(0 0 0 / 0.45);
@@ -299,6 +305,9 @@
   --label-custom: var(--label-amber);
   --label-custom-bg: var(--label-amber-bg);
 
+  /* Fleet Action card action-class chip / blast-dot colors (dark theme). */
+  --action-transformative: var(--label-purple);
+
   /* Chart grid & axis */
   --chart-grid: oklch(1 0 0 / 0.05);
   --chart-tick: oklch(1 0 0 / 0.40);
@@ -407,6 +416,7 @@
   --color-update-foreground: var(--update-foreground);
   --color-update-muted: var(--update-muted);
   --color-destructive-muted: var(--destructive-muted);
+  --color-action-transformative: var(--action-transformative);
 
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
