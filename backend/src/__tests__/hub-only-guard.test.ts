@@ -87,6 +87,39 @@ describe('hubOnlyGuard', () => {
     expect(res.body?.code).not.toBe('HUB_ONLY_ENDPOINT');
   });
 
+  // Regression: HUB_ONLY_PREFIXES entries carry a trailing slash, and a bare
+  // startsWith() match would let the collection paths (no trailing slash) fall
+  // through to the remote proxy. The matcher must accept both forms.
+  it('rejects /api/scheduled-tasks (no trailing slash) with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/scheduled-tasks')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/audit-log (no trailing slash) with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/audit-log')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/notification-routes (no trailing slash) with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/notification-routes')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
   it('does not interfere with non-hub paths even when nodeId targets a remote node', async () => {
     // /api/stacks is not hub-only and should be forwarded by the proxy.
     // The exact upstream-error status is not the contract here; what
