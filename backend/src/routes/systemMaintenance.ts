@@ -49,15 +49,37 @@ systemMaintenanceRouter.post('/prune/orphans', async (req: Request, res: Respons
 systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { target, scope } = req.body as { target: string; scope?: string };
+    const { target, scope, dryRun } = req.body as { target: string; scope?: string; dryRun?: boolean };
     if (!['containers', 'images', 'networks', 'volumes'].includes(target)) {
       return res.status(400).json({ error: 'Invalid prune target' });
     }
 
     const pruneScope = scope === 'managed' ? 'managed' : 'all';
-    console.log(`[Resources] System prune: ${target} (scope: ${pruneScope})`);
+    const isDryRun = dryRun === true;
     const dockerController = DockerController.getInstance(req.nodeId);
 
+    if (isDryRun) {
+      // Rehearse the destructive path: same scope resolution, same Docker
+      // enumeration, no remove calls. Containers have no managed estimate
+      // helper because pruneManagedOnly does not handle them.
+      const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
+      let estimate: { reclaimableBytes: number };
+      if (pruneScope === 'managed' && target !== 'containers') {
+        estimate = await dockerController.estimateManagedReclaim(
+          target as 'images' | 'volumes' | 'networks',
+          knownStacks,
+        );
+      } else {
+        estimate = await dockerController.estimateSystemReclaim(
+          target as 'containers' | 'images' | 'networks' | 'volumes',
+          knownStacks,
+        );
+      }
+      res.json({ message: 'Dry run', success: true, dryRun: true, reclaimedBytes: estimate.reclaimableBytes });
+      return;
+    }
+
+    console.log(`[Resources] System prune: ${target} (scope: ${pruneScope})`);
     let result: { success: boolean; reclaimedBytes: number };
     if (pruneScope === 'managed' && target !== 'containers') {
       const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
@@ -77,6 +99,41 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
   } catch (error: unknown) {
     console.error('System prune error:', error);
     res.status(500).json({ error: 'System prune failed' });
+  }
+});
+
+// Non-destructive size estimate for a prune target/scope. The Fleet Actions
+// "Prune fleet-wide" card calls this on each remote node to populate its live
+// blast-radius readout before the operator confirms. Reuses the same Docker
+// enumeration as `/prune/system` so the estimate matches what the destructive
+// path would reclaim.
+systemMaintenanceRouter.post('/prune/estimate', async (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const { target, scope } = req.body as { target: string; scope?: string };
+    if (!['containers', 'images', 'networks', 'volumes'].includes(target)) {
+      return res.status(400).json({ error: 'Invalid prune target' });
+    }
+    const pruneScope = scope === 'managed' ? 'managed' : 'all';
+    const dockerController = DockerController.getInstance(req.nodeId);
+    const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
+
+    let result: { reclaimableBytes: number };
+    if (pruneScope === 'managed' && target !== 'containers') {
+      result = await dockerController.estimateManagedReclaim(
+        target as 'images' | 'volumes' | 'networks',
+        knownStacks,
+      );
+    } else {
+      result = await dockerController.estimateSystemReclaim(
+        target as 'containers' | 'images' | 'networks' | 'volumes',
+        knownStacks,
+      );
+    }
+    res.json({ reclaimableBytes: result.reclaimableBytes });
+  } catch (error: unknown) {
+    console.error('Prune estimate error:', error);
+    res.status(500).json({ error: 'Failed to estimate reclaimable bytes' });
   }
 });
 

@@ -1041,17 +1041,18 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
 fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePaid(req, res)) return;
   if (!requireAdmin(req, res)) return;
-  const body = req.body as { labelName?: unknown } | undefined;
+  const body = req.body as { labelName?: unknown; dryRun?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
     return;
   }
-  const { labelName } = body;
+  const { labelName, dryRun } = body;
   if (typeof labelName !== 'string' || labelName.trim().length === 0) {
     res.status(400).json({ error: 'labelName is required' });
     return;
   }
   const trimmed = labelName.trim();
+  const isDryRun = dryRun === true;
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
@@ -1068,7 +1069,8 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
       if (node.type === 'local') {
         // Share the per-node bulk lock with `POST /api/labels/:id/action` so
         // a fleet-stop and a per-label action cannot double-stop the same
-        // containers concurrently on the same local node.
+        // containers concurrently on the same local node. Dry run acquires
+        // the same lock so the rehearsal exercises the same contention path.
         const lockKey = `bulk:${node.id}`;
         if (activeBulkActions.has(lockKey)) {
           return {
@@ -1081,14 +1083,18 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
           const fsStacks = await FileSystemService.getInstance(node.id).getStacks();
           const fsStackSet = new Set(fsStacks);
           const validStacks = stackNames.filter(name => fsStackSet.has(name));
-          const stackResults: { stackName: string; success: boolean; error?: string }[] = [];
+          const stackResults: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] = [];
           for (const stackName of validStacks) {
+            if (isDryRun) {
+              stackResults.push({ stackName, success: true, dryRun: true });
+              continue;
+            }
             const outcome = await containerActionForStack(node.id, stackName, 'stop');
             if (outcome.kind === 'ok') stackResults.push({ stackName, success: true });
             else if (outcome.kind === 'no-containers') stackResults.push({ stackName, success: false, error: 'No containers found for this stack' });
             else stackResults.push({ stackName, success: false, error: outcome.message });
           }
-          if (stackResults.some(r => r.success)) invalidateNodeCaches(node.id);
+          if (!isDryRun && stackResults.some(r => r.success)) invalidateNodeCaches(node.id);
           return { nodeId: node.id, nodeName: node.name, matched: true, stackResults };
         } finally {
           activeBulkActions.delete(lockKey);
@@ -1105,7 +1111,7 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         const response = await fetch(`${node.api_url.replace(/\/$/, '')}/api/labels/${label.id}/action`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'stop' }),
+          body: JSON.stringify({ action: 'stop', dryRun: isDryRun }),
           signal: AbortSignal.timeout(60000),
         });
         if (!response.ok) {
@@ -1116,7 +1122,7 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
             stackResults: stackNames.map(stackName => ({ stackName, success: false, error: message })),
           };
         }
-        const remote = (await response.json()) as { results?: { stackName: string; success: boolean; error?: string }[] };
+        const remote = (await response.json()) as { results?: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] };
         return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: remote.results ?? [] };
       } catch (err) {
         const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
@@ -1149,7 +1155,7 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
   if (!requirePaid(req, res)) return;
   if (!requireAdmin(req, res)) return;
 
-  const body = req.body as { targets?: unknown; scope?: unknown } | undefined;
+  const body = req.body as { targets?: unknown; scope?: unknown; dryRun?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
     return;
@@ -1169,8 +1175,9 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
   }
   const targets: FleetPruneTarget[] = Array.from(dedup);
   const scope: 'managed' | 'all' = body.scope === 'all' ? 'all' : 'managed';
+  const isDryRun = body.dryRun === true;
 
-  type TargetResult = { target: FleetPruneTarget; success: boolean; reclaimedBytes: number; error?: string };
+  type TargetResult = { target: FleetPruneTarget; success: boolean; reclaimedBytes: number; error?: string; dryRun?: boolean };
   type NodeResult = {
     nodeId: number; nodeName: string; reachable: boolean; error?: string; targets: TargetResult[];
   };
@@ -1196,6 +1203,13 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
           let anySuccess = false;
           for (const target of targets) {
             try {
+              if (isDryRun) {
+                const estimate = scope === 'managed'
+                  ? await dockerController.estimateManagedReclaim(target, knownStacks)
+                  : await dockerController.estimateSystemReclaim(target, knownStacks);
+                targetResults.push({ target, success: true, reclaimedBytes: estimate.reclaimableBytes, dryRun: true });
+                continue;
+              }
               const result = scope === 'managed'
                 ? await dockerController.pruneManagedOnly(target, knownStacks)
                 : await dockerController.pruneSystem(target);
@@ -1205,7 +1219,7 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
               targetResults.push({ target, success: false, reclaimedBytes: 0, error: getErrorMessage(err, 'Prune failed') });
             }
           }
-          if (anySuccess) invalidateNodeCaches(node.id);
+          if (anySuccess && !isDryRun) invalidateNodeCaches(node.id);
           return { nodeId: node.id, nodeName: node.name, reachable: true, targets: targetResults };
         } finally {
           activeBulkActions.delete(lockKey);
@@ -1232,7 +1246,7 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
           const response = await fetch(`${baseUrl}/api/system/prune/system`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target, scope }),
+            body: JSON.stringify({ target, scope, dryRun: isDryRun }),
             signal: AbortSignal.timeout(120000),
           });
           if (!response.ok) {
@@ -1242,12 +1256,14 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
             targetResults.push({ target, success: false, reclaimedBytes: 0, error: message });
             continue;
           }
-          const remote = (await response.json().catch(() => null)) as { success?: boolean; reclaimedBytes?: number } | null;
+          const remote = (await response.json().catch(() => null)) as { success?: boolean; reclaimedBytes?: number; dryRun?: boolean } | null;
           if (!remote || typeof remote.reclaimedBytes !== 'number') {
             targetResults.push({ target, success: false, reclaimedBytes: 0, error: 'Invalid response from remote node' });
             continue;
           }
-          targetResults.push({ target, success: remote.success !== false, reclaimedBytes: remote.reclaimedBytes });
+          const entry: TargetResult = { target, success: remote.success !== false, reclaimedBytes: remote.reclaimedBytes };
+          if (remote.dryRun) entry.dryRun = true;
+          targetResults.push(entry);
         } catch (err) {
           const message = getErrorMessage(err, 'Failed to reach remote node');
           nodeUnreachable = message;
@@ -1266,6 +1282,158 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
   } catch (error) {
     console.error('[Fleet] fleet-prune error:', error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to run fleet prune') });
+  }
+});
+
+// ─── Fleet Actions: blast-radius preview endpoints (non-destructive) ───
+//
+// Power the live readouts in the Fleet Action cards. Same auth gates as the
+// destructive endpoints above so the surface stays uniform: an operator who
+// can fire `fleet-stop` is also the operator who can ask how big it would be.
+
+// Per-label fleet preview. Walks the central node list and looks up the label
+// + assignments table for each node. No remote fan-out: stack-to-label
+// assignments live in the central DB even for remote nodes, populated by the
+// nodes' own UIs and synced via Distributed API.
+fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePaid(req, res)) return;
+  if (!requireAdmin(req, res)) return;
+  const body = req.body as { labelName?: unknown } | undefined;
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Request body is required' });
+    return;
+  }
+  const { labelName } = body;
+  if (typeof labelName !== 'string' || labelName.trim().length === 0) {
+    res.status(400).json({ error: 'labelName is required' });
+    return;
+  }
+  const trimmed = labelName.trim();
+  try {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+    let matchedStacks = 0;
+    const perNode = nodes.map((node) => {
+      const label = db.getLabels(node.id).find(l => l.name === trimmed);
+      const stackNames = label ? db.getStacksForLabel(label.id, node.id) : [];
+      matchedStacks += stackNames.length;
+      return {
+        nodeId: node.id,
+        nodeName: node.name,
+        stackCount: stackNames.length,
+        stackNames,
+      };
+    });
+    const matchedNodes = perNode.filter(n => n.stackCount > 0).length;
+    res.json({ matchedNodes, matchedStacks, perNode });
+  } catch (error) {
+    console.error('[Fleet] match-preview error:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to compute match preview') });
+  }
+});
+
+// Fleet-wide prune size estimate. Local node uses the controller estimate
+// helper; remote nodes hit `/api/system/prune/estimate` per target. Same
+// fan-out shape as `/labels/fleet-prune` minus the locks (estimation is read
+// only).
+fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePaid(req, res)) return;
+  if (!requireAdmin(req, res)) return;
+
+  const body = req.body as { targets?: unknown; scope?: unknown } | undefined;
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Request body is required' });
+    return;
+  }
+  const rawTargets = Array.isArray(body.targets) ? body.targets : null;
+  if (!rawTargets || rawTargets.length === 0) {
+    res.status(400).json({ error: 'targets must be a non-empty array' });
+    return;
+  }
+  const dedup = new Set<FleetPruneTarget>();
+  for (const t of rawTargets) {
+    if (typeof t !== 'string' || !(FLEET_PRUNE_TARGETS as readonly string[]).includes(t)) {
+      res.status(400).json({ error: `Invalid target: ${typeof t === 'string' ? t : typeof t}` });
+      return;
+    }
+    dedup.add(t as FleetPruneTarget);
+  }
+  const targets: FleetPruneTarget[] = Array.from(dedup);
+  const scope: 'managed' | 'all' = body.scope === 'all' ? 'all' : 'managed';
+
+  type NodeEstimate = {
+    nodeId: number; nodeName: string; reclaimableBytes: number; reachable: boolean; error?: string;
+  };
+
+  try {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+    const perNode: NodeEstimate[] = await Promise.all(nodes.map(async (node): Promise<NodeEstimate> => {
+      if (node.type === 'local') {
+        try {
+          const knownStacks = scope === 'managed' ? await FileSystemService.getInstance(node.id).getStacks() : [];
+          const dockerController = DockerController.getInstance(node.id);
+          let nodeBytes = 0;
+          for (const target of targets) {
+            const result = scope === 'managed'
+              ? await dockerController.estimateManagedReclaim(target, knownStacks)
+              : await dockerController.estimateSystemReclaim(target, knownStacks);
+            nodeBytes += result.reclaimableBytes;
+          }
+          return { nodeId: node.id, nodeName: node.name, reclaimableBytes: nodeBytes, reachable: true };
+        } catch (err) {
+          return {
+            nodeId: node.id, nodeName: node.name, reclaimableBytes: 0, reachable: false,
+            error: getErrorMessage(err, 'Failed to estimate locally'),
+          };
+        }
+      }
+
+      if (!node.api_url || !node.api_token) {
+        return {
+          nodeId: node.id, nodeName: node.name, reclaimableBytes: 0, reachable: false,
+          error: 'Remote node not configured',
+        };
+      }
+      const baseUrl = node.api_url.replace(/\/$/, '');
+      // Estimate is a live readout; fan out the per-target fetches in parallel
+      // so wall time matches the slowest single call rather than the sum.
+      // (The destructive sibling stays serial because Docker prune is internally
+      // serialized and one failure should short-circuit later targets there.)
+      const perTarget = await Promise.all(targets.map(async (target): Promise<{ bytes: number; error?: string }> => {
+        try {
+          const response = await fetch(`${baseUrl}/api/system/prune/estimate`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target, scope }),
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!response.ok) {
+            const errBody = (await response.json().catch(() => ({}))) as { error?: string };
+            return { bytes: 0, error: errBody.error || `Remote returned ${response.status}` };
+          }
+          const remote = (await response.json().catch(() => null)) as { reclaimableBytes?: number } | null;
+          if (!remote || typeof remote.reclaimableBytes !== 'number') {
+            return { bytes: 0, error: 'Invalid response from remote node' };
+          }
+          return { bytes: remote.reclaimableBytes };
+        } catch (err) {
+          return { bytes: 0, error: getErrorMessage(err, 'Failed to reach remote node') };
+        }
+      }));
+      const firstError = perTarget.find(t => t.error)?.error;
+      if (firstError) {
+        return { nodeId: node.id, nodeName: node.name, reclaimableBytes: 0, reachable: false, error: firstError };
+      }
+      const nodeBytes = perTarget.reduce((sum, t) => sum + t.bytes, 0);
+      return { nodeId: node.id, nodeName: node.name, reclaimableBytes: nodeBytes, reachable: true };
+    }));
+
+    const totalBytes = perNode.reduce((acc, n) => acc + (n.reachable ? n.reclaimableBytes : 0), 0);
+    res.json({ totalBytes, perNode });
+  } catch (error) {
+    console.error('[Fleet] prune-estimate error:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to compute prune estimate') });
   }
 });
 

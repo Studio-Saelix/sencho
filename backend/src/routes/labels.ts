@@ -172,12 +172,13 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
   try {
     const id = parseIntParam(req, res, 'id', 'label ID');
     if (id === null) return;
-    const { action } = req.body;
+    const { action, dryRun } = req.body;
     const validActions = ['deploy', 'stop', 'restart'];
     if (!action || !validActions.includes(action)) {
       res.status(400).json({ error: `action must be one of: ${validActions.join(', ')}` });
       return;
     }
+    const isDryRun = dryRun === true;
 
     const nodeId = req.nodeId ?? 0;
 
@@ -200,11 +201,17 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
       const fsStackNames = new Set(fsStacks);
       const validStacks = stackNames.filter(name => fsStackNames.has(name));
 
-      if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action start:', { id, action, nodeId, totalLabeled: stackNames.length, validStacks: validStacks.length });
+      if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action start:', { id, action, nodeId, totalLabeled: stackNames.length, validStacks: validStacks.length, dryRun: isDryRun });
 
-      const results: { stackName: string; success: boolean; error?: string }[] = [];
+      const results: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] = [];
 
       for (const stackName of validStacks) {
+        if (isDryRun) {
+          // Rehearse the action under the same lock + label resolution + fs
+          // intersection. Skip the destructive leaf call.
+          results.push({ stackName, success: true, dryRun: true });
+          continue;
+        }
         try {
           if (action === 'deploy') {
             const gate = await enforcePolicyPreDeploy(
@@ -235,10 +242,10 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
 
       const succeeded = results.filter(r => r.success).length;
       const failed = results.length - succeeded;
-      console.log(`[Labels] Bulk ${sanitizeForLog(action)} on label ${id}: ${validStacks.length} stacks (${succeeded} succeeded, ${failed} failed)`);
-      if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action complete:', { id, action, total: results.length, succeeded, failed });
+      console.log(`[Labels] Bulk ${sanitizeForLog(action)}${isDryRun ? ' (dry run)' : ''} on label ${id}: ${validStacks.length} stacks (${succeeded} succeeded, ${failed} failed)`);
+      if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action complete:', { id, action, total: results.length, succeeded, failed, dryRun: isDryRun });
 
-      if (succeeded > 0) {
+      if (succeeded > 0 && !isDryRun) {
         invalidateNodeCaches(req.nodeId);
       }
       res.json({ results });
