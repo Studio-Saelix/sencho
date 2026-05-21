@@ -1016,7 +1016,6 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
 });
 
 stacksRouter.get('/:stackName/files/download', async (req: Request, res: Response) => {
-  if (!requirePaid(req, res)) return;
   const stackName = req.params.stackName as string;
   const relPath = getRelPath(req);
   if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
@@ -1050,7 +1049,6 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
 stacksRouter.post(
   '/:stackName/files/upload',
   (req: Request, res: Response, next: NextFunction) => {
-    if (!requirePaid(req, res)) return;
     upload.single('file')(req, res, (err) => {
       if (err && (err as multer.MulterError).code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({ error: 'File exceeds 25 MB limit', code: 'TOO_LARGE' });
@@ -1089,7 +1087,6 @@ stacksRouter.post(
 );
 
 stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response) => {
-  if (!requirePaid(req, res)) return;
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -1115,7 +1112,6 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
 });
 
 stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => {
-  if (!requirePaid(req, res)) return;
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -1138,7 +1134,6 @@ stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => 
 });
 
 stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response) => {
-  if (!requirePaid(req, res)) return;
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);
@@ -1160,7 +1155,6 @@ stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response
 });
 
 stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Response) => {
-  if (!requirePaid(req, res)) return;
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const { from, to } = req.body as { from?: unknown; to?: unknown };
@@ -1209,7 +1203,6 @@ stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Resp
 });
 
 stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Response) => {
-  if (!requirePaid(req, res)) return;
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const relPath = getRelPath(req);

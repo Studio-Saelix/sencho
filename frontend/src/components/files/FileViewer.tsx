@@ -4,7 +4,6 @@ import { AlertCircle, FileIcon, Download, Loader2, Save } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
-import { useLicense } from '@/context/LicenseContext';
 import { readStackFile, writeStackFile, downloadStackFile } from '@/lib/stackFilesApi';
 import { extensionToLanguage } from '@/lib/monacoLanguages';
 import { formatBytes } from '@/lib/utils';
@@ -27,7 +26,6 @@ interface SpecialFilePanelProps {
   label: string;
   stackName: string;
   relPath: string;
-  canDownload: boolean;
 }
 
 function SpecialFilePanel({
@@ -36,12 +34,10 @@ function SpecialFilePanel({
   label,
   stackName,
   relPath,
-  canDownload,
 }: SpecialFilePanelProps) {
   const [downloading, setDownloading] = useState(false);
 
   const handleDownload = async () => {
-    if (!canDownload) return;
     setDownloading(true);
     try {
       const res = await downloadStackFile(stackName, relPath);
@@ -72,21 +68,19 @@ function SpecialFilePanel({
         <p className="font-mono text-sm text-stat-title">{filename}</p>
         <p className="text-xs text-stat-subtitle">{label} &middot; {formatBytes(size)}</p>
       </div>
-      {canDownload && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => void handleDownload()}
-          disabled={downloading}
-        >
-          {downloading ? (
-            <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
-          ) : (
-            <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
-          )}
-          Download
-        </Button>
-      )}
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => void handleDownload()}
+        disabled={downloading}
+      >
+        {downloading ? (
+          <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
+        ) : (
+          <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+        )}
+        Download
+      </Button>
     </div>
   );
 }
@@ -98,8 +92,6 @@ export function FileViewer({
   isDarkMode,
   onSaved,
 }: FileViewerProps) {
-  const { isPaid } = useLicense();
-
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
   const [loading, setLoading] = useState(false);
@@ -109,7 +101,7 @@ export function FileViewer({
   const [isOversized, setIsOversized] = useState(false);
   const [size, setSize] = useState(0);
 
-  const readOnly = !canEdit || !isPaid;
+  const readOnly = !canEdit;
 
   const editorOptions = useMemo(
     () => ({
@@ -220,7 +212,6 @@ export function FileViewer({
         label="Binary file"
         stackName={stackName}
         relPath={selectedPath}
-        canDownload={isPaid}
       />
     );
   }
@@ -233,7 +224,6 @@ export function FileViewer({
         label="File too large to preview"
         stackName={stackName}
         relPath={selectedPath}
-        canDownload={isPaid}
       />
     );
   }

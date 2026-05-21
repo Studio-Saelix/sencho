@@ -1,12 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { FileUploadDropzone } from '../FileUploadDropzone';
-
-const licenseState = { isPaid: true };
-
-vi.mock('@/context/LicenseContext', () => ({
-  useLicense: () => licenseState,
-}));
 
 vi.mock('@/lib/stackFilesApi', () => ({
   uploadStackFile: vi.fn(),
@@ -22,11 +16,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 describe('FileUploadDropzone', () => {
-  beforeEach(() => {
-    licenseState.isPaid = true;
-  });
-
-  it('renders upload control for paid users with stack edit permission', () => {
+  it('renders upload control for users with stack edit permission', () => {
     render(
       <FileUploadDropzone
         stackName="app"
@@ -45,21 +35,6 @@ describe('FileUploadDropzone', () => {
         stackName="app"
         currentDir=""
         canEdit={false}
-        onUploaded={vi.fn()}
-      />,
-    );
-
-    expect(screen.queryByRole('button', { name: /upload file/i })).not.toBeInTheDocument();
-  });
-
-  it('hides upload control on Community tier', () => {
-    licenseState.isPaid = false;
-
-    render(
-      <FileUploadDropzone
-        stackName="app"
-        currentDir=""
-        canEdit
         onUploaded={vi.fn()}
       />,
     );

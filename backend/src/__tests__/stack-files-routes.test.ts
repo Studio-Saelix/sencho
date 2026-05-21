@@ -2,16 +2,18 @@
  * Route-level tests for the stack file explorer endpoints:
  *   GET    /:stackName/files
  *   GET    /:stackName/files/content
- *   GET    /:stackName/files/download  (Skipper+)
- *   POST   /:stackName/files/upload    (Skipper+)
- *   PUT    /:stackName/files/content   (Skipper+)
- *   DELETE /:stackName/files           (Skipper+)
- *   POST   /:stackName/files/folder    (Skipper+)
- *   PATCH  /:stackName/files/rename    (Skipper+)
- *   PUT    /:stackName/files/permissions (Skipper+)
+ *   GET    /:stackName/files/download
+ *   POST   /:stackName/files/upload
+ *   PUT    /:stackName/files/content
+ *   DELETE /:stackName/files
+ *   POST   /:stackName/files/folder
+ *   PATCH  /:stackName/files/rename
+ *   PUT    /:stackName/files/permissions
  *
- * Covers: auth gating, tier gating (Community vs paid), input validation,
- * upload size limit, and happy-path 204/200 responses.
+ * The full file explorer is available on every tier; writes still require the
+ * `stack:edit` permission (admin role). Tests cover: auth gating, RBAC gating,
+ * Community-tier success, input validation, upload size limit, and happy-path
+ * 204/200 responses.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -205,13 +207,14 @@ describe('GET /api/stacks/:stackName/files/download', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 for Community tier', async () => {
+  it('streams the file for a Community-tier admin', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
     const res = await request(app)
       .get(`/api/stacks/${STACK}/files/download`)
       .query({ path: 'compose.yaml' })
       .set('Cookie', adminCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toMatch(/attachment/);
   });
 
   it('returns 400 INVALID_PATH when path query parameter is missing', async () => {
@@ -243,13 +246,16 @@ describe('POST /api/stacks/:stackName/files/upload', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 for Community tier', async () => {
+  it('uploads successfully for a Community-tier admin', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
     const res = await request(app)
       .post(`/api/stacks/${STACK}/files/upload`)
       .set('Cookie', adminCookie)
-      .attach('file', Buffer.from('data'), 'test.txt');
-    expect(res.status).toBe(403);
+      .attach('file', Buffer.from('community-upload'), 'community-upload.txt');
+    expect(res.status).toBe(204);
+
+    const content = await fs.readFile(path.join(stacksDir, STACK, 'community-upload.txt'), 'utf-8');
+    expect(content).toBe('community-upload');
   });
 
   it('returns 400 when no file is attached', async () => {
@@ -327,14 +333,17 @@ describe('PUT /api/stacks/:stackName/files/content', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 for Community tier', async () => {
+  it('writes the file for a Community-tier admin', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
     const res = await request(app)
       .put(`/api/stacks/${STACK}/files/content`)
-      .query({ path: 'new.txt' })
+      .query({ path: 'community-write.txt' })
       .set('Cookie', adminCookie)
-      .send({ content: 'hello' });
-    expect(res.status).toBe(403);
+      .send({ content: 'community-write' });
+    expect(res.status).toBe(204);
+
+    const content = await fs.readFile(path.join(stacksDir, STACK, 'community-write.txt'), 'utf-8');
+    expect(content).toBe('community-write');
   });
 
   it('returns 400 when content is not a string', async () => {
@@ -382,6 +391,20 @@ describe('PATCH /api/stacks/:stackName/files/rename', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('ALREADY_EXISTS');
   });
+
+  it('renames successfully for a Community-tier admin', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'community-rename-from.txt'), 'src');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'community-rename-from.txt', to: 'community-rename-to.txt' });
+    expect(res.status).toBe(204);
+
+    await expect(fs.access(path.join(stacksDir, STACK, 'community-rename-from.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const moved = await fs.readFile(path.join(stacksDir, STACK, 'community-rename-to.txt'), 'utf-8');
+    expect(moved).toBe('src');
+  });
 });
 
 // ── PUT /:stackName/files/permissions ────────────────────────────────────────
@@ -396,6 +419,17 @@ describe('PUT /api/stacks/:stackName/files/permissions', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_PATH');
   });
+
+  it('sets permissions successfully for a Community-tier admin', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'community-perms.txt'), 'data');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/permissions`)
+      .query({ path: 'community-perms.txt' })
+      .set('Cookie', adminCookie)
+      .send({ mode: 0o600 });
+    expect(res.status).toBe(204);
+  });
 });
 
 // ── DELETE /:stackName/files ──────────────────────────────────────────────────
@@ -408,13 +442,16 @@ describe('DELETE /api/stacks/:stackName/files', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 for Community tier', async () => {
+  it('deletes successfully for a Community-tier admin', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'community-delete.txt'), 'bye');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
     const res = await request(app)
       .delete(`/api/stacks/${STACK}/files`)
-      .query({ path: 'compose.yaml' })
+      .query({ path: 'community-delete.txt' })
       .set('Cookie', adminCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(204);
+
+    await expect(fs.access(path.join(stacksDir, STACK, 'community-delete.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('returns 400 when path is missing', async () => {
@@ -475,13 +512,16 @@ describe('POST /api/stacks/:stackName/files/folder', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 for Community tier', async () => {
+  it('creates the folder for a Community-tier admin', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
     const res = await request(app)
       .post(`/api/stacks/${STACK}/files/folder`)
-      .query({ path: 'newdir' })
+      .query({ path: 'community-folder' })
       .set('Cookie', adminCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(204);
+
+    const stat = await fs.stat(path.join(stacksDir, STACK, 'community-folder'));
+    expect(stat.isDirectory()).toBe(true);
   });
 
   it('returns 400 when path is missing', async () => {
