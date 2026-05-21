@@ -1,12 +1,14 @@
-import { useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import { Card, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { TogglePill } from '@/components/ui/toggle-pill';
-import { Plus, ServerCog, Activity, Loader2 } from 'lucide-react';
+import { formatAgeShort } from '@/lib/relativeTime';
 import type { MeshAlias, MeshNodeStatus } from '@/types/mesh';
-import { meshRouteStateFor, meshRouteStateTokens } from './meshRouteState';
+import {
+    RoutingNodeCard as RoutingNodeCardPrimitive,
+    type RoutingAliasRow,
+    type RoutingNodeCardMeta,
+    type RoutingNodeState,
+} from '@/components/ui/routing-node-card';
 
 interface Props {
     status: MeshNodeStatus;
@@ -18,25 +20,108 @@ interface Props {
     onChanged: () => void;
 }
 
+const REVERSE_BRIDGE: Record<MeshNodeStatus['reverseCallbackStatus'], RoutingNodeCardMeta['reverseBridge']> = {
+    connected: 'up',
+    connecting: 'unavailable',
+    unavailable: 'unavailable',
+    not_applicable: 'na',
+};
+
+function deriveNodeState(status: MeshNodeStatus): RoutingNodeState {
+    if (status.reachableMode === 'unreachable') return 'offline';
+    if (!status.enabled) return 'idle';
+    if (status.reachableMode === 'pilot' && !status.pilotConnected) return 'degraded';
+    if (status.reverseCallbackStatus === 'unavailable' || status.reverseCallbackStatus === 'connecting') return 'degraded';
+    return 'meshed';
+}
+
+function buildFooterContext(
+    nodeState: RoutingNodeState,
+    status: MeshNodeStatus,
+    seenAgeMs: number,
+): string {
+    const seen = formatAgeShort(seenAgeMs);
+    switch (nodeState) {
+        case 'meshed': {
+            const reverse = status.reverseCallbackStatus === 'connected'
+                ? 'up'
+                : status.reverseCallbackStatus === 'not_applicable'
+                    ? 'n/a'
+                    : 'unavail';
+            return `Reverse bridge ${reverse} · reconcile ${seen}`;
+        }
+        case 'idle':
+            return `Mesh off · seen ${seen}`;
+        case 'degraded':
+            return status.reverseCallbackStatus === 'connecting'
+                ? `Redialing · last update ${seen}`
+                : `Last seen ${seen}`;
+        case 'offline':
+            return `Last seen ${seen}`;
+    }
+}
+
 export function RoutingNodeCard({
     status, aliases, onAddStack, onShowDiagnostics, onShowAlias, onTestUpstream, onChanged,
 }: Props) {
     const [toggling, setToggling] = useState(false);
     const [testingAlias, setTestingAlias] = useState<string | null>(null);
+    const [lastTestedByHost, setLastTestedByHost] = useState<Map<string, { at: number; ok: boolean }>>(() => new Map());
+    const lastSeenRef = useRef<number>(Date.now());
+    const lastStatusSignatureRef = useRef<string>('');
 
-    const nodeAliases = aliases.filter((a) => a.nodeId === status.nodeId);
-    const hasOptIns = status.optedInStacks.length > 0;
-    // Defensive de-dup: `/mesh/status` and `/mesh/aliases` are fetched
-    // separately, so a transient inconsistency between the two snapshots
-    // could otherwise render both a live alias row and a suspended row for
-    // the same stack. Drop suspended entries that the alias snapshot still
-    // covers; the alias row already represents the live state.
-    const stackNamesWithAliases = new Set(nodeAliases.map((a) => a.stackName));
-    const suspendedOptIns = status.optedInStacks.filter(
-        (s) => !s.currentlyResolvable && !stackNamesWithAliases.has(s.stackName),
+    // Track only health-bearing fields; `activeStreamCount` and stack-count
+    // churn would otherwise reset the "seen" clock on every reconcile tick.
+    const signature = `${status.enabled}|${status.reachableMode}|${status.pilotConnected}|${status.reverseCallbackStatus}`;
+    if (signature !== lastStatusSignatureRef.current) {
+        lastStatusSignatureRef.current = signature;
+        lastSeenRef.current = Date.now();
+    }
+
+    const nodeAliases = useMemo(() => aliases.filter((a) => a.nodeId === status.nodeId), [aliases, status.nodeId]);
+    // Defensive de-dup: `/mesh/status` and `/mesh/aliases` are fetched separately,
+    // so a transient inconsistency could otherwise render both a live row and a
+    // suspended row for the same stack. Drop suspended entries the alias snapshot
+    // still covers; the alias row already represents the live state.
+    const stackNamesWithAliases = useMemo(
+        () => new Set(nodeAliases.map((a) => a.stackName)),
+        [nodeAliases],
+    );
+    const suspended = useMemo(
+        () => status.optedInStacks.filter(
+            (s) => !s.currentlyResolvable && !stackNamesWithAliases.has(s.stackName),
+        ),
+        [status.optedInStacks, stackNamesWithAliases],
     );
 
+    const rows: RoutingAliasRow[] = useMemo(() => {
+        const live: RoutingAliasRow[] = nodeAliases.map((a) => ({
+            host: a.host,
+            port: a.port,
+            kind: 'alias',
+            lastTested: lastTestedByHost.get(a.host),
+            testing: testingAlias === a.host,
+        }));
+        const sus: RoutingAliasRow[] = suspended.map((s) => ({
+            host: s.stackName,
+            port: 0,
+            kind: 'suspended',
+        }));
+        return [...live, ...sus];
+    }, [nodeAliases, suspended, lastTestedByHost, testingAlias]);
+
+    const nodeState = deriveNodeState(status);
+    const meta: RoutingNodeCardMeta = {
+        pilotConnected: status.pilotConnected,
+        reverseBridge: REVERSE_BRIDGE[status.reverseCallbackStatus],
+        stacks: status.optedInStacks.length,
+        aliases: nodeAliases.length,
+    };
+    const seenAgeMs = Date.now() - lastSeenRef.current;
+    const footerContext = buildFooterContext(nodeState, status, seenAgeMs);
+
     const toggleEnabled = async (next: boolean) => {
+        if (toggling) return;
         setToggling(true);
         try {
             const action = next ? 'enable' : 'disable';
@@ -53,150 +138,43 @@ export function RoutingNodeCard({
         }
     };
 
-    const runTest = async (alias: string) => {
-        setTestingAlias(alias);
-        try { await onTestUpstream(alias); } finally { setTestingAlias(null); }
+    const handleTestAlias = async (host: string) => {
+        if (testingAlias) return;
+        setTestingAlias(host);
+        try {
+            await onTestUpstream(host);
+            setLastTestedByHost((prev) => {
+                const next = new Map(prev);
+                next.set(host, { at: Date.now(), ok: true });
+                return next;
+            });
+        } catch {
+            setLastTestedByHost((prev) => {
+                const next = new Map(prev);
+                next.set(host, { at: Date.now(), ok: false });
+                return next;
+            });
+        } finally {
+            setTestingAlias(null);
+        }
     };
 
     return (
-        <Card className="bg-card shadow-card-bevel">
-            <CardContent className="p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm">{status.nodeName}</span>
-                        {status.reachableMode === 'local' && (
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-brand/40 bg-brand/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-brand">
-                                ★ Local
-                            </span>
-                        )}
-                        {status.reachableMode === 'pilot' && !status.pilotConnected && (
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-destructive/40 bg-destructive/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-destructive">
-                                pilot offline
-                            </span>
-                        )}
-                        {status.reachableMode === 'unreachable' && (
-                            <span
-                                title={status.reachableReason ?? undefined}
-                                className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-destructive/40 bg-destructive/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-destructive"
-                            >
-                                unreachable
-                            </span>
-                        )}
-                        {status.reverseCallbackStatus === 'connecting' && (
-                            <span
-                                title="Central is dialing the reverse bridge to this peer."
-                                className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-card-border bg-card text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-stat-subtitle"
-                            >
-                                reconnecting
-                            </span>
-                        )}
-                        {status.reverseCallbackStatus === 'unavailable' && (
-                            <span
-                                title="Peer→central tunnel is between dials. Central will redial on its next reconcile tick."
-                                className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-amber-500/40 bg-amber-500/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-amber-600 dark:text-amber-400"
-                            >
-                                reverse unavailable
-                            </span>
-                        )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <TogglePill
-                            checked={status.enabled}
-                            disabled={toggling || status.reachableMode === 'unreachable'}
-                            onChange={(next) => { void toggleEnabled(next); }}
-                        />
-                        <Button variant="outline" size="sm" onClick={onShowDiagnostics}>
-                            <ServerCog className="w-3 h-3 mr-1" /> Diagnostics
-                        </Button>
-                    </div>
-                </div>
-
-                {status.reachableMode === 'unreachable' && status.reachableReason && (
-                    <div className="text-[11px] text-destructive">
-                        {status.reachableReason}
-                    </div>
-                )}
-                {status.reachableMode === 'pilot' && !status.pilotConnected && (
-                    <div className="text-[11px] text-stat-subtitle">
-                        Pilot tunnel is not connected. Mesh traffic resumes when the agent reconnects.
-                    </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="text-stat-subtitle">Mesh stacks</div>
-                    <div className="font-mono text-stat-value">{status.optedInStacks.length}</div>
-                    <div className="text-stat-subtitle">Aliases</div>
-                    <div className="font-mono text-stat-value">{nodeAliases.length}</div>
-                </div>
-
-                {status.enabled && (
-                    <>
-                        <div className="border-t border-card-border pt-2 space-y-1">
-                            {!hasOptIns && nodeAliases.length === 0 && (
-                                <div className="text-[11px] text-stat-subtitle">No mesh services on this node yet.</div>
-                            )}
-                            {nodeAliases.map((a) => {
-                                const pillState = meshRouteStateFor({
-                                    optedIn: true,
-                                    pilotConnected: status.pilotConnected,
-                                });
-                                const pill = meshRouteStateTokens(pillState);
-                                return (
-                                    <div key={a.host} className="flex items-center justify-between gap-2 rounded border border-card-border bg-card px-2 py-1.5">
-                                        <button
-                                            type="button"
-                                            className="text-[11px] font-mono text-left truncate hover:text-brand transition-colors"
-                                            onClick={() => onShowAlias(a.host)}
-                                        >
-                                            {a.host}:{a.port}
-                                        </button>
-                                        <span className={`shrink-0 px-1.5 py-0.5 rounded-sm border text-[10px] leading-3 font-mono uppercase tracking-[0.18em] ${pill.toneClass}`}>
-                                            {pill.label}
-                                        </span>
-                                        <Button
-                                            variant="ghost" size="sm"
-                                            onClick={() => { void runTest(a.host); }}
-                                            disabled={testingAlias === a.host}
-                                            className="h-6 px-1.5"
-                                        >
-                                            {testingAlias === a.host
-                                                ? <Loader2 className="w-3 h-3 animate-spin" />
-                                                : <Activity className="w-3 h-3" />}
-                                        </Button>
-                                    </div>
-                                );
-                            })}
-                            {suspendedOptIns.map((s) => (
-                                <div
-                                    key={`suspended-${s.stackName}`}
-                                    className="flex items-center justify-between gap-2 rounded border border-card-border bg-card px-2 py-1.5"
-                                    title="Stack is opted into the mesh but has no running services. Aliases will publish when the stack starts."
-                                >
-                                    <span className="text-[11px] font-mono text-left truncate text-stat-subtitle">
-                                        {s.stackName}
-                                    </span>
-                                    <span className="shrink-0 px-1.5 py-0.5 rounded-sm border border-amber-500/40 bg-amber-500/10 text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-amber-600 dark:text-amber-400">
-                                        suspended
-                                    </span>
-                                </div>
-                            ))}
-                            {suspendedOptIns.length > 0 && (
-                                <div className="text-[11px] text-stat-subtitle pt-1">
-                                    Stack stopped, alias resumes when services start.
-                                </div>
-                            )}
-                        </div>
-                        <Button
-                            variant="outline" size="sm" className="w-full"
-                            onClick={onAddStack}
-                            disabled={status.reachableMode === 'unreachable'}
-                        >
-                            <Plus className="w-3 h-3 mr-1" /> Add stack to mesh
-                        </Button>
-                    </>
-                )}
-            </CardContent>
-        </Card>
+        <RoutingNodeCardPrimitive
+            crumb={['Routing', 'Node', status.nodeName]}
+            name={status.nodeName}
+            isLocal={status.reachableMode === 'local'}
+            nodeState={nodeState}
+            meta={meta}
+            aliases={rows}
+            onToggleEnabled={(next) => { void toggleEnabled(next); }}
+            onShowDiagnostics={onShowDiagnostics}
+            onShowAlias={onShowAlias}
+            onTestAlias={(host) => { void handleTestAlias(host); }}
+            onAddStack={onAddStack}
+            onRetry={onChanged}
+            footerContext={footerContext}
+            offlineReason={status.reachableReason}
+        />
     );
 }
-

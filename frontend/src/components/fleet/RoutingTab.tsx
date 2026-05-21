@@ -166,7 +166,7 @@ export function RoutingTab() {
                         Add a stack to the mesh and its services become reachable from any other meshed
                         stack by hostname. No VPN, no firewall changes.
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 w-full">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-[18px] grid-auto-rows-min-content items-start w-full">
                         {status.map((s) => (
                             <RoutingNodeCard
                                 key={s.nodeId}
@@ -223,7 +223,7 @@ export function RoutingTab() {
                 )}
             </div>
             {viewMode === 'table' ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-[18px] grid-auto-rows-min-content items-start">
                     {status.map((s) => (
                         <RoutingNodeCard
                             key={s.nodeId}
