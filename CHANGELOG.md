@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.84.3](https://github.com/Studio-Saelix/sencho/compare/v0.84.2...v0.84.3) (2026-05-21)
+
+
+### Fixed
+
+* **pilot:** post-merge audit followups (WS via getProxyTarget, closeTunnel lifecycle, mesh source buffer, docs) ([#1128](https://github.com/Studio-Saelix/sencho/issues/1128)) ([e65c5e8](https://github.com/Studio-Saelix/sencho/commit/e65c5e855108b8fc726c5d84ae7925932a54f056))
+
 ## [0.84.2](https://github.com/Studio-Saelix/sencho/compare/v0.84.1...v0.84.2) (2026-05-20)
 
 
