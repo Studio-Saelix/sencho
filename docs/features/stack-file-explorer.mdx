@@ -21,7 +21,7 @@ The file explorer gives you direct access to everything inside a stack's directo
 
 The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files tab in one click.
 
-The file explorer is available on every Sencho tier. Write actions (upload, download, edit, create, rename, change permissions, delete) require **stack edit** permission on your account. Viewer accounts can browse the tree, preview text files, and inspect permissions in read-only mode.
+The file explorer is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) are available to every authenticated account. Write actions (upload, edit, create, rename, change permissions, delete) require **stack edit** permission on your account.
 
 ## Layout
 
@@ -181,7 +181,7 @@ The Permissions dialog opens for everyone; only users with stack edit permission
     The container caches the file at startup, or the mount is configured read-only inside the container. Restart the service after saving so the container picks up the new file.
   </Accordion>
   <Accordion title="Download button is missing">
-    Confirm you are signed in to an account with **stack edit** permission. Viewer accounts can browse and preview but cannot download. To pull files from a viewer-only login, use a host terminal or `docker cp`.
+    The Download button appears in the right-pane action bar only when a file is selected in the tree. Click any text or binary file to open it, and the button activates.
   </Accordion>
   <Accordion title="The tree shows 'Showing 500 of N - refine in shell'">
     Each directory render is capped at 500 entries to keep the tree responsive. The first 500 entries alphabetically are shown. To work with the entries past the cap, drop into a host shell with `cd` into the stack directory.
