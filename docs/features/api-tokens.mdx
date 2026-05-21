@@ -1,114 +1,436 @@
 ---
 title: API Tokens
-description: Generate scoped API tokens for CI/CD pipelines, scripts, and automation workflows with granular permission control.
+description: Long-lived scoped bearer tokens for CI/CD pipelines, fleet automation, and monitoring integrations. Available on every Sencho tier.
+keywords: ["api token", "bearer token", "automation", "ci/cd", "scopes", "fleet automation"]
 ---
 
 <Note>
-  API tokens are available on every Sencho tier. Each user can create up to 25 active tokens.
+  API tokens are available on every Sencho tier. Creation and revocation require an admin Sencho user.
 </Note>
 
-API tokens let you authenticate external tools (CI/CD pipelines, deployment scripts, monitoring integrations) without sharing user credentials. Each token is scoped to a specific permission level so you can follow the principle of least privilege.
+API tokens are opaque, scoped bearer credentials that authenticate external tools against the Sencho REST and WebSocket APIs without sharing a user password. They let CI/CD pipelines deploy stacks, monitoring agents subscribe to log streams, and operator scripts query fleet state, each under a permission level you choose at creation time.
 
-## Permission scopes
+The audience is anyone automating against a Sencho instance: a homelab operator running a backup script on cron, a small team gating deploys behind a GitHub Actions workflow, or a fleet of nodes orchestrated from a single Sencho hub. Every Sencho deployment that runs an external automation eventually issues at least one.
 
-Every token is created with one of three permission levels:
+API tokens sit alongside two other credential types in the Sencho auth pipeline: short-lived browser session cookies for human operators, and node-to-node JWTs for cross-instance proxy calls. API tokens are the only credential designed for long-lived programmatic use by external systems.
 
-| Scope | Allowed actions |
-|-------|----------------|
-| **Read Only** | `GET` requests only: view stacks, containers, metrics, and settings |
-| **Deploy Only** | Everything in Read Only, plus stack lifecycle operations: deploy, down, restart, stop, start, update |
-| **Full Admin** | All read and write operations except the universal restrictions listed below |
+## Mental model
 
-Choose the narrowest scope that fits your use case. A CI pipeline that only deploys stacks should use **Deploy Only**, not Full Admin.
+An API token is an opaque secret value (not a JWT), 56 characters long, that Sencho recognises by its `sen_sk_` prefix. It is owned by exactly one Sencho user, lives in the local SQLite database as a SHA-256 hash, and authorises every request it accompanies under one of three scopes.
 
-### Universal restrictions
+The three scopes form a ladder:
 
-Regardless of scope, **all** API tokens are blocked from:
+- **Read Only** authorises every `GET` request the underlying API exposes.
+- **Deploy Only** adds the six stack-lifecycle POSTs: deploy, down, restart, stop, start, update.
+- **Full Admin** adds every other read and write on the underlying API.
 
-| Category | Description |
-|----------|-------------|
-| **Password management** | Changing user passwords |
-| **User management** | Creating, updating, deleting, or listing user accounts |
-| **SSO configuration** | Viewing, creating, updating, deleting, or testing SSO providers |
-| **Node management** | Adding, updating, or deleting remote nodes |
-| **License management** | Activating or deactivating license keys |
-| **Token management** | Creating, listing, or revoking API tokens |
-| **Registry management** | Viewing, creating, updating, deleting, or testing registry credentials |
-| **Console access** | Generating console session tokens for interactive terminals |
+A separate layer sits on top: a set of universal restrictions that **no** API token can reach, regardless of scope or HTTP method. These cover identity, trust roots, billing, and interactive shell access; even a Read Only `GET` against `/api/users` or `/api/sso/config` is rejected. They require a human user session.
 
-These restrictions ensure that API tokens cannot escalate privileges or modify the identity and infrastructure configuration of your Sencho instance. These operations require a human user session (browser login).
+Finally, scope-enforced API tokens compose with the fleet. When a request carries an `x-node-id` header (HTTP) or `?nodeId=` query (WebSocket) for a remote node, Sencho's [remote-node proxy](/features/multi-node) substitutes that node's own credential for the API token before forwarding, so a single token on the hub drives every node in the fleet under the same scope.
+
+## Key capabilities
+
+**Scoped automation for CI/CD.** Three scopes let a token grant exactly what a pipeline needs and nothing more. A deploy pipeline takes Deploy Only; a Prometheus exporter takes Read Only; a fleet-wide rotation script takes Full Admin.
+
+**Fleet-wide programmatic control from a single token.** One token authenticated against the hub can target any enrolled node by ID. The hub re-signs the request with the target node's credential transparently, so the automation does not need to hold a separate secret per node.
+
+**Long-lived bearer auth with optional expiry.** Tokens stay valid until revoked or expired. Expiry is opt-in at 30, 60, 90, or 365 days; tokens with no expiry must be revoked manually.
+
+**Per-token rate budget.** Each token gets its own rate-limit budget keyed by a hash of the token itself, so one chatty automation never starves another.
+
+**Secret-scanner-recognisable format.** The `sen_sk_` prefix is the same shape secret scanners look for: GitHub Advanced Security, TruffleHog, and GitGuardian all flag accidental commits without configuration.
+
+**Live audit attribution.** Every mutating call made with a token is recorded in the [Audit Log](/features/audit-log) under the username of the user who created the token, with the target node ID when the call was proxied.
+
+**WebSocket support.** The same Bearer header authenticates WebSocket upgrades, so a token can subscribe to stack log streams and notification events, not just REST endpoints.
+
+## Prerequisites
+
+- An **admin** Sencho user account. Token creation and revocation are admin-only.
+- The Sencho instance must be reachable from the automation host. The default listen port is `1852`; behind a reverse proxy, the public hostname applies.
+- For fleet-wide automation: the target nodes must already be [enrolled in the fleet](/features/multi-node). API tokens do not extend the proxy chain; they only ride it.
 
 ## Creating a token
 
-1. Open **Settings Hub** and navigate to the **API Tokens** tab (admin-only).
-2. Click **Create Token**.
-3. Fill in the creation form:
-   - **Name**: A descriptive label (e.g., "GitHub Actions deploy")
-   - **Permission Scope**: Select Read Only, Deploy Only, or Full Admin
-   - **Expiration**: Choose 30 days, 60 days, 90 days, 1 year, or no expiration. Tokens without an expiration must be revoked manually.
-4. Click **Create**. A green banner appears with the raw token value. Copy it immediately using the copy button.
-
-<Note>
-  Token names must be unique among your active tokens. If you need to reuse a name, revoke the existing token first.
-</Note>
-
-<Frame>
-  <img src="/images/api-tokens/api-tokens-overview.png" alt="API Tokens management view in Settings Hub showing the token list and create form" />
+<Frame caption="Settings → Identity → API Tokens. Empty state, with the Create token affordance.">
+  <img src="/images/api-tokens/api-tokens-empty-state.png" alt="API Tokens settings tab, empty state" />
 </Frame>
 
-<Warning>
-  The token value is shown only at creation time. Sencho stores a SHA-256 hash of the token, not the token itself. If you lose it, revoke and create a new one.
-</Warning>
+<Steps>
+  <Step title="Open Settings → Identity → API Tokens">
+    Click your avatar, then **Settings**. The tab lives in the **Identity** group of the Settings sidebar.
+  </Step>
+  <Step title="Click Create token">
+    The inline form expands.
+  </Step>
+  <Step title="Name the token, pick a scope, pick an expiry">
+    Use a name that says who or what holds the token (`ci-deploy-pipeline`, `monitoring-readonly`). Names must be unique among your active tokens.
 
-## Managing tokens
+    <Frame caption="Create form. Name accepts up to 100 characters; scope is one of three; expiration is 30 / 60 / 90 / 365 days or none.">
+      <img src="/images/api-tokens/api-tokens-create-form.png" alt="API token create form filled in with name, scope, and expiration" />
+    </Frame>
+  </Step>
+  <Step title="Copy the revealed token">
+    Sencho generates the token and shows it once in a green banner. Copy it now and store it in your secret manager.
 
-The token list displays each active token as a card showing:
+    <Frame caption="Reveal banner. The token starts with `sen_sk_` and is 56 characters total. Sencho stores only a SHA-256 hash; if you lose the value, the only fix is to revoke and create a new token.">
+      <img src="/images/api-tokens/api-tokens-reveal-banner.png" alt="Token created banner showing the sen_sk_ token value and a copy button" />
+    </Frame>
+  </Step>
+</Steps>
 
-- **Name** and **scope badge** (color-coded: teal for Read Only, gray for Deploy Only, red for Full Admin)
-- **Created date**
-- **Last used** timestamp (relative, e.g., "3h ago"), or "Never" if unused
-- **Expiration date**, if one was set. Expired tokens are marked in red.
+Each user can hold up to **25 active tokens**. Revoke an old one to free a slot, or revoke a token to reuse its name.
 
 ## Using a token
 
-Pass the token as a Bearer token in the `Authorization` header:
+Pass the token as a `Bearer` credential in the `Authorization` header. Sencho prefers the Bearer header over the session cookie, so a cookie left behind in `~/.curlrc` or similar will not shadow an API-token call.
+
+### REST
 
 <CodeGroup>
 ```bash curl
-curl -H "Authorization: Bearer YOUR_TOKEN" \
-     https://your-sencho-instance/api/stacks
+curl -H "Authorization: Bearer $SENCHO_TOKEN" \
+     https://sencho.example.com/api/stacks
 ```
 
 ```yaml GitHub Actions
 - name: Deploy stack
+  env:
+    SENCHO_TOKEN: ${{ secrets.SENCHO_TOKEN }}
   run: |
     curl -X POST \
-      -H "Authorization: Bearer ${{ secrets.SENCHO_TOKEN }}" \
-      https://your-sencho-instance/api/stacks/my-app/deploy
+      -H "Authorization: Bearer $SENCHO_TOKEN" \
+      https://sencho.example.com/api/stacks/my-app/deploy
+```
+
+```python python
+import os, requests
+
+resp = requests.post(
+    "https://sencho.example.com/api/stacks/my-app/deploy",
+    headers={"Authorization": f"Bearer {os.environ['SENCHO_TOKEN']}"},
+)
+resp.raise_for_status()
 ```
 </CodeGroup>
 
-### Scope enforcement
+### Targeting a remote node
 
-If a token attempts an action outside its scope, Sencho returns a `403` response with a `SCOPE_DENIED` error code:
+Add `x-node-id` (REST) or `?nodeId=` (WebSocket) and the request is forwarded to the named node through the hub. The token's scope is checked on the hub first; the request that reaches the remote carries the node's own credential, not yours.
 
-```json
-{
-  "error": "API token scope \"read-only\" only allows GET requests.",
-  "code": "SCOPE_DENIED"
-}
+```bash
+curl -H "Authorization: Bearer $SENCHO_TOKEN" \
+     -H "x-node-id: 4" \
+     https://sencho.example.com/api/stacks
 ```
 
-## Revoking a token
+### WebSocket
 
-Click the trash icon next to any token in the API Tokens settings tab. A confirmation dialog warns that revoking the token will immediately invalidate it and break any pipelines or scripts using it. After confirmation, revocation is instant: any in-flight or future requests using the revoked token will receive a `401` response.
+```javascript
+const ws = new WebSocket(
+  "wss://sencho.example.com/api/stacks/my-app/logs",
+  // The Authorization header is set by environment-specific means.
+  // In a Node.js client:
+  { headers: { Authorization: `Bearer ${process.env.SENCHO_TOKEN}` } }
+);
+```
+
+The default `WebSocket` constructor in browsers cannot set headers, so browser-side use requires routing through an authenticated origin (a same-site fetch that establishes a session cookie) or running the WebSocket client server-side.
+
+## Permission scopes in detail
+
+### Read Only
+
+Authorises **every** `GET` against the API. Representative uses: list stacks, fetch container metrics, read stack files, query fleet topology, fetch the audit log, read system stats.
+
+### Deploy Only
+
+Authorises every `GET`, plus exactly six `POST` patterns that operate on a stack by name:
+
+| Method | Path pattern | Action |
+|--------|--------------|--------|
+| `POST` | `/api/stacks/:name/deploy` | Create or update and bring up. |
+| `POST` | `/api/stacks/:name/down` | Tear down. |
+| `POST` | `/api/stacks/:name/restart` | Restart in place. |
+| `POST` | `/api/stacks/:name/stop` | Stop without removing. |
+| `POST` | `/api/stacks/:name/start` | Start a stopped stack. |
+| `POST` | `/api/stacks/:name/update` | Pull newer images and redeploy. |
+
+Any other write (creating a stack, editing a stack file, calling a non-lifecycle action) returns `403 SCOPE_DENIED`.
+
+### Full Admin
+
+Authorises every read and every write the API exposes, **except** the universal restrictions below. This is the right scope for fleet-wide rotation scripts, migration tooling, or any automation that needs to create/edit objects beyond simple lifecycle.
+
+### WebSocket scope matrix
+
+| Endpoint | Read Only | Deploy Only | Full Admin |
+|----------|-----------|-------------|------------|
+| `/api/stacks/:stack/logs` (stack log stream) | yes | yes | yes |
+| `/ws/notifications` (notification stream) | yes | yes | yes |
+| `/ws` (generic exec / stats) | no | no | yes |
+| `/api/system/host-console` (host shell) | no | no | yes |
+
+A Read Only or Deploy Only token attempting an out-of-scope WebSocket upgrade is rejected with `403 Forbidden` before any frames flow.
+
+## Universal restrictions
+
+Regardless of scope, every API token is rejected from the following routes with `403 SCOPE_DENIED`. These endpoints alter identity, trust roots, billing, or interactive shell access, and require a human session.
+
+| Category | What it covers |
+|----------|----------------|
+| **Password change** | `PUT /api/auth/password` |
+| **MFA configuration** | Enrol, verify, and disable TOTP |
+| **User management** | Create, list, update, delete, role change |
+| **SSO configuration** | View, create, update, delete, test any provider |
+| **Node management** | Add, update, delete remote nodes |
+| **Node token generation** | Mint a long-lived JWT for fleet enrollment |
+| **License management** | Activate and deactivate license keys |
+| **Registry credentials** | View, create, update, delete, test registry creds |
+| **Host-console session token** | Mint the short-lived ticket the browser console uses |
+| **API token self-management** | Create, list, revoke API tokens |
+| **Cloud Backup** | Configure or trigger Sencho Cloud Backup |
+
+The rationale is the same in every case: a programmatic credential should not be able to grant itself more authority, change the trust roots that issued it, or open an interactive shell. Those actions require a live human user logged into a browser.
+
+## Cross-node behaviour
+
+When a request reaches the hub with both a Bearer API token and an `x-node-id` (or `?nodeId=`) for a remote node, the middleware pipeline runs in this order:
+
+1. **Auth.** The API token is validated against the local hash store. The request now carries the creating user's identity and the token's scope.
+2. **Scope check.** `enforceApiTokenScope` rejects the request if the method/path is outside the token's scope. This runs **before** the proxy decision.
+3. **Proxy.** The remote-node proxy strips the Bearer API token, attaches the remote node's own `api_token` (the credential the hub stored when the node was enrolled), and forwards the request to the remote's `api_url`.
+
+Two consequences worth remembering:
+
+- The scope of the **calling** token governs the cross-node call. A Read Only token cannot perform a `POST` on a remote node even if that node would happily accept its own admin credential.
+- The remote node sees a call signed by **its own** credential. The API token never crosses the hub. If the remote was enrolled with a token that has since been revoked, the call returns `401`; the fix is to re-enroll the node, not to issue a new API token.
+
+Net behaviour: one API token on the hub is a fleet-wide credential whose authority is bounded by its scope and by the hub's enrollment to each node.
+
+## Managing tokens
+
+The Settings → API Tokens tab lists every active token you own as a card.
+
+<Frame caption="Settings → Identity → API Tokens. Each card carries the token name, a scope badge (Read Only · Deploy Only · Full Admin), the created date, last-used relative time, and the expiration date when one is set.">
+  <img src="/images/api-tokens/api-tokens-populated.png" alt="API Tokens settings tab listing three tokens, one of each scope" />
+</Frame>
+
+The masthead `TOKENS` counter is the number of your active tokens; you can hold up to 25.
+
+## Lifecycle and operational behaviour
+
+**Creation.** The raw token is generated, displayed once in the reveal banner, and hashed with SHA-256 before persistence. Sencho never stores or logs the raw value.
+
+**Usage.** The `last_used_at` timestamp is updated on every authenticated request, whether REST or WebSocket. The list view formats it as a relative time (`3h ago`, `2d ago`) so dormant tokens are easy to spot.
+
+**Expiry.** Tokens past their `expires_at` are rejected at the auth step with the same `401 Invalid or expired token` body as a revoked or unknown token.
+
+**Revocation.** Clicking the trash icon opens a confirmation modal. Confirming revokes the token immediately; the next call returns `401`. Revocation is one-way.
+
+<Frame caption="Revoke confirmation. The kicker `API TOKEN · REVOKE · IRREVERSIBLE` and the body call out the named token so you know exactly which credential is about to die.">
+  <img src="/images/api-tokens/api-tokens-revoke-modal.png" alt="Revoke API token confirmation modal naming fleet-admin-rotation" />
+</Frame>
+
+**Audit attribution.** Every mutating call (`POST`, `PUT`, `DELETE`, `PATCH`) made with an API token writes an [audit-log entry](/features/audit-log) under the **creating user's username**, not under a token label. When the call was proxied to a remote node, the entry also records the target node ID, so a fleet-wide deploy made by `ci-deploy-pipeline` shows up under your username with the node ID it hit.
+
+## Rate limits
+
+Each API token gets its own rate-limit budget so one automation cannot starve another.
+
+- **Standard endpoints:** 200 requests per minute per token in production (1000 per minute in dev), keyed by a hash slice of the token itself. Configurable via the `API_RATE_LIMIT` environment variable on the Sencho instance.
+- **High-frequency polling endpoints** (`/api/health`, `/api/meta`, `/api/stats`, `/api/system/stats`, `/api/stacks/statuses`, `/api/metrics/historical`, `/api/auth/status`, `/api/auth/sso/providers`, `/api/license`): exempt from the standard limit, governed instead by a polling safety net at 300 requests per minute per token.
+- **Webhook triggers:** governed separately at 500 requests per minute, since CI/CD platforms often share datacenter IPs.
+
+When a token hits the standard limit, Sencho returns `429 Too many requests` with a JSON body and the standard `RateLimit-*` response headers so clients can back off. Internal node-to-node proxy traffic between Sencho instances does not consume the API-token budget.
+
+## Where to find it
+
+API tokens are issued and revoked on the hub that authenticates the call. When you select a remote node in the node switcher, the Settings sidebar reflects that node's settings; tokens live with the hub.
 
 ## Security model
 
-- **Recognizable format**: Tokens are 56 characters and begin with the `sen_sk_` prefix, followed by 49 base62 (alphanumeric) characters. The last six characters are a checksum, so malformed or typoed values are rejected before any database lookup. The prefix makes Sencho tokens easy to spot in logs, code, and secret-scanning tools (GitHub, TruffleHog, GitGuardian).
-- **Hashed storage**: Only a SHA-256 hash of the token is stored in the database. The raw token is never persisted.
-- **Audit trail**: All actions performed via API tokens are recorded in the [Audit Log](/features/audit-log) under the creating user's username.
-- **Optional expiry**: Tokens can be created with an expiration period (30 days, 60 days, 90 days, or 1 year). Tokens without an expiry must be revoked manually when no longer needed.
-- **Per-user limits**: Each user can create up to 25 active tokens. Token names must be unique among active tokens for the same user.
-- **Usage tracking**: Each token tracks when it was last used, visible in the token list.
-- **Scope enforcement**: Permission checks happen at the middleware level before any route handler executes, ensuring consistent enforcement across all endpoints.
+- **Format.** A token is `sen_sk_` followed by 43 random base62 characters and a 6-character base62 checksum: 56 characters total.
+- **Checksum.** The checksum lets Sencho reject typoed or malformed values without touching the database. Malformed values, unknown hashes, expired tokens, and revoked tokens all return the same `401 Invalid or expired token` body so the response cannot be used as a token-existence oracle.
+- **Hashed storage.** Only the SHA-256 hash lives in the database. The raw value exists in memory exactly long enough to render the reveal banner.
+- **Scanner-friendly prefix.** GitHub Advanced Security, TruffleHog, and GitGuardian recognise the `sen_sk_` prefix and flag accidental commits.
+- **Middleware-enforced scope ladder.** The Read Only / Deploy Only / Full Admin gate runs in middleware before any route handler executes, so the same rules cover every HTTP method on every route. The universal-restriction list is layered on top per-route, so each restricted endpoint declares its rejection explicitly.
+- **Bearer preferred over cookie.** When both a Bearer header and a session cookie are present, the Bearer wins. An old session cookie sitting in a shared HTTP client will not silently elevate or override an API token call.
+
+## Limitations and non-goals
+
+- **No per-stack or per-node scoping.** Scope is global to the instance. A Deploy Only token can deploy any stack on any node it can reach via the proxy. Per-resource scoping is not a v1 capability.
+- **No automatic rotation.** Tokens stay valid until you revoke them or they expire. Rotation is a procedural concern; pair it with your secret manager.
+- **No intermediate granularity between Deploy Only and Full Admin.** A token that needs to call any non-lifecycle write (creating a stack, editing a Compose file, triggering an arbitrary action) needs Full Admin.
+- **One owner per token.** Tokens are not shareable across users at the data model; only the creating user can revoke a token through the UI.
+- **Owner deletion breaks the token.** If the user who created a token is deleted, subsequent calls with that token return `401` because the auth path requires the creator to still exist. Rotate before deleting accounts.
+- **No token introspection endpoint.** There is no `GET /api/me` for an API token; client code must know its own scope.
+- **WebSocket scope restrictions.** Read Only and Deploy Only tokens cannot reach the generic `/ws` exec/stats endpoint or the host console. Full Admin can.
+
+## Common workflows
+
+### GitHub Actions: deploy a stack on a specific node
+
+```yaml
+name: Deploy to Sencho fleet
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger deploy on node 4
+        env:
+          SENCHO_TOKEN: ${{ secrets.SENCHO_TOKEN }}
+        run: |
+          curl --fail -X POST \
+            -H "Authorization: Bearer $SENCHO_TOKEN" \
+            -H "x-node-id: 4" \
+            https://sencho.example.com/api/stacks/my-app/update
+```
+
+A Deploy Only token is sufficient; `update` is in the allow-list.
+
+### CLI health check across the fleet
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+for id in 1 2 3 4; do
+  status=$(curl -sf \
+    -H "Authorization: Bearer $SENCHO_TOKEN" \
+    -H "x-node-id: $id" \
+    https://sencho.example.com/api/health | jq -r '.status')
+  echo "node $id: $status"
+done
+```
+
+A Read Only token is sufficient. `/api/health` is exempt from the standard rate limit.
+
+### Monitoring agent: subscribe to the notification stream
+
+```javascript
+import { WebSocket } from "ws";
+
+const ws = new WebSocket("wss://sencho.example.com/ws/notifications", {
+  headers: { Authorization: `Bearer ${process.env.SENCHO_TOKEN}` },
+});
+ws.on("message", (data) => console.log(JSON.parse(data.toString())));
+```
+
+Read Only is sufficient for the notification stream.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Every call returns 401 with `Invalid or expired token`">
+    The same body covers four causes by design. Walk them in order:
+
+    1. **Malformed token.** The value must be exactly 56 characters and start with `sen_sk_`. A copy-paste that dropped or added a character fails the checksum.
+    2. **Expired.** Look up the token in Settings → API Tokens. If it has expired, create a replacement.
+    3. **Revoked.** If the token is missing from the list, it was revoked. Create a replacement.
+    4. **Owner deleted.** If the user who created the token has been removed, the auth path rejects every call. Have an admin issue a new token under a live account.
+  </Accordion>
+
+  <Accordion title="`403 SCOPE_DENIED` with a scope-allowance message">
+    The scope does not authorise the method or path you called. Either widen the scope by issuing a new token, or change the call. Common cases:
+
+    - Read Only attempting a `POST` of any kind.
+    - Deploy Only attempting a write that is not one of the six lifecycle actions (`deploy`, `down`, `restart`, `stop`, `start`, `update`).
+    - Any scope attempting a [universal restriction](#universal-restrictions) (user management, SSO, MFA, license, registries, console, node management, cloud backup, API-token self-management).
+  </Accordion>
+
+  <Accordion title="`400 Maximum of 25 active API tokens per user`">
+    Each user holds at most 25 active tokens. Revoke one in Settings → API Tokens before issuing another. The cap is per user, not per instance.
+  </Accordion>
+
+  <Accordion title="`409 An active token with this name already exists`">
+    Token names are unique among your active tokens. Either pick a different name or revoke the existing token with that name first. Revoked tokens free their names immediately.
+  </Accordion>
+
+  <Accordion title="Token works against the hub but returns 401 on a specific remote node">
+    The hub's proxy strips your token and signs the forwarded request with the node's own credential. A `401` from the proxy path means that node's enrollment credential is no longer valid on the remote (the remote was reset, the credential was rotated, the node fell out of sync). Re-enroll the node from Fleet → Nodes; the API token itself does not need to change.
+  </Accordion>
+
+  <Accordion title="`429 Too many requests`">
+    The token has hit the standard 200/min budget. Back off using the `RateLimit-Reset` header and consider splitting load across multiple tokens (each token has its own budget). For sustained high-frequency polling, prefer the polling endpoints listed in [Rate limits](#rate-limits), which are governed by a more generous safety net.
+  </Accordion>
+
+  <Accordion title="The API Tokens tab is missing from Settings">
+    The tab is admin-only. Sign in as an admin user to see it. Tokens are also issued from the hub; if you have selected a remote node in the node switcher, switch back to the local hub and the tab will appear under **Settings → Identity**.
+  </Accordion>
+</AccordionGroup>
+
+## FAQ
+
+<AccordionGroup>
+  <Accordion title="What is the difference between an API token and a Node Token?">
+    A **Node Token** is what you generate from **Settings → Nodes → Generate Token** on a remote Sencho to enroll that remote into a hub fleet. It is a long-lived JWT carrying a `node_proxy` scope and is consumed by the hub when adding the node, not by automation.
+
+    An **API token** is what you generate from **Settings → API Tokens** on the hub for external tools to authenticate against the hub's REST and WebSocket APIs. It is the credential you put in a CI variable or a script.
+
+    Different code paths, different consumers, different lifetimes.
+  </Accordion>
+
+  <Accordion title="What is the difference between an API token and SSO?">
+    SSO authenticates **humans** in a browser via OpenID Connect, OAuth, or LDAP, then issues a Sencho session cookie. An API token authenticates **machines** via a Bearer header and does not involve any identity provider.
+  </Accordion>
+
+  <Accordion title="What is the difference between an API token and a login cookie?">
+    A login cookie is a short-lived JWT (24 hours), bound to the browser, that is invalidated by password changes, role changes, and MFA enrollment. An API token is opaque, long-lived, and only invalidated by explicit revocation, expiry, or owner deletion. Sencho prefers the Bearer header over the cookie when both are present.
+  </Accordion>
+
+  <Accordion title="What is the difference between an API token and a webhook?">
+    Webhooks are **inbound** triggers Sencho accepts from external systems, authenticated via per-webhook HMAC signatures. API tokens are **outbound** credentials your automation uses to call into Sencho. They solve opposite directions of the integration problem.
+  </Accordion>
+
+  <Accordion title="Does Sencho rotate tokens automatically?">
+    No. Tokens stay valid until revoked or expired. Pair tokens with your secret manager's rotation policy, or use the optional expiry (30, 60, 90, 365 days) to force a periodic refresh.
+  </Accordion>
+
+  <Accordion title="What happens if the user who created the token is deleted?">
+    The token's auth path resolves the creator on every call. If the creator no longer exists, the call returns `401`. Rotate tokens before deleting user accounts that own them.
+  </Accordion>
+
+  <Accordion title="Can I revoke a token from the CLI?">
+    Yes. `DELETE /api/api-tokens/:id` works from an admin browser session; the API-token routes are admin-session only. The simplest path is the Settings UI; the REST route is there for tooling that wants to wrap it.
+  </Accordion>
+
+  <Accordion title="Will a revoked token leak in logs?">
+    Sencho logs the token's name and scope, never the raw value. The hash-slice rate-limit key is non-reversible. A revoked token in your own logs is still a leak risk for the period before revocation, so treat the secret manager as the source of truth and rotate on suspected compromise.
+  </Accordion>
+
+  <Accordion title="Do all my tokens share a rate-limit budget?">
+    No. Each token gets its own per-minute budget keyed by a hash of the token itself. Two parallel automations under the same user account do not collide.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<Columns cols={2}>
+  <Card title="API overview" icon="code" href="/api-reference/overview">
+    Base URL, error envelope, node-routing headers, and the full endpoint inventory.
+  </Card>
+  <Card title="Audit log" icon="file-clock" href="/features/audit-log">
+    Where every mutating call made with a token is recorded, attributed to its creator.
+  </Card>
+  <Card title="Multi-node management" icon="server" href="/features/multi-node">
+    How the `x-node-id` header routes a token's call through the hub's proxy to the right node.
+  </Card>
+  <Card title="Fleet view" icon="layout-grid" href="/features/fleet-view">
+    The hub-side console for the nodes your tokens target.
+  </Card>
+  <Card title="RBAC" icon="users" href="/features/rbac">
+    The role mapping the three token scopes inherit from.
+  </Card>
+  <Card title="SSO and LDAP" icon="key" href="/features/sso">
+    How human operators authenticate, for contrast.
+  </Card>
+  <Card title="Webhooks" icon="webhook" href="/features/webhooks">
+    Inbound counterpart to API tokens; HMAC-authenticated push triggers.
+  </Card>
+  <Card title="Security overview" icon="shield-check" href="/security">
+    Where API tokens fit in Sencho's wider security model.
+  </Card>
+</Columns>
