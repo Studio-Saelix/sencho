@@ -150,7 +150,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         label: 'Routing',
         description: 'Rules that steer alerts to the right channel based on severity or label.',
         keywords: ['rules', 'routing', 'channels', 'severity', 'labels'],
-        tier: 'admiral',
+        tier: 'skipper',
         scope: 'global',
         adminOnly: true,
         hiddenOnRemote: true,

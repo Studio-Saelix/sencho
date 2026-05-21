@@ -1,9 +1,9 @@
 ---
 title: Alerts & Notifications
-description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, or any webhook, with per-stack rules and Admiral routing.
+description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, or any webhook, with per-stack rules and Skipper routing.
 ---
 
-Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and one of three external channels you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with Admiral routing rules, and tuning retention.
+Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and one of three external channels you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with Skipper routing rules, and tuning retention.
 
 <Frame>
   <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications panel showing the Discord, Slack, and Webhook tabs with the masthead breadcrumb, the CHANNELS 3/3 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
@@ -51,7 +51,7 @@ Each dispatch is a single-shot HTTP POST with a 10-second `AbortSignal.timeout`.
 ## Notification Routing
 
 <Note>
-  Notification Routing requires a **Sencho Admiral** license. Admin role is required to create, edit, or delete routes.
+  Notification Routing requires a **Sencho Skipper or Admiral** license. Admin role is required to create, edit, or delete routes.
 </Note>
 
 Routing lets you direct alerts that match specific criteria to dedicated channels. Production crashes can land in `#prod-incidents` on Slack while staging notifications go to a less urgent Discord channel, all without juggling per-channel webhook URLs across teams.

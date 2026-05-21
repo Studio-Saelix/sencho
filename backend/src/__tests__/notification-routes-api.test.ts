@@ -88,6 +88,65 @@ describe('Notification Routes - auth enforcement', () => {
   });
 });
 
+// --- Tier enforcement (Skipper or Admiral) ---
+
+describe('Notification Routes - tier enforcement', () => {
+  it('GET /api/notification-routes returns 200 when the variant is Skipper', async () => {
+    // The default mock returns paid + admiral. Overriding variant to skipper
+    // for one call confirms requirePaid does not gate on variant.
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValueOnce('skipper');
+    const res = await request(app)
+      .get('/api/notification-routes')
+      .set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('GET /api/notification-routes returns 403 PAID_REQUIRED on Community', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app).get('/api/notification-routes').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('POST /api/notification-routes returns 403 PAID_REQUIRED on Community', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({ name: 'x', stack_patterns: ['app'], channel_type: 'discord', channel_url: 'https://discord.com/api/webhooks/123/abc' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('PUT /api/notification-routes/:id returns 403 PAID_REQUIRED on Community', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app).put('/api/notification-routes/1').set('Cookie', authCookie).send({ name: 'x' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('DELETE /api/notification-routes/:id returns 403 PAID_REQUIRED on Community', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app).delete('/api/notification-routes/1').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('POST /api/notification-routes/:id/test returns 403 PAID_REQUIRED on Community', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app).post('/api/notification-routes/1/test').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+});
+
 // --- Agents Auth (now requires authMiddleware) ---
 
 describe('Agents endpoints - auth enforcement', () => {

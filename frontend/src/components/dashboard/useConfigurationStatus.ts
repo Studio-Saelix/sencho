@@ -14,7 +14,7 @@ export interface ConfigurationStatus {
   notifications: {
     agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus };
     alertRules: number;
-    routingRules: { count: number; enabledCount: number; locked: boolean; requiredTier: 'admiral' };
+    routingRules: { count: number; enabledCount: number; locked: boolean; requiredTier: 'skipper' };
   };
   automation: {
     autoHeal: { total: number; enabled: number };
