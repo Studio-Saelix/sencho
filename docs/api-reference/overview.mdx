@@ -24,10 +24,6 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" \
 
 API tokens are 56-character opaque strings that begin with `sen_sk_`, for example `sen_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`. The prefix makes them easy to identify in logs and is recognized by secret-scanning tools (GitHub, TruffleHog, GitGuardian).
 
-<Note>
-  API Tokens require a Sencho **Admiral** license. Community and Skipper editions do not include this feature.
-</Note>
-
 ### Token scopes
 
 Every token is created with one of three permission levels:
@@ -94,12 +90,12 @@ Sencho uses a tiered rate limiting system that balances security with usability:
 
 | Tier | Limit | Applies to | Keyed by |
 |------|-------|------------|----------|
-| **Polling** | 300/min | Dashboard status endpoints (`/stats`, `/system/stats`, `/stacks/statuses`, etc.) | User session |
-| **Standard** | 200/min | All other API endpoints | User session |
+| **Polling** | 300/min | Dashboard status endpoints (`/stats`, `/system/stats`, `/stacks/statuses`, etc.) | User session or API token |
+| **Standard** | 200/min | All other API endpoints | User session or API token |
 | **Webhooks** | 500/min | `POST /webhooks/:id/trigger` | IP address |
 | **Auth** | 5-10/15min | Login, setup, SSO endpoints | IP address |
 
-Authenticated requests (browser sessions and API tokens) are rate-limited per user, not per IP. This prevents teams behind shared NAT or VPN from pooling rate limit budgets. Unauthenticated requests fall back to IP-based limiting.
+Authenticated requests are rate-limited per credential (per user session, or per API token). This prevents teams behind shared NAT or VPN from pooling rate limit budgets, and lets two API-token-driven automations under the same account run on independent budgets. Unauthenticated requests fall back to IP-based limiting.
 
 Internal node-to-node traffic (requests authenticated with node proxy tokens) bypasses rate limiting entirely.
 
@@ -122,7 +118,7 @@ Some endpoints are gated by license tier:
 | Tier | Gated features |
 |------|---------------|
 | **Skipper+** | Webhooks, Fleet snapshots, Stack rollback |
-| **Admiral** | API Tokens, Scheduled Tasks |
+| **Admiral** | Scheduled Tasks |
 
 Requests to gated endpoints on a lower tier return `403` with the appropriate error code.
 
