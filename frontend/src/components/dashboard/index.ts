@@ -9,6 +9,7 @@ export { StackRestartMap } from './StackRestartMap';
 export { useDashboardData } from './useDashboardData';
 export { useConfigurationStatus } from './useConfigurationStatus';
 export { useFleetHeartbeat } from './useFleetHeartbeat';
+export { useMeshDataPlane } from './useMeshDataPlane';
 export { useStackRestartMap } from './useStackRestartMap';
 export type * from './types';
 export type { ConfigurationStatus as ConfigurationStatusPayload } from './useConfigurationStatus';

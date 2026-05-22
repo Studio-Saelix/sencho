@@ -2,7 +2,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Radio, CheckCircle2 } from 'lucide-react';
 import { formatRelativeTime } from '@/lib/utils';
 import { useFleetHeartbeat } from './useFleetHeartbeat';
+import { useMeshDataPlane } from './useMeshDataPlane';
 import { useNodes } from '@/context/NodeContext';
+import { MeshDataPlaneBanner } from '@/components/fleet/MeshDataPlaneBanner';
 import type { FleetNodeOverview } from './useFleetHeartbeat';
 import type { Node } from '@/context/NodeContext';
 
@@ -54,7 +56,11 @@ function SkeletonRow() {
 
 export function FleetHeartbeat() {
   const { nodes: overviewNodes, loading, error } = useFleetHeartbeat();
+  const { status: meshDataPlane } = useMeshDataPlane();
   const { nodes: contextNodes } = useNodes();
+  const meshDown = meshDataPlane?.ok === false
+    && meshDataPlane.reason !== 'not_in_docker'
+    && meshDataPlane.reason !== 'not_started';
 
   if (loading) {
     return (
@@ -102,11 +108,15 @@ export function FleetHeartbeat() {
               {unreachableCount > 0 && (
                 <span className="text-destructive"> · {unreachableCount} unreachable</span>
               )}
+              {meshDown && (
+                <span className="text-destructive"> · mesh down</span>
+              )}
             </span>
           </div>
         </div>
       </CardHeader>
       <CardContent className="pt-0">
+        {meshDown && <MeshDataPlaneBanner status={meshDataPlane} variant="card" />}
         {sorted.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-6 text-stat-subtitle">
             <CheckCircle2 className="h-4 w-4 text-success" strokeWidth={1.5} />

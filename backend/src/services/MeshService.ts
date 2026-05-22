@@ -27,6 +27,23 @@ const PROBE_TIMEOUT_MS = 5_000;
 const SLOW_PROBE_THRESHOLD_MS = 500;
 const DEFAULT_MESH_SUBNET = '172.30.0.0/24';
 
+/**
+ * Subnets attempted in order when SENCHO_MESH_SUBNET is unset and no
+ * `sencho_mesh` network already exists. Each is a `/24` chosen to dodge the
+ * usual homelab Docker patterns: `172.30.0.0/24` matches the prior default,
+ * `172.31.0.0/24` sits one above it, and the `10.42`/`10.43` pair lands well
+ * outside both the linuxserver/* `172.30.0.0/16` family and the typical
+ * `192.168.x` LAN range. The first candidate that Docker accepts wins; the
+ * chosen subnet persists implicitly through the `sencho_mesh` network on the
+ * Docker daemon (next boot adopts it via the inspect path).
+ */
+export const MESH_SUBNET_CANDIDATES = [
+    '172.30.0.0/24',
+    '172.31.0.0/24',
+    '10.42.0.0/24',
+    '10.43.0.0/24',
+];
+
 const REACHABLE_REASON: Record<DialFailureCode, string> = {
     auth_failed: 'api token rejected by remote',
     endpoint_not_found: 'remote does not support proxy mesh',
@@ -404,12 +421,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
         const dpReason = this.dataPlaneStatus.reason;
         const dataPlane = this.senchoIp ? 'ok' : `unavailable (${dpReason}: ${this.networkSetupError ?? 'unknown'})`;
+        const subnetSuffix = this.senchoIp ? `, subnet ${this.meshSubnet}` : '';
         const summaryLevel: MeshActivityLevel = dpReason === 'ok'
             ? 'info'
             : dpReason === 'not_in_docker' ? 'warn' : 'error';
         this.logActivity({
             source: 'mesh', level: summaryLevel, type: 'mesh.enable',
-            message: `MeshService started (data plane ${dataPlane}, self nodeId ${this.selfCentralNodeId})`,
+            message: `MeshService started (data plane ${dataPlane}${subnetSuffix}, self nodeId ${this.selfCentralNodeId})`,
         });
     }
 
@@ -581,28 +599,145 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * Skipped entirely when Sencho is not running inside Docker (dev mode,
      * detected by an unset HOSTNAME env var or by the inspect lookup
      * failing). The forwarder still runs locally for unit-test coverage.
+     *
+     * Three subnet-resolution paths:
+     *   1. **Operator-explicit.** `SENCHO_MESH_SUBNET` is set. Use exactly
+     *      that subnet; a pre-existing `sencho_mesh` with a different subnet
+     *      raises `subnet_mismatch`. Preserves the loud-config-error case.
+     *   2. **Adopt-existing.** `SENCHO_MESH_SUBNET` is unset and
+     *      `sencho_mesh` already exists on the Docker daemon. Adopt its
+     *      subnet (Docker is the source of truth across restarts).
+     *   3. **Candidate iteration.** Neither of the above. Walk
+     *      `MESH_SUBNET_CANDIDATES` in order; first subnet Docker accepts
+     *      wins. If every candidate overlaps an existing network, record
+     *      `subnet_overlap` with a message naming every attempted subnet.
      */
     private async setupMeshNetwork(): Promise<void> {
-        const subnet = (process.env.SENCHO_MESH_SUBNET || DEFAULT_MESH_SUBNET).trim();
+        const envSubnet = process.env.SENCHO_MESH_SUBNET?.trim() || null;
+
+        // Validate the operator-supplied CIDR before any Docker call. An
+        // invalid env var is the operator's problem, not the daemon's, and
+        // reporting `subnet_invalid` from here means the diagnostic stays
+        // accurate even if the daemon is also broken.
+        if (envSubnet) {
+            try {
+                this.senchoIp = getSenchoIpFromSubnet(envSubnet);
+                this.meshSubnet = envSubnet;
+            } catch (err) {
+                this.recordSetupFailure('subnet_invalid', err, 'error', envSubnet);
+                return;
+            }
+        }
+
+        let existingSubnet: string | null;
         try {
-            this.senchoIp = getSenchoIpFromSubnet(subnet);
-            this.meshSubnet = subnet;
+            existingSubnet = await this.inspectExistingMeshSubnet();
         } catch (err) {
-            this.recordSetupFailure('subnet_invalid', err, 'error', subnet);
+            // A genuinely broken Docker daemon (404s return null, see
+            // `inspectExistingMeshSubnet`). Classify as `attach_failed`;
+            // calling create would just hit the same error one layer down.
+            this.recordSetupFailure(
+                'attach_failed',
+                err,
+                'error',
+                envSubnet ?? DEFAULT_MESH_SUBNET,
+            );
             return;
         }
 
-        try {
-            await this.ensureMeshNetwork(subnet);
-        } catch (err) {
-            this.recordSetupFailure(this.classifyMeshNetworkError(err), err, 'error', subnet);
-            return;
+        if (envSubnet) {
+            if (existingSubnet && existingSubnet !== envSubnet) {
+                this.recordSetupFailure(
+                    'subnet_mismatch',
+                    new Error(
+                        `${SENCHO_MESH_NETWORK} exists with subnet ${existingSubnet}, ` +
+                        `expected ${envSubnet}. Remove the network or set SENCHO_MESH_SUBNET to match.`,
+                    ),
+                    'error',
+                    envSubnet,
+                );
+                return;
+            }
+            if (!existingSubnet) {
+                try {
+                    await this.createMeshNetwork(envSubnet);
+                } catch (err) {
+                    this.recordSetupFailure(
+                        this.classifyMeshNetworkError(err),
+                        err,
+                        'error',
+                        envSubnet,
+                    );
+                    return;
+                }
+            }
+        } else if (existingSubnet) {
+            try {
+                this.senchoIp = getSenchoIpFromSubnet(existingSubnet);
+                this.meshSubnet = existingSubnet;
+            } catch (err) {
+                this.recordSetupFailure('subnet_invalid', err, 'error', existingSubnet);
+                return;
+            }
+        } else {
+            const tried: string[] = [];
+            let chosen: string | null = null;
+            let lastErr: unknown = null;
+            for (const candidate of MESH_SUBNET_CANDIDATES) {
+                tried.push(candidate);
+                try {
+                    await this.createMeshNetwork(candidate);
+                    chosen = candidate;
+                    break;
+                } catch (err) {
+                    const cls = this.classifyMeshNetworkError(err);
+                    if (cls === 'subnet_overlap') {
+                        lastErr = err;
+                        continue;
+                    }
+                    // Non-overlap failures (e.g. daemon attach error) are not
+                    // helped by trying another candidate; bail with the typed
+                    // reason for this candidate. A 409 from another process
+                    // racing to create `sencho_mesh` between our inspect and
+                    // our create will classify as `attach_failed` here; the
+                    // race is rare enough that we accept the bail and let the
+                    // next process start adopt the now-existing network.
+                    this.recordSetupFailure(cls, err, 'error', candidate);
+                    return;
+                }
+            }
+            if (!chosen) {
+                this.recordSetupFailure(
+                    'subnet_overlap',
+                    new Error(
+                        `every candidate subnet overlaps an existing Docker network on this host ` +
+                        `(tried ${tried.join(', ')}). Set SENCHO_MESH_SUBNET to a free /24 and restart.` +
+                        (lastErr instanceof Error ? ` Last error: ${lastErr.message}` : ''),
+                    ),
+                    'error',
+                    tried[tried.length - 1],
+                );
+                return;
+            }
+            try {
+                this.senchoIp = getSenchoIpFromSubnet(chosen);
+                this.meshSubnet = chosen;
+            } catch (err) {
+                // Hard-coded candidates are well-formed; defensive only.
+                this.recordSetupFailure('subnet_invalid', err, 'error', chosen);
+                return;
+            }
         }
 
         try {
             await this.ensureSelfAttached();
         } catch (err) {
-            this.recordSetupFailure(this.classifySelfAttachError(err), err, 'error', subnet);
+            this.recordSetupFailure(
+                this.classifySelfAttachError(err),
+                err,
+                'error',
+                this.meshSubnet,
+            );
             return;
         }
 
@@ -614,40 +749,44 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!this.senchoIp) return;
 
         this.networkSetupError = null;
-        this.dataPlaneStatus = { ok: true, reason: 'ok', message: null, subnet };
+        this.dataPlaneStatus = { ok: true, reason: 'ok', message: null, subnet: this.meshSubnet };
     }
 
     /**
-     * Create `sencho_mesh` if it does not exist. If it does, validate the
-     * subnet matches `expectedSubnet`; on mismatch, refuse to continue.
-     * Silently using the wrong subnet would route traffic to the wrong IP.
+     * Return the subnet of an existing `sencho_mesh` network, or null if the
+     * network does not exist. Docker's inspect endpoint surfaces 404 for
+     * the missing case; any other error is re-raised so the caller can
+     * classify it as `attach_failed`.
      */
-    private async ensureMeshNetwork(expectedSubnet: string): Promise<void> {
+    private async inspectExistingMeshSubnet(): Promise<string | null> {
         const dc = DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
         try {
-            await dc.createNetwork({
-                Name: SENCHO_MESH_NETWORK,
-                Driver: 'bridge',
-                Attachable: true,
-                IPAM: { Config: [{ Subnet: expectedSubnet }] },
-                Labels: { 'io.sencho.mesh': 'true' },
-            });
-            return;
+            const info = await dc.inspectNetwork(SENCHO_MESH_NETWORK) as {
+                IPAM?: { Config?: Array<{ Subnet?: string }> };
+            } | undefined;
+            return info?.IPAM?.Config?.[0]?.Subnet ?? null;
         } catch (err) {
-            const e = err as { statusCode?: number; message?: string };
-            if (e?.statusCode !== 409) throw err;
+            const e = err as { statusCode?: number };
+            if (e?.statusCode === 404) return null;
+            throw err;
         }
+    }
 
-        const info = await dc.inspectNetwork(SENCHO_MESH_NETWORK) as {
-            IPAM?: { Config?: Array<{ Subnet?: string }> };
-        };
-        const existingSubnet = info?.IPAM?.Config?.[0]?.Subnet;
-        if (existingSubnet && existingSubnet !== expectedSubnet) {
-            throw new Error(
-                `${SENCHO_MESH_NETWORK} exists with subnet ${existingSubnet}, ` +
-                `expected ${expectedSubnet}. Remove the network or set SENCHO_MESH_SUBNET to match.`,
-            );
-        }
+    /**
+     * Create the `sencho_mesh` bridge network with the given subnet. Throws
+     * the raw Dockerode error (including the 500 pool-overlap that
+     * `classifyMeshNetworkError` recognises) so callers can decide whether
+     * to retry on another candidate or bail.
+     */
+    private async createMeshNetwork(subnet: string): Promise<void> {
+        const dc = DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
+        await dc.createNetwork({
+            Name: SENCHO_MESH_NETWORK,
+            Driver: 'bridge',
+            Attachable: true,
+            IPAM: { Config: [{ Subnet: subnet }] },
+            Labels: { 'io.sencho.mesh': 'true' },
+        });
     }
 
     /**
