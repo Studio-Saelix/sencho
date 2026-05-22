@@ -71,16 +71,21 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (_req: Request, res: Resp
         }
 
         // Remote nodes: parallel fetches with per-request timeouts.
-        const remoteNodes = nodes.filter(n => n.type === 'remote' && n.status === 'online' && n.api_url);
+        // Pilot-agent rows have no api_url; rely on getProxyTarget for the
+        // reachability predicate AND the base URL so pilots with an active
+        // tunnel participate in the fan-out.
+        const remoteCandidates = nodes
+          .filter(n => n.type === 'remote' && n.status === 'online')
+          .map(node => ({ node, proxyTarget: nr.getProxyTarget(node.id) }))
+          .filter((entry): entry is { node: typeof entry.node; proxyTarget: NonNullable<typeof entry.proxyTarget> } => entry.proxyTarget !== null);
         const remoteResults = await Promise.allSettled(
-          remoteNodes.map(async (node) => {
-            const proxyTarget = nr.getProxyTarget(node.id);
-            const baseUrl = node.api_url!.replace(/\/$/, '');
+          remoteCandidates.map(async ({ node, proxyTarget }) => {
+            const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
             try {
               const resp = await fetch(`${baseUrl}/api/image-updates`, {
-                headers: proxyTarget?.apiToken
+                headers: proxyTarget.apiToken
                   ? { Authorization: `Bearer ${proxyTarget.apiToken}` }
                   : {},
                 signal: controller.signal,
@@ -138,17 +143,22 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
     }
   }
 
-  const remoteNodes = nodes.filter(n => n.type === 'remote' && n.status === 'online' && n.api_url);
+  // Pilot-agent rows have no api_url; rely on getProxyTarget for the
+  // reachability predicate AND the base URL so pilots with an active
+  // tunnel participate in the fan-out.
+  const remoteCandidates = nodes
+    .filter(n => n.type === 'remote' && n.status === 'online')
+    .map(node => ({ node, proxyTarget: nr.getProxyTarget(node.id) }))
+    .filter((entry): entry is { node: typeof entry.node; proxyTarget: NonNullable<typeof entry.proxyTarget> } => entry.proxyTarget !== null);
   const remoteResults = await Promise.allSettled(
-    remoteNodes.map(async (node) => {
-      const proxyTarget = nr.getProxyTarget(node.id);
-      const baseUrl = node.api_url!.replace(/\/$/, '');
+    remoteCandidates.map(async ({ node, proxyTarget }) => {
+      const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
       try {
         const resp = await fetch(`${baseUrl}/api/image-updates/refresh`, {
           method: 'POST',
-          headers: proxyTarget?.apiToken
+          headers: proxyTarget.apiToken
             ? { Authorization: `Bearer ${proxyTarget.apiToken}` }
             : {},
           signal: controller.signal,
