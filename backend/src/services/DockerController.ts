@@ -335,6 +335,30 @@ class DockerController {
     return { images, volumes, networks };
   }
 
+  /**
+   * Returns `Id -> SharedSize` (bytes) for every image the daemon currently
+   * knows about. Used by the managed-prune paths to subtract layers shared
+   * with other images when accounting for freed bytes, so the post-prune
+   * total reflects on-disk delta rather than a per-image roll-up. Returns an
+   * empty map if `docker df` fails so the caller degrades to "no sharing
+   * known" rather than throwing.
+   */
+  private async getImageSharedSizeMap(): Promise<Map<string, number>> {
+    try {
+      const df = await this.docker.df();
+      const m = new Map<string, number>();
+      const images = (df.Images ?? []) as Array<{ Id?: string; SharedSize?: number }>;
+      for (const img of images) {
+        if (!img?.Id) continue;
+        const s = typeof img.SharedSize === 'number' && img.SharedSize >= 0 ? img.SharedSize : 0;
+        m.set(img.Id, s);
+      }
+      return m;
+    } catch {
+      return new Map();
+    }
+  }
+
   public async pruneManagedOnly(
     target: 'images' | 'volumes' | 'networks',
     knownStackNames: string[]
@@ -394,10 +418,15 @@ class DockerController {
         && !unmanagedImageIds.has(img.Id)
         && !selfIdentity.isOwnImage(img.Id)
       );
+      const sharedSizes = await this.getImageSharedSizeMap();
       await Promise.all(prunable.map(async (img) => {
         try {
           await this.docker.getImage(img.Id).remove({ force: true });
-          reclaimedBytes += img.Size ?? 0;
+          // Subtract layers shared with other images. Those bytes stay on
+          // disk until every referrer is removed, so the visible reclaim is
+          // the image's unique slice, not its rolled-up Size.
+          const shared = sharedSizes.get(img.Id) ?? 0;
+          reclaimedBytes += Math.max(0, (img.Size ?? 0) - shared);
         } catch (e) {
           console.error(`[pruneManagedOnly] Failed to remove image ${img.Id}:`, e);
         }
@@ -451,7 +480,11 @@ class DockerController {
         && !unmanagedImageIds.has(img.Id)
         && !selfIdentity.isOwnImage(img.Id),
       );
-      for (const img of prunable) reclaimableBytes += img.Size ?? 0;
+      const sharedSizes = await this.getImageSharedSizeMap();
+      for (const img of prunable) {
+        const shared = sharedSizes.get(img.Id) ?? 0;
+        reclaimableBytes += Math.max(0, (img.Size ?? 0) - shared);
+      }
     }
 
     return { reclaimableBytes };

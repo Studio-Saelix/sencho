@@ -335,6 +335,87 @@ describe('DockerController - getClassifiedResources', () => {
   });
 });
 
+// ── pruneManagedOnly / estimateManagedReclaim (images) ─────────────────
+
+describe('DockerController - managed image prune accounting', () => {
+  // Two unused images each report a 1000-byte rolled-up Size, but 400 of those
+  // bytes live in a layer shared with a third (in-use) image, so removing
+  // the unused pair only frees the 600 unique bytes from each. The buggy
+  // sum-of-Size accounting would have reported 2000; the fix should report
+  // 1200 (600 × 2).
+  const sharedLayerDfMock = {
+    Images: [
+      { Id: 'img-a', SharedSize: 400 },
+      { Id: 'img-b', SharedSize: 400 },
+      { Id: 'img-c', SharedSize: 400 },
+    ],
+  };
+  const unusedManagedListMock = [
+    { Id: 'img-a', Containers: 0, Size: 1000 },
+    { Id: 'img-b', Containers: 0, Size: 1000 },
+    { Id: 'img-c', Containers: 1, Size: 800 },  // in-use; filtered by Containers===0
+  ];
+
+  it('estimateManagedReclaim subtracts SharedSize per prunable image', async () => {
+    mockDocker.df.mockResolvedValue(sharedLayerDfMock);
+    mockDocker.listImages.mockResolvedValue(unusedManagedListMock);
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.estimateManagedReclaim('images', ['any-stack']);
+
+    expect(result.reclaimableBytes).toBe(1200);
+  });
+
+  it('pruneManagedOnly subtracts SharedSize after each removal', async () => {
+    mockDocker.df.mockResolvedValue(sharedLayerDfMock);
+    mockDocker.listImages.mockResolvedValue(unusedManagedListMock);
+    mockDocker.listContainers.mockResolvedValue([]);
+    const removeFn = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getImage.mockReturnValue({ remove: removeFn });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneManagedOnly('images', ['any-stack']);
+
+    expect(result).toEqual({ success: true, reclaimedBytes: 1200 });
+    expect(removeFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats images missing from the df map as having no shared layers', async () => {
+    // df reports only img-a; img-b is omitted (stale / race / older daemon).
+    // The accounting should still process img-b, defaulting its SharedSize to 0.
+    mockDocker.df.mockResolvedValue({ Images: [{ Id: 'img-a', SharedSize: 400 }] });
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-a', Containers: 0, Size: 1000 },
+      { Id: 'img-b', Containers: 0, Size: 1000 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.estimateManagedReclaim('images', ['any-stack']);
+
+    // img-a: 1000-400=600; img-b: 1000-0=1000; total 1600
+    expect(result.reclaimableBytes).toBe(1600);
+  });
+
+  it('degrades to no-sharing assumption when df fails', async () => {
+    // If df throws, the helper returns an empty map and the accounting falls
+    // back to full per-image Size. This preserves prior behavior (over-report)
+    // rather than failing the prune.
+    mockDocker.df.mockRejectedValue(new Error('daemon df failed'));
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-a', Containers: 0, Size: 1000 },
+      { Id: 'img-b', Containers: 0, Size: 1000 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.estimateManagedReclaim('images', ['any-stack']);
+
+    expect(result.reclaimableBytes).toBe(2000);
+  });
+});
+
 // ── getOrphanContainers ────────────────────────────────────────────────
 
 describe('DockerController - getOrphanContainers', () => {
