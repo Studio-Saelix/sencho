@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import DockerController, { type CreateNetworkOptions, type NetworkDriver } from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
+import SelfIdentityService from '../services/SelfIdentityService';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isValidDockerResourceId, isValidCidr, isValidIPv4 } from '../utils/validation';
@@ -9,6 +10,24 @@ import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 
 export const systemMaintenanceRouter = Router();
+
+// 423 Locked is sent when the operator targets the running Sencho container's
+// own image / volume / network. The frontend surfaces the `error` string as a
+// toast; `kind` is for diagnostics.
+function rejectIfSelf(kind: 'image' | 'volume' | 'network', id: string, res: Response): boolean {
+  const self = SelfIdentityService.getInstance();
+  const matched =
+    (kind === 'image' && self.isOwnImage(id)) ||
+    (kind === 'volume' && self.isOwnVolume(id)) ||
+    (kind === 'network' && self.isOwnNetwork(id));
+  if (!matched) return false;
+  res.status(423).json({
+    error: 'Cannot delete the running Sencho instance',
+    kind,
+    id,
+  });
+  return true;
+}
 
 systemMaintenanceRouter.get('/orphans', async (req: Request, res: Response) => {
   try {
@@ -33,13 +52,19 @@ systemMaintenanceRouter.post('/prune/orphans', async (req: Request, res: Respons
     if (invalidIds.length > 0) {
       return res.status(400).json({ error: 'One or more container IDs have an invalid format' });
     }
-    console.log(`[Resources] Prune orphans: ${sanitizeForLog(containerIds.length)} container(s) requested`);
+    // Silently drop the running Sencho container if a stale client somehow
+    // includes it in the prune set. The Unmanaged tab already filters self
+    // out, so this is a belt-and-braces guard.
+    const self = SelfIdentityService.getInstance();
+    const skippedSelf = (containerIds as string[]).some((id) => self.isOwnContainer(id));
+    const safeIds: string[] = (containerIds as string[]).filter((id) => !self.isOwnContainer(id));
+    console.log(`[Resources] Prune orphans: ${sanitizeForLog(safeIds.length)} container(s) requested${skippedSelf ? ' (self skipped)' : ''}`);
     const dockerController = DockerController.getInstance(req.nodeId);
-    const results = await dockerController.removeContainers(containerIds);
+    const results = await dockerController.removeContainers(safeIds);
     const succeeded = results.filter((r: { success: boolean }) => r.success).length;
-    console.log(`[Resources] Prune orphans completed: ${succeeded}/${sanitizeForLog(containerIds.length)} removed`);
+    console.log(`[Resources] Prune orphans completed: ${succeeded}/${sanitizeForLog(safeIds.length)} removed`);
     invalidateNodeCaches(req.nodeId);
-    res.json({ results });
+    res.json(skippedSelf ? { results, skipped: 'self' } : { results });
   } catch (error) {
     console.error('Failed to prune orphan containers:', error);
     res.status(500).json({ error: 'Failed to prune orphan containers' });
@@ -216,10 +241,18 @@ systemMaintenanceRouter.post('/images/delete', async (req: Request, res: Respons
   try {
     const { id } = req.body;
     if (!id) return res.status(400).json({ error: 'ID is required' });
-    if (typeof id !== 'string' || !isValidDockerResourceId(id)) {
+    if (typeof id !== 'string') {
       return res.status(400).json({ error: 'Invalid image ID format' });
     }
-    console.log(`[Resources] Delete image: ${id.substring(0, 12)}`);
+    // Docker image IDs round-trip as `sha256:<hex>` through /system/images,
+    // so the UI and any client that forwards the same value sees the prefixed
+    // form. Strip before validation, mirroring the inspect route above.
+    const hexId = id.startsWith('sha256:') ? id.slice('sha256:'.length) : id;
+    if (!isValidDockerResourceId(hexId)) {
+      return res.status(400).json({ error: 'Invalid image ID format' });
+    }
+    if (rejectIfSelf('image', id, res)) return;
+    console.log(`[Resources] Delete image: ${hexId.substring(0, 12)}`);
     const dockerController = DockerController.getInstance(req.nodeId);
     await dockerController.removeImage(id);
     invalidateNodeCaches(req.nodeId);
@@ -235,6 +268,7 @@ systemMaintenanceRouter.post('/volumes/delete', async (req: Request, res: Respon
   try {
     const { id } = req.body;
     if (!id || typeof id !== 'string') return res.status(400).json({ error: 'Volume name is required' });
+    if (rejectIfSelf('volume', id, res)) return;
     console.log(`[Resources] Delete volume: ${sanitizeForLog(id)}`);
     const dockerController = DockerController.getInstance(req.nodeId);
     await dockerController.removeVolume(id);
@@ -254,6 +288,7 @@ systemMaintenanceRouter.post('/networks/delete', async (req: Request, res: Respo
     if (typeof id !== 'string' || !isValidDockerResourceId(id)) {
       return res.status(400).json({ error: 'Invalid network ID format' });
     }
+    if (rejectIfSelf('network', id, res)) return;
     console.log(`[Resources] Delete network: ${id.substring(0, 12)}`);
     const dockerController = DockerController.getInstance(req.nodeId);
     await dockerController.removeNetwork(id);

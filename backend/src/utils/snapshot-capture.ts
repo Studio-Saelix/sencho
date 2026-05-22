@@ -3,7 +3,10 @@
  * and the SchedulerService for fleet-wide snapshot operations.
  */
 
+import type { NodeMode } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
+import { NodeRegistry } from '../services/NodeRegistry';
+import { formatNoTargetError } from './remoteTarget';
 import { isDebugEnabled } from './debug';
 
 export interface SnapshotNodeData {
@@ -15,12 +18,15 @@ export interface SnapshotNodeData {
   }>;
 }
 
-/** Minimal node shape accepted by capture functions. */
+/**
+ * Minimal node shape accepted by capture functions.
+ * `mode` is required so remote dispatch can emit a tunnel-aware error when
+ * the pilot-agent proxy target is null.
+ */
 export interface CaptureNode {
   id: number;
   name: string;
-  api_url?: string;
-  api_token?: string;
+  mode: NodeMode;
 }
 
 /**
@@ -65,13 +71,15 @@ export async function captureLocalNodeFiles(node: CaptureNode): Promise<Snapshot
  * fetched are silently skipped.
  */
 export async function captureRemoteNodeFiles(node: CaptureNode): Promise<SnapshotNodeData> {
-  if (!node.api_url || !node.api_token) {
-    throw new Error('Remote node not configured');
+  const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+  if (!target) {
+    throw new Error(formatNoTargetError(node));
   }
 
   const start = Date.now();
-  const baseUrl = node.api_url.replace(/\/$/, '');
-  const headers = { Authorization: `Bearer ${node.api_token}` };
+  const baseUrl = target.apiUrl.replace(/\/$/, '');
+  const headers: Record<string, string> = {};
+  if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
 
   const stacksRes = await fetch(`${baseUrl}/api/stacks`, {
     headers,

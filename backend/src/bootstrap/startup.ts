@@ -6,6 +6,7 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { DatabaseService } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import SelfUpdateService from '../services/SelfUpdateService';
+import SelfIdentityService from '../services/SelfIdentityService';
 import { MonitorService } from '../services/MonitorService';
 import { AutoHealService } from '../services/AutoHealService';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
@@ -121,6 +122,7 @@ export async function startServer(server: Server): Promise<void> {
   // so total boot time is the slowest one rather than the sum.
   await Promise.all([
     SelfUpdateService.getInstance().initialize(),
+    SelfIdentityService.getInstance().initialize(),
     DockerEventManager.getInstance().start(),
     TrivyService.getInstance().initialize(),
   ]);

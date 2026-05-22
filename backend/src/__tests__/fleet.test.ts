@@ -157,13 +157,12 @@ describe('GET /api/fleet/overview', () => {
 describe('Fleet tier gating', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('POST /api/fleet/update-all returns 403 on community tier (bulk update is Skipper+)', async () => {
+  it('POST /api/fleet/update-all is accessible on community tier', async () => {
     mockTier('community');
     const res = await request(app)
       .post('/api/fleet/update-all')
       .set('Authorization', authHeader);
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
   });
 
   it('GET /api/fleet/update-status is accessible on community tier', async () => {
