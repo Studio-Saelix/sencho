@@ -214,8 +214,13 @@ async function resolveEnvFileLocal(nodeId: number, stackName: string, basename: 
 }
 
 async function resolveEnvFileRemote(node: Node, stackName: string, basename: string): Promise<ResolvedEnvFile | null> {
+    // Throw on a null target so previewPushDiff / executePush surface the
+    // tunnel-disconnected (or proxy-not-configured) reason on the right
+    // axis. Returning null here would flow up through readExistingEnv as
+    // "env file not found", which is wrong: we know the env exists, we
+    // just cannot reach the node.
     const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-    if (!target) return null;
+    if (!target) throw new Error(formatNoTargetError(node));
     const baseUrl = target.apiUrl.replace(/\/$/, '');
     const headers: Record<string, string> = {};
     if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;

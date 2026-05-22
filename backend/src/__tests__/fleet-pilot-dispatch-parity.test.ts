@@ -7,12 +7,17 @@
  * fixed the literal /api/fleet/nodes/:id/update path:
  *   - POST /api/fleet/labels/fleet-stop      (fleet.ts)
  *   - POST /api/fleet/labels/fleet-prune     (fleet.ts)
- *   - POST /api/fleet/prune/estimate   (fleet.ts)
- *   - POST /api/fleet/snapshots/:id/restore (fleet.ts)
- *   - GET  /api/image-updates/fleet           (imageUpdates.ts)
- *   - POST /api/image-updates/fleet/refresh   (imageUpdates.ts)
- *   - captureRemoteNodeFiles (utils/snapshot-capture.ts)
- *   - SecretsService.{resolveEnvFileRemote,readEnvRemote,writeEnvRemote}
+ *   - POST /api/fleet/prune/estimate         (fleet.ts)
+ *   - GET  /api/image-updates/fleet          (imageUpdates.ts)
+ *   - POST /api/image-updates/fleet/refresh  (imageUpdates.ts)
+ *   - captureRemoteNodeFiles                 (utils/snapshot-capture.ts)
+ *
+ * Snapshot restore (fleet.ts:1660) and SecretsService env IO follow the
+ * identical getProxyTarget + conditional-Authorization shape. Their
+ * fixture cost (seeding snapshot rows + files; seeding a label, selector
+ * match, and secret row) is heavy relative to the structural change
+ * being verified; tsc plus the routes covered above already exercise the
+ * helper shape end-to-end.
  *
  * Each test proves either (a) a pilot row gets dispatched against
  * `target.apiUrl` with no Authorization header, or (b) a pilot with no
@@ -107,7 +112,7 @@ function seedStackLabel(nodeId: number, stackName: string, labelId: number): voi
   db.prepare('INSERT INTO stack_label_assignments (label_id, stack_name, node_id) VALUES (?, ?, ?)').run(labelId, stackName, nodeId);
 }
 
-describe('POST /api/labels/fleet-stop (pilot-agent dispatch)', () => {
+describe('POST /api/fleet/labels/fleet-stop (pilot-agent dispatch)', () => {
   const LABEL = 'fleet-stop-pilot';
 
   beforeAll(() => {
@@ -204,7 +209,7 @@ describe('POST /api/fleet/prune/estimate (pilot-agent dispatch)', () => {
   });
 });
 
-describe('POST /api/labels/fleet-prune (pilot-agent dispatch)', () => {
+describe('POST /api/fleet/labels/fleet-prune (pilot-agent dispatch)', () => {
   it('dispatches the pilot row through the loopback target and surfaces the result', async () => {
     mockPaidTier();
     mockTargets();
