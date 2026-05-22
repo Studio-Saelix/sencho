@@ -1,3 +1,4 @@
+import fs from 'fs/promises';
 import DockerController from './DockerController';
 
 /**
@@ -6,15 +7,18 @@ import DockerController from './DockerController';
  * Resources view and destructive routes can refuse to delete them and the
  * Unmanaged tab can filter out Sencho's own container.
  *
- * Reads the container's identity from `process.env.HOSTNAME` (Docker injects
- * the container short-ID as HOSTNAME unless overridden) and inspects it via
- * Dockerode against the local node's socket. Mirrors the bootstrap pattern in
- * SelfUpdateService and the 404-tolerance pattern in MeshService.ensureSelfAttached.
+ * Identification strategy, in order:
+ *   1. `process.env.HOSTNAME` resolves via `docker.getContainer(...).inspect()`.
+ *      This is Docker's default (HOSTNAME equals the container's short ID).
+ *   2. `/proc/self/cgroup` fallback. Custom `--hostname`, Compose `hostname:`,
+ *      or `--uts=host` decouples HOSTNAME from the container ID; the kernel
+ *      still places the process in a cgroup that names the full 64-hex
+ *      container ID for both cgroupv1 (`.../docker/<id>`) and cgroupv2
+ *      (`.../docker-<id>.scope` / `.../libpod-<id>.scope`).
  *
- * In dev mode (`npm run dev` outside Docker), HOSTNAME points at the
- * workstation and the inspect lookup returns 404; the service stays in its
- * empty state and every `isOwn*()` returns false, leaving today's behavior
- * untouched.
+ * In dev mode (`npm run dev` outside Docker) both paths fail, the service
+ * stays in its empty state, every `isOwn*()` returns false, and today's
+ * behavior is preserved.
  */
 class SelfIdentityService {
   private static instance: SelfIdentityService;
@@ -37,48 +41,70 @@ class SelfIdentityService {
     if (this.initialized) return;
     this.initialized = true;
 
+    const docker = DockerController.getInstance().getDocker();
+    const info = await this.resolveSelfInspect(docker);
+    if (!info) return;
+
+    this.containerId = info.Id ?? null;
+    this.containerName = (info.Name || '').replace(/^\//, '') || null;
+    this.imageIdHex = SelfIdentityService.stripSha(info.Image ?? '') || null;
+
+    const nets = info.NetworkSettings?.Networks ?? {};
+    for (const [name, net] of Object.entries(nets)) {
+      if (name) this.networkNames.add(name);
+      const id = (net as { NetworkID?: string } | null)?.NetworkID;
+      if (id) this.networkIds.add(id);
+    }
+
+    const mounts = (info.Mounts ?? []) as Array<{ Type?: string; Name?: string }>;
+    for (const m of mounts) {
+      if (m.Type === 'volume' && m.Name) {
+        this.volumeNames.add(m.Name);
+      }
+    }
+
+    const cidShort = this.containerId ? this.containerId.substring(0, 12) : '?';
+    const iidShort = this.imageIdHex ? this.imageIdHex.substring(0, 12) : '?';
+    console.log(
+      `[SelfIdentity] Detected self: container=${cidShort}, image=${iidShort}, ` +
+      `networks=${this.networkNames.size}, volumes=${this.volumeNames.size}`,
+    );
+  }
+
+  private async resolveSelfInspect(
+    docker: ReturnType<typeof DockerController.prototype.getDocker>,
+  ): Promise<Awaited<ReturnType<ReturnType<typeof docker.getContainer>['inspect']>> | null> {
     const hostname = process.env.HOSTNAME;
-    if (!hostname) {
-      console.log('[SelfIdentity] HOSTNAME not set, self-protection disabled (not running in Docker?)');
-      return;
+    if (hostname) {
+      try {
+        return await docker.getContainer(hostname).inspect();
+      } catch (err) {
+        const e = err as { statusCode?: number; message?: string };
+        if (e?.statusCode !== 404) {
+          console.warn('[SelfIdentity] HOSTNAME inspect failed:', e?.message || String(err));
+          return null;
+        }
+        // 404 on HOSTNAME means custom hostname or running outside Docker;
+        // fall through to the cgroup probe.
+      }
+    }
+
+    const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
+    if (!cgroupId) {
+      console.log('[SelfIdentity] no HOSTNAME match and no container ID in /proc/self/cgroup; self-protection disabled (not running in Docker?)');
+      return null;
     }
 
     try {
-      const docker = DockerController.getInstance().getDocker();
-      const container = docker.getContainer(hostname);
-      const info = await container.inspect();
-
-      this.containerId = info.Id ?? null;
-      this.containerName = (info.Name || '').replace(/^\//, '') || null;
-      this.imageIdHex = SelfIdentityService.stripSha(info.Image ?? '') || null;
-
-      const nets = info.NetworkSettings?.Networks ?? {};
-      for (const [name, net] of Object.entries(nets)) {
-        if (name) this.networkNames.add(name);
-        const id = (net as { NetworkID?: string } | null)?.NetworkID;
-        if (id) this.networkIds.add(id);
-      }
-
-      const mounts = (info.Mounts ?? []) as Array<{ Type?: string; Name?: string }>;
-      for (const m of mounts) {
-        if (m.Type === 'volume' && m.Name) {
-          this.volumeNames.add(m.Name);
-        }
-      }
-
-      const cidShort = this.containerId ? this.containerId.substring(0, 12) : '?';
-      const iidShort = this.imageIdHex ? this.imageIdHex.substring(0, 12) : '?';
-      console.log(
-        `[SelfIdentity] Detected self: container=${cidShort}, image=${iidShort}, ` +
-        `networks=${this.networkNames.size}, volumes=${this.volumeNames.size}`,
-      );
+      return await docker.getContainer(cgroupId).inspect();
     } catch (err) {
       const e = err as { statusCode?: number; message?: string };
       if (e?.statusCode === 404) {
-        console.log('[SelfIdentity] self-container lookup failed (404); self-protection disabled (not running in Docker?)');
-        return;
+        console.log('[SelfIdentity] cgroup container ID inspect returned 404; self-protection disabled');
+        return null;
       }
-      console.warn('[SelfIdentity] initialization failed:', e?.message || String(err));
+      console.warn('[SelfIdentity] cgroup-resolved inspect failed:', e?.message || String(err));
+      return null;
     }
   }
 
@@ -100,8 +126,12 @@ class SelfIdentityService {
   /** True when the given network ID or name matches a network the Sencho container is attached to. */
   isOwnNetwork(idOrName: string): boolean {
     if (!idOrName) return false;
+    // Names match exactly. Only hex-looking inputs (12 to 64 chars) are
+    // prefix-matched against the cached IDs, so a network NAMED like a hex
+    // prefix of Sencho's network ID is not falsely flagged.
     if (this.networkNames.has(idOrName)) return true;
     if (this.networkIds.has(idOrName)) return true;
+    if (!SelfIdentityService.isHexId(idOrName)) return false;
     for (const id of this.networkIds) {
       if (SelfIdentityService.matchesId(id, idOrName)) return true;
     }
@@ -146,14 +176,34 @@ class SelfIdentityService {
     return s.startsWith('sha256:') ? s.slice('sha256:'.length) : s;
   }
 
-  // 64-hex IDs match when either side is a prefix of the other so the UI's
-  // short-ID (12 chars) hits the cached full ID and vice versa.
+  private static isHexId(s: string): boolean {
+    return /^[a-f0-9]{12,64}$/i.test(s);
+  }
+
+  // Prefix matching is restricted to hex-shaped candidates: a 12-char short
+  // ID hits the cached full ID and vice versa, but a name like "bridge" never
+  // matches a cached ID just because of a partial overlap.
   private static matchesId(full: string, candidate: string): boolean {
     if (!full || !candidate) return false;
     if (full === candidate) return true;
+    if (!SelfIdentityService.isHexId(full) || !SelfIdentityService.isHexId(candidate)) return false;
     if (full.startsWith(candidate)) return true;
     if (candidate.startsWith(full)) return true;
     return false;
+  }
+
+  // Both cgroupv1 (`12:cpuset:/docker/<64hex>`) and cgroupv2
+  // (`0::/system.slice/docker-<64hex>.scope`, also podman's
+  // `libpod-<64hex>.scope`) embed the full container ID as a 64-hex run.
+  // Matching the longest such run survives kernel + runtime variation.
+  static async readContainerIdFromCgroup(path = '/proc/self/cgroup'): Promise<string | null> {
+    try {
+      const contents = await fs.readFile(path, 'utf8');
+      const matches = contents.match(/[a-f0-9]{64}/gi);
+      return matches && matches.length > 0 ? matches[matches.length - 1].toLowerCase() : null;
+    } catch {
+      return null;
+    }
   }
 }
 

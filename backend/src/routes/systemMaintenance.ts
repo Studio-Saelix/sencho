@@ -241,11 +241,18 @@ systemMaintenanceRouter.post('/images/delete', async (req: Request, res: Respons
   try {
     const { id } = req.body;
     if (!id) return res.status(400).json({ error: 'ID is required' });
-    if (typeof id !== 'string' || !isValidDockerResourceId(id)) {
+    if (typeof id !== 'string') {
+      return res.status(400).json({ error: 'Invalid image ID format' });
+    }
+    // Docker image IDs round-trip as `sha256:<hex>` through /system/images,
+    // so the UI and any client that forwards the same value sees the prefixed
+    // form. Strip before validation, mirroring the inspect route above.
+    const hexId = id.startsWith('sha256:') ? id.slice('sha256:'.length) : id;
+    if (!isValidDockerResourceId(hexId)) {
       return res.status(400).json({ error: 'Invalid image ID format' });
     }
     if (rejectIfSelf('image', id, res)) return;
-    console.log(`[Resources] Delete image: ${id.substring(0, 12)}`);
+    console.log(`[Resources] Delete image: ${hexId.substring(0, 12)}`);
     const dockerController = DockerController.getInstance(req.nodeId);
     await dockerController.removeImage(id);
     invalidateNodeCaches(req.nodeId);

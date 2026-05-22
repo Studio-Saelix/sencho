@@ -42,10 +42,18 @@ const originalHostname = process.env.HOSTNAME;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // mockReset (not clearAllMocks) drops implementations set by prior
+  // mockResolvedValue/mockResolvedValueOnce calls, otherwise resolutions
+  // leak across tests.
+  mockContainer.inspect.mockReset();
   SelfIdentityService.getInstance().resetForTesting();
 });
 
 afterEach(() => {
+  // restoreAllMocks() puts vi.spyOn'd statics (readContainerIdFromCgroup,
+  // console.warn) back to their real implementations so the next test
+  // exercises real code paths.
+  vi.restoreAllMocks();
   if (originalHostname === undefined) delete process.env.HOSTNAME;
   else process.env.HOSTNAME = originalHostname;
 });
@@ -88,10 +96,44 @@ describe('SelfIdentityService.initialize', () => {
     expect(mockContainer.inspect).not.toHaveBeenCalled();
   });
 
-  it('stays empty when inspect throws 404 (Sencho process running outside Docker)', async () => {
+  it('stays empty when HOSTNAME inspect 404s and cgroup probe has no container ID (dev mode)', async () => {
     process.env.HOSTNAME = 'my-laptop';
     const err: Error & { statusCode?: number } = Object.assign(new Error('no such container'), { statusCode: 404 });
     mockContainer.inspect.mockRejectedValue(err);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+    expect(svc.getIdentity().containerId).toBeNull();
+  });
+
+  it('falls back to /proc/self/cgroup when HOSTNAME inspect 404s (custom --hostname)', async () => {
+    process.env.HOSTNAME = 'my-custom-name';
+    const err404: Error & { statusCode?: number } = Object.assign(new Error('no such container'), { statusCode: 404 });
+    // First call (HOSTNAME) 404s; second call (cgroup-resolved ID) succeeds.
+    mockContainer.inspect
+      .mockRejectedValueOnce(err404)
+      .mockResolvedValueOnce({
+        Id: FULL_CONTAINER_ID,
+        Name: '/sencho',
+        Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+        NetworkSettings: { Networks: { sencho_mesh: { NetworkID: FULL_NETWORK_ID } } },
+        Mounts: [{ Type: 'volume', Name: 'sencho_data' }],
+      });
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+    expect(svc.getIdentity().containerId).toBe(FULL_CONTAINER_ID);
+    expect(mockDocker.getContainer).toHaveBeenNthCalledWith(1, 'my-custom-name');
+    expect(mockDocker.getContainer).toHaveBeenNthCalledWith(2, FULL_CONTAINER_ID);
+  });
+
+  it('stays empty when HOSTNAME 404s and cgroup probe resolves but inspect 404s on that ID too', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    const err404: Error & { statusCode?: number } = Object.assign(new Error('no such container'), { statusCode: 404 });
+    mockContainer.inspect.mockRejectedValue(err404);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
 
     const svc = SelfIdentityService.getInstance();
     await svc.initialize();
@@ -107,6 +149,33 @@ describe('SelfIdentityService.initialize', () => {
     await svc.initialize();
     expect(svc.getIdentity().containerId).toBeNull();
     expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it('parses /proc/self/cgroup formats (cgroupv1 docker, cgroupv2 docker, podman libpod)', async () => {
+    const tmp = await import('os');
+    const fsp = await import('fs/promises');
+    const path = await import('path');
+    const dir = await fsp.mkdtemp(path.join(tmp.tmpdir(), 'sencho-cgroup-'));
+
+    const cgroupV1 = path.join(dir, 'cgv1');
+    await fsp.writeFile(cgroupV1, `12:cpuset:/docker/${FULL_CONTAINER_ID}\n11:memory:/docker/${FULL_CONTAINER_ID}\n`);
+    expect(await SelfIdentityService.readContainerIdFromCgroup(cgroupV1)).toBe(FULL_CONTAINER_ID);
+
+    const cgroupV2 = path.join(dir, 'cgv2');
+    await fsp.writeFile(cgroupV2, `0::/system.slice/docker-${FULL_CONTAINER_ID}.scope\n`);
+    expect(await SelfIdentityService.readContainerIdFromCgroup(cgroupV2)).toBe(FULL_CONTAINER_ID);
+
+    const podman = path.join(dir, 'podman');
+    await fsp.writeFile(podman, `0::/user.slice/user-1000.slice/libpod-${FULL_CONTAINER_ID}.scope\n`);
+    expect(await SelfIdentityService.readContainerIdFromCgroup(podman)).toBe(FULL_CONTAINER_ID);
+
+    const noMatch = path.join(dir, 'empty');
+    await fsp.writeFile(noMatch, '0::/system.slice/sshd.service\n');
+    expect(await SelfIdentityService.readContainerIdFromCgroup(noMatch)).toBeNull();
+
+    expect(await SelfIdentityService.readContainerIdFromCgroup(path.join(dir, 'does-not-exist'))).toBeNull();
+
+    await fsp.rm(dir, { recursive: true, force: true });
   });
 
   it('is idempotent: re-initialize is a no-op', async () => {
@@ -162,6 +231,14 @@ describe('SelfIdentityService matchers', () => {
     expect(svc.isOwnNetwork(FULL_NETWORK_ID.slice(0, 12))).toBe(true);
     expect(svc.isOwnNetwork('sencho_mesh')).toBe(true);
     expect(svc.isOwnNetwork('bridge')).toBe(false);
+  });
+
+  it('isOwnNetwork does not falsely match a non-hex network name that overlaps a cached ID prefix', () => {
+    // The cached network ID is 64 chars of 'c'. A network named "ccc" is NOT
+    // a hex ID input (length below 12), so prefix matching must not fire.
+    const svc = SelfIdentityService.getInstance();
+    expect(svc.isOwnNetwork('ccc')).toBe(false);
+    expect(svc.isOwnNetwork('cc')).toBe(false);
   });
 
   it('isOwnVolume matches by name only', () => {

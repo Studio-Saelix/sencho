@@ -85,6 +85,19 @@ describe('Self-protection on /api/system delete routes', () => {
     expect(docker.removeImage).toHaveBeenCalledWith(OTHER_IMAGE);
   });
 
+  it('accepts sha256:-prefixed image IDs (the form Docker returns from /system/images)', async () => {
+    stubSelfIdentity({ imageId: SELF_IMAGE });
+    const docker = stubDockerControllerNoops();
+
+    const res = await request(app)
+      .post('/api/system/images/delete')
+      .set('Authorization', authHeader)
+      .send({ id: 'sha256:' + OTHER_IMAGE });
+
+    expect(res.status).toBe(200);
+    expect(docker.removeImage).toHaveBeenCalledWith('sha256:' + OTHER_IMAGE);
+  });
+
   it('refuses to delete Sencho\'s own network with 423', async () => {
     stubSelfIdentity({ networkId: SELF_NETWORK });
     const docker = stubDockerControllerNoops();
