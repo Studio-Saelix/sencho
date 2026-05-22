@@ -216,6 +216,8 @@ These are the explicit boundaries of the v1 mesh.
     - `attach_failed`: the Docker daemon refused the network attachment for a reason that does not match the patterns above. The full error appears in the activity log entry and on `/api/health`.
 
     The `mesh.dataPlane.subnet` field shows the CIDR Sencho settled on (or the last candidate it tried), so the operator can verify which subnet is configured before changing anything.
+
+    For the container-log view, `docker logs sencho 2>&1 | grep '\[Mesh\]'` shows the boot summary (one line) and any setup failures with the same reason discriminator: `[Mesh] data plane ok, self attached at 172.31.0.2, subnet 172.31.0.0/24` on success, or `[Mesh] data plane unavailable (subnet_overlap, subnet 172.30.0.0/24): Pool overlaps with other one on this address space` on failure.
   </Accordion>
 
   <Accordion title="Opt-in rejects with 'host-network service'">
