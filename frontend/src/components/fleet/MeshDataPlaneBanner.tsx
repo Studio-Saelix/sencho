@@ -39,20 +39,17 @@ export function MeshDataPlaneBanner({
     const headline = HEADLINES[status.reason](status);
 
     if (variant === 'card') {
+        // Compact single-row strip for inside the Fleet Heartbeat card.
+        // Headline only — the full recovery hint lives on the Routing tab
+        // banner and in /docs/features/sencho-mesh.mdx#troubleshooting.
         return (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 mb-2 text-xs text-destructive flex items-start gap-2">
-                <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" strokeWidth={1.75} />
-                <div className="min-w-0 leading-relaxed">
-                    <span className="font-medium">Mesh data plane down · </span>
-                    <span className="font-mono text-[11px]">{status.reason}</span>
-                    <span> · </span>
-                    <span>{headline}</span>
-                    <span> Set </span>
-                    <code className="font-mono bg-destructive/15 px-1 rounded text-[10px]">SENCHO_MESH_SUBNET</code>
-                    <span> to a free </span>
-                    <code className="font-mono bg-destructive/15 px-1 rounded text-[10px]">/24</code>
-                    <span> and restart Sencho.</span>
-                </div>
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 mb-2 text-xs text-destructive flex items-center gap-2">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
+                <span className="font-medium shrink-0">Mesh data plane down</span>
+                <span className="text-destructive/60 shrink-0">·</span>
+                <span className="font-mono text-[11px] shrink-0">{status.reason}</span>
+                <span className="text-destructive/60 shrink-0">·</span>
+                <span className="truncate min-w-0">{headline}</span>
             </div>
         );
     }

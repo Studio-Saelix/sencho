@@ -154,7 +154,7 @@ Use Test before assuming the issue is your application. It tells you whether the
 
 ## Customising the mesh subnet
 
-The default `172.30.0.0/24` will collide if a host already has a Docker bridge in that range. Override it per node with `SENCHO_MESH_SUBNET`:
+Sencho picks the mesh subnet automatically. When `SENCHO_MESH_SUBNET` is unset and `sencho_mesh` does not already exist on the Docker daemon, the node walks `172.30.0.0/24`, `172.31.0.0/24`, `10.42.0.0/24`, then `10.43.0.0/24` and keeps the first one Docker accepts. When `sencho_mesh` already exists, Sencho adopts its subnet (Docker is the source of truth across restarts). Override the choice per node with `SENCHO_MESH_SUBNET` when you need a specific CIDR:
 
 ```yaml
 services:
@@ -208,7 +208,8 @@ These are the explicit boundaries of the v1 mesh.
 
     The fix depends on which reason fired:
 
-    - `subnet_overlap`: every candidate subnet overlaps an existing Docker bridge network on this host. Run `docker network ls -q | xargs -L1 docker network inspect --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}'` to list every existing subnet, then set `SENCHO_MESH_SUBNET` to a free `/24` outside the candidate list and recreate the Sencho container.
+    - `subnet_overlap` (`SENCHO_MESH_SUBNET` unset): every candidate subnet overlaps an existing Docker bridge network on this host. Run `docker network ls -q | xargs -L1 docker network inspect --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}'` to list every existing subnet, then set `SENCHO_MESH_SUBNET` to a free `/24` outside the candidate list and recreate the Sencho container.
+    - `subnet_overlap` (`SENCHO_MESH_SUBNET` set): the explicit CIDR overlaps another Docker bridge network on this host. Either remove the conflicting network or change `SENCHO_MESH_SUBNET` to a free `/24`. Sencho does not auto-fall-back when the operator pins a specific subnet.
     - `subnet_mismatch`: `SENCHO_MESH_SUBNET` is set explicitly, but `sencho_mesh` already exists with a different subnet. Either remove the network (`docker network rm sencho_mesh` after detaching any containers) or change `SENCHO_MESH_SUBNET` to match the existing subnet. Unset the variable to let Sencho adopt whatever is on disk.
     - `subnet_invalid`: `SENCHO_MESH_SUBNET` is not a valid CIDR. Fix the value (it must look like `10.42.0.0/24`) and recreate the container.
     - `ip_in_use`: another container is squatting the IP Sencho wants on its mesh subnet. Find the squatting container with `docker network inspect sencho_mesh`, detach or remove it, then restart Sencho.

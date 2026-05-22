@@ -327,4 +327,117 @@ describe('MeshService.setupMeshNetwork subnet auto-fallback', () => {
         expect(status.subnet).toBe('10.42.0.0/24');
         expect(createNetwork).toHaveBeenCalledTimes(1);
     });
+
+    it('bails the candidate loop on a non-overlap createNetwork failure', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const overlap = Object.assign(
+            new Error('Pool overlaps with other one on this address space'),
+            { statusCode: 500 },
+        );
+        const daemonErr = Object.assign(
+            new Error('daemon attach error: out of inodes'),
+            { statusCode: 500 },
+        );
+        // First candidate overlaps (recoverable, advance), second hits a
+        // generic daemon error (unrecoverable, bail).
+        const createNetwork = vi.fn()
+            .mockRejectedValueOnce(overlap)
+            .mockRejectedValueOnce(daemonErr);
+        const inspectNetwork = vi.fn().mockRejectedValue({ statusCode: 404, message: 'no such network' });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(false);
+        expect(status.reason).toBe('attach_failed');
+        // Stops at the second candidate; does not advance to the third.
+        expect(createNetwork).toHaveBeenCalledTimes(2);
+        expect(status.subnet).toBe('172.31.0.0/24');
+    });
+
+    it('classifies an unparseable existing subnet as subnet_invalid on the adopt path', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const createNetwork = vi.fn();
+        const inspectNetwork = vi.fn().mockResolvedValue({
+            IPAM: { Config: [{ Subnet: 'not-a-cidr' }] },
+        });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(false);
+        expect(status.reason).toBe('subnet_invalid');
+        expect(status.subnet).toBe('not-a-cidr');
+        expect(createNetwork).not.toHaveBeenCalled();
+    });
+
+    it('classifies a generic explicit-env createNetwork failure as attach_failed', async () => {
+        process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
+        process.env.HOSTNAME = 'sencho';
+        const daemonErr = Object.assign(
+            new Error('daemon attach error: out of inodes'),
+            { statusCode: 500 },
+        );
+        const createNetwork = vi.fn().mockRejectedValue(daemonErr);
+        const inspectNetwork = vi.fn().mockRejectedValue({ statusCode: 404, message: 'no such network' });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(false);
+        expect(status.reason).toBe('attach_failed');
+        expect(status.subnet).toBe('10.42.0.0/24');
+    });
+
+    it('treats a TOCTOU 409 in the explicit-env path as idempotent when the race-winner subnet matches', async () => {
+        process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
+        process.env.HOSTNAME = 'sencho';
+        const conflict = Object.assign(
+            new Error('network with name sencho_mesh already exists'),
+            { statusCode: 409 },
+        );
+        const createNetwork = vi.fn().mockRejectedValue(conflict);
+        // First inspect (pre-create probe): 404. Second inspect (post-409
+        // race-winner check): the matching subnet.
+        const inspectNetwork = vi.fn()
+            .mockRejectedValueOnce({ statusCode: 404, message: 'no such network' })
+            .mockResolvedValueOnce({ IPAM: { Config: [{ Subnet: '10.42.0.0/24' }] } });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(true);
+        expect(status.subnet).toBe('10.42.0.0/24');
+    });
+
+    it('treats a TOCTOU 409 in the explicit-env path as subnet_mismatch when the race-winner differs', async () => {
+        process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
+        process.env.HOSTNAME = 'sencho';
+        const conflict = Object.assign(
+            new Error('network with name sencho_mesh already exists'),
+            { statusCode: 409 },
+        );
+        const createNetwork = vi.fn().mockRejectedValue(conflict);
+        const inspectNetwork = vi.fn()
+            .mockRejectedValueOnce({ statusCode: 404, message: 'no such network' })
+            .mockResolvedValueOnce({ IPAM: { Config: [{ Subnet: '172.30.0.0/24' }] } });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(false);
+        expect(status.reason).toBe('subnet_mismatch');
+    });
 });
