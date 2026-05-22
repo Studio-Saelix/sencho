@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.0](https://github.com/Studio-Saelix/sencho/compare/v0.85.0...v0.86.0) (2026-05-22)
+
+
+### Added
+
+* **cloud-backup:** make Custom S3-compatible target available on every tier ([#1143](https://github.com/Studio-Saelix/sencho/issues/1143)) ([380ed6f](https://github.com/Studio-Saelix/sencho/commit/380ed6fd5093790f8b1456c7b5a4a6186eaf6321))
+* **files:** open stack file explorer to every tier ([#1144](https://github.com/Studio-Saelix/sencho/issues/1144)) ([535023b](https://github.com/Studio-Saelix/sencho/commit/535023b35005021fff24b5bb55564ff923c7db59))
+* **fleet:** move bulk Remote OTA updates to Community tier ([#1151](https://github.com/Studio-Saelix/sencho/issues/1151)) ([60f893a](https://github.com/Studio-Saelix/sencho/commit/60f893a81f1accc411b85d6cc72fae5f0818aa0d))
+* **fleet:** open Fleet Actions tab to Community (admin-only) ([#1153](https://github.com/Studio-Saelix/sencho/issues/1153)) ([519a59e](https://github.com/Studio-Saelix/sencho/commit/519a59ed2e370e4da53fb7f702c149b50b0fd281))
+* **notifications:** move Notification Routing to Skipper tier ([#1145](https://github.com/Studio-Saelix/sencho/issues/1145)) ([66b8493](https://github.com/Studio-Saelix/sencho/commit/66b84932e0dd4cc5a89c632f599933289a02c195))
+* **resources:** protect Sencho's own image, network, volumes from deletion ([#1149](https://github.com/Studio-Saelix/sencho/issues/1149)) ([b740dd1](https://github.com/Studio-Saelix/sencho/commit/b740dd1078a8d0c2d96603ad0d5d0b6015996e9c))
+* **schedules:** make every scheduled action available on Skipper ([#1141](https://github.com/Studio-Saelix/sencho/issues/1141)) ([c491d30](https://github.com/Studio-Saelix/sencho/commit/c491d309c12a7b823915e40c1f340495076dec32))
+* **security:** move managed Trivy auto-update to Skipper tier ([#1150](https://github.com/Studio-Saelix/sencho/issues/1150)) ([8a3889d](https://github.com/Studio-Saelix/sencho/commit/8a3889dc67c2d61d2e539ac5b8778bd81c558d52))
+
+
+### Fixed
+
+* **fleet:** equalize action card heights, swap order, replace native autocomplete ([#1138](https://github.com/Studio-Saelix/sencho/issues/1138)) ([2563e30](https://github.com/Studio-Saelix/sencho/commit/2563e30424d1cead0cecaf8affada275f4f1e91d))
+* **fleet:** route remaining fleet dispatches through getProxyTarget for pilot-agent nodes ([#1152](https://github.com/Studio-Saelix/sencho/issues/1152)) ([2f2401d](https://github.com/Studio-Saelix/sencho/commit/2f2401df68e9a50dbd6d724dce0a0a181dc21f44))
+* **frontend:** wire favicon to existing logo assets ([#1146](https://github.com/Studio-Saelix/sencho/issues/1146)) ([dc8a368](https://github.com/Studio-Saelix/sencho/commit/dc8a368785518279b1d1f4cd0c4cc02f32996087))
+* **hub-only-guard:** reject hub-only collection paths without trailing slash ([#1142](https://github.com/Studio-Saelix/sencho/issues/1142)) ([8d1304b](https://github.com/Studio-Saelix/sencho/commit/8d1304b0dfb4e5476a5729482b8e72bbd89c6faf))
+* **resources:** subtract shared layers when accounting managed prune bytes ([#1155](https://github.com/Studio-Saelix/sencho/issues/1155)) ([cd1cde2](https://github.com/Studio-Saelix/sencho/commit/cd1cde2fd44d8bf67c397aa3ade6b4d99f523147))
+* **resources:** use daemon-reported reclaimable image bytes ([#1154](https://github.com/Studio-Saelix/sencho/issues/1154)) ([a1caf6b](https://github.com/Studio-Saelix/sencho/commit/a1caf6b0dd8269911a61adff9bb31e1ad1a01461))
+
 ## [0.85.0](https://github.com/Studio-Saelix/sencho/compare/v0.84.3...v0.85.0) (2026-05-21)
 
 
