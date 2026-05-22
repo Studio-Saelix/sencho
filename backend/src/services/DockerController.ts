@@ -145,16 +145,41 @@ class DockerController {
       return { bytes, count: reclaimable.length };
     };
 
-    const reclaimableImages = (items: any[]) => {
+    // Prefer the daemon's own ImageUsage.Reclaimable (Docker API v1.44+); it is
+    // the exact number `docker system df` displays and accounts for shared
+    // layers correctly. On older daemons, fall back to LayersSize minus the
+    // unique-to-in-use bytes, the same arithmetic the CLI uses internally.
+    // Summing per-image Size/VirtualSize would over-report by the multiplicity
+    // of every shared layer (the old bug that inflated the banner).
+    const reclaimableImages = (items: any[], layersSize: number, serverReclaimable: number | undefined) => {
       if (!items || !Array.isArray(items)) return { bytes: 0, count: 0 };
-      const reclaimable = items.filter(i => i.Containers === 0);
-      const bytes = reclaimable.reduce((acc, item) => {
-        let size = item.VirtualSize || item.Size || item.SharedSize || 0;
-        if (item.UsageData && typeof item.UsageData.Size === 'number') {
-          size = item.UsageData.Size;
+      const reclaimable = items.filter(i => (i?.Containers ?? 0) === 0);
+      if (serverReclaimable !== undefined && serverReclaimable >= 0) {
+        return { bytes: serverReclaimable, count: reclaimable.length };
+      }
+      let used = 0;
+      for (const item of items) {
+        if (!item || (item.Containers ?? 0) <= 0) continue;
+        // Choose the best non-negative size: prefer VirtualSize, fall back to
+        // Size. If neither is known the image is truly unaccountable; skipping
+        // it leaks at most one image's worth of bytes into the reclaim total.
+        let virt = -1;
+        if (typeof item.VirtualSize === 'number' && item.VirtualSize >= 0) {
+          virt = item.VirtualSize;
+        } else if (typeof item.Size === 'number' && item.Size >= 0) {
+          virt = item.Size;
         }
-        return acc + size;
-      }, 0);
+        if (virt < 0) continue;
+        // SharedSize === -1 (or absent) means "unknown" on older daemons. Treat
+        // it as 0 so the image's full size counts as in-use. Under-reporting
+        // reclaimable is the safer direction; the previous skip-on-(-1) path
+        // moved those bytes into the reclaimable total and re-inflated it.
+        const shared = typeof item.SharedSize === 'number' && item.SharedSize >= 0
+          ? item.SharedSize
+          : 0;
+        used += Math.max(0, virt - shared);
+      }
+      const bytes = Math.max(0, (layersSize || 0) - used);
       return { bytes, count: reclaimable.length };
     };
 
@@ -175,7 +200,10 @@ class DockerController {
       return { bytes, count: reclaimable.length };
     };
 
-    const images = df.Images ? reclaimableImages(df.Images) : { bytes: 0, count: 0 };
+    const imageUsage = (df as { ImageUsage?: { Reclaimable?: number } }).ImageUsage;
+    const images = df.Images
+      ? reclaimableImages(df.Images, df.LayersSize ?? 0, imageUsage?.Reclaimable)
+      : { bytes: 0, count: 0 };
     const containers = df.Containers ? reclaimableContainers(df.Containers) : { bytes: 0, count: 0 };
     const volumes = df.Volumes ? reclaimableVolumes(df.Volumes) : { bytes: 0, count: 0 };
     const buildCache = df.BuildCache ? reclaimableBuildCache(df.BuildCache) : { bytes: 0, count: 0 };
