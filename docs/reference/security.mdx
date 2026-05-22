@@ -85,9 +85,9 @@ Every Sencho instance includes the foundational security stack. Advanced access-
 | Scan policies, scheduled scans, SBOM generation | | ✓ | ✓ |
 | Fleet Secrets (encrypted env-var bundles) | | ✓ | ✓ |
 | Webhook signatures (HMAC-SHA256) | | ✓ | ✓ |
+| API tokens (scoped, expiring) | ✓ | ✓ | ✓ |
 | Advanced RBAC (Deployer, Node Admin, Auditor) | | | ✓ |
 | Scoped permissions (per-stack, per-node) | | | ✓ |
-| API tokens (scoped, expiring) | | | ✓ |
 | Audit log with export | | | ✓ |
 
 ## Password authentication
@@ -161,10 +161,10 @@ Regardless of scope, tokens are universally blocked from sensitive operations: p
 Tokens are cryptographically hashed before storage; the raw value is shown exactly once at creation. Each token tracks its last-used timestamp for auditing. You can configure expiry at 30, 60, 90, or 365 days, or leave it open-ended. A maximum of 25 active tokens are allowed per user.
 
 <Frame>
-  <img src="/images/api-tokens/api-tokens-overview.png" alt="API tokens management showing active tokens with scope badges" />
+  <img src="/images/api-tokens/api-tokens-populated.png" alt="API tokens management showing active tokens with scope badges" />
 </Frame>
 
-For setup and usage, see [API Tokens](/features/api-tokens). Admiral tier.
+For setup and usage, see [API Tokens](/features/api-tokens).
 
 ## Webhook signature authentication
 
