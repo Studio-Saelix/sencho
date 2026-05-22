@@ -160,11 +160,23 @@ class DockerController {
       let used = 0;
       for (const item of items) {
         if (!item || (item.Containers ?? 0) <= 0) continue;
-        if (item.VirtualSize === -1 || item.SharedSize === -1) continue;
-        const virt = typeof item.VirtualSize === 'number'
-          ? item.VirtualSize
-          : (typeof item.Size === 'number' ? item.Size : 0);
-        const shared = typeof item.SharedSize === 'number' ? item.SharedSize : 0;
+        // Choose the best non-negative size: prefer VirtualSize, fall back to
+        // Size. If neither is known the image is truly unaccountable; skipping
+        // it leaks at most one image's worth of bytes into the reclaim total.
+        let virt = -1;
+        if (typeof item.VirtualSize === 'number' && item.VirtualSize >= 0) {
+          virt = item.VirtualSize;
+        } else if (typeof item.Size === 'number' && item.Size >= 0) {
+          virt = item.Size;
+        }
+        if (virt < 0) continue;
+        // SharedSize === -1 (or absent) means "unknown" on older daemons. Treat
+        // it as 0 so the image's full size counts as in-use. Under-reporting
+        // reclaimable is the safer direction; the previous skip-on-(-1) path
+        // moved those bytes into the reclaimable total and re-inflated it.
+        const shared = typeof item.SharedSize === 'number' && item.SharedSize >= 0
+          ? item.SharedSize
+          : 0;
         used += Math.max(0, virt - shared);
       }
       const bytes = Math.max(0, (layersSize || 0) - used);

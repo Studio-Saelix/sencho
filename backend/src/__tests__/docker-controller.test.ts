@@ -243,12 +243,16 @@ describe('DockerController - getDiskUsage', () => {
     expect(usage.reclaimableImageCount).toBe(2);
   });
 
-  it('skips images Docker reports with unknown (-1) sizes', async () => {
+  it('skips active images only when no usable size is available', async () => {
+    // Truly unaccountable image: both VirtualSize and Size are -1 / missing.
+    // Skipping leaks at most one image's worth of bytes into the reclaim
+    // total, but modern daemons never return this shape; the prior "always
+    // skip on -1" path moved any image with SharedSize=-1 into the leak set.
     mockDocker.df.mockResolvedValue({
       LayersSize: 1000,
       Images: [
         { Id: 'known', Containers: 1, VirtualSize: 400, SharedSize: 100 },
-        { Id: 'unknown', Containers: 1, VirtualSize: -1, SharedSize: -1 },
+        { Id: 'truly-lost', Containers: 1, VirtualSize: -1, Size: -1 },
       ],
       Containers: [],
       Volumes: [],
@@ -257,9 +261,34 @@ describe('DockerController - getDiskUsage', () => {
     const dc = DockerController.getInstance(1);
     const usage = await dc.getDiskUsage();
 
-    // unknown image is ignored; used = 400 - 100 = 300; reclaimable = 1000 - 300
+    // truly-lost is unaccountable and skipped; used = 400 - 100 = 300
     expect(usage.reclaimableImages).toBe(700);
     expect(usage.reclaimableImageCount).toBe(0);
+  });
+
+  it('treats SharedSize=-1 conservatively (full Size counts as used)', async () => {
+    // Older daemons may report SharedSize as -1 (unknown) while Size is
+    // accurate. Treating SharedSize as 0 in that case under-reports
+    // reclaimable, which is the safe direction; the prior skip-on-(-1)
+    // path made the image's full Size look reclaimable.
+    mockDocker.df.mockResolvedValue({
+      LayersSize: 1000,
+      Images: [
+        { Id: 'modern', Containers: 1, Size: 400, SharedSize: 100 },
+        { Id: 'no-shared-info', Containers: 1, Size: 300, SharedSize: -1 },
+      ],
+      Containers: [],
+      Volumes: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage();
+
+    // modern: used += 400 - 100 = 300
+    // no-shared-info: shared treated as 0, used += 300 - 0 = 300; total = 600
+    // (the old buggy formula skipped no-shared-info, leaving used=300 and
+    //  reclaimable=700 — i.e. the in-use 300 bytes looked reclaimable)
+    expect(usage.reclaimableImages).toBe(400);
   });
 
   it('handles empty arrays gracefully', async () => {
