@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.2](https://github.com/Studio-Saelix/sencho/compare/v0.86.1...v0.86.2) (2026-05-22)
+
+
+### Fixed
+
+* **mesh:** log boot state to console so docker logs surfaces mesh status ([#1159](https://github.com/Studio-Saelix/sencho/issues/1159)) ([4742900](https://github.com/Studio-Saelix/sencho/commit/474290081d2b99dbb51fffca64becd242b7ebace))
+
 ## [0.86.1](https://github.com/Studio-Saelix/sencho/compare/v0.86.0...v0.86.1) (2026-05-22)
 
 
