@@ -656,36 +656,6 @@ describe('getSenchoIpFromSubnet', () => {
     });
 });
 
-describe('MeshService.ensureMeshNetwork', () => {
-    it('refuses to continue when sencho_mesh exists with a different subnet', async () => {
-        const svc = MeshService.getInstance();
-        const dcModule = await import('../services/DockerController');
-        const fakeController = {
-            createNetwork: vi.fn().mockRejectedValue({ statusCode: 409, message: 'network already exists' }),
-            inspectNetwork: vi.fn().mockResolvedValue({ IPAM: { Config: [{ Subnet: '10.99.0.0/24' }] } }),
-        };
-        vi.spyOn(dcModule.default, 'getInstance').mockReturnValue(fakeController as unknown as ReturnType<typeof dcModule.default.getInstance>);
-
-        await expect(
-            (svc as unknown as { ensureMeshNetwork: (s: string) => Promise<void> }).ensureMeshNetwork('172.30.0.0/24'),
-        ).rejects.toThrow(/exists with subnet 10\.99\.0\.0\/24/);
-    });
-
-    it('treats 409 with matching subnet as idempotent success', async () => {
-        const svc = MeshService.getInstance();
-        const dcModule = await import('../services/DockerController');
-        const fakeController = {
-            createNetwork: vi.fn().mockRejectedValue({ statusCode: 409, message: 'network already exists' }),
-            inspectNetwork: vi.fn().mockResolvedValue({ IPAM: { Config: [{ Subnet: '172.30.0.0/24' }] } }),
-        };
-        vi.spyOn(dcModule.default, 'getInstance').mockReturnValue(fakeController as unknown as ReturnType<typeof dcModule.default.getInstance>);
-
-        await expect(
-            (svc as unknown as { ensureMeshNetwork: (s: string) => Promise<void> }).ensureMeshNetwork('172.30.0.0/24'),
-        ).resolves.toBeUndefined();
-    });
-});
-
 describe('MeshService.optInStack rollback', () => {
     it('rolls back the DB row when the just-inserted stack fails to push its override', async () => {
         const svc = MeshService.getInstance();

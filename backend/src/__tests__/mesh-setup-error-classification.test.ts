@@ -204,3 +204,127 @@ describe('MeshService.setupMeshNetwork failure classification', () => {
         expect(svc.getNetworkSetupError()).toMatch(/overlap/i);
     });
 });
+
+describe('MeshService.setupMeshNetwork subnet auto-fallback', () => {
+    it('iterates past the first overlapping candidate when SENCHO_MESH_SUBNET is unset', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const overlap = Object.assign(
+            new Error('Pool overlaps with other one on this address space'),
+            { statusCode: 500 },
+        );
+        const createNetwork = vi.fn()
+            .mockRejectedValueOnce(overlap)
+            .mockResolvedValueOnce(undefined);
+        const inspectNetwork = vi.fn().mockRejectedValue({ statusCode: 404, message: 'no such network' });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(true);
+        expect(status.subnet).toBe('172.31.0.0/24');
+        expect(createNetwork).toHaveBeenCalledTimes(2);
+    });
+
+    it('records subnet_overlap with every tried candidate when all candidates overlap', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const overlap = Object.assign(
+            new Error('Pool overlaps with other one on this address space'),
+            { statusCode: 500 },
+        );
+        const createNetwork = vi.fn().mockRejectedValue(overlap);
+        const inspectNetwork = vi.fn().mockRejectedValue({ statusCode: 404, message: 'no such network' });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(false);
+        expect(status.reason).toBe('subnet_overlap');
+        expect(createNetwork).toHaveBeenCalledTimes(4);
+        expect(status.message).toContain('172.30.0.0/24');
+        expect(status.message).toContain('172.31.0.0/24');
+        expect(status.message).toContain('10.42.0.0/24');
+        expect(status.message).toContain('10.43.0.0/24');
+        expect(status.message).toMatch(/SENCHO_MESH_SUBNET/);
+    });
+
+    it('adopts an existing sencho_mesh subnet when SENCHO_MESH_SUBNET is unset', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const createNetwork = vi.fn();
+        const inspectNetwork = vi.fn().mockResolvedValue({
+            IPAM: { Config: [{ Subnet: '192.168.42.0/24' }] },
+        });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(true);
+        expect(status.subnet).toBe('192.168.42.0/24');
+        expect(createNetwork).not.toHaveBeenCalled();
+    });
+
+    it('classifies a non-404 inspectNetwork failure as attach_failed without trying to create', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const createNetwork = vi.fn();
+        const inspectNetwork = vi.fn().mockRejectedValue(
+            Object.assign(new Error('daemon unresponsive'), { statusCode: 500 }),
+        );
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(false);
+        expect(status.reason).toBe('attach_failed');
+        expect(createNetwork).not.toHaveBeenCalled();
+    });
+
+    it('skips create when SENCHO_MESH_SUBNET matches the existing sencho_mesh subnet', async () => {
+        process.env.SENCHO_MESH_SUBNET = '172.30.0.0/24';
+        process.env.HOSTNAME = 'sencho';
+        const createNetwork = vi.fn();
+        const inspectNetwork = vi.fn().mockResolvedValue({
+            IPAM: { Config: [{ Subnet: '172.30.0.0/24' }] },
+        });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(true);
+        expect(status.subnet).toBe('172.30.0.0/24');
+        expect(createNetwork).not.toHaveBeenCalled();
+    });
+
+    it('keeps the operator-explicit path strict (no candidate fallback)', async () => {
+        process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
+        process.env.HOSTNAME = 'sencho';
+        const overlap = Object.assign(
+            new Error('Pool overlaps with other one on this address space'),
+            { statusCode: 500 },
+        );
+        const createNetwork = vi.fn().mockRejectedValue(overlap);
+        const inspectNetwork = vi.fn().mockRejectedValue({ statusCode: 404, message: 'no such network' });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(false);
+        expect(status.reason).toBe('subnet_overlap');
+        expect(status.subnet).toBe('10.42.0.0/24');
+        expect(createNetwork).toHaveBeenCalledTimes(1);
+    });
+});

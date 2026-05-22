@@ -202,15 +202,19 @@ These are the explicit boundaries of the v1 mesh.
 
 <AccordionGroup>
   <Accordion title="Mesh data plane is down">
-    The Routing tab shows a red banner when the local Sencho's `sencho_mesh` setup did not complete. The banner names the specific reason; the same reason appears in the mesh activity log and on `/api/health` as `mesh.dataPlane.reason`. The fix depends on which reason fired:
+    The Routing tab shows a red banner when the local Sencho's `sencho_mesh` setup did not complete, and the dashboard's Fleet Heartbeat card surfaces the same failure as a compact status line. The reason also appears in the mesh activity log and on `/api/health` as `mesh.dataPlane.reason`.
 
-    - `subnet_overlap`: the requested CIDR overlaps another Docker bridge network on this host. Run `docker network ls -q | xargs -L1 docker network inspect --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}'` to list every existing subnet, then set `SENCHO_MESH_SUBNET` to a free `/24` (for example `10.42.0.0/24`) and recreate the Sencho container.
-    - `subnet_mismatch`: `sencho_mesh` already exists with a different subnet. Either remove the network (`docker network rm sencho_mesh` after detaching any containers) or set `SENCHO_MESH_SUBNET` to match the existing subnet.
+    **Subnet selection.** When `SENCHO_MESH_SUBNET` is unset, Sencho tries `172.30.0.0/24`, then `172.31.0.0/24`, then `10.42.0.0/24`, then `10.43.0.0/24` in order, and keeps the first subnet Docker accepts. If `sencho_mesh` already exists on the daemon, Sencho adopts that network's subnet without touching the candidate list. Set `SENCHO_MESH_SUBNET` only when you need to force a specific CIDR.
+
+    The fix depends on which reason fired:
+
+    - `subnet_overlap`: every candidate subnet overlaps an existing Docker bridge network on this host. Run `docker network ls -q | xargs -L1 docker network inspect --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}'` to list every existing subnet, then set `SENCHO_MESH_SUBNET` to a free `/24` outside the candidate list and recreate the Sencho container.
+    - `subnet_mismatch`: `SENCHO_MESH_SUBNET` is set explicitly, but `sencho_mesh` already exists with a different subnet. Either remove the network (`docker network rm sencho_mesh` after detaching any containers) or change `SENCHO_MESH_SUBNET` to match the existing subnet. Unset the variable to let Sencho adopt whatever is on disk.
     - `subnet_invalid`: `SENCHO_MESH_SUBNET` is not a valid CIDR. Fix the value (it must look like `10.42.0.0/24`) and recreate the container.
     - `ip_in_use`: another container is squatting the IP Sencho wants on its mesh subnet. Find the squatting container with `docker network inspect sencho_mesh`, detach or remove it, then restart Sencho.
     - `attach_failed`: the Docker daemon refused the network attachment for a reason that does not match the patterns above. The full error appears in the activity log entry and on `/api/health`.
 
-    The `mesh.dataPlane.subnet` field shows the CIDR Sencho tried to use, so the operator can verify which subnet is configured before changing anything.
+    The `mesh.dataPlane.subnet` field shows the CIDR Sencho settled on (or the last candidate it tried), so the operator can verify which subnet is configured before changing anything.
   </Accordion>
 
   <Accordion title="Opt-in rejects with 'host-network service'">
