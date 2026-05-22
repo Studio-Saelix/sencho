@@ -8,6 +8,7 @@ import * as yaml from 'yaml';
 
 import { NodeRegistry } from './NodeRegistry';
 import { CacheService } from './CacheService';
+import SelfIdentityService from './SelfIdentityService';
 import { isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -42,6 +43,7 @@ export interface ClassifiedImage {
   Containers: number;
   managedBy: string | null;
   managedStatus: 'managed' | 'unmanaged' | 'unused';
+  isSencho: boolean;
 }
 
 export interface PortInUseInfo {
@@ -57,6 +59,7 @@ export interface ClassifiedVolume {
   CreatedAt: string | null;
   managedBy: string | null;
   managedStatus: 'managed' | 'unmanaged';
+  isSencho: boolean;
 }
 
 export interface ClassifiedNetwork {
@@ -66,6 +69,7 @@ export interface ClassifiedNetwork {
   Scope: string;
   managedBy: string | null;
   managedStatus: 'managed' | 'unmanaged' | 'system';
+  isSencho: boolean;
 }
 
 export interface TopologyContainer {
@@ -188,6 +192,12 @@ class DockerController {
     };
   }
 
+  // Sencho's own image, networks, and named volumes are always in use by the
+  // running container, so Docker's server-side prune APIs (pruneContainers,
+  // pruneImages, pruneNetworks, pruneVolumes) skip them by definition. No
+  // extra self-guard is needed at this layer; the `managed` scope path goes
+  // through `pruneManagedOnly`, which adds an explicit self filter for
+  // defense-in-depth.
   public async pruneSystem(target: 'containers' | 'images' | 'networks' | 'volumes', labelFilter?: string) {
     let spaceReclaimed = 0;
     if (target === 'containers') {
@@ -268,6 +278,8 @@ class DockerController {
       if (stack) imageToStack.set(c.ImageID, stack);
     }
 
+    const selfIdentity = SelfIdentityService.getInstance();
+
     const images: ClassifiedImage[] = this.validateApiData<any[]>(rawImages).map((img: any) => {
       const stack = imageToStack.get(img.Id) ?? null;
       const managedStatus: ClassifiedImage['managedStatus'] =
@@ -280,6 +292,7 @@ class DockerController {
         Containers: img.Containers ?? 0,
         managedBy: stack,
         managedStatus,
+        isSencho: selfIdentity.isOwnImage(img.Id),
       };
     });
 
@@ -294,12 +307,13 @@ class DockerController {
         CreatedAt: vol.CreatedAt ?? null,
         managedBy: stack,
         managedStatus,
+        isSencho: selfIdentity.isOwnVolume(vol.Name),
       };
     });
 
     const networks: ClassifiedNetwork[] = this.validateApiData<any[]>(rawNetworks).map((net: any) => {
       if (DockerController.SYSTEM_NETWORKS.has(net.Name)) {
-        return { Id: net.Id, Name: net.Name, Driver: net.Driver, Scope: net.Scope, managedBy: null, managedStatus: 'system' as const };
+        return { Id: net.Id, Name: net.Name, Driver: net.Driver, Scope: net.Scope, managedBy: null, managedStatus: 'system' as const, isSencho: false };
       }
       const stack = DockerController.resolveProjectLabel(net.Labels?.['com.docker.compose.project'], knownSet, projectToStack);
       const managedStatus: ClassifiedNetwork['managedStatus'] = stack ? 'managed' : 'unmanaged';
@@ -310,6 +324,7 @@ class DockerController {
         Scope: net.Scope,
         managedBy: stack,
         managedStatus,
+        isSencho: selfIdentity.isOwnNetwork(net.Id) || selfIdentity.isOwnNetwork(net.Name),
       };
     });
 
@@ -326,6 +341,7 @@ class DockerController {
   ): Promise<{ success: boolean; reclaimedBytes: number }> {
     const knownSet = new Set(knownStackNames);
     const projectToStack = await DockerController.resolveProjectNameMap(knownStackNames);
+    const selfIdentity = SelfIdentityService.getInstance();
     let reclaimedBytes = 0;
 
     if (target === 'volumes') {
@@ -333,7 +349,8 @@ class DockerController {
       const rawVolumes: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
       const prunable = rawVolumes.filter((v: any) => {
         return !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
-          && (v.UsageData?.RefCount ?? 1) === 0;
+          && (v.UsageData?.RefCount ?? 1) === 0
+          && !selfIdentity.isOwnVolume(v.Name);
       });
       // Removals are independent and Docker handles concurrent volume
       // deletes; parallelize so wall time matches the slowest single
@@ -349,7 +366,9 @@ class DockerController {
     } else if (target === 'networks') {
       const rawNetworks = await this.docker.listNetworks();
       const prunable = (rawNetworks as any[]).filter((n: any) => {
-        return !!DockerController.resolveProjectLabel(n.Labels?.['com.docker.compose.project'], knownSet, projectToStack);
+        return !!DockerController.resolveProjectLabel(n.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
+          && !selfIdentity.isOwnNetwork(n.Id)
+          && !selfIdentity.isOwnNetwork(n.Name);
       });
       await Promise.all(prunable.map(async (net) => {
         try {
@@ -371,7 +390,9 @@ class DockerController {
       }
       const rawImages = await this.docker.listImages({ all: false });
       const prunable = (rawImages as any[]).filter((img: any) =>
-        img.Containers === 0 && !unmanagedImageIds.has(img.Id)
+        img.Containers === 0
+        && !unmanagedImageIds.has(img.Id)
+        && !selfIdentity.isOwnImage(img.Id)
       );
       await Promise.all(prunable.map(async (img) => {
         try {
@@ -398,6 +419,7 @@ class DockerController {
   ): Promise<{ reclaimableBytes: number }> {
     const knownSet = new Set(knownStackNames);
     const projectToStack = await DockerController.resolveProjectNameMap(knownStackNames);
+    const selfIdentity = SelfIdentityService.getInstance();
     let reclaimableBytes = 0;
 
     if (target === 'volumes') {
@@ -405,7 +427,8 @@ class DockerController {
       const rawVolumes: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
       const prunable = rawVolumes.filter((v: any) => {
         return !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
-          && (v.UsageData?.RefCount ?? 1) === 0;
+          && (v.UsageData?.RefCount ?? 1) === 0
+          && !selfIdentity.isOwnVolume(v.Name);
       });
       for (const vol of prunable) reclaimableBytes += vol.UsageData?.Size ?? 0;
     } else if (target === 'networks') {
@@ -424,7 +447,9 @@ class DockerController {
       }
       const rawImages = await this.docker.listImages({ all: false });
       const prunable = (rawImages as any[]).filter((img: any) =>
-        img.Containers === 0 && !unmanagedImageIds.has(img.Id),
+        img.Containers === 0
+        && !unmanagedImageIds.has(img.Id)
+        && !selfIdentity.isOwnImage(img.Id),
       );
       for (const img of prunable) reclaimableBytes += img.Size ?? 0;
     }
@@ -1173,10 +1198,16 @@ class DockerController {
 
     // 2. Filter and categorize orphans
     const orphans: Record<string, any[]> = {};
+    const selfIdentity = SelfIdentityService.getInstance();
 
     allContainers.forEach((container) => {
       // Look for the docker compose project label
       const projectName = container.Labels?.['com.docker.compose.project'];
+
+      // Sencho's own container is not a stack on this node, so when it carries
+      // a compose-project label (compose-deployed installations) it would
+      // otherwise surface here as a stray under that project name.
+      if (selfIdentity.isOwnContainer(container.Id)) return;
 
       // If it has a project label, but the project is NOT in our known list...
       if (projectName && !knownStackNames.includes(projectName)) {

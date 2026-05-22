@@ -56,6 +56,10 @@ Below the hero, four tabs partition your inventory: **images**, **volumes**, **n
 
 A **Scan history** button sits on the right of the tab strip when image vulnerability scanning is configured for the node. It opens the full scan record so you can review past results without launching a new scan. See [Vulnerability scanning](/features/vulnerability-scanning) for the full workflow.
 
+<Note>
+  Sencho protects its own image, network, named volumes, and container from accidental deletion. They appear in the Images, Networks, and Volumes tabs with a **Sencho** pill alongside the managed status, and the delete button is disabled with a "Protected · running Sencho instance" tooltip. The Unmanaged tab never lists the Sencho container itself.
+</Note>
+
 ### Images
 
 Lists all Docker images on the host with their ID, repository tag, size, and status.
@@ -193,7 +197,7 @@ By default, system networks (`bridge`, `host`, `none`) are hidden so the graph s
   <img src="/images/resources/resources-unmanaged-tab.png" alt="Unmanaged tab with Select all checkbox, Purge Selected action, and a container row grouped under External Project: sencho" />
 </Frame>
 
-Lists containers running on the host that are not part of any Sencho-managed stack: containers started with `docker run`, or Compose projects outside your `COMPOSE_DIR`. The tab shows a count badge when any are detected.
+Lists containers running on the host that are not part of any Sencho-managed stack: containers started with `docker run`, or Compose projects outside your `COMPOSE_DIR`. The tab shows a count badge when any are detected. The running Sencho container itself is excluded from this list so it cannot be purged by accident.
 
 Containers are grouped by their external Compose project. Each group has an **External Project** header with the project name and a container count. Each container row shows:
 
@@ -205,3 +209,14 @@ Containers are grouped by their external Compose project. Each group has an **Ex
 The toolbar above the list provides a **Select all** checkbox and a destructive **Purge Selected (N)** button. The button stays disabled until at least one row is checked, and is admin-only.
 
 When no unmanaged containers are detected, the tab shows a success state with the message "No unmanaged containers" and the subline "All running containers are managed by Sencho."
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The delete button is greyed out on an image, network, or volume row">
+    The row carries a **Sencho** pill, which means the resource is the running Sencho instance's own image, attached network, or named volume. Sencho refuses to delete the resources that keep itself running so an admin cannot take the dashboard offline by accident. Bind-mounted host paths are not shown in the Volumes tab and are not affected.
+  </Accordion>
+  <Accordion title="I expected to see the Sencho container in the Unmanaged tab and it is not there">
+    The Unmanaged tab filters the running Sencho container out by design so it cannot be selected and purged. Other containers started outside Sencho (with `docker run` or by a Compose project outside `COMPOSE_DIR`) still appear normally. To inspect the Sencho container itself, use **Host Console** or `docker ps` on the host.
+  </Accordion>
+</AccordionGroup>
