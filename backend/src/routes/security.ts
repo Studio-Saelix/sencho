@@ -203,6 +203,7 @@ securityRouter.post('/trivy-update', trivyInstallLimiter, authMiddleware, async 
 });
 
 securityRouter.put('/trivy-auto-update', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
   if (!requirePaid(req, res)) return;
   const enabled = req.body?.enabled === true;
   try {
