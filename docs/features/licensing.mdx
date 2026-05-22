@@ -29,7 +29,7 @@ For larger deployments, an **Enterprise** tier is available with custom pricing,
 - Real-time container stats, global logs, the interactive network topology graph, and stack labels
 - Git sources for compose stacks
 - Multi-node management in both Proxy and Pilot Agent modes
-- Manual fleet snapshots (create, browse, restore, delete) and per-node Sencho updates
+- Manual fleet snapshots (create, browse, restore, delete) and Remote OTA node updates (per-node and **Update all**)
 - Custom S3-compatible backup target (bring your own AWS S3, Cloudflare R2, MinIO, Backblaze B2, or Wasabi bucket)
 - Vulnerability scanning: install, update, and uninstall Trivy, on-demand scans for vulnerabilities, secrets, and misconfigurations, plus scan comparison
 - CVE suppressions
@@ -48,8 +48,7 @@ For larger deployments, an **Enterprise** tier is available with custom pricing,
 - Scheduled operations across the full action catalog (lifecycle, updates, scans, snapshots, prune)
 - Scan policies with `block_on_deploy` deploy enforcement, SBOM (SPDX, CycloneDX), and SARIF export
 - Bulk actions on a label (deploy, stop, or restart every stack tagged with it)
-- Remote OTA node updates from the control instance
-- Fleet Actions (bulk update all, bulk restart Sencho)
+- Fleet Actions (bulk restart Sencho)
 - Blueprints and Fleet Secrets
 - Preset SSO for Google, GitHub, and Okta
 - Viewer accounts (1 admin plus 3 viewers)

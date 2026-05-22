@@ -184,15 +184,15 @@ describe('POST /api/fleet/nodes/:nodeId/update (pilot-agent)', () => {
 });
 
 describe('POST /api/fleet/update-all (pilot-agent mixed fleet)', () => {
-  // /update-all is requirePaid; spy the license tier so the test DB does not
-  // need a real activation row.
-  function mockPaidTier() {
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
+  // Bulk OTA is admin-only and runs at every tier; spy the tier to Community
+  // so this suite doubles as a regression guard that the gate has not been
+  // re-introduced.
+  function mockCommunityTier() {
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
   }
 
   it('includes the pilot node in the candidate set and dispatches through its target', async () => {
-    mockPaidTier();
+    mockCommunityTier();
     mockTargetForPilot();
     mockMeta(META_ONLINE_OUTDATED);
     const postedUrls: string[] = [];
@@ -213,7 +213,7 @@ describe('POST /api/fleet/update-all (pilot-agent mixed fleet)', () => {
   });
 
   it('skips remotes whose target resolves to null and never calls /api/system/update on them', async () => {
-    mockPaidTier();
+    mockCommunityTier();
     mockTargetUnreachable();
     // /update-all also calls api.github.com to compute the compare target;
     // pin the assertion to the route's own dispatch surface.

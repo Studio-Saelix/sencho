@@ -937,7 +937,6 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
 });
 
 fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireAdmin(req, res)) return;
   try {
     const db = DatabaseService.getInstance();
