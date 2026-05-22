@@ -14,7 +14,6 @@ import { SettingsCallout } from './SettingsCallout';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 import type { FleetRole, ScanPolicy, VulnSeverity } from '@/types/security';
-import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { SuppressionsPanel } from './SuppressionsPanel';
@@ -70,8 +69,6 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
   const [saving, setSaving] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
 
-  const { license } = useLicense();
-  const isAdmiral = isPaid && license?.variant === 'admiral';
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
   const { status: trivy, updateCheck, refresh: refreshTrivy, refreshUpdateCheck } = useTrivyStatus();
@@ -402,7 +399,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
           <div className="text-xs text-stat-subtitle">{TRIVY_SOURCE_DESCRIPTIONS[trivy.source]}</div>
         )}
 
-        {trivy.source === 'managed' && isAdmiral && (
+        {trivy.source === 'managed' && isPaid && (
           <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
             <div>
               <Label className="text-sm">Auto-update Trivy</Label>

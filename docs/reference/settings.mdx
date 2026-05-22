@@ -388,7 +388,7 @@ See [Stack Labels](/features/stack-labels) for the full walkthrough.
 ## Security
 
 <Note>
-  Security is admin-only. The Trivy installer and CVE/misconfig suppressions are available on all tiers; scan policies require Sencho Skipper or Admiral; the **Auto-update Trivy** toggle requires Admiral and a managed Trivy binary.
+  Security is admin-only. The Trivy installer and CVE/misconfig suppressions are available on all tiers; scan policies and the **Auto-update Trivy** toggle require Sencho Skipper or Admiral (the toggle also requires a managed Trivy binary).
 </Note>
 
 **Scope:** Per-node
@@ -406,7 +406,7 @@ Manage the Trivy scanner, scan policies, suppressions, and acknowledgements that
 | **Status** | `Installed (managed)` when Sencho manages the binary, `Installed (host)` when an existing host binary is being reused, or empty when nothing is detected. |
 | **Version** | The current Trivy version, when installed. |
 | **Install / Update / Uninstall** | Lifecycle actions for the managed binary. Uninstall asks for confirmation. |
-| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires Admiral and a managed Trivy binary. |
+| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires Skipper and a managed Trivy binary. |
 
 ### Scan policies
 

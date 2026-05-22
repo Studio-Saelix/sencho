@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requireAdmiral, requirePaid } from '../middleware/tierGates';
+import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { trivyInstallLimiter } from '../middleware/rateLimiters';
 import TrivyService, { SbomFormat } from '../services/TrivyService';
 import TrivyInstaller from '../services/TrivyInstaller';
@@ -203,7 +203,7 @@ securityRouter.post('/trivy-update', trivyInstallLimiter, authMiddleware, async 
 });
 
 securityRouter.put('/trivy-auto-update', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   const enabled = req.body?.enabled === true;
   try {
     DatabaseService.getInstance().updateGlobalSetting('trivy_auto_update', enabled ? '1' : '0');
