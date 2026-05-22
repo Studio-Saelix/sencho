@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.1](https://github.com/Studio-Saelix/sencho/compare/v0.86.0...v0.86.1) (2026-05-22)
+
+
+### Fixed
+
+* **mesh:** address Codex audit findings on F-1 PR ([#1158](https://github.com/Studio-Saelix/sencho/issues/1158)) ([e4fe4cf](https://github.com/Studio-Saelix/sencho/commit/e4fe4cfced6c81eb13cc186b324c2e3c55acdffa))
+* **mesh:** auto-fallback through candidate subnets when default overlaps ([#1156](https://github.com/Studio-Saelix/sencho/issues/1156)) ([1a03cf8](https://github.com/Studio-Saelix/sencho/commit/1a03cf82af67237c4109a9a7a8e112a49f893232))
+
 ## [0.86.0](https://github.com/Studio-Saelix/sencho/compare/v0.85.0...v0.86.0) (2026-05-22)
 
 
