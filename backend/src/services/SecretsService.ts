@@ -4,8 +4,10 @@ import { CryptoService } from './CryptoService';
 import { DatabaseService, type BlueprintSelector, type Node, type SecretRow, type SecretVersionRow, type SecretPushStatus } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { NodeLabelService } from './NodeLabelService';
+import { NodeRegistry } from './NodeRegistry';
 import { resolveAllEnvFilePaths } from '../routes/stacks';
 import { getErrorMessage } from '../utils/errors';
+import { formatNoTargetError } from '../utils/remoteTarget';
 
 export type SecretKv = Record<string, string>;
 export type DiffStatus = 'added' | 'changed' | 'removed' | 'unchanged';
@@ -212,9 +214,11 @@ async function resolveEnvFileLocal(nodeId: number, stackName: string, basename: 
 }
 
 async function resolveEnvFileRemote(node: Node, stackName: string, basename: string): Promise<ResolvedEnvFile | null> {
-    if (!node.api_url || !node.api_token) return null;
-    const baseUrl = node.api_url.replace(/\/$/, '');
-    const headers = { Authorization: `Bearer ${node.api_token}` };
+    const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+    if (!target) return null;
+    const baseUrl = target.apiUrl.replace(/\/$/, '');
+    const headers: Record<string, string> = {};
+    if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
     const res = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/envs`, {
         headers,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -251,9 +255,11 @@ async function writeEnvLocal(nodeId: number, absolutePath: string, content: stri
 }
 
 async function readEnvRemote(node: Node, stackName: string, absolutePath: string): Promise<string> {
-    if (!node.api_url || !node.api_token) throw new Error('node has no api_url or api_token');
-    const baseUrl = node.api_url.replace(/\/$/, '');
-    const headers = { Authorization: `Bearer ${node.api_token}` };
+    const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+    if (!target) throw new Error(formatNoTargetError(node));
+    const baseUrl = target.apiUrl.replace(/\/$/, '');
+    const headers: Record<string, string> = {};
+    if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
     const url = new URL(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`);
     if (absolutePath !== '.env') url.searchParams.set('file', absolutePath);
     const res = await fetch(url.toString(), {
@@ -266,12 +272,13 @@ async function readEnvRemote(node: Node, stackName: string, absolutePath: string
 }
 
 async function writeEnvRemote(node: Node, stackName: string, absolutePath: string, content: string): Promise<void> {
-    if (!node.api_url || !node.api_token) throw new Error('node has no api_url or api_token');
-    const baseUrl = node.api_url.replace(/\/$/, '');
-    const headers = {
-        Authorization: `Bearer ${node.api_token}`,
+    const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+    if (!target) throw new Error(formatNoTargetError(node));
+    const baseUrl = target.apiUrl.replace(/\/$/, '');
+    const headers: Record<string, string> = {
         'Content-Type': 'application/json',
     };
+    if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
     const url = new URL(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`);
     if (absolutePath !== '.env') url.searchParams.set('file', absolutePath);
     const res = await fetch(url.toString(), {

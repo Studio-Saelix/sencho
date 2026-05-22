@@ -25,6 +25,7 @@ import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 import { POLICY_SEVERITIES } from '../utils/severity';
 import { sanitizeForLog } from '../utils/safeLog';
+import { formatNoTargetError } from '../utils/remoteTarget';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -226,12 +227,6 @@ function pilotLastSeenSeconds(node: Node): number | null {
   return node.mode === 'pilot_agent' && node.pilot_last_seen
     ? Math.floor(node.pilot_last_seen / 1000)
     : null;
-}
-
-function noTargetMessage(node: Node): string {
-  return node.mode === 'pilot_agent'
-    ? `Pilot tunnel to "${node.name}" is disconnected. Operations resume when the agent reconnects.`
-    : 'Remote node not configured';
 }
 
 function offlineRemoteOverview(node: Node, status: 'online' | 'offline'): FleetNodeOverview {
@@ -619,7 +614,7 @@ fleetRouter.get('/node/:nodeId/stacks', authMiddleware, async (req: Request, res
     if (node.type === 'remote') {
       const target = NodeRegistry.getInstance().getProxyTarget(node.id);
       if (!target) {
-        res.status(503).json({ error: noTargetMessage(node) });
+        res.status(503).json({ error: formatNoTargetError(node) });
         return;
       }
       const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/stacks`, {
@@ -663,7 +658,7 @@ fleetRouter.get('/node/:nodeId/stacks/:stackName/containers', authMiddleware, as
     if (node.type === 'remote') {
       const target = NodeRegistry.getInstance().getProxyTarget(node.id);
       if (!target) {
-        res.status(503).json({ error: noTargetMessage(node) });
+        res.status(503).json({ error: formatNoTargetError(node) });
         return;
       }
       const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/containers`, {
@@ -893,10 +888,7 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
 
     const target = NodeRegistry.getInstance().getProxyTarget(node.id);
     if (!target) {
-      const msg = node.mode === 'pilot_agent'
-        ? `Pilot tunnel to "${node.name}" is disconnected.`
-        : 'Remote node not configured.';
-      res.status(503).json({ error: msg });
+      res.status(503).json({ error: formatNoTargetError(node) });
       return;
     }
 
@@ -1101,16 +1093,20 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         }
       }
 
-      if (!node.api_url || !node.api_token) {
+      const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+      if (!target) {
+        const error = formatNoTargetError(node);
         return {
           nodeId: node.id, nodeName: node.name, matched: true,
-          stackResults: stackNames.map(stackName => ({ stackName, success: false, error: 'Remote node not configured' })),
+          stackResults: stackNames.map(stackName => ({ stackName, success: false, error })),
         };
       }
       try {
-        const response = await fetch(`${node.api_url.replace(/\/$/, '')}/api/labels/${label.id}/action`, {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
+        const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/labels/${label.id}/action`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ action: 'stop', dryRun: isDryRun }),
           signal: AbortSignal.timeout(60000),
         });
@@ -1228,13 +1224,17 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
 
       // Remote node: POST /api/system/prune/system per target, short-circuiting
       // on the first transport-level failure so we don't hammer a dead node.
-      if (!node.api_url || !node.api_token) {
+      const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
+      if (!proxyTarget) {
+        const error = formatNoTargetError(node);
         return {
-          nodeId: node.id, nodeName: node.name, reachable: false, error: 'Remote node not configured',
-          targets: targets.map(t => ({ target: t, success: false, reclaimedBytes: 0, error: 'Remote node not configured' })),
+          nodeId: node.id, nodeName: node.name, reachable: false, error,
+          targets: targets.map(t => ({ target: t, success: false, reclaimedBytes: 0, error })),
         };
       }
-      const baseUrl = node.api_url.replace(/\/$/, '');
+      const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+      const remoteHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (proxyTarget.apiToken) remoteHeaders.Authorization = `Bearer ${proxyTarget.apiToken}`;
       const targetResults: TargetResult[] = [];
       let nodeUnreachable: string | null = null;
       for (const target of targets) {
@@ -1245,7 +1245,7 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
         try {
           const response = await fetch(`${baseUrl}/api/system/prune/system`, {
             method: 'POST',
-            headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
+            headers: remoteHeaders,
             body: JSON.stringify({ target, scope, dryRun: isDryRun }),
             signal: AbortSignal.timeout(120000),
           });
@@ -1389,13 +1389,16 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
         }
       }
 
-      if (!node.api_url || !node.api_token) {
+      const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
+      if (!proxyTarget) {
         return {
           nodeId: node.id, nodeName: node.name, reclaimableBytes: 0, reachable: false,
-          error: 'Remote node not configured',
+          error: formatNoTargetError(node),
         };
       }
-      const baseUrl = node.api_url.replace(/\/$/, '');
+      const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+      const estimateHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (proxyTarget.apiToken) estimateHeaders.Authorization = `Bearer ${proxyTarget.apiToken}`;
       // Estimate is a live readout; fan out the per-target fetches in parallel
       // so wall time matches the slowest single call rather than the sum.
       // (The destructive sibling stays serial because Docker prune is internally
@@ -1404,7 +1407,7 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
         try {
           const response = await fetch(`${baseUrl}/api/system/prune/estimate`, {
             method: 'POST',
-            headers: { Authorization: `Bearer ${node.api_token}`, 'Content-Type': 'application/json' },
+            headers: estimateHeaders,
             body: JSON.stringify({ target, scope }),
             signal: AbortSignal.timeout(15000),
           });
@@ -1657,19 +1660,23 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
         await composeService.deployStack(stackName);
       }
     } else {
-      if (!node.api_url || !node.api_token) {
-        res.status(503).json({ error: 'Remote node not configured' });
+      const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
+      if (!proxyTarget) {
+        res.status(503).json({ error: formatNoTargetError(node) });
         return;
       }
 
-      const baseUrl = node.api_url.replace(/\/$/, '');
+      const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
       const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+      // Tier/variant headers describe the central instance and stay
+      // unconditional; the Bearer header is gated on a non-empty token
+      // because pilot-loopback dispatch carries auth via the tunnel.
       const headers: Record<string, string> = {
-        Authorization: `Bearer ${node.api_token}`,
         'Content-Type': 'application/json',
         [PROXY_TIER_HEADER]: proxyHeaders.tier,
         [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
       };
+      if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
 
       for (const file of files) {
         if (file.filename === 'compose.yaml') {
