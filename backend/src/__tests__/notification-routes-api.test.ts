@@ -2,7 +2,7 @@
  * Integration tests for Notification Routes CRUD endpoints,
  * auth enforcement, input validation, and test dispatch.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
@@ -10,6 +10,7 @@ import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTes
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+let licenseService: import('../services/LicenseService').LicenseService;
 let authCookie: string;
 let viewerCookie: string;
 
@@ -19,9 +20,10 @@ beforeAll(async () => {
 
   // Mock LicenseService so Admiral-gated routes are accessible
   const { LicenseService } = await import('../services/LicenseService');
-  vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
+  licenseService = LicenseService.getInstance();
+  vi.spyOn(licenseService, 'getTier').mockReturnValue('paid');
+  vi.spyOn(licenseService, 'getVariant').mockReturnValue('admiral');
+  vi.spyOn(licenseService, 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
   authCookie = await loginAsTestAdmin(app);
@@ -85,6 +87,98 @@ describe('Notification Routes - auth enforcement', () => {
       .set('Cookie', viewerCookie)
       .send({ name: 'test', stack_patterns: ['app'], channel_type: 'discord', channel_url: 'https://discord.com/api/webhooks/123/abc' });
     expect(res.status).toBe(403);
+  });
+});
+
+// --- Tier enforcement (Skipper or Admiral) ---
+//
+// Skipper-positive tests exist per endpoint so that a future regression
+// reverting any single handler to `requireAdmiral` is caught: with the
+// default mock returning `admiral`, a stray `requireAdmiral` would still
+// pass the Community-negative tests below (Community fails on tier
+// before variant is checked), so only Skipper-positive coverage proves
+// the gate is `requirePaid`. `afterEach` restores the suite defaults so
+// per-test mock overrides cannot leak across tests.
+
+describe('Notification Routes - tier enforcement', () => {
+  afterEach(() => {
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('paid');
+    vi.spyOn(licenseService, 'getVariant').mockReturnValue('admiral');
+  });
+
+  it('GET /api/notification-routes returns 200 when the variant is Skipper', async () => {
+    vi.spyOn(licenseService, 'getVariant').mockReturnValue('skipper');
+    const res = await request(app).get('/api/notification-routes').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('POST /api/notification-routes returns 201 when the variant is Skipper', async () => {
+    vi.spyOn(licenseService, 'getVariant').mockReturnValue('skipper');
+    const res = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({ name: 'skipper-positive', stack_patterns: ['app'], channel_type: 'discord', channel_url: 'https://discord.com/api/webhooks/123/abc' });
+    expect(res.status).toBe(201);
+    if (typeof res.body?.id === 'number') {
+      DatabaseService.getInstance().deleteNotificationRoute(res.body.id);
+    }
+  });
+
+  it('PUT /api/notification-routes/:id returns 404 (gate passed) when the variant is Skipper', async () => {
+    vi.spyOn(licenseService, 'getVariant').mockReturnValue('skipper');
+    const res = await request(app).put('/api/notification-routes/99999').set('Cookie', authCookie).send({ name: 'x' });
+    expect(res.status).toBe(404);
+  });
+
+  it('DELETE /api/notification-routes/:id returns 404 (gate passed) when the variant is Skipper', async () => {
+    vi.spyOn(licenseService, 'getVariant').mockReturnValue('skipper');
+    const res = await request(app).delete('/api/notification-routes/99999').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+
+  it('POST /api/notification-routes/:id/test returns 404 (gate passed) when the variant is Skipper', async () => {
+    vi.spyOn(licenseService, 'getVariant').mockReturnValue('skipper');
+    const res = await request(app).post('/api/notification-routes/99999/test').set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+  });
+
+  it('GET /api/notification-routes returns 403 PAID_REQUIRED on Community', async () => {
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('community');
+    const res = await request(app).get('/api/notification-routes').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('POST /api/notification-routes returns 403 PAID_REQUIRED on Community', async () => {
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('community');
+    const res = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({ name: 'x', stack_patterns: ['app'], channel_type: 'discord', channel_url: 'https://discord.com/api/webhooks/123/abc' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('PUT /api/notification-routes/:id returns 403 PAID_REQUIRED on Community', async () => {
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('community');
+    const res = await request(app).put('/api/notification-routes/1').set('Cookie', authCookie).send({ name: 'x' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('DELETE /api/notification-routes/:id returns 403 PAID_REQUIRED on Community', async () => {
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('community');
+    const res = await request(app).delete('/api/notification-routes/1').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('POST /api/notification-routes/:id/test returns 403 PAID_REQUIRED on Community', async () => {
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('community');
+    const res = await request(app).post('/api/notification-routes/1/test').set('Cookie', authCookie);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
   });
 });
 

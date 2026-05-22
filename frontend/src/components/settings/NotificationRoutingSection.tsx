@@ -14,7 +14,6 @@ import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/comp
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
-import { AdmiralGate } from '@/components/AdmiralGate';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import type { NotificationCategory } from '@/components/dashboard/types';
 import type { Label as StackLabel } from '@/components/label-types';
@@ -298,8 +297,7 @@ export function NotificationRoutingSection() {
     );
 
     return (
-        <AdmiralGate>
-          <CapabilityGate capability="notification-routing" featureName="Notification Routing">
+        <CapabilityGate capability="notification-routing" featureName="Notification Routing">
             <div className="space-y-6">
                 <div className="flex justify-end">
                     <SettingsPrimaryButton size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
@@ -603,7 +601,6 @@ export function NotificationRoutingSection() {
                     </p>
                 </ConfirmModal>
             </div>
-          </CapabilityGate>
-        </AdmiralGate>
+        </CapabilityGate>
     );
 }

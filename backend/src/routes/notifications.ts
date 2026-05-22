@@ -4,7 +4,7 @@ import { NotificationService, ALL_NOTIFICATION_CATEGORIES } from '../services/No
 import type { NotificationCategory } from '../services/NotificationService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
+import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import {
   NOTIFICATION_CHANNEL_TYPES,
   validateHttpsUrl,
@@ -114,7 +114,7 @@ export const notificationRoutesRouter = Router();
 
 notificationRoutesRouter.get('/', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const routes = DatabaseService.getInstance().getNotificationRoutes();
     res.json(routes);
@@ -126,7 +126,7 @@ notificationRoutesRouter.get('/', authMiddleware, (req: Request, res: Response):
 
 notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, channel_type, channel_url, priority, enabled } = req.body;
 
@@ -183,7 +183,7 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
 
 notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'route ID');
     if (id === null) return;
@@ -259,7 +259,7 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
 
 notificationRoutesRouter.delete('/:id', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'route ID');
     if (id === null) return;
@@ -276,7 +276,7 @@ notificationRoutesRouter.delete('/:id', authMiddleware, (req: Request, res: Resp
 
 notificationRoutesRouter.post('/:id/test', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'route ID');
     if (id === null) return;
