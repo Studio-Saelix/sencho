@@ -336,27 +336,39 @@ class DockerController {
   }
 
   /**
-   * Returns `Id -> SharedSize` (bytes) for every image the daemon currently
-   * knows about. Used by the managed-prune paths to subtract layers shared
-   * with other images when accounting for freed bytes, so the post-prune
-   * total reflects on-disk delta rather than a per-image roll-up. Returns an
-   * empty map if `docker df` fails so the caller degrades to "no sharing
-   * known" rather than throwing.
+   * Returns the `docker df` snapshot, or null if the call fails. The
+   * destructive prune path uses this for a `LayersSize` before/after delta;
+   * the estimate path uses it for a SharedSize lookup. Null on failure lets
+   * each caller decide how to degrade rather than throwing mid-prune.
    */
-  private async getImageSharedSizeMap(): Promise<Map<string, number>> {
+  private async safeDfSnapshot(): Promise<{
+    LayersSize?: number;
+    Images?: Array<{ Id?: string; SharedSize?: number }>;
+  } | null> {
     try {
-      const df = await this.docker.df();
-      const m = new Map<string, number>();
-      const images = (df.Images ?? []) as Array<{ Id?: string; SharedSize?: number }>;
-      for (const img of images) {
-        if (!img?.Id) continue;
-        const s = typeof img.SharedSize === 'number' && img.SharedSize >= 0 ? img.SharedSize : 0;
-        m.set(img.Id, s);
-      }
-      return m;
+      return await this.docker.df();
     } catch {
-      return new Map();
+      return null;
     }
+  }
+
+  /**
+   * Extracts `Id -> SharedSize` from a df snapshot. Treats missing or
+   * negative (Docker's "unknown" sentinel) SharedSize as 0 so the caller
+   * counts the image's full Size as unique, an under-report rather than an
+   * over-report.
+   */
+  private static mapSharedSizesFromDf(
+    df: { Images?: Array<{ Id?: string; SharedSize?: number }> } | null,
+  ): Map<string, number> {
+    const m = new Map<string, number>();
+    if (!df?.Images) return m;
+    for (const img of df.Images) {
+      if (!img?.Id) continue;
+      const s = typeof img.SharedSize === 'number' && img.SharedSize >= 0 ? img.SharedSize : 0;
+      m.set(img.Id, s);
+    }
+    return m;
   }
 
   public async pruneManagedOnly(
@@ -418,19 +430,37 @@ class DockerController {
         && !unmanagedImageIds.has(img.Id)
         && !selfIdentity.isOwnImage(img.Id)
       );
-      const sharedSizes = await this.getImageSharedSizeMap();
+      // df-before / df-after delta is the only honest measurement of bytes
+      // actually freed. Per-image (Size - SharedSize) undercounts layers
+      // shared exclusively between prunable images (Docker frees the layer
+      // once, but the per-image formula subtracts it from every referrer).
+      const beforeDf = await this.safeDfSnapshot();
       await Promise.all(prunable.map(async (img) => {
         try {
           await this.docker.getImage(img.Id).remove({ force: true });
-          // Subtract layers shared with other images. Those bytes stay on
-          // disk until every referrer is removed, so the visible reclaim is
-          // the image's unique slice, not its rolled-up Size.
-          const shared = sharedSizes.get(img.Id) ?? 0;
-          reclaimedBytes += Math.max(0, (img.Size ?? 0) - shared);
         } catch (e) {
           console.error(`[pruneManagedOnly] Failed to remove image ${img.Id}:`, e);
         }
       }));
+      const afterDf = await this.safeDfSnapshot();
+      if (typeof beforeDf?.LayersSize === 'number' && typeof afterDf?.LayersSize === 'number') {
+        // Clamp to 0: a concurrent pull during the prune can grow on-disk
+        // bytes, and attributing that growth to "reclaimed" would mislead.
+        reclaimedBytes = Math.max(0, beforeDf.LayersSize - afterDf.LayersSize);
+      } else if (beforeDf) {
+        // After-snapshot failed but we have the before-snapshot, so fall
+        // back to a per-image lower bound. (We deliberately do not fall back
+        // on after-only: after the prune those image IDs are gone from the
+        // daemon's view, so a SharedSize map built from afterDf would treat
+        // every pruned image as having no sharing and over-report.)
+        console.warn('[pruneManagedOnly] docker df after-snapshot unavailable; reporting per-image lower bound');
+        const shared = DockerController.mapSharedSizesFromDf(beforeDf);
+        for (const img of prunable) {
+          reclaimedBytes += Math.max(0, (img.Size ?? 0) - (shared.get(img.Id) ?? 0));
+        }
+      } else {
+        console.warn('[pruneManagedOnly] docker df unavailable on both ends; reporting 0 reclaimed');
+      }
     }
 
     return { success: true, reclaimedBytes };
@@ -441,6 +471,13 @@ class DockerController {
    * the `/api/system/prune/estimate` route. Walks the same filter rules but
    * does not call `.remove()`. Kept structurally parallel to the destructive
    * method so the two stay in lockstep when the enumeration logic changes.
+   *
+   * For images, the returned figure is a **conservative lower bound** on
+   * bytes that will actually be freed. The formula subtracts each prunable
+   * image's `SharedSize`, which double-counts layers shared between two
+   * prunable images (the layer would only be freed once on prune). The
+   * exact freed bytes can only be measured by the df-delta that
+   * `pruneManagedOnly` reports after the destructive action.
    */
   public async estimateManagedReclaim(
     target: 'images' | 'volumes' | 'networks',
@@ -480,10 +517,9 @@ class DockerController {
         && !unmanagedImageIds.has(img.Id)
         && !selfIdentity.isOwnImage(img.Id),
       );
-      const sharedSizes = await this.getImageSharedSizeMap();
+      const sharedSizes = DockerController.mapSharedSizesFromDf(await this.safeDfSnapshot());
       for (const img of prunable) {
-        const shared = sharedSizes.get(img.Id) ?? 0;
-        reclaimableBytes += Math.max(0, (img.Size ?? 0) - shared);
+        reclaimableBytes += Math.max(0, (img.Size ?? 0) - (sharedSizes.get(img.Id) ?? 0));
       }
     }
 

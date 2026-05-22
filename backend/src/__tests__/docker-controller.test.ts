@@ -367,9 +367,25 @@ describe('DockerController - managed image prune accounting', () => {
     expect(result.reclaimableBytes).toBe(1200);
   });
 
-  it('pruneManagedOnly subtracts SharedSize after each removal', async () => {
-    mockDocker.df.mockResolvedValue(sharedLayerDfMock);
-    mockDocker.listImages.mockResolvedValue(unusedManagedListMock);
+  it('pruneManagedOnly reports the LayersSize delta as the reclaimed total', async () => {
+    // df-before reports 5000 bytes on disk; df-after reports 3400. The
+    // honest reclaim is 1600, independent of per-image Size/SharedSize.
+    // Two prunable images that share a layer exclusively would be
+    // undercounted by the per-image formula (1200) but Docker actually
+    // frees the shared layer too.
+    mockDocker.df
+      .mockResolvedValueOnce({
+        LayersSize: 5000,
+        Images: [
+          { Id: 'img-a', SharedSize: 400 },
+          { Id: 'img-b', SharedSize: 400 },
+        ],
+      })
+      .mockResolvedValueOnce({ LayersSize: 3400, Images: [] });
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-a', Containers: 0, Size: 1000 },
+      { Id: 'img-b', Containers: 0, Size: 1000 },
+    ]);
     mockDocker.listContainers.mockResolvedValue([]);
     const removeFn = vi.fn().mockResolvedValue(undefined);
     mockDocker.getImage.mockReturnValue({ remove: removeFn });
@@ -377,8 +393,115 @@ describe('DockerController - managed image prune accounting', () => {
     const dc = DockerController.getInstance(1);
     const result = await dc.pruneManagedOnly('images', ['any-stack']);
 
-    expect(result).toEqual({ success: true, reclaimedBytes: 1200 });
+    expect(result).toEqual({ success: true, reclaimedBytes: 1600 });
     expect(removeFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('pruneManagedOnly falls back to per-image lower bound using before-snapshot when after-df fails', async () => {
+    // Before-snapshot succeeded (SharedSize known); after-snapshot failed.
+    // Fall back to Σ(Size - SharedSize) over the prunable set: a
+    // conservative lower bound, but defensible because each pruned image's
+    // SharedSize was known at the start.
+    mockDocker.df
+      .mockResolvedValueOnce({
+        Images: [
+          { Id: 'img-a', SharedSize: 400 },
+          { Id: 'img-b', SharedSize: 400 },
+        ],
+      })
+      .mockRejectedValueOnce(new Error('df unavailable after prune'));
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-a', Containers: 0, Size: 1000 },
+      { Id: 'img-b', Containers: 0, Size: 1000 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    mockDocker.getImage.mockReturnValue({ remove: vi.fn().mockResolvedValue(undefined) });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneManagedOnly('images', ['any-stack']);
+
+    // (1000 - 400) + (1000 - 400) = 1200
+    expect(result).toEqual({ success: true, reclaimedBytes: 1200 });
+  });
+
+  it('pruneManagedOnly reports 0 reclaimed when both df snapshots fail', async () => {
+    // Without the before-snapshot we cannot build a meaningful per-image
+    // bound (after-only has stale image IDs missing from its view), so the
+    // destructive path completes the removes and reports 0 rather than a
+    // misleading approximation.
+    mockDocker.df
+      .mockRejectedValueOnce(new Error('df unavailable before'))
+      .mockRejectedValueOnce(new Error('df unavailable after'));
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-a', Containers: 0, Size: 1000 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    const removeFn = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getImage.mockReturnValue({ remove: removeFn });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneManagedOnly('images', ['any-stack']);
+
+    expect(result).toEqual({ success: true, reclaimedBytes: 0 });
+    expect(removeFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('estimateManagedReclaim under-reports when layers are shared exclusively between prunable images', async () => {
+    // Two prunable images that share a 400-byte layer with no retained
+    // image. Docker would free that layer once on prune (1600 bytes total:
+    // each image's unique 600 plus the shared 400). The estimate formula
+    // subtracts 400 from each image and reports 1200, a conservative
+    // lower bound documented in the JSDoc.
+    mockDocker.df.mockResolvedValue({
+      Images: [
+        { Id: 'img-a', SharedSize: 400 },
+        { Id: 'img-b', SharedSize: 400 },
+      ],
+    });
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-a', Containers: 0, Size: 1000 },
+      { Id: 'img-b', Containers: 0, Size: 1000 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.estimateManagedReclaim('images', ['any-stack']);
+
+    expect(result.reclaimableBytes).toBe(1200);
+  });
+
+  it('invariant: pruneManagedOnly reports >= estimateManagedReclaim on the same inputs', async () => {
+    // The estimate is a conservative lower bound; the destructive path
+    // reports the truth (df-delta). On any input, destructive >= estimate.
+    // This locks the contract so future changes to either formula cannot
+    // accidentally flip the direction.
+    const dfBefore = {
+      LayersSize: 5000,
+      Images: [
+        { Id: 'img-a', SharedSize: 400 },
+        { Id: 'img-b', SharedSize: 400 },
+      ],
+    };
+    const dfAfter = { LayersSize: 3400, Images: [] };
+    const listImages = [
+      { Id: 'img-a', Containers: 0, Size: 1000 },
+      { Id: 'img-b', Containers: 0, Size: 1000 },
+    ];
+
+    // Estimate path: df called once.
+    mockDocker.df.mockResolvedValueOnce(dfBefore);
+    mockDocker.listImages.mockResolvedValue(listImages);
+    mockDocker.listContainers.mockResolvedValue([]);
+    const dc = DockerController.getInstance(1);
+    const estimate = await dc.estimateManagedReclaim('images', ['any-stack']);
+
+    // Reset the df mock for the destructive path: before then after.
+    mockDocker.df.mockReset();
+    mockDocker.df.mockResolvedValueOnce(dfBefore).mockResolvedValueOnce(dfAfter);
+    mockDocker.getImage.mockReturnValue({ remove: vi.fn().mockResolvedValue(undefined) });
+    const prune = await dc.pruneManagedOnly('images', ['any-stack']);
+
+    expect(prune.reclaimedBytes).toBeGreaterThanOrEqual(estimate.reclaimableBytes);
   });
 
   it('treats images missing from the df map as having no shared layers', async () => {
