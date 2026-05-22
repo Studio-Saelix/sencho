@@ -662,13 +662,43 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 try {
                     await this.createMeshNetwork(envSubnet);
                 } catch (err) {
-                    this.recordSetupFailure(
-                        this.classifyMeshNetworkError(err),
-                        err,
-                        'error',
-                        envSubnet,
-                    );
-                    return;
+                    // TOCTOU: another process may have created `sencho_mesh`
+                    // between our inspect (returned null) and our create
+                    // (rejected with 409). Re-inspect; if the existing
+                    // subnet matches what the operator requested, treat
+                    // this as idempotent success (matches the prior
+                    // ensureMeshNetwork 409-then-inspect behavior). Any
+                    // other error or a mismatch reverts to the typed
+                    // failure path.
+                    const dockerErr = err as { statusCode?: number };
+                    if (dockerErr?.statusCode === 409) {
+                        const raceWinner = await this.inspectExistingMeshSubnet().catch(() => null);
+                        if (raceWinner === envSubnet) {
+                            // Adopt the race-winner's network; proceed to attach.
+                        } else if (raceWinner) {
+                            this.recordSetupFailure(
+                                'subnet_mismatch',
+                                new Error(
+                                    `${SENCHO_MESH_NETWORK} exists with subnet ${raceWinner}, ` +
+                                    `expected ${envSubnet}. Remove the network or set SENCHO_MESH_SUBNET to match.`,
+                                ),
+                                'error',
+                                envSubnet,
+                            );
+                            return;
+                        } else {
+                            this.recordSetupFailure('attach_failed', err, 'error', envSubnet);
+                            return;
+                        }
+                    } else {
+                        this.recordSetupFailure(
+                            this.classifyMeshNetworkError(err),
+                            err,
+                            'error',
+                            envSubnet,
+                        );
+                        return;
+                    }
                 }
             }
         } else if (existingSubnet) {
