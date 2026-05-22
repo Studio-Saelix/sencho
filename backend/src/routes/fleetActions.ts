@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
+import { requireAdmin, requireBody } from '../middleware/tierGates';
 import { isValidStackName } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 
@@ -20,14 +20,14 @@ const MAX_ASSIGNMENTS = 1000;
 // Bulk label assignment for many stacks on a single node. The single-stack
 // endpoint at `PUT /api/stacks/:stackName/labels` covers one stack at a time;
 // this wrapper applies the same operation to many stacks atomically per HTTP
-// request. Tier: requirePaid + requireAdmin. The per-stack endpoint is
-// Community-tier organization metadata; this multi-stack wrapper is an
-// automation surface exposed only inside the Skipper+ Fleet Actions tab.
+// request. Tier: requireAdmin (admin-only fleet plumbing). The per-stack
+// endpoint is Community-tier organization metadata; this multi-stack wrapper
+// matches the surrounding Fleet Actions surface, which is admin-only but
+// available on every license.
 fleetActionsRouter.post(
   '/labels/bulk-assign',
   authMiddleware,
   async (req: Request, res: Response): Promise<void> => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const { assignments } = req.body as { assignments?: unknown };

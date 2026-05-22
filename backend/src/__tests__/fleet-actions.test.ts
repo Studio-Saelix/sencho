@@ -38,27 +38,29 @@ describe('Fleet Actions endpoints require authentication', () => {
   });
 });
 
-describe('Fleet Actions tier gating', () => {
+describe('Fleet Actions tier gating (Community + admin)', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('POST /api/fleet/labels/fleet-stop returns 403 on community tier (Skipper+)', async () => {
+  it('POST /api/fleet/labels/fleet-stop is reachable on community tier for admins', async () => {
     mockTier('community');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
-      .send({ labelName: 'prod' });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+      .send({ labelName: 'this-label-does-not-exist' });
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+    expect(Array.isArray(res.body.results)).toBe(true);
   });
 
-  it('POST /api/fleet-actions/labels/bulk-assign returns 403 on community tier (Skipper+)', async () => {
+  it('POST /api/fleet-actions/labels/bulk-assign is reachable on community tier for admins', async () => {
     mockTier('community');
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
       .set('Authorization', authHeader)
       .send({ assignments: [] });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+    expect(res.body.results).toEqual([]);
   });
 });
 

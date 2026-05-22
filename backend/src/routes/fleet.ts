@@ -1037,9 +1037,8 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
 
 // Fleet-wide stop by label name. Matches each node's labels by name and runs
 // container stops on each matching stack.
-// Tier: requirePaid + requireAdmin.
+// Tier: requireAdmin (admin-only fleet plumbing; available on every license).
 fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireAdmin(req, res)) return;
   const body = req.body as { labelName?: unknown; dryRun?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
@@ -1147,12 +1146,11 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
 // systemMaintenance.ts is safe because Docker's prune API is internally
 // serialized and idempotent (the worst case is a duplicate call returning 0
 // reclaimed bytes).
-// Tier: requirePaid + requireAdmin.
+// Tier: requireAdmin (admin-only fleet plumbing; available on every license).
 const FLEET_PRUNE_TARGETS = ['images', 'volumes', 'networks'] as const;
 type FleetPruneTarget = (typeof FLEET_PRUNE_TARGETS)[number];
 
 fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireAdmin(req, res)) return;
 
   const body = req.body as { targets?: unknown; scope?: unknown; dryRun?: unknown } | undefined;
@@ -1296,7 +1294,6 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
 // assignments live in the central DB even for remote nodes, populated by the
 // nodes' own UIs and synced via Distributed API.
 fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireAdmin(req, res)) return;
   const body = req.body as { labelName?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
@@ -1337,7 +1334,6 @@ fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, r
 // fan-out shape as `/labels/fleet-prune` minus the locks (estimation is read
 // only).
 fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireAdmin(req, res)) return;
 
   const body = req.body as { targets?: unknown; scope?: unknown } | undefined;

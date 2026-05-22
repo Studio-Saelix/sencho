@@ -66,14 +66,16 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 PAID_REQUIRED on community tier', async () => {
+  it('is reachable on community tier for admins (no PAID_REQUIRED)', async () => {
     mockTier('community');
+    mockLocalPrune({ managedBytes: { images: 128 } });
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
       .set('Authorization', authHeader)
       .send({ targets: ['images'], scope: 'managed' });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+    expect(Array.isArray(res.body.results)).toBe(true);
   });
 
   it('returns 400 when body is missing', async () => {
