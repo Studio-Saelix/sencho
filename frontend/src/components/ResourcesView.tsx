@@ -61,6 +61,7 @@ interface DockerImage {
     Containers: number;
     managedBy: string | null;
     managedStatus: 'managed' | 'unmanaged' | 'unused';
+    isSencho: boolean;
 }
 
 interface DockerVolume {
@@ -71,6 +72,7 @@ interface DockerVolume {
     CreatedAt: string | null;
     managedBy: string | null;
     managedStatus: 'managed' | 'unmanaged';
+    isSencho: boolean;
 }
 
 const NETWORK_DRIVERS = ['bridge', 'overlay', 'macvlan', 'host', 'none'] as const;
@@ -83,6 +85,7 @@ export interface DockerNetwork {
     Scope: string;
     managedBy: string | null;
     managedStatus: 'managed' | 'unmanaged' | 'system';
+    isSencho: boolean;
 }
 
 interface UnmanagedContainer {
@@ -173,6 +176,20 @@ function ManagedBadge({ status, managedBy }: {
         );
     }
     return null;
+}
+
+// ── Sencho Self-Protection Badge ───────────────────────────────────────────────
+
+function SenchoBadge() {
+    return (
+        <span
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-brand/25 bg-brand/8 text-brand text-[10px] font-medium"
+            title="Protected · running Sencho instance"
+        >
+            <span className="w-1.5 h-1.5 rounded-full bg-brand shrink-0" />
+            Sencho
+        </span>
+    );
 }
 
 // ── Severity Badge ─────────────────────────────────────────────────────────────
@@ -793,6 +810,7 @@ export default function ResourcesView() {
                                                         {img.Containers > 0 ? "In Use" : "Unused"}
                                                     </Badge>
                                                     <ManagedBadge status={img.managedStatus} managedBy={img.managedBy} />
+                                                    {img.isSencho && <SenchoBadge />}
                                                     {(() => {
                                                         const tag = img.RepoTags?.[0];
                                                         const summary = tag ? scanSummaries[tag] : undefined;
@@ -844,7 +862,14 @@ export default function ResourcesView() {
                                                             </DropdownMenuContent>
                                                         </DropdownMenu>
                                                     )}
-                                                    {isAdmin && <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors" onClick={() => setConfirmDelete({ type: 'images', id: img.Id, name: img.RepoTags?.[0] })}>
+                                                    {isAdmin && <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                        disabled={img.isSencho}
+                                                        title={img.isSencho ? 'Protected · running Sencho instance' : undefined}
+                                                        onClick={() => setConfirmDelete({ type: 'images', id: img.Id, name: img.RepoTags?.[0] })}
+                                                    >
                                                         <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
                                                     </Button>}
                                                 </div>
@@ -890,7 +915,12 @@ export default function ResourcesView() {
                                             <TableCell className="font-mono text-xs max-w-[200px] truncate">{vol.Name}</TableCell>
                                             <TableCell><Badge variant="outline" className="text-[10px] h-5">{vol.Driver}</Badge></TableCell>
                                             <TableCell className="hidden md:table-cell text-xs text-muted-foreground truncate max-w-[300px]">{vol.Mountpoint}</TableCell>
-                                            <TableCell><ManagedBadge status={vol.managedStatus} managedBy={vol.managedBy} /></TableCell>
+                                            <TableCell>
+                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                    <ManagedBadge status={vol.managedStatus} managedBy={vol.managedBy} />
+                                                    {vol.isSencho && <SenchoBadge />}
+                                                </div>
+                                            </TableCell>
                                             <TableCell className="text-right">
                                                 <div className="flex items-center justify-end gap-1">
                                                     {isAdmin && (
@@ -905,7 +935,14 @@ export default function ResourcesView() {
                                                             <FolderOpen className="w-3.5 h-3.5" strokeWidth={1.5} />
                                                         </Button>
                                                     )}
-                                                    {isAdmin && <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors" onClick={() => setConfirmDelete({ type: 'volumes', id: vol.Name, name: vol.Name })}>
+                                                    {isAdmin && <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                        disabled={vol.isSencho}
+                                                        title={vol.isSencho ? 'Protected · running Sencho instance' : undefined}
+                                                        onClick={() => setConfirmDelete({ type: 'volumes', id: vol.Name, name: vol.Name })}
+                                                    >
                                                         <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
                                                     </Button>}
                                                 </div>
@@ -1013,7 +1050,12 @@ export default function ResourcesView() {
                                             <TableCell className="font-medium max-w-[200px] truncate">{net.Name}</TableCell>
                                             <TableCell className="text-xs">{net.Driver}</TableCell>
                                             <TableCell><Badge variant="outline" className="text-[10px] h-5">{net.Scope}</Badge></TableCell>
-                                            <TableCell><ManagedBadge status={net.managedStatus} managedBy={net.managedBy} /></TableCell>
+                                            <TableCell>
+                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                    <ManagedBadge status={net.managedStatus} managedBy={net.managedBy} />
+                                                    {net.isSencho && <SenchoBadge />}
+                                                </div>
+                                            </TableCell>
                                             <TableCell className="text-right">
                                                 <div className="flex items-center justify-end gap-1">
                                                     <Button
@@ -1028,8 +1070,9 @@ export default function ResourcesView() {
                                                     {isAdmin && <Button
                                                         variant="ghost"
                                                         size="icon"
-                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30"
-                                                        disabled={net.managedStatus === 'system'}
+                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                        disabled={net.managedStatus === 'system' || net.isSencho}
+                                                        title={net.isSencho ? 'Protected · running Sencho instance' : undefined}
                                                         onClick={() => setConfirmDelete({ type: 'networks', id: net.Id, name: net.Name })}
                                                     >
                                                         <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
