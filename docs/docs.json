@@ -96,6 +96,7 @@
               "features/overview",
               {
                 "group": "Stacks",
+                "expanded": true,
                 "pages": [
                   "features/stack-management",
                   "features/editor",
@@ -107,6 +108,7 @@
               },
               {
                 "group": "Deployment",
+                "expanded": true,
                 "pages": [
                   "features/deploy-progress",
                   "features/atomic-deployments",
@@ -119,6 +121,7 @@
               "features/resources",
               {
                 "group": "Observability",
+                "expanded": true,
                 "pages": [
                   "features/dashboard",
                   "features/global-search",
@@ -129,6 +132,7 @@
               },
               {
                 "group": "Fleet",
+                "expanded": true,
                 "pages": [
                   "features/multi-node",
                   "features/pilot-agent",
@@ -146,6 +150,7 @@
               },
               {
                 "group": "Automation",
+                "expanded": true,
                 "pages": [
                   "features/scheduled-operations",
                   "features/auto-update-policies",
@@ -155,6 +160,7 @@
               },
               {
                 "group": "Security & Identity",
+                "expanded": true,
                 "pages": [
                   "features/two-factor-authentication",
                   "features/rbac",
