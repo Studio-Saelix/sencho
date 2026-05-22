@@ -242,7 +242,6 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 retryNodeUpdate={updateStatus.retryNodeUpdate}
                 dismissNodeUpdate={updateStatus.dismissNodeUpdate}
                 triggerUpdateAll={updateStatus.triggerUpdateAll}
-                canBulkUpdate={isPaid}
             />
 
             <LocalUpdateConfirmDialog

@@ -23,13 +23,11 @@ interface NodeUpdatesSheetProps {
     retryNodeUpdate: (nodeId: number) => void;
     dismissNodeUpdate: (nodeId: number) => void;
     triggerUpdateAll: () => Promise<void>;
-    canBulkUpdate: boolean;
 }
 
 export function NodeUpdatesSheet({
     open, onOpenChange, checkingUpdates, updateStatuses, updatingNodeId,
     fetchUpdateStatus, triggerNodeUpdate, retryNodeUpdate, dismissNodeUpdate, triggerUpdateAll,
-    canBulkUpdate,
 }: NodeUpdatesSheetProps) {
     const [search, setSearch] = useState('');
     const [recheckingUpdates, setRecheckingUpdates] = useState(false);
@@ -71,7 +69,7 @@ export function NodeUpdatesSheet({
         ? undefined
         : (gatewayLabel ? `Latest version ${gatewayLabel}` : `${available} update${available === 1 ? '' : 's'} available`);
 
-    const secondaryActions = canBulkUpdate && updatableRemoteCount > 0
+    const secondaryActions = updatableRemoteCount > 0
         ? [{
             label: `Update all (${updatableRemoteCount})`,
             icon: Download,
