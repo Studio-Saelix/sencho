@@ -646,7 +646,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             }
         }
 
-        let existingSubnet: string | null;
+        let existingSubnet: { subnet: string; auxSenchoIp: string | null } | null;
         try {
             existingSubnet = await this.inspectExistingMeshSubnet();
         } catch (err) {
@@ -663,11 +663,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
 
         if (envSubnet) {
-            if (existingSubnet && existingSubnet !== envSubnet) {
+            if (existingSubnet && existingSubnet.subnet !== envSubnet) {
                 this.recordSetupFailure(
                     'subnet_mismatch',
                     new Error(
-                        `${SENCHO_MESH_NETWORK} exists with subnet ${existingSubnet}, ` +
+                        `${SENCHO_MESH_NETWORK} exists with subnet ${existingSubnet.subnet}, ` +
                         `expected ${envSubnet}. Remove the network or set SENCHO_MESH_SUBNET to match.`,
                     ),
                     'error',
@@ -690,13 +690,17 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     const dockerErr = err as { statusCode?: number };
                     if (dockerErr?.statusCode === 409) {
                         const raceWinner = await this.inspectExistingMeshSubnet().catch(() => null);
-                        if (raceWinner === envSubnet) {
+                        if (raceWinner && raceWinner.subnet === envSubnet) {
                             // Adopt the race-winner's network; proceed to attach.
+                            // Defer the legacy-reservation check to the shared
+                            // helper below so the warn message is identical
+                            // regardless of which branch arrived here.
+                            existingSubnet = raceWinner;
                         } else if (raceWinner) {
                             this.recordSetupFailure(
                                 'subnet_mismatch',
                                 new Error(
-                                    `${SENCHO_MESH_NETWORK} exists with subnet ${raceWinner}, ` +
+                                    `${SENCHO_MESH_NETWORK} exists with subnet ${raceWinner.subnet}, ` +
                                     `expected ${envSubnet}. Remove the network or set SENCHO_MESH_SUBNET to match.`,
                                 ),
                                 'error',
@@ -720,10 +724,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             }
         } else if (existingSubnet) {
             try {
-                this.senchoIp = getSenchoIpFromSubnet(existingSubnet);
-                this.meshSubnet = existingSubnet;
+                this.senchoIp = getSenchoIpFromSubnet(existingSubnet.subnet);
+                this.meshSubnet = existingSubnet.subnet;
             } catch (err) {
-                this.recordSetupFailure('subnet_invalid', err, 'error', existingSubnet);
+                this.recordSetupFailure('subnet_invalid', err, 'error', existingSubnet.subnet);
                 return;
             }
         } else {
@@ -776,6 +780,19 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             }
         }
 
+        // Legacy-network advisory: if we adopted an existing `sencho_mesh`
+        // (rather than creating a fresh one) AND its IPAM block lacks the
+        // `AuxiliaryAddresses.sencho` entry that pins the data-plane IP, warn
+        // the operator that a meshed workload restarting while Sencho is
+        // offline can squat that IP (F-13 failure mode). The data plane still
+        // comes up; the warn is advisory and rides at `level: 'warn'` on the
+        // existing `mesh.enable` activity type plus a console mirror so it
+        // appears in `docker logs sencho`. Fresh-created networks always
+        // carry the reservation (see `createMeshNetwork`).
+        if (existingSubnet && this.senchoIp && existingSubnet.auxSenchoIp !== this.senchoIp) {
+            this.warnLegacyMeshReservation(existingSubnet.auxSenchoIp);
+        }
+
         try {
             await this.ensureSelfAttached();
         } catch (err) {
@@ -800,18 +817,61 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     /**
-     * Return the subnet of an existing `sencho_mesh` network, or null if the
-     * network does not exist. Docker's inspect endpoint surfaces 404 for
-     * the missing case; any other error is re-raised so the caller can
-     * classify it as `attach_failed`.
+     * Emit the F-13 advisory: the operator is running on a `sencho_mesh`
+     * that pre-dates the IPAM auxiliary-address reservation, so another
+     * container can grab Sencho's `<network>+2` IP while Sencho is offline.
+     * Logged once per process at boot (this is only called from
+     * `setupMeshNetwork`, which itself runs once per `start()`). Mirrored to
+     * `console.warn` so it appears in `docker logs sencho`.
      */
-    private async inspectExistingMeshSubnet(): Promise<string | null> {
+    private warnLegacyMeshReservation(actualAuxSenchoIp: string | null): void {
+        const msg = `${SENCHO_MESH_NETWORK} adopted without an IPAM auxiliary reservation for ${this.senchoIp}; `
+            + `another container can squat this IP while Sencho is offline. To apply the reservation: `
+            + `stop every meshed stack, run \`docker network rm ${SENCHO_MESH_NETWORK}\`, then restart Sencho.`;
+        this.logActivity({
+            source: 'mesh',
+            level: 'warn',
+            type: 'mesh.enable',
+            message: msg,
+            details: {
+                subnet: this.meshSubnet,
+                expectedAuxSenchoIp: this.senchoIp,
+                actualAuxSenchoIp,
+            },
+        });
+        console.warn(`[Mesh] ${msg}`);
+    }
+
+    /**
+     * Return the subnet and the Sencho aux-address reservation of an existing
+     * `sencho_mesh` network, or null if the network does not exist. The
+     * `auxSenchoIp` field reflects `IPAM.Config[0].AuxiliaryAddresses.sencho`
+     * on the daemon: null when the network pre-dates the reservation, the
+     * pinned IP otherwise. The adopt-existing path uses this to surface a
+     * one-time warn when running on a legacy network that is vulnerable to
+     * IP squatting while Sencho is offline. Docker's inspect endpoint
+     * surfaces 404 for the missing-network case; any other error is
+     * re-raised so the caller can classify it as `attach_failed`.
+     */
+    private async inspectExistingMeshSubnet(): Promise<
+        { subnet: string; auxSenchoIp: string | null } | null
+    > {
         const dc = DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
         try {
             const info = await dc.inspectNetwork(SENCHO_MESH_NETWORK) as {
-                IPAM?: { Config?: Array<{ Subnet?: string }> };
+                IPAM?: {
+                    Config?: Array<{
+                        Subnet?: string;
+                        AuxiliaryAddresses?: Record<string, string>;
+                    }>;
+                };
             } | undefined;
-            return info?.IPAM?.Config?.[0]?.Subnet ?? null;
+            const cfg = info?.IPAM?.Config?.[0];
+            if (!cfg?.Subnet) return null;
+            return {
+                subnet: cfg.Subnet,
+                auxSenchoIp: cfg.AuxiliaryAddresses?.sencho ?? null,
+            };
         } catch (err) {
             const e = err as { statusCode?: number };
             if (e?.statusCode === 404) return null;
@@ -824,14 +884,27 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * the raw Dockerode error (including the 500 pool-overlap that
      * `classifyMeshNetworkError` recognises) so callers can decide whether
      * to retry on another candidate or bail.
+     *
+     * The IPAM block reserves Sencho's static `<network>+2` via
+     * `AuxiliaryAddresses`. Aux-listed addresses are removed from the
+     * auto-allocatable pool, so Docker refuses to hand `.2` to any other
+     * container while Sencho is offline. Sencho's own attach via
+     * `connectContainerToNetwork({ ipv4Address })` is unaffected because
+     * explicit pins still bind aux-reserved addresses.
      */
     private async createMeshNetwork(subnet: string): Promise<void> {
         const dc = DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
+        const senchoIp = getSenchoIpFromSubnet(subnet);
         await dc.createNetwork({
             Name: SENCHO_MESH_NETWORK,
             Driver: 'bridge',
             Attachable: true,
-            IPAM: { Config: [{ Subnet: subnet }] },
+            IPAM: {
+                Config: [{
+                    Subnet: subnet,
+                    AuxiliaryAddresses: { sencho: senchoIp },
+                }],
+            },
             Labels: { 'io.sencho.mesh': 'true' },
         });
     }

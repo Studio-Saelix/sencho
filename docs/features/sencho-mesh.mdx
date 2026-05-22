@@ -163,7 +163,7 @@ services:
       - SENCHO_MESH_SUBNET=10.42.0.0/24
 ```
 
-Sencho pins itself to `<network address> + 2` (so `10.42.0.2` for the example above; the bridge's `+1` gateway sits between). Each node is configured independently; the alias registry pushes the correct local IP to each node's override file.
+Sencho pins itself to `<network address> + 2` (so `10.42.0.2` for the example above; the bridge's `+1` gateway sits between). The same address is registered as an IPAM auxiliary reservation on `sencho_mesh`, so Docker will refuse to hand it to any other container even while Sencho is offline; meshed workloads without a pinned IP get `<network> + 3` and up. Each node is configured independently; the alias registry pushes the correct local IP to each node's override file.
 
 ## Security and trust boundaries
 

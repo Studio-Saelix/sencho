@@ -96,7 +96,13 @@ export type NetworkDriver = 'bridge' | 'overlay' | 'macvlan' | 'host' | 'none';
 export interface CreateNetworkOptions {
   Name: string;
   Driver?: NetworkDriver;
-  IPAM?: { Config: Array<{ Subnet?: string; Gateway?: string }> };
+  IPAM?: {
+    Config: Array<{
+      Subnet?: string;
+      Gateway?: string;
+      AuxiliaryAddresses?: Record<string, string>;
+    }>;
+  };
   Labels?: Record<string, string>;
   Internal?: boolean;
   Attachable?: boolean;
