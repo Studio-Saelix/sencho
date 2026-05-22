@@ -95,22 +95,28 @@
             "pages": [
               "features/overview",
               {
-                "group": "Stacks & Deployments",
+                "group": "Stacks",
                 "pages": [
                   "features/stack-management",
-                  "features/stack-activity",
                   "features/editor",
                   "features/stack-file-explorer",
-                  "features/deploy-progress",
-                  "features/resources",
-                  "features/app-store",
-                  "features/atomic-deployments",
-                  "features/deploy-enforcement",
-                  "features/blueprint-model",
-                  "features/git-sources",
-                  "features/stack-labels"
+                  "features/stack-activity",
+                  "features/stack-labels",
+                  "features/sidebar"
                 ]
               },
+              {
+                "group": "Deployment",
+                "pages": [
+                  "features/deploy-progress",
+                  "features/atomic-deployments",
+                  "features/deploy-enforcement",
+                  "features/git-sources",
+                  "features/app-store",
+                  "features/blueprint-model"
+                ]
+              },
+              "features/resources",
               {
                 "group": "Observability",
                 "pages": [
@@ -122,7 +128,7 @@
                 ]
               },
               {
-                "group": "Fleet & Multi-Node",
+                "group": "Fleet",
                 "pages": [
                   "features/multi-node",
                   "features/pilot-agent",
@@ -134,7 +140,17 @@
                   "features/fleet-secrets",
                   "features/fleet-backups",
                   "features/remote-updates",
-                  "features/scheduled-operations"
+                  "features/node-compatibility",
+                  "features/host-console"
+                ]
+              },
+              {
+                "group": "Automation",
+                "pages": [
+                  "features/scheduled-operations",
+                  "features/auto-update-policies",
+                  "features/auto-heal-policies",
+                  "features/webhooks"
                 ]
               },
               {
@@ -148,32 +164,7 @@
                   "features/cve-suppressions",
                   "features/private-registries"
                 ]
-              },
-              {
-                "group": "Automation",
-                "pages": [
-                  "features/auto-update-policies",
-                  "features/auto-heal-policies",
-                  "features/webhooks"
-                ]
-              },
-              {
-                "group": "Platform",
-                "pages": [
-                  "features/sidebar",
-                  "features/host-console"
-                ]
               }
-            ]
-          },
-          {
-            "group": "Reference",
-            "pages": [
-              "reference/settings",
-              "features/licensing",
-              "features/node-compatibility",
-              "security",
-              "reference/contact"
             ]
           },
           {
@@ -186,6 +177,15 @@
               "operations/verifying-images",
               "operations/trivy-setup",
               "operations/two-factor-admin"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/settings",
+              "features/licensing",
+              "reference/security",
+              "reference/contact"
             ]
           }
         ]

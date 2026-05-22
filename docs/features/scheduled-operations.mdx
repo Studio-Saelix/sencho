@@ -59,7 +59,7 @@ The All tasks toggle swaps the lane track for a sortable table.
 | Action | Target | What it does |
 |---|---|---|
 | **Restart Stack** | A specific stack (optionally specific services) on a specific node | Restarts all or selected containers in the stack. |
-| **Auto-update Stack** | A specific stack on a specific node | Checks each image in the stack for a newer tag and recreates the stack if any image has an update. See [Auto-Update Readiness](/features/auto-update-policies) for the companion review board. |
+| **Auto-update Stack** | A specific stack on a specific node | Checks each image in the stack for a newer tag and recreates the stack if any image has an update. See [Auto-Update Policies](/features/auto-update-policies) for the companion review board. |
 | **Auto-update All Stacks** | A specific node | Runs the auto-update check across every stack on the node that has auto-updates enabled. Stacks with auto-updates turned off are skipped. |
 | **Fleet Snapshot** | The whole fleet | Creates a versioned, fleet-wide snapshot of every node's compose files and `.env` files. See [Fleet Backups](/features/fleet-backups). |
 | **System Prune** | The selected node | Prunes containers, images, networks, and volumes (any subset), optionally filtered by a Docker label. |

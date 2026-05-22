@@ -111,3 +111,15 @@ A clean result means no unresolved HIGH or CRITICAL CVEs. CVEs listed as `not_af
 <Note>
 Trivy 0.36.0 or later is required for `--vex` flag support.
 </Note>
+
+## Available tags
+
+Each release publishes two moving tags plus one immutable tag, so you can choose how aggressively you want to track updates:
+
+| Tag | Example | Updates on |
+|---|---|---|
+| `latest` | `saelix/sencho:latest` | Every release |
+| `X.Y` | `saelix/sencho:0.42` | Every patch release in the `0.42.x` line |
+| `X.Y.Z` | `saelix/sencho:0.42.7` | Never (immutable) |
+
+For production, pin to `X.Y.Z` or `X.Y` and verify the signature on every pull. For staging or development, `latest` is fine.
