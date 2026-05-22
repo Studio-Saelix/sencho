@@ -75,7 +75,6 @@ beforeEach(() => {
   // not polluted by earlier tests.
   vi.restoreAllMocks();
   vi.clearAllMocks();
-  vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
   mockFsStacks = ['alpha', 'beta'];
   pruneManagedOnly.mockResolvedValue({ success: true, reclaimedBytes: 0 });
   pruneSystem.mockResolvedValue({ success: true, reclaimedBytes: 0 });

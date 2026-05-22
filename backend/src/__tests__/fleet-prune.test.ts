@@ -79,7 +79,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('returns 400 when body is missing', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
       .set('Authorization', authHeader)
@@ -88,7 +87,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('returns 400 when targets is empty', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
       .set('Authorization', authHeader)
@@ -98,7 +96,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('returns 400 when a target is unrecognized', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
       .set('Authorization', authHeader)
@@ -108,7 +105,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('runs pruneManagedOnly per target on the local node and returns aggregated bytes', async () => {
-    mockTier('paid');
     const fake = mockLocalPrune({ managedBytes: { images: 1500, volumes: 320 } });
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
@@ -127,7 +123,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('runs pruneSystem when scope is "all" and dedupes targets', async () => {
-    mockTier('paid');
     const fake = mockLocalPrune({ allBytes: { networks: 0, images: 2048 } });
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
@@ -141,7 +136,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('records per-target failure when DockerController throws but continues remaining targets', async () => {
-    mockTier('paid');
     mockLocalPrune({ managedBytes: { images: 100 }, throwOn: 'volumes' });
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
@@ -157,7 +151,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('reports lock contention when bulk-prune lock is already held', async () => {
-    mockTier('paid');
     mockLocalPrune();
     const db = DatabaseService.getInstance();
     const localId = db.getNodes().find(n => n.type === 'local')!.id;
@@ -173,7 +166,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('marks a remote node unreachable when fetch throws and short-circuits later targets', async () => {
-    mockTier('paid');
     mockLocalPrune();
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({
@@ -204,7 +196,6 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
   });
 
   it('parses remote node responses into per-target reclaimed bytes', async () => {
-    mockTier('paid');
     mockLocalPrune();
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({

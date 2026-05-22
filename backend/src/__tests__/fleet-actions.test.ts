@@ -68,7 +68,6 @@ describe('Fleet Actions input validation', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('POST /api/fleet/labels/fleet-stop rejects missing labelName', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
@@ -78,7 +77,6 @@ describe('Fleet Actions input validation', () => {
   });
 
   it('POST /api/fleet/labels/fleet-stop rejects whitespace-only labelName', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
@@ -87,7 +85,6 @@ describe('Fleet Actions input validation', () => {
   });
 
   it('POST /api/fleet-actions/labels/bulk-assign rejects non-array assignments', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
       .set('Authorization', authHeader)
@@ -97,7 +94,6 @@ describe('Fleet Actions input validation', () => {
   });
 
   it('POST /api/fleet-actions/labels/bulk-assign rejects oversized payload', async () => {
-    mockTier('paid');
     const big = Array.from({ length: 1001 }, (_, i) => ({ stackName: `s${i}`, labelIds: [] }));
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
@@ -112,7 +108,6 @@ describe('Fleet Actions orchestration shape', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('POST /api/fleet/labels/fleet-stop with unknown label returns matched:false per node', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
@@ -126,7 +121,6 @@ describe('Fleet Actions orchestration shape', () => {
   });
 
   it('POST /api/fleet-actions/labels/bulk-assign accepts empty assignments and returns empty results', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
       .set('Authorization', authHeader)
@@ -136,7 +130,6 @@ describe('Fleet Actions orchestration shape', () => {
   });
 
   it('POST /api/fleet-actions/labels/bulk-assign rejects an entry with bad stack name in-line', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
       .set('Authorization', authHeader)

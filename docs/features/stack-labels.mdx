@@ -3,7 +3,7 @@ title: "Stack Labels"
 description: "Per-node tags that group your stacks by purpose, surface them under collapsible headers in the sidebar, and unlock cross-stack bulk actions across the fleet."
 ---
 
-A **Stack Label** is a per-node tag (name plus color) you can stick on any stack. Once a stack carries a label, the sidebar groups it under that label's header instead of dumping every stack into a flat list, and Fleet View can filter the overview by tag. Operators on a Skipper or Admiral license also get a pair of fleet-wide actions powered by labels: stop every stack labeled `prod` across every node, or replace the label set on a batch of stacks in one shot.
+A **Stack Label** is a per-node tag (name plus color) you can stick on any stack. Once a stack carries a label, the sidebar groups it under that label's header instead of dumping every stack into a flat list, and Fleet View can filter the overview by tag. Admins also get a pair of fleet-wide actions powered by labels: stop every stack labeled `prod` across every node, or replace the label set on a batch of stacks in one shot.
 
 <Frame>
   <img src="/images/stack-labels/sidebar-grouping.png" alt="Sidebar showing stacks grouped under three uppercase label headers (MEDIA 6, UTILITIES 5, NETWORK 3) and an UNLABELED 1 group at the bottom. Each stack row carries a small colored dot on the trailing edge that matches the group's color." />
@@ -111,7 +111,7 @@ The **Bulk label assign** card is per-node only by design. To re-tag stacks on a
 - **Names are unique per node**, case-sensitive. The same name on two nodes is two separate label rows. Cross-node fleet stop matches on name; bulk assign always operates on one node's labels at a time.
 - **Allowed name characters**: letters, digits, spaces, and hyphens. Empty names and names beyond 30 characters are rejected at the API.
 - **Bulk-action concurrency**: only one label-driven bulk action can run on a single node at a time. A second concurrent attempt against the same node returns HTTP 429 and the operator sees an error toast; the in-flight action keeps running.
-- **Role gate**: organizing with labels is open to every role. Sidebar grouping, trailing dots on stack rows, the **Settings · Advanced · Labels** panel, the inline create form in the stack menu, and the Fleet View **Tags** filter are available to every signed-in user. The **Fleet · Fleet Actions** cards (Stop-fleet-by-label and Bulk-label-assign) run admin-only; operator and viewer roles see the cards but cannot apply them.
+- **Role visibility**: label authoring is open to every signed-in role. Sidebar grouping, trailing dots on stack rows, the **Settings · Advanced · Labels** panel, the inline create form in the stack menu, and the Fleet View **Tags** filter all work for every user.
 
 ## Troubleshooting
 
