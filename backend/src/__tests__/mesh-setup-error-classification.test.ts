@@ -441,3 +441,43 @@ describe('MeshService.setupMeshNetwork subnet auto-fallback', () => {
         expect(status.reason).toBe('subnet_mismatch');
     });
 });
+
+describe('MeshService console.log mirror (F-5)', () => {
+    it('mirrors a setup failure to console.error with the [Mesh] prefix', async () => {
+        process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
+        process.env.HOSTNAME = 'sencho';
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        mockDocker({
+            createNetwork: vi.fn().mockRejectedValue(
+                Object.assign(new Error('Pool overlaps with other one on this address space'), { statusCode: 500 }),
+            ),
+        });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const meshLines = errSpy.mock.calls
+            .map((args) => String(args[0]))
+            .filter((line) => line.startsWith('[Mesh] data plane unavailable'));
+        expect(meshLines.length).toBeGreaterThan(0);
+        expect(meshLines[0]).toContain('subnet_overlap');
+        expect(meshLines[0]).toContain('10.42.0.0/24');
+        expect(meshLines[0]).toMatch(/overlap/i);
+    });
+
+    it('mirrors a not_in_docker condition to console.warn (expected dev-mode case)', async () => {
+        process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
+        delete process.env.HOSTNAME;
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        mockDocker();
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const meshLines = warnSpy.mock.calls
+            .map((args) => String(args[0]))
+            .filter((line) => line.startsWith('[Mesh] data plane unavailable'));
+        expect(meshLines.length).toBeGreaterThan(0);
+        expect(meshLines[0]).toContain('not_in_docker');
+    });
+});

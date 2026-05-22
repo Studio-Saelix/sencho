@@ -422,13 +422,22 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const dpReason = this.dataPlaneStatus.reason;
         const dataPlane = this.senchoIp ? 'ok' : `unavailable (${dpReason}: ${this.networkSetupError ?? 'unknown'})`;
         const subnetSuffix = this.senchoIp ? `, subnet ${this.meshSubnet}` : '';
+        const ipSuffix = this.senchoIp ? `, self attached at ${this.senchoIp}` : '';
         const summaryLevel: MeshActivityLevel = dpReason === 'ok'
             ? 'info'
             : dpReason === 'not_in_docker' ? 'warn' : 'error';
+        const summaryMessage = `MeshService started (data plane ${dataPlane}${subnetSuffix}, self nodeId ${this.selfCentralNodeId})`;
         this.logActivity({
             source: 'mesh', level: summaryLevel, type: 'mesh.enable',
-            message: `MeshService started (data plane ${dataPlane}${subnetSuffix}, self nodeId ${this.selfCentralNodeId})`,
+            message: summaryMessage,
         });
+        // Mirror to console so `docker logs sencho` surfaces the boot state.
+        // The activity entry above feeds the Routing tab; this line feeds the
+        // operator's `docker logs` workflow. Same content, different surface.
+        const consoleLine = `[Mesh] data plane ${dataPlane}${ipSuffix}${subnetSuffix}`;
+        if (summaryLevel === 'error') console.error(consoleLine);
+        else if (summaryLevel === 'warn') console.warn(consoleLine);
+        else console.log(consoleLine);
     }
 
     public async stop(): Promise<void> {
@@ -554,13 +563,21 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         this.networkSetupError = message;
         this.dataPlaneStatus = { ok: false, reason, message, subnet };
         this.senchoIp = null;
+        const sanitized = sanitizeForLog(message);
         this.logActivity({
             source: 'mesh',
             level,
             type: 'mesh.disable',
-            message: `mesh data plane unavailable (${reason}): ${sanitizeForLog(message)}`,
+            message: `mesh data plane unavailable (${reason}): ${sanitized}`,
             details: { reason, subnet },
         });
+        // Mirror to console so the failure shows in `docker logs sencho`. The
+        // start() summary will also emit a boot line after setupMeshNetwork
+        // returns; this per-failure line gives the specific reason + Docker
+        // error message for diagnostic purposes.
+        const consoleLine = `[Mesh] data plane unavailable (${reason}, subnet ${subnet}): ${sanitized}`;
+        if (level === 'warn') console.warn(consoleLine);
+        else console.error(consoleLine);
     }
 
     /**
