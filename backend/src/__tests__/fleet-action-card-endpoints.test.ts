@@ -75,7 +75,6 @@ beforeEach(() => {
   // not polluted by earlier tests.
   vi.restoreAllMocks();
   vi.clearAllMocks();
-  vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
   mockFsStacks = ['alpha', 'beta'];
   pruneManagedOnly.mockResolvedValue({ success: true, reclaimedBytes: 0 });
   pruneSystem.mockResolvedValue({ success: true, reclaimedBytes: 0 });
@@ -115,14 +114,15 @@ describe('POST /api/fleet/labels/match-preview', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 PAID_REQUIRED on community tier', async () => {
+  it('is reachable on community tier for admins (no PAID_REQUIRED)', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
     const res = await request(app)
       .post('/api/fleet/labels/match-preview')
       .set('Authorization', authHeader)
-      .send({ labelName: 'x' });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+      .send({ labelName: 'does-not-exist' });
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+    expect(res.body.matchedNodes).toBe(0);
   });
 
   it('returns 400 when labelName is missing or empty', async () => {
@@ -171,13 +171,15 @@ describe('POST /api/fleet/prune/estimate', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 PAID_REQUIRED on community tier', async () => {
+  it('is reachable on community tier for admins (no PAID_REQUIRED)', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
     const res = await request(app)
       .post('/api/fleet/prune/estimate')
       .set('Authorization', authHeader)
       .send({ targets: ['images'], scope: 'managed' });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+    expect(res.body).toHaveProperty('totalBytes');
   });
 
   it('returns 400 when targets is empty', async () => {

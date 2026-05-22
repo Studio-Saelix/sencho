@@ -38,27 +38,29 @@ describe('Fleet Actions endpoints require authentication', () => {
   });
 });
 
-describe('Fleet Actions tier gating', () => {
+describe('Fleet Actions tier gating (Community + admin)', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('POST /api/fleet/labels/fleet-stop returns 403 on community tier (Skipper+)', async () => {
+  it('POST /api/fleet/labels/fleet-stop is reachable on community tier for admins', async () => {
     mockTier('community');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
-      .send({ labelName: 'prod' });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+      .send({ labelName: 'this-label-does-not-exist' });
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+    expect(Array.isArray(res.body.results)).toBe(true);
   });
 
-  it('POST /api/fleet-actions/labels/bulk-assign returns 403 on community tier (Skipper+)', async () => {
+  it('POST /api/fleet-actions/labels/bulk-assign is reachable on community tier for admins', async () => {
     mockTier('community');
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
       .set('Authorization', authHeader)
       .send({ assignments: [] });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+    expect(res.body.results).toEqual([]);
   });
 });
 
@@ -66,7 +68,6 @@ describe('Fleet Actions input validation', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('POST /api/fleet/labels/fleet-stop rejects missing labelName', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
@@ -76,7 +77,6 @@ describe('Fleet Actions input validation', () => {
   });
 
   it('POST /api/fleet/labels/fleet-stop rejects whitespace-only labelName', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
@@ -85,7 +85,6 @@ describe('Fleet Actions input validation', () => {
   });
 
   it('POST /api/fleet-actions/labels/bulk-assign rejects non-array assignments', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
       .set('Authorization', authHeader)
@@ -95,7 +94,6 @@ describe('Fleet Actions input validation', () => {
   });
 
   it('POST /api/fleet-actions/labels/bulk-assign rejects oversized payload', async () => {
-    mockTier('paid');
     const big = Array.from({ length: 1001 }, (_, i) => ({ stackName: `s${i}`, labelIds: [] }));
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
@@ -110,7 +108,6 @@ describe('Fleet Actions orchestration shape', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('POST /api/fleet/labels/fleet-stop with unknown label returns matched:false per node', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
@@ -124,7 +121,6 @@ describe('Fleet Actions orchestration shape', () => {
   });
 
   it('POST /api/fleet-actions/labels/bulk-assign accepts empty assignments and returns empty results', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
       .set('Authorization', authHeader)
@@ -134,7 +130,6 @@ describe('Fleet Actions orchestration shape', () => {
   });
 
   it('POST /api/fleet-actions/labels/bulk-assign rejects an entry with bad stack name in-line', async () => {
-    mockTier('paid');
     const res = await request(app)
       .post('/api/fleet-actions/labels/bulk-assign')
       .set('Authorization', authHeader)

@@ -12,7 +12,7 @@ Three cards ship today: **Stop fleet by label**, **Bulk label assign**, and **Pr
 </Frame>
 
 <Note>
-Fleet Actions is a Skipper feature. Every card requires an admin user role.
+Fleet Actions runs admin-only. Operator and viewer roles see the tab but cannot apply the cards.
 </Note>
 
 ## What Fleet Actions covers (and what it doesn't)
@@ -29,7 +29,7 @@ Fleet Actions is the home for operations that span the fleet but don't fit anywh
 
 ## Three cards, three execution paths
 
-The cards share a tab and a tier gate, but they don't share an execution path. Knowing which path runs explains the result panels and the failure modes.
+The cards share a tab and a role gate, but they don't share an execution path. Knowing which path runs explains the result panels and the failure modes.
 
 | Card | Endpoint | Where it runs | Scope |
 |---|---|---|---|
@@ -130,8 +130,6 @@ Scope is a segmented control with two options:
 
 | Requirement | Why it matters |
 |---|---|
-| **Skipper or Admiral license on the control instance** | Every card gates on the control instance's tier. Remote nodes inherit the paid tier through the proxy's tier header, so a paid control plane covers the whole fleet. |
-| **Admin role for the active user** | Operator and viewer roles cannot reach any of the three endpoints. |
 | **Configured remote nodes in Settings → Nodes** | The two fan-out cards iterate the configured node list. A node missing its `api_url` or `api_token` shows up in the results with *Remote node not configured* per stack or per target. |
 | **Labels you intend to target** | Stop fleet by label and the autocomplete depend on labels existing on at least one node. See [Stack Labels](/features/stack-labels) for the authoring flow. |
 
@@ -189,8 +187,8 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
   <Accordion title="Prune across fleet reports 'A prune is already running on this node'">
     The per-node prune lock is held while the first prune is in flight. Wait for the first run to finish or click **Refresh** on the Fleet masthead to confirm it has cleared, then re-run. The lock is released automatically when the first run exits.
   </Accordion>
-  <Accordion title="The Fleet Actions tab opens but the cards aren't there">
-    Fleet Actions is a Skipper feature. On a Community license, the tab still opens and surfaces a calm explainer card pointing at the upgrade. Confirm the active license under **Settings → License**.
+  <Accordion title="The Apply button returns an error toast">
+    Fleet Actions runs admin-only. Confirm the active user has the admin role under **Settings → Users**. Operator and viewer roles see the cards but cannot apply them.
   </Accordion>
   <Accordion title="A node returns a transport error row for every stack or every target">
     The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Open **Settings → Nodes** on the control instance and click **Test connection** for the remote; fix the credential or the reachability, then re-run the action.
@@ -210,4 +208,4 @@ Fleet Actions is one slice of the Fleet view. Each adjacent surface answers a di
 | [Fleet Sync](/features/fleet-sync) | Push-only replication of security rules from a control instance to its replicas. | Fleet Sync replicates state; Fleet Actions runs operations. |
 | [Multi-Node Management](/features/multi-node) | How nodes get added to the fleet (proxy or pilot mode) and how the license tier propagates. | Multi-Node Management is the prerequisite; Fleet Actions runs against whatever Multi-Node Management already configured. |
 | [Fleet View](/features/fleet-view) | The masthead, tab strip, and node grid that host the Fleet Actions tab. | Fleet Actions is one tab inside Fleet View. |
-| [Licensing](/features/licensing) | The full tier matrix and what each tier unlocks. | The single source of truth for the Skipper requirement called out at the top of this page. |
+| [Licensing](/features/licensing) | The full tier matrix and what each tier unlocks. | Licensing covers tier coverage across the product; Fleet Actions only cites the admin role check above. |

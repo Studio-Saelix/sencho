@@ -3,7 +3,7 @@ title: "Stack Labels"
 description: "Per-node tags that group your stacks by purpose, surface them under collapsible headers in the sidebar, and unlock cross-stack bulk actions across the fleet."
 ---
 
-A **Stack Label** is a per-node tag (name plus color) you can stick on any stack. Once a stack carries a label, the sidebar groups it under that label's header instead of dumping every stack into a flat list, and Fleet View can filter the overview by tag. Operators on a Skipper or Admiral license also get a pair of fleet-wide actions powered by labels: stop every stack labeled `prod` across every node, or replace the label set on a batch of stacks in one shot.
+A **Stack Label** is a per-node tag (name plus color) you can stick on any stack. Once a stack carries a label, the sidebar groups it under that label's header instead of dumping every stack into a flat list, and Fleet View can filter the overview by tag. Admins also get a pair of fleet-wide actions powered by labels: stop every stack labeled `prod` across every node, or replace the label set on a batch of stacks in one shot.
 
 <Frame>
   <img src="/images/stack-labels/sidebar-grouping.png" alt="Sidebar showing stacks grouped under three uppercase label headers (MEDIA 6, UTILITIES 5, NETWORK 3) and an UNLABELED 1 group at the bottom. Each stack row carries a small colored dot on the trailing edge that matches the group's color." />
@@ -82,10 +82,10 @@ A stack can carry multiple labels and will then appear under each label's group 
 ## Fleet · Fleet Actions
 
 <Note>
-  Bulk actions on a label require a Sencho **Skipper** or **Admiral** license. Creating, assigning, and filtering by labels is available on every tier; only the cross-node bulk surface is paid.
+  The Fleet Actions cards run admin-only on every tier. Operator and viewer roles see the cards but cannot apply them.
 </Note>
 
-Two cards in the **Fleet · Fleet Actions** tab use labels to drive cross-node operations. Both endpoints are gated on a paid tier and an admin role: Community installs see the tab in the navigation but the body renders a single empty-state card explaining the gate, and a non-admin operator on a paid tier sees the cards rendered but receives a 403 from the backend on submit.
+Two cards in the **Fleet · Fleet Actions** tab use labels to drive cross-node operations. See [Fleet Actions](/features/fleet-actions) for the full reference.
 
 <Frame>
   <img src="/images/stack-labels/fleet-actions.png" alt="Fleet Actions tab with two cards side by side. Left card 'Stop fleet by label' (rose accent rail) has a Label name combobox containing 'Media' and a Stop matching stacks button beneath. Right card 'Bulk label assign' (purple accent rail) has a node selector reading Local (local), a stacks checklist showing plex and radarr ticked, a Labels row with a highlighted Media pill plus inactive Network and Utilities, and an Apply to 3 stacks button." />
@@ -111,7 +111,7 @@ The **Bulk label assign** card is per-node only by design. To re-tag stacks on a
 - **Names are unique per node**, case-sensitive. The same name on two nodes is two separate label rows. Cross-node fleet stop matches on name; bulk assign always operates on one node's labels at a time.
 - **Allowed name characters**: letters, digits, spaces, and hyphens. Empty names and names beyond 30 characters are rejected at the API.
 - **Bulk-action concurrency**: only one label-driven bulk action can run on a single node at a time. A second concurrent attempt against the same node returns HTTP 429 and the operator sees an error toast; the in-flight action keeps running.
-- **Tier visibility**: organizing with labels is Community. Sidebar grouping, trailing dots on stack rows, the **Settings · Advanced · Labels** panel, the inline create form in the stack menu, and the Fleet View **Tags** filter all light up on every tier. Only the **Fleet · Fleet Actions** body content (the Stop-fleet-by-label and Bulk-label-assign cards) is paid; Community installs see the tab in the navigation but the body renders a single upgrade-context empty state.
+- **Role visibility**: label authoring is open to every signed-in role. Sidebar grouping, trailing dots on stack rows, the **Settings · Advanced · Labels** panel, the inline create form in the stack menu, and the Fleet View **Tags** filter all work for every user.
 
 ## Troubleshooting
 
@@ -137,8 +137,8 @@ The **Bulk label assign** card is per-node only by design. To re-tag stacks on a
   <Accordion title="Two stacks with the same name on different nodes only got relabeled on one">
     `Bulk label assign` is per-node by design. The node picker at the top is the source of truth and the stacks list only shows stacks on that node. Run the card a second time with the other node selected, or use **Stop fleet by label** instead if the goal is fleet-wide.
   </Accordion>
-  <Accordion title="The Fleet Actions tab body shows an upgrade card on Community">
-    Cross-node bulk actions stay on Skipper and Admiral. The tab itself is visible to every tier, but the body renders a single empty-state card on Community pointing at the upgrade. All other Stack Labels surfaces (sidebar grouping, trailing dots, the Settings panel, the inline create form, the Fleet View Tags filter) work the same on Community.
+  <Accordion title="The Fleet Actions cards return an error when I click Apply">
+    The cards run admin-only. Confirm the active user has the admin role under **Settings · Users**; operator and viewer roles see the cards rendered but cannot apply them. All other Stack Labels surfaces (sidebar grouping, trailing dots, the Settings panel, the inline create form, the Fleet View Tags filter) work for every role.
   </Accordion>
   <Accordion title="Deleting a label removed it from every stack">
     Working as designed. The destructive confirmation reads `Removes the label from every stack across the fleet.` The label row and every assignment row that pointed to it are dropped in a single transaction. There is no undo; recreate the label by name and color and reassign the affected stacks if you need to recover.
