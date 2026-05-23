@@ -50,6 +50,30 @@ export interface PolicyEnforcementResult {
     trivyMissing?: boolean;
 }
 
+const TRIVY_MISSING_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
+// Growth bounded by configured-policy fanout (only stacks with an enabled
+// block_on_deploy policy can land here), not by total stack churn. Cleared
+// on process restart, which is the right scope for an informational warning.
+const trivyMissingNotifiedAt = new Map<string, number>();
+
+function notifyTrivyMissingOnce(nodeId: number, stackName: string): void {
+    const key = `${nodeId}:${stackName}`;
+    const now = Date.now();
+    const last = trivyMissingNotifiedAt.get(key);
+    if (last !== undefined && now - last < TRIVY_MISSING_NOTIFY_COOLDOWN_MS) return;
+    trivyMissingNotifiedAt.set(key, now);
+    NotificationService.getInstance().dispatchAlert(
+        'warning',
+        'scan_finding',
+        `Pre-deploy scan for "${stackName}" skipped: Trivy not installed on this node`,
+        { stackName },
+    );
+}
+
+export function _resetTrivyMissingNotificationStateForTests(): void {
+    trivyMissingNotifiedAt.clear();
+}
+
 export async function enforcePolicyPreDeploy(
     stackName: string,
     nodeId: number,
@@ -68,12 +92,7 @@ export async function enforcePolicyPreDeploy(
 
     const svc = TrivyService.getInstance();
     if (!svc.isTrivyAvailable()) {
-        NotificationService.getInstance().dispatchAlert(
-            'warning',
-            'scan_finding',
-            `Pre-deploy scan for "${stackName}" skipped: Trivy not installed on this node`,
-            { stackName },
-        );
+        notifyTrivyMissingOnce(nodeId, stackName);
         return { ok: true, bypassed: false, policy, violations: [], trivyMissing: true };
     }
 
@@ -117,12 +136,7 @@ export async function enforcePolicyForImageRefs(
 
     const svc = TrivyService.getInstance();
     if (!svc.isTrivyAvailable()) {
-        NotificationService.getInstance().dispatchAlert(
-            'warning',
-            'scan_finding',
-            `Pre-deploy scan for "${stackName}" skipped: Trivy not installed on this node`,
-            { stackName },
-        );
+        notifyTrivyMissingOnce(nodeId, stackName);
         return { ok: true, bypassed: false, policy, violations: [], trivyMissing: true };
     }
 
