@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Button } from './ui/button';
 import { Plus } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
@@ -32,6 +32,10 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { StackSidebar } from '@/components/sidebar/StackSidebar';
 import type { StackRowStatus } from '@/components/sidebar/stack-status-utils';
+import { useSidebarActivitySummary, countEnabledAutoUpdates } from '@/components/sidebar/useSidebarActivitySummary';
+import { useNextAutoUpdateRun } from '@/components/sidebar/useNextAutoUpdateRun';
+import { usePanelSessionStartedAt } from '@/components/sidebar/usePanelSessionStartedAt';
+import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivityTicker';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
 import { toast } from '@/components/ui/toast-store';
 
@@ -39,7 +43,7 @@ export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
   const { isPaid, license } = useLicense();
   const { status: trivy } = useTrivyStatus();
-  const { runWithLog } = useDeployFeedback();
+  const { runWithLog, panelState } = useDeployFeedback();
 
   const editorState = useEditorViewState();
   const {
@@ -64,6 +68,7 @@ export default function EditorLayout() {
 
   const stackListState = useStackListState();
   const {
+    files,
     selectedFile,
     isLoading,
     stackActions: stackActionMap,
@@ -71,6 +76,7 @@ export default function EditorLayout() {
     searchQuery, setSearchQuery,
     stackStatuses,
     stackLabelMap,
+    autoUpdateSettings,
     filterChip, setFilterChip,
     bulkMode,
     selectedFiles,
@@ -177,6 +183,40 @@ export default function EditorLayout() {
     pendingStackLoadRef,
     pendingLogsRef,
   } = stackActions;
+
+  const panelStartedAt = usePanelSessionStartedAt(panelState);
+
+  const autoUpdateEnabledCount = useMemo(
+    () => countEnabledAutoUpdates(files, autoUpdateSettings),
+    [files, autoUpdateSettings],
+  );
+
+  const nextAutoUpdateRunAt = useNextAutoUpdateRun();
+  const activitySummary = useSidebarActivitySummary({
+    notifications,
+    tickerConnected,
+    panelState,
+    panelStartedAt,
+    autoUpdateEnabledCount,
+    totalStackCount: files.length,
+    nextAutoUpdateRunAt,
+  });
+
+  const handleActivityAction = useCallback((action: SidebarActivityAction) => {
+    switch (action.kind) {
+      case 'open-stack-notification':
+        stackActions.navigateToNotification(action.summary.notif);
+        return;
+      case 'open-auto-updates':
+        setActiveView('auto-updates');
+        return;
+      case 'open-activity':
+        setActiveView('global-observability');
+        return;
+      case 'noop':
+        return;
+    }
+  }, [stackActions, setActiveView]);
 
   const loadingAction = selectedFile ? (stackActionMap[selectedFile] ?? null) : null;
   const stackName = selectedFile || '';
@@ -303,9 +343,8 @@ export default function EditorLayout() {
             if (node) void stackActions.loadFileOnNode(node, file);
           },
         }}
-        notifications={notifications}
-        tickerConnected={tickerConnected}
-        onOpenActivity={() => setActiveView('global-observability')}
+        activitySummary={activitySummary}
+        onActivityAction={handleActivityAction}
         bulkMode={bulkMode}
         selectedFiles={selectedFiles}
         isPaid={isPaid}

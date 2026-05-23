@@ -20,6 +20,13 @@ export interface DeployPanelState {
   action: ActionVerb;
   status: 'preparing' | 'streaming' | 'succeeded' | 'failed';
   errorMessage?: string;
+  /**
+   * Monotonic id incremented on every runWithLog call. Lets external
+   * consumers (e.g. the sidebar footer elapsed-time tracker) detect a new
+   * deploy of the same stack+action even when isOpen stays true across the
+   * transition.
+   */
+  sessionId: number;
 }
 
 interface RunResult {
@@ -44,6 +51,7 @@ const DEFAULT_PANEL_STATE: DeployPanelState = {
   stackName: '',
   action: 'deploy',
   status: 'preparing',
+  sessionId: 0,
 };
 
 const DeployFeedbackContext = createContext<DeployFeedbackContextValue | undefined>(undefined);
@@ -109,6 +117,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         stackName: params.stackName,
         action: params.action,
         status: 'preparing',
+        sessionId: mySession,
       });
 
       const deployStarted = new Promise<void>((resolve) => {

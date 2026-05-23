@@ -1,9 +1,8 @@
 import { useState, useCallback, type ReactNode } from 'react';
 import { Command } from '@/components/ui/command';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import type { NotificationItem } from '@/components/dashboard/types';
 import { SidebarActions } from './SidebarActions';
-import { SidebarActivityTicker } from './SidebarActivityTicker';
+import { SidebarActivityTicker, type SidebarActivityAction } from './SidebarActivityTicker';
 import { SidebarBrand } from './SidebarBrand';
 import { SidebarBulkBar } from './SidebarBulkBar';
 import { SidebarFilterChips, type FilterCounts } from './SidebarFilterChips';
@@ -11,6 +10,7 @@ import { SidebarSearch } from './SidebarSearch';
 import { StackList, type StackListProps } from './StackList';
 import type { FilterChip } from './sidebar-types';
 import type { BulkAction } from '@/hooks/useBulkStackActions';
+import type { SidebarActivitySummary } from './useSidebarActivitySummary';
 
 export interface StackSidebarProps {
   isDarkMode: boolean;
@@ -25,9 +25,8 @@ export interface StackSidebarProps {
   filterCounts: FilterCounts;
   onFilterChipChange: (chip: FilterChip) => void;
   list: StackListProps;
-  notifications: NotificationItem[];
-  tickerConnected: boolean;
-  onOpenActivity: () => void;
+  activitySummary: SidebarActivitySummary;
+  onActivityAction: (action: SidebarActivityAction) => void;
   bulkMode: boolean;
   selectedFiles: Set<string>;
   isPaid: boolean;
@@ -41,7 +40,7 @@ export function StackSidebar(props: StackSidebarProps) {
   const {
     isDarkMode, nodeSwitcherSlot, createStackSlot, onScan, isScanning, canCreate,
     searchQuery, onSearchChange, filterChip, filterCounts, onFilterChipChange,
-    list, notifications, tickerConnected, onOpenActivity,
+    list, activitySummary, onActivityAction,
     bulkMode, selectedFiles, isPaid, onToggleBulkMode, onToggleSelect, onClearSelection, onBulkAction,
   } = props;
 
@@ -97,9 +96,8 @@ export function StackSidebar(props: StackSidebarProps) {
         </ScrollArea>
       </Command>
       <SidebarActivityTicker
-        notifications={notifications}
-        connected={tickerConnected}
-        onNavigate={onOpenActivity}
+        summary={activitySummary}
+        onAction={onActivityAction}
       />
     </div>
   );
