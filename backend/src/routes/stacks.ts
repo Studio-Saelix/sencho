@@ -14,6 +14,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { requirePermission } from '../middleware/permissions';
 import { requirePaid, requireAdmin, effectiveTier } from '../middleware/tierGates';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
+import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
 import { isValidGitSourcePath, isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -35,6 +36,42 @@ function notifyActionSuccess(category: NotificationCategory, message: string, st
   NotificationService.getInstance()
     .dispatchAlert('info', category, message, { stackName, actor })
     .catch(err => console.error('[Stacks] Failed to dispatch activity for %s:', sanitizeForLog(stackName), err));
+}
+
+const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
+  deploy: 'deploying',
+  down: 'stopping',
+  restart: 'restarting',
+  stop: 'stopping',
+  start: 'starting',
+  update: 'updating',
+};
+
+function tryAcquireStackOpLock(
+  req: Request,
+  res: Response,
+  stackName: string,
+  action: StackOpAction,
+): boolean {
+  const user = req.user?.username ?? 'system';
+  const result = StackOpLockService.getInstance().tryAcquire(req.nodeId, stackName, action, user);
+  if (!result.acquired) {
+    res.status(409).json({
+      error: `${stackName} is already ${STACK_OP_PRESENT_PARTICIPLE[result.existing.action]}`,
+      code: 'stack_op_in_progress',
+      inProgress: {
+        action: result.existing.action,
+        startedAt: result.existing.startedAt,
+        user: result.existing.user,
+      },
+    });
+    return false;
+  }
+  return true;
+}
+
+function releaseStackOpLock(req: Request, stackName: string): void {
+  StackOpLockService.getInstance().release(req.nodeId, stackName);
 }
 
 async function requireStackExists(nodeId: number, stackName: string, res: Response): Promise<boolean> {
@@ -640,6 +677,8 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  // Lock held below. All early-returns must stay inside the try so finally fires.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'deploy')) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
@@ -669,7 +708,9 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     }
     const message = getErrorMessage(error, 'Failed to deploy stack');
     notifyActionFailure('deploy', stackName, error);
-    res.status(500).json({ error: message, rolledBack });
+    if (!res.headersSent) res.status(500).json({ error: message, rolledBack });
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 });
 
@@ -677,6 +718,8 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  // Lock held below. All early-returns must stay inside the try so finally fires.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'down')) return;
   try {
     await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs());
     invalidateNodeCaches(req.nodeId);
@@ -685,7 +728,9 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
     notifyActionFailure('down', stackName, error);
-    res.status(500).json({ error: 'Failed to start command' });
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to start command' });
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 });
 
@@ -729,25 +774,36 @@ async function bulkContainerOp(
 ): Promise<void> {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
-  const titleCase = action.charAt(0).toUpperCase() + action.slice(1);
-  const outcome = await containerActionForStack(req.nodeId, stackName, action);
+  // Lock held below. All early-returns must stay inside the try so finally fires.
+  if (!tryAcquireStackOpLock(req, res, stackName, action)) return;
+  try {
+    const titleCase = action.charAt(0).toUpperCase() + action.slice(1);
+    const outcome = await containerActionForStack(req.nodeId, stackName, action);
 
-  if (outcome.kind === 'no-containers') {
-    res.status(404).json({ error: 'No containers found for this stack.' });
-    return;
-  }
-  if (outcome.kind === 'error') {
-    console.error('[Stacks] %s failed: %s %s', sanitizeForLog(titleCase), sanitizeForLog(stackName), sanitizeForLog(outcome.message));
-    if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message));
-    res.status(500).json({ error: outcome.message });
-    return;
-  }
+    if (outcome.kind === 'no-containers') {
+      res.status(404).json({ error: 'No containers found for this stack.' });
+      return;
+    }
+    if (outcome.kind === 'error') {
+      console.error('[Stacks] %s failed: %s %s', sanitizeForLog(titleCase), sanitizeForLog(stackName), sanitizeForLog(outcome.message));
+      if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message));
+      res.status(500).json({ error: outcome.message });
+      return;
+    }
 
-  invalidateNodeCaches(req.nodeId);
-  console.log(`[Stacks] ${titleCase} completed: ${sanitizeForLog(stackName)} (${outcome.count} containers)`);
-  res.json({ success: true, message: `${titleCase} completed via Engine API.` });
-  const { category, pastTense } = CONTAINER_ACTION_META[action];
-  notifyActionSuccess(category, `${stackName} ${pastTense}`, stackName, req.user?.username ?? 'system');
+    invalidateNodeCaches(req.nodeId);
+    console.log(`[Stacks] ${titleCase} completed: ${sanitizeForLog(stackName)} (${outcome.count} containers)`);
+    res.json({ success: true, message: `${titleCase} completed via Engine API.` });
+    const { category, pastTense } = CONTAINER_ACTION_META[action];
+    notifyActionSuccess(category, `${stackName} ${pastTense}`, stackName, req.user?.username ?? 'system');
+  } catch (error: unknown) {
+    console.error('[Stacks] %s threw unexpectedly: %s', sanitizeForLog(action), sanitizeForLog(stackName), error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: getErrorMessage(error, `Failed to ${action} stack`) });
+    }
+  } finally {
+    releaseStackOpLock(req, stackName);
+  }
 }
 
 stacksRouter.post('/:stackName/restart', (req, res) => bulkContainerOp(req, res, 'restart'));
@@ -824,6 +880,8 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  // Lock held below. All early-returns must stay inside the try so finally fires.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'update')) return;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
@@ -861,7 +919,11 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       console.warn(`[Stacks] Update failed, rollback did not complete: ${sanitizeForLog(stackName)}`);
     }
     notifyActionFailure('update', stackName, error);
-    res.status(500).json({ error: getErrorMessage(error, 'Failed to update'), rolledBack });
+    if (!res.headersSent) {
+      res.status(500).json({ error: getErrorMessage(error, 'Failed to update'), rolledBack });
+    }
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 });
 
