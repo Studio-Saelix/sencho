@@ -7,7 +7,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: docker-publish
+  # Ref-scoped so two different release tags (e.g. v0.86.4 and v0.86.5) cannot
+  # cancel each other. Reruns of the exact same ref still cancel the prior
+  # run for that ref, which is the cancel behavior we actually want.
+  group: docker-publish-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -132,7 +135,6 @@ jobs:
           exit-code: '1'
           severity: 'CRITICAL,HIGH'
           format: 'table'
-          trivy-version: 'latest'
           trivy-config: trivy.yaml
 
       # Start the scanned image headless on the runner and poll /api/health

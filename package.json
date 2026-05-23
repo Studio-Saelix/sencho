@@ -17,6 +17,9 @@
   "author": "Studio Saelix",
   "license": "SEE LICENSE IN LICENSE",
   "type": "commonjs",
+  "engines": {
+    "node": ">=26.0.0"
+  },
   "bugs": {
     "url": "https://github.com/studio-saelix/sencho/issues"
   },

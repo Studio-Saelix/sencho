@@ -1,5 +1,8 @@
 version: 2
 updates:
+  # npm (root) - playwright/husky/commitlint
+  # Security advisories batch into their own PR (labeled "security") so they
+  # can be reviewed and merged ahead of the noisier weekly version-update PR.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -9,6 +12,10 @@ updates:
     open-pull-requests-limit: 10
     groups:
       all-npm-root:
+        applies-to: version-updates
+        patterns: ["*"]
+      all-npm-root-security:
+        applies-to: security-updates
         patterns: ["*"]
 
   - package-ecosystem: "npm"
@@ -20,6 +27,10 @@ updates:
     open-pull-requests-limit: 10
     groups:
       all-npm-backend:
+        applies-to: version-updates
+        patterns: ["*"]
+      all-npm-backend-security:
+        applies-to: security-updates
         patterns: ["*"]
 
   - package-ecosystem: "npm"
@@ -31,21 +42,42 @@ updates:
     open-pull-requests-limit: 10
     groups:
       all-npm-frontend:
+        applies-to: version-updates
+        patterns: ["*"]
+      all-npm-frontend-security:
+        applies-to: security-updates
         patterns: ["*"]
 
+  # Docker base images. No version-update group: keep base-image bumps as
+  # individual PRs so each digest change gets its own review. Security
+  # updates still batch into one PR for quick triage.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
     labels:
       - "dependencies"
+    groups:
+      docker-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
+  # github-actions: scan both top-level workflows (.github/workflows/) and the
+  # local composite action (.github/actions/start-app/action.yml). Dependabot
+  # only walks each directory it is given, so the composite must be listed
+  # explicitly for its uses: pins to be tracked.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/start-app"
     schedule:
       interval: "weekly"
     labels:
       - "ci"
     groups:
       all-actions:
+        applies-to: version-updates
+        patterns: ["*"]
+      all-actions-security:
+        applies-to: security-updates
         patterns: ["*"]

@@ -5,8 +5,13 @@ on:
   pull_request_target:
     types: [opened,closed,synchronize]
 
+# Minimum scopes contributor-assistant/github-action needs to operate:
+#   contents: write       - commit signatures to signatures/version1/cla.json
+#   pull-requests: write  - comment on the PR with the CLA prompt
+#   statuses: write       - set the commit status (success / pending)
+# actions: write is intentionally NOT granted; this workflow does not manage
+# other workflow runs.
 permissions:
-  actions: write
   contents: write
   pull-requests: write
   statuses: write
@@ -16,7 +21,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "CLA Assistant"
-        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        # Only run on pull_request_target events, or on issue_comment events
+        # that are (a) on a PR (not a plain Issue) and (b) match one of the two
+        # documented CLA phrases. github.event.issue.pull_request is truthy
+        # only when the issue is a PR, so plain-Issue comments are ignored.
+        if: |
+          github.event_name == 'pull_request_target' ||
+          (github.event_name == 'issue_comment' &&
+           github.event.issue.pull_request != null &&
+           (github.event.comment.body == 'recheck' ||
+            github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
         uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
