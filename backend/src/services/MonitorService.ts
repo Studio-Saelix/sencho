@@ -7,6 +7,7 @@ import { NotificationService } from './NotificationService';
 import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
 import { getLatestVersion } from '../utils/version-check';
 import { isDebugEnabled } from '../utils/debug';
+import { withTimeout, TimeoutError } from '../utils/withTimeout';
 
 const getMetricDetails = (metric: string): { name: string, unit: string } => {
     switch (metric) {
@@ -60,25 +61,17 @@ const HOST_ALERT_KEYS = {
 const STATS_TIMEOUT_MS = 10_000;
 const FLOAT_EQ_EPSILON = 0.01;
 
-class TimeoutError extends Error {
-    constructor(label: string, ms: number) {
-        super(`Timeout: ${label} after ${ms}ms`);
-        this.name = 'TimeoutError';
-    }
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-    // Note: JavaScript Promise.race does not cancel the losing promise.
-    // A timed-out Docker API or systeminformation call continues in the
-    // background until it resolves or the process exits. True cancellation
-    // requires AbortController plumbing through DockerController and
-    // systeminformation, which is a structural limitation of the codebase.
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new TimeoutError(label, ms)), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
+// Janitor cadence and circuit-breaker. The disk-usage call (`docker system df`)
+// can take 30+ seconds on Docker Desktop Windows when the daemon has many
+// volumes; running it on the 30s evaluate cycle compounded with stats fan-out
+// produced 140s+ stalls (F-6). Decoupling onto a slow cadence + tight timeout
+// keeps the monitor cycle bounded and prevents the cycle from re-entering on
+// a sick daemon.
+const JANITOR_INTERVAL_MS = 15 * 60 * 1000;
+const JANITOR_TIMEOUT_MS = 8_000;
+const JANITOR_BREAKER_THRESHOLD = 3;
+const JANITOR_BREAKER_COOLDOWN_MS = 60 * 60 * 1000;
+const JANITOR_FIRST_TICK_DELAY_MS = 45_000;
 
 // Cap on simultaneous Docker socket requests when fanning out per-container
 // work. Mirrors the implicit safety profile of updateGlobalDockerNetwork in
@@ -117,7 +110,19 @@ async function runWithConcurrency<T>(
 export class MonitorService {
     private static instance: MonitorService;
     private intervalId: NodeJS.Timeout | null = null;
+    private firstTickTimeoutId: NodeJS.Timeout | null = null;
+    private janitorIntervalId: NodeJS.Timeout | null = null;
+    private janitorFirstTickTimeoutId: NodeJS.Timeout | null = null;
     private isProcessing = false;
+    private isJanitorProcessing = false;
+
+    // Circuit-breaker state for the janitor disk-usage check. When
+    // getDiskUsage() times out JANITOR_BREAKER_THRESHOLD times in a row the
+    // breaker opens for JANITOR_BREAKER_COOLDOWN_MS so a sick daemon stops
+    // pinning Dockerode sockets every cycle. Counter resets on success or
+    // when the cooldown elapses.
+    private janitorConsecutiveTimeouts = 0;
+    private janitorBreakerUntil = 0;
 
     // Track the duration a specific stack alert rule has been in breach state
     // key: rule_id, value: AlertState
@@ -155,23 +160,43 @@ export class MonitorService {
 
     public start() {
         if (this.intervalId) return;
-        if (isDebugEnabled()) console.log('[Monitor:diag] Starting evaluation loop (30s interval)');
+        if (isDebugEnabled()) console.log('[Monitor:diag] Starting evaluation loop (30s interval) + janitor loop (15m interval)');
 
-        // Run every 30 seconds
+        // 30s monitor cycle: host stats, container stats, version check.
+        // Does NOT include the janitor disk-usage check (F-6); that runs on
+        // its own slow cadence so a hung df() cannot compound the cycle.
         this.intervalId = setInterval(() => {
             this.evaluate();
         }, 30000);
+        this.firstTickTimeoutId = setTimeout(() => this.evaluate(), 5000);
 
-        // Run an initial evaluation slightly after boot
-        setTimeout(() => this.evaluate(), 5000);
+        // 15m janitor cycle: disk-usage check with tight timeout + breaker.
+        // First tick is deferred past the initial monitor tick's stats
+        // fan-out so the two don't share daemon head-of-line latency.
+        this.janitorIntervalId = setInterval(() => {
+            this.evaluateJanitor();
+        }, JANITOR_INTERVAL_MS);
+        this.janitorFirstTickTimeoutId = setTimeout(() => this.evaluateJanitor(), JANITOR_FIRST_TICK_DELAY_MS);
     }
 
     public stop() {
         if (this.intervalId) {
             clearInterval(this.intervalId);
             this.intervalId = null;
-            if (isDebugEnabled()) console.log('[Monitor:diag] Evaluation loop stopped');
         }
+        if (this.firstTickTimeoutId) {
+            clearTimeout(this.firstTickTimeoutId);
+            this.firstTickTimeoutId = null;
+        }
+        if (this.janitorIntervalId) {
+            clearInterval(this.janitorIntervalId);
+            this.janitorIntervalId = null;
+        }
+        if (this.janitorFirstTickTimeoutId) {
+            clearTimeout(this.janitorFirstTickTimeoutId);
+            this.janitorFirstTickTimeoutId = null;
+        }
+        if (isDebugEnabled()) console.log('[Monitor:diag] Evaluation + janitor loops stopped');
     }
 
     private async evaluate() {
@@ -241,47 +266,105 @@ export class MonitorService {
         //    DockerEventService: event-driven, causal, distinguishes
         //    intentional stops from real crashes, detects OOM kills.
 
-        // 3. Docker Janitor Check
-        try {
-            const janitorLimitGb = parseFloat(settings['docker_janitor_gb']);
-            if (!isNaN(janitorLimitGb) && janitorLimitGb > 0) {
-                // Use the Docker Engine API directly via dockerode. The previous
-                // shell-out parsed `docker system df --format "{{json .}}"` and
-                // walked the human-readable "1.196GB" Reclaimable strings with
-                // a regex; the API returns raw byte counts and saves a fork
-                // every monitor tick (default 30 s).
-                const usage = await withTimeout(
-                    DockerController.getInstance().getDiskUsage(),
-                    STATS_TIMEOUT_MS,
-                    'docker disk usage',
-                );
-                const totalReclaimableBytes =
-                    usage.reclaimableImages +
-                    usage.reclaimableContainers +
-                    usage.reclaimableVolumes +
-                    usage.reclaimableBuildCache;
-
-                const reclaimGb = totalReclaimableBytes / (1024 * 1024 * 1024);
-                const JANITOR_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
-                // Sanity floor: never alert on near-empty hosts even if the user
-                // configured an aggressive threshold like 0.001 GB. 100 MB is the
-                // smallest waste worth interrupting an operator over.
-                const MIN_RECLAIMABLE_GB = 0.1;
-
-                if (reclaimGb >= janitorLimitGb && reclaimGb >= MIN_RECLAIMABLE_GB) {
-                    const registry = NodeRegistry.getInstance();
-                    const localNode = registry.getNode(registry.getDefaultNodeId());
-                    const nodeLabel = localNode?.name ?? 'this node';
-                    await this.dispatchWithCooldown(HOST_ALERT_KEYS.janitor, JANITOR_COOLDOWN_MS, 'info', 'system',
-                        `Node "${nodeLabel}" has accumulated ${reclaimGb.toFixed(1)} GB of unused Docker data. Consider using the Janitor tool.`);
-                }
-            }
-        } catch (e) {
-            console.error('Error checking docker janitor limits', e);
-        }
+        // 3. (Decoupled) Docker janitor disk-usage check runs on its own
+        //    slow cadence in evaluateJanitor(); see start() and F-6.
 
         // 4. Sencho version update check (runs once per VERSION_CHECK_INTERVAL_MS)
         await this.checkSenchoVersion();
+    }
+
+    /**
+     * Slow-cadence janitor disk-usage check, decoupled from the 30s monitor
+     * cycle (F-6). A hung `docker system df` would otherwise compound with
+     * the per-container stats fan-out and produce 140s+ stalls.
+     *
+     * Failure handling:
+     * - TimeoutError increments a counter; at JANITOR_BREAKER_THRESHOLD the
+     *   breaker opens for JANITOR_BREAKER_COOLDOWN_MS, after which the
+     *   counter resets and the next tick attempts again.
+     * - Other errors (daemon unreachable, parse errors) are logged but do
+     *   not advance the breaker, because they are not the failure mode the
+     *   breaker exists to mitigate.
+     * - Re-entrancy is guarded; this matters because the 8s timeout still
+     *   may leave the previous in-flight `df()` resolving in the background.
+     */
+    private async evaluateJanitor(): Promise<void> {
+        if (this.isJanitorProcessing) return;
+
+        if (Date.now() < this.janitorBreakerUntil) {
+            if (isDebugEnabled()) {
+                const remainingMin = Math.round((this.janitorBreakerUntil - Date.now()) / 60000);
+                console.debug(`[Monitor:diag] Janitor breaker open; next attempt in ~${remainingMin}m`);
+            }
+            return;
+        }
+
+        this.isJanitorProcessing = true;
+        try {
+            const db = DatabaseService.getInstance();
+            const settings = db.getGlobalSettings();
+            const janitorLimitGb = parseFloat(settings['docker_janitor_gb']);
+            if (isNaN(janitorLimitGb) || janitorLimitGb <= 0) return;
+
+            let usage: Awaited<ReturnType<DockerController['getDiskUsage']>>;
+            try {
+                usage = await withTimeout(
+                    DockerController.getInstance().getDiskUsage(),
+                    JANITOR_TIMEOUT_MS,
+                    'docker disk usage',
+                );
+            } catch (e) {
+                if (e instanceof TimeoutError) {
+                    this.janitorConsecutiveTimeouts += 1;
+                    if (this.janitorConsecutiveTimeouts >= JANITOR_BREAKER_THRESHOLD) {
+                        this.janitorBreakerUntil = Date.now() + JANITOR_BREAKER_COOLDOWN_MS;
+                        const cooldownMin = Math.round(JANITOR_BREAKER_COOLDOWN_MS / 60000);
+                        console.warn(
+                            `[Monitor] Janitor disk-usage check circuit breaker opened after ${this.janitorConsecutiveTimeouts} consecutive timeouts (next attempt in ${cooldownMin}m)`,
+                        );
+                        this.janitorConsecutiveTimeouts = 0;
+                    } else if (isDebugEnabled()) {
+                        console.debug(`[Monitor:diag] Janitor disk-usage timeout ${this.janitorConsecutiveTimeouts}/${JANITOR_BREAKER_THRESHOLD}`);
+                    }
+                    return;
+                }
+                console.error('Error checking docker janitor limits', e);
+                return;
+            }
+
+            if (this.janitorConsecutiveTimeouts > 0) {
+                console.log('[Monitor] Janitor disk-usage check recovered');
+                this.janitorConsecutiveTimeouts = 0;
+            }
+
+            const totalReclaimableBytes =
+                usage.reclaimableImages +
+                usage.reclaimableContainers +
+                usage.reclaimableVolumes +
+                usage.reclaimableBuildCache;
+
+            const reclaimGb = totalReclaimableBytes / (1024 * 1024 * 1024);
+            const JANITOR_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h between repeat alerts
+            // Sanity floor: never alert on near-empty hosts even if the user
+            // configured an aggressive threshold like 0.001 GB. 100 MB is the
+            // smallest waste worth interrupting an operator over.
+            const MIN_RECLAIMABLE_GB = 0.1;
+
+            if (reclaimGb >= janitorLimitGb && reclaimGb >= MIN_RECLAIMABLE_GB) {
+                const registry = NodeRegistry.getInstance();
+                const localNode = registry.getNode(registry.getDefaultNodeId());
+                const nodeLabel = localNode?.name ?? 'this node';
+                await this.dispatchWithCooldown(
+                    HOST_ALERT_KEYS.janitor,
+                    JANITOR_COOLDOWN_MS,
+                    'info',
+                    'system',
+                    `Node "${nodeLabel}" has accumulated ${reclaimGb.toFixed(1)} GB of unused Docker data. Consider using the Janitor tool.`,
+                );
+            }
+        } finally {
+            this.isJanitorProcessing = false;
+        }
     }
 
     /**

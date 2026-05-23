@@ -8,6 +8,20 @@ import { isValidDockerResourceId, isValidCidr, isValidIPv4 } from '../utils/vali
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
+import { withTimeout, TimeoutError } from '../utils/withTimeout';
+
+// `docker system df` (the call backing estimateSystemReclaim) can take 30+
+// seconds on Docker Desktop with many volumes; 8s matches the MonitorService
+// janitor timeout so the daemon never has more than ~16s of concurrent
+// pressure from Sencho's own paths even when prune and janitor collide.
+const PRUNE_ESTIMATE_TIMEOUT_MS = 8_000;
+
+function respondDfSlow(res: Response): Response {
+  return res.status(503).json({
+    error: 'Docker daemon is busy. Please try again in a moment.',
+    code: 'docker_df_slow',
+  });
+}
 
 export const systemMaintenanceRouter = Router();
 
@@ -95,9 +109,15 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
           knownStacks,
         );
       } else {
-        estimate = await dockerController.estimateSystemReclaim(
-          target as 'containers' | 'images' | 'networks' | 'volumes',
-          knownStacks,
+        // estimateSystemReclaim calls `docker system df`; bound it so a slow
+        // daemon doesn't hang the admin's tab (F-6).
+        estimate = await withTimeout(
+          dockerController.estimateSystemReclaim(
+            target as 'containers' | 'images' | 'networks' | 'volumes',
+            knownStacks,
+          ),
+          PRUNE_ESTIMATE_TIMEOUT_MS,
+          'docker disk usage',
         );
       }
       res.json({ message: 'Dry run', success: true, dryRun: true, reclaimedBytes: estimate.reclaimableBytes });
@@ -122,6 +142,10 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     }
     res.json({ message: 'Prune completed', ...result });
   } catch (error: unknown) {
+    if (error instanceof TimeoutError) {
+      console.warn('System prune: docker disk usage timed out');
+      return respondDfSlow(res);
+    }
     console.error('System prune error:', error);
     res.status(500).json({ error: 'System prune failed' });
   }
@@ -150,13 +174,23 @@ systemMaintenanceRouter.post('/prune/estimate', async (req: Request, res: Respon
         knownStacks,
       );
     } else {
-      result = await dockerController.estimateSystemReclaim(
-        target as 'containers' | 'images' | 'networks' | 'volumes',
-        knownStacks,
+      // estimateSystemReclaim calls `docker system df`; bound it so a slow
+      // daemon doesn't hang the admin's tab (F-6).
+      result = await withTimeout(
+        dockerController.estimateSystemReclaim(
+          target as 'containers' | 'images' | 'networks' | 'volumes',
+          knownStacks,
+        ),
+        PRUNE_ESTIMATE_TIMEOUT_MS,
+        'docker disk usage',
       );
     }
     res.json({ reclaimableBytes: result.reclaimableBytes });
   } catch (error: unknown) {
+    if (error instanceof TimeoutError) {
+      console.warn('Prune estimate: docker disk usage timed out');
+      return respondDfSlow(res);
+    }
     console.error('Prune estimate error:', error);
     res.status(500).json({ error: 'Failed to estimate reclaimable bytes' });
   }
