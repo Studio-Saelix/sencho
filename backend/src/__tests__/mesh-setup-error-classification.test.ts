@@ -442,6 +442,157 @@ describe('MeshService.setupMeshNetwork subnet auto-fallback', () => {
     });
 });
 
+describe('MeshService static IP reservation (F-13)', () => {
+    it('emits IPRange for the upper half of the subnet when creating with an explicit env subnet', async () => {
+        process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
+        process.env.HOSTNAME = 'sencho';
+        const createNetwork = vi.fn().mockResolvedValue(undefined);
+        const inspectNetwork = vi.fn().mockRejectedValue({ statusCode: 404, message: 'no such network' });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        expect(svc.getDataPlaneStatus().ok).toBe(true);
+        expect(createNetwork).toHaveBeenCalledTimes(1);
+        const payload = createNetwork.mock.calls[0][0] as {
+            IPAM?: { Config?: Array<{ Subnet?: string; IPRange?: string }> };
+        };
+        expect(payload.IPAM?.Config?.[0]?.Subnet).toBe('10.42.0.0/24');
+        expect(payload.IPAM?.Config?.[0]?.IPRange).toBe('10.42.0.128/25');
+    });
+
+    it('emits the IPRange on the winning candidate when env is unset and the first candidate overlaps', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const overlap = Object.assign(
+            new Error('Pool overlaps with other one on this address space'),
+            { statusCode: 500 },
+        );
+        const createNetwork = vi.fn()
+            .mockRejectedValueOnce(overlap)
+            .mockResolvedValueOnce(undefined);
+        const inspectNetwork = vi.fn().mockRejectedValue({ statusCode: 404, message: 'no such network' });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        expect(svc.getDataPlaneStatus().ok).toBe(true);
+        expect(svc.getDataPlaneStatus().subnet).toBe('172.31.0.0/24');
+        expect(createNetwork).toHaveBeenCalledTimes(2);
+        const winningPayload = createNetwork.mock.calls[1][0] as {
+            IPAM?: { Config?: Array<{ Subnet?: string; IPRange?: string }> };
+        };
+        expect(winningPayload.IPAM?.Config?.[0]?.Subnet).toBe('172.31.0.0/24');
+        expect(winningPayload.IPAM?.Config?.[0]?.IPRange).toBe('172.31.0.128/25');
+    });
+
+    it('emits a legacy warn when adopting a sencho_mesh without the upper-half IPRange', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const createNetwork = vi.fn();
+        // Legacy network: Subnet only, no IPRange (Docker defaults auto-
+        // allocation to the entire subnet, including .2).
+        const inspectNetwork = vi.fn().mockResolvedValue({
+            IPAM: { Config: [{ Subnet: '172.30.0.0/24' }] },
+        });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(true);
+        expect(status.subnet).toBe('172.30.0.0/24');
+        expect(createNetwork).not.toHaveBeenCalled();
+
+        const all = (svc as unknown as { activity: MeshActivityEvent[] }).activity;
+        const warns = all.filter((e) => e.level === 'warn' && /without the upper-half IPAM IPRange/.test(e.message));
+        expect(warns).toHaveLength(1);
+        expect(warns[0].details).toMatchObject({
+            subnet: '172.30.0.0/24',
+            expectedIpRange: '172.30.0.128/25',
+            actualIpRange: null,
+        });
+
+        const meshLines = warnSpy.mock.calls
+            .map((args) => String(args[0]))
+            .filter((line) => /\[Mesh\] sencho_mesh adopted without the upper-half IPAM IPRange/.test(line));
+        expect(meshLines.length).toBeGreaterThan(0);
+    });
+
+    it('stays silent on the adopt path when the existing sencho_mesh already carries the upper-half IPRange', async () => {
+        delete process.env.SENCHO_MESH_SUBNET;
+        process.env.HOSTNAME = 'sencho';
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const createNetwork = vi.fn();
+        const inspectNetwork = vi.fn().mockResolvedValue({
+            IPAM: {
+                Config: [{
+                    Subnet: '172.30.0.0/24',
+                    IPRange: '172.30.0.128/25',
+                }],
+            },
+        });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        const status = svc.getDataPlaneStatus();
+        expect(status.ok).toBe(true);
+
+        const all = (svc as unknown as { activity: MeshActivityEvent[] }).activity;
+        const warns = all.filter((e) => e.level === 'warn' && /IPAM IPRange/.test(e.message));
+        expect(warns).toHaveLength(0);
+
+        const meshLines = warnSpy.mock.calls
+            .map((args) => String(args[0]))
+            .filter((line) => /IPAM IPRange/.test(line));
+        expect(meshLines).toHaveLength(0);
+    });
+
+    it('emits the legacy warn when a TOCTOU 409 race-winner is a legacy network', async () => {
+        // Operator-explicit subnet matches a race-winner that pre-dates the
+        // upper-half IPRange bias: another process created sencho_mesh
+        // between our initial inspect and our create. We adopt it, the data
+        // plane comes up, and the warn fires because the race-winner's IPAM
+        // block has no IPRange entry. Exercises the subtle assignment in
+        // setupMeshNetwork that reassigns existingSubnet = raceWinner.
+        process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
+        process.env.HOSTNAME = 'sencho';
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const conflict = Object.assign(
+            new Error('network with name sencho_mesh already exists'),
+            { statusCode: 409 },
+        );
+        const createNetwork = vi.fn().mockRejectedValue(conflict);
+        const inspectNetwork = vi.fn()
+            .mockRejectedValueOnce({ statusCode: 404, message: 'no such network' })
+            .mockResolvedValueOnce({ IPAM: { Config: [{ Subnet: '10.42.0.0/24' }] } });
+        mockDocker({ createNetwork, inspectNetwork });
+
+        const svc = MeshService.getInstance();
+        await callSetup(svc);
+
+        expect(svc.getDataPlaneStatus().ok).toBe(true);
+        const all = (svc as unknown as { activity: MeshActivityEvent[] }).activity;
+        const warns = all.filter((e) => e.level === 'warn' && /without the upper-half IPAM IPRange/.test(e.message));
+        expect(warns).toHaveLength(1);
+        expect(warns[0].details).toMatchObject({
+            subnet: '10.42.0.0/24',
+            expectedIpRange: '10.42.0.128/25',
+            actualIpRange: null,
+        });
+        const meshLines = warnSpy.mock.calls
+            .map((args) => String(args[0]))
+            .filter((line) => /\[Mesh\] sencho_mesh adopted without the upper-half IPAM IPRange/.test(line));
+        expect(meshLines.length).toBeGreaterThan(0);
+    });
+});
+
 describe('MeshService console.log mirror (F-5)', () => {
     it('mirrors a setup failure to console.error with the [Mesh] prefix', async () => {
         process.env.SENCHO_MESH_SUBNET = '10.42.0.0/24';
