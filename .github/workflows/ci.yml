@@ -3,8 +3,6 @@ name: Sencho CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
 
 # Cancel previous runs on the same branch/PR
 concurrency:
@@ -217,81 +215,3 @@ jobs:
             test-results/
             ci-logs/
           retention-days: 7
-
-  sync-docs:
-    name: Sync Docs to sencho-docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      # This job mirrors docs/ into the sibling sencho-docs repo. The token
-      # must therefore be scoped to `sencho-docs`, not the current repo, so
-      # we mint an installation token explicitly targeting that repo.
-      # Minted unconditionally so the step graph stays simple; the token
-      # auto-revokes on post-step even when the gate below is false.
-      - name: Generate GitHub App installation token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: sencho-docs
-          permission-contents: write
-
-      - name: Checkout Sencho repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          path: sencho
-          # Need the previous commit to diff against for the docs-change gate.
-          fetch-depth: 2
-
-      # Skip the clone/rsync/commit work entirely when the push doesn't touch
-      # docs/. rsync --delete is a no-op in that case anyway, but spinning up
-      # the runner + cloning sencho-docs + computing the diff still burns
-      # ~30s of action minutes per non-docs push to main. With multiple
-      # non-docs merges per day this adds up fast.
-      - name: Detect docs changes
-        id: detect
-        working-directory: sencho
-        run: |
-          if git diff --name-only HEAD~1 HEAD -- docs/ | grep -q .; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No changes under docs/ in this commit; skipping sync."
-          fi
-
-      - name: Clone or init sencho-docs
-        if: steps.detect.outputs.changed == 'true'
-        env:
-          DOCS_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          rm -rf sencho-docs
-
-          REMOTE="https://x-access-token:${DOCS_TOKEN}@github.com/studio-saelix/sencho-docs.git"
-
-          if git clone "${REMOTE}" sencho-docs 2>/dev/null; then
-            echo "Cloned existing sencho-docs."
-          else
-            echo "Clone failed (repo is empty or has no default branch) - initializing."
-            mkdir -p sencho-docs
-            cd sencho-docs
-            git init
-            git checkout -b main
-            git remote add origin "${REMOTE}"
-          fi
-
-      - name: Copy /docs into sencho-docs root
-        if: steps.detect.outputs.changed == 'true'
-        run: rsync -av --delete --exclude='.git' sencho/docs/ sencho-docs/
-
-      - name: Commit and push to sencho-docs
-        if: steps.detect.outputs.changed == 'true'
-        working-directory: sencho-docs
-        run: |
-          git config user.email "docs-bot@sencho.io"
-          git config user.name "Sencho Docs Bot"
-          git add -A
-          git commit -m "docs: sync from main@${{ github.sha }}" || echo "No changes to commit"
-          git push origin HEAD:main
