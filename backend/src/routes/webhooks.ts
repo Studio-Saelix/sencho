@@ -147,6 +147,15 @@ webhooksRouter.get('/:id/history', authMiddleware, async (req: Request, res: Res
 // Every unauthenticated rejection returns the same 404 with the same body so
 // callers cannot enumerate webhook ids or fingerprint the instance's licence
 // tier from the response surface. Successful authentication still returns 202.
+//
+// The handler also runs the HMAC computation on every path (using a decoy
+// secret and an empty buffer when the real ones are missing) so the wall-
+// clock cost of a reject path matches the wall-clock cost of a real-shape
+// wrong-secret path. Without this, repeated near-rate-limit probes with a
+// large attacker-controlled body could distinguish a valid-and-enabled
+// webhook id on a paid tier from the other reject cases via response
+// latency. Timing now depends only on the size of the request body, which
+// the attacker already controls and which reveals nothing webhook-specific.
 webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, res: Response): Promise<void> => {
   const unauthenticated = (): void => {
     res.status(404).json({ error: 'Webhook not found or signature invalid' });
@@ -156,22 +165,27 @@ webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, 
     const db = DatabaseService.getInstance();
     const webhook = db.getWebhook(id);
 
-    if (!webhook || !webhook.enabled) return unauthenticated();
-    if (LicenseService.getInstance().getTier() !== 'paid') return unauthenticated();
+    const tier = LicenseService.getInstance().getTier();
+    const signature = req.headers['x-webhook-signature'] as string | undefined;
 
-    const signature = req.headers['x-webhook-signature'] as string;
-    if (!signature) return unauthenticated();
-
-    // Fail closed when the raw body was not captured. express.json()'s verify
-    // callback populates req.rawBody for every parsed body; an absent rawBody
-    // means the request had no body or an unparseable content-type. Falling
-    // back to JSON.stringify(req.body) would compare the HMAC against a
-    // re-serialised payload that is not byte-equal to what the client signed.
-    if (!req.rawBody) return unauthenticated();
-    const payload = req.rawBody.toString('utf-8');
-
+    // Unconditional HMAC. The decoy secret keeps the work non-skippable when
+    // the webhook does not exist; an empty buffer keeps it non-skippable
+    // when express.json()'s verify callback did not capture a body. The
+    // empty-string signature still flows through validateSignature, which
+    // is constant-time over every shape and will return false against the
+    // all-zero sentinel. Reject conditions are checked after the HMAC has
+    // already run so the timing of every reject path matches the timing of
+    // a real-shape wrong-secret request.
     const svc = WebhookService.getInstance();
-    if (!svc.validateSignature(payload, webhook.secret, signature)) return unauthenticated();
+    const payload = (req.rawBody ?? Buffer.alloc(0)).toString('utf-8');
+    const secretForHmac = webhook?.secret ?? WebhookService.getDecoySecret();
+    const sigOk = svc.validateSignature(payload, secretForHmac, signature ?? '');
+
+    if (!webhook || !webhook.enabled) return unauthenticated();
+    if (tier !== 'paid') return unauthenticated();
+    if (!signature) return unauthenticated();
+    if (!req.rawBody) return unauthenticated();
+    if (!sigOk) return unauthenticated();
 
     // Use action from body if provided, otherwise use webhook default.
     // Validate against the action allowlist before queueing execution so an

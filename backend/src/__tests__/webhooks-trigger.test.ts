@@ -172,6 +172,70 @@ describe('POST /api/webhooks/:id/trigger: uniform unauthenticated 404 (M1, H3)',
         expect(res.status).toBe(404);
         expect(res.body).toEqual(expected);
     });
+
+    it('runs validateSignature even when the webhook id is unknown (timing oracle)', async () => {
+        const sigSpy = vi.spyOn(WebhookService.getInstance(), 'validateSignature');
+        const body = '{"probe":true}';
+
+        const res = await request(app)
+            .post('/api/webhooks/9999999/trigger')
+            .set('Content-Type', 'application/json')
+            .set('X-Webhook-Signature', `sha256=${'a'.repeat(64)}`)
+            .send(body);
+
+        expect(res.status).toBe(404);
+        expect(sigSpy).toHaveBeenCalledTimes(1);
+        const [usedPayload, usedSecret, usedSignature] = sigSpy.mock.calls[0];
+        // HMAC ran against the attacker-supplied body, not a short-circuited
+        // empty string; the unknown-id path must do the same work as the
+        // wrong-signature path.
+        expect(usedPayload).toBe(body);
+        // Decoy secret got plumbed through so the HMAC compute was real.
+        expect(typeof usedSecret).toBe('string');
+        expect((usedSecret as string).length).toBeGreaterThan(0);
+        expect(usedSignature).toContain('sha256=');
+    });
+
+    it('runs validateSignature even when the signature header is missing', async () => {
+        const sigSpy = vi.spyOn(WebhookService.getInstance(), 'validateSignature');
+        const { id } = createWebhook();
+        const body = '{}';
+
+        const res = await request(app)
+            .post(`/api/webhooks/${id}/trigger`)
+            .set('Content-Type', 'application/json')
+            .send(body);
+
+        expect(res.status).toBe(404);
+        expect(sigSpy).toHaveBeenCalledTimes(1);
+        const [usedPayload, , usedSignature] = sigSpy.mock.calls[0];
+        expect(usedPayload).toBe(body);
+        // Empty-string signature flowed into validateSignature instead of
+        // short-circuiting before the HMAC compute.
+        expect(usedSignature).toBe('');
+    });
+});
+
+describe('WebhookService.validateSignature: constant-time over input shape', () => {
+    it('returns false but does not throw on an empty signature string', () => {
+        const result = WebhookService.getInstance().validateSignature('payload', 'secret', '');
+        expect(result).toBe(false);
+    });
+
+    it('returns false but does not throw on a wrong-prefix signature', () => {
+        const result = WebhookService.getInstance().validateSignature('payload', 'secret', 'sha1=abc');
+        expect(result).toBe(false);
+    });
+
+    it('returns false but does not throw on a malformed hex signature', () => {
+        const result = WebhookService.getInstance().validateSignature('payload', 'secret', 'sha256=not-hex-data-shorter-than-64-chars');
+        expect(result).toBe(false);
+    });
+
+    it('returns false but does not throw on a hex signature of the wrong length', () => {
+        const result = WebhookService.getInstance().validateSignature('payload', 'secret', `sha256=${'a'.repeat(32)}`);
+        expect(result).toBe(false);
+    });
 });
 
 describe('POST /api/webhooks/:id/trigger: authenticated happy path', () => {

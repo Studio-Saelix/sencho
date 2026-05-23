@@ -214,13 +214,16 @@ components:
       properties:
         id:
           type: integer
+        node_id:
+          type: integer
+          description: Node the webhook executes against.
         name:
           type: string
         stack_name:
           type: string
         action:
           type: string
-          enum: [deploy, restart, stop, start, pull]
+          enum: [deploy, restart, stop, start, pull, git-pull]
         secret:
           type: string
           description: Masked secret (e.g., `****...****`). Full secret is only returned on creation.
@@ -1465,7 +1468,7 @@ paths:
                   description: Node the webhook executes against. Defaults to the request's resolved node or the default node.
       responses:
         "201":
-          description: Webhook created. The `secret` field is the HMAC signing key — save it now.
+          description: Webhook created. The `secret` field is the HMAC signing key; save it now.
           content:
             application/json:
               schema:
@@ -1476,7 +1479,7 @@ paths:
                     type: integer
                   secret:
                     type: string
-                    description: HMAC-SHA256 signing secret. Store securely — this is the only time it's returned in full.
+                    description: HMAC-SHA256 signing secret. Store securely; this is the only time it's returned in full.
         "400":
           description: Validation error.
           content:
@@ -1631,6 +1634,12 @@ paths:
                 $ref: "#/components/schemas/Error"
         "404":
           description: Authentication failed. The webhook is unknown, disabled, the licence is not paid, the signature header is missing, the body was empty, or the signature did not match. Sencho returns the same response for every unauthenticated case.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate limit exceeded. The trigger endpoint allows 500 requests per minute per source IP; CI/CD callers behind shared NAT may share that budget.
           content:
             application/json:
               schema:

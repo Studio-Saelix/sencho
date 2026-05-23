@@ -39,4 +39,27 @@ describe('redactSensitiveText', () => {
     expect(text).not.toContain('user.windows');
     expect(text).toContain('D:\\Users\\<user>\\Sencho\\compose.yaml');
   });
+
+  it('strips Windows-style homedir usernames when the drive letter is lowercase', () => {
+    const text = redactSensitiveText('failed: c:\\Users\\user.lowercase\\app\\compose.yaml');
+
+    expect(text).not.toContain('user.lowercase');
+    expect(text).toContain('c:\\Users\\<user>\\app\\compose.yaml');
+  });
+
+  it('redacts Basic auth credentials embedded after Authorization header', () => {
+    const text = redactSensitiveText(
+      'upstream 401: Authorization: Basic dXNlcjpwYXNzd29yZA== rejected by registry',
+    );
+
+    expect(text).not.toContain('dXNlcjpwYXNzd29yZA');
+    expect(text).toContain('[redacted]');
+  });
+
+  it('redacts a bare Basic auth scheme without an Authorization header', () => {
+    const text = redactSensitiveText('curl error: header Basic c2VjcmV0OnZhbHVl was rejected');
+
+    expect(text).not.toContain('c2VjcmV0OnZhbHVl');
+    expect(text).toContain('Basic [redacted]');
+  });
 });

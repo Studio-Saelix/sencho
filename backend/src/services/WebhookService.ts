@@ -18,6 +18,12 @@ const REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS = 30_000;
 
 export class WebhookService {
     private static instance: WebhookService;
+    // Stable per-process decoy secret used to keep HMAC work non-skippable on
+    // reject paths (unknown webhook id, disabled, non-paid tier, etc.). Never
+    // accepts a signature: the trigger handler decides the final 202 / 404
+    // outcome from independent conditions and only consults the HMAC result
+    // when every other check has already passed.
+    private static decoySecret: string | null = null;
 
     public static getInstance(): WebhookService {
         if (!WebhookService.instance) {
@@ -26,27 +32,39 @@ export class WebhookService {
         return WebhookService.instance;
     }
 
+    public static getDecoySecret(): string {
+        if (!WebhookService.decoySecret) {
+            WebhookService.decoySecret = crypto.randomBytes(32).toString('hex');
+        }
+        return WebhookService.decoySecret;
+    }
+
     public generateSecret(): string {
         return crypto.randomBytes(32).toString('hex');
     }
 
     public validateSignature(payload: string, secret: string, signature: string): boolean {
+        // Always perform HMAC and timingSafeEqual against a fixed-length
+        // buffer so the wall-clock cost of this call is independent of the
+        // shape of the input signature. Without this, the early-return paths
+        // (missing header, wrong prefix, malformed hex) would skip the HMAC
+        // and let an attacker distinguish those cases from a real-shape
+        // wrong-secret case through repeated near-rate-limit probes with a
+        // large attacker-controlled body. Timing now depends only on the
+        // size of `payload`, which the attacker already controls and which
+        // does not reveal anything about the webhook id or licence tier.
+        const expected = crypto.createHmac('sha256', secret).update(payload).digest();
+        const provided = Buffer.alloc(32);
+        let formatOk = false;
+
         const parts = signature.split('=');
-        if (parts.length !== 2 || parts[0] !== 'sha256') return false;
-
-        const expected = crypto
-            .createHmac('sha256', secret)
-            .update(payload)
-            .digest('hex');
-
-        try {
-            return crypto.timingSafeEqual(
-                Buffer.from(expected, 'hex'),
-                Buffer.from(parts[1], 'hex'),
-            );
-        } catch {
-            return false;
+        if (parts.length === 2 && parts[0] === 'sha256' && /^[0-9a-fA-F]{64}$/.test(parts[1])) {
+            provided.write(parts[1], 'hex');
+            formatOk = true;
         }
+
+        const sigEq = crypto.timingSafeEqual(expected, provided);
+        return formatOk && sigEq;
     }
 
     public async gitSourceExists(stackName: string, nodeId: number): Promise<boolean> {
