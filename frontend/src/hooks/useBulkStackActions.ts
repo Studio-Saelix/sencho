@@ -17,6 +17,18 @@ interface BulkCallbacks {
   onAfter?: (files: string[]) => void;
 }
 
+interface BulkResultItem {
+  stackName: string;
+  ok: boolean;
+  error?: string;
+  code?: string;
+}
+
+interface BulkResponse {
+  action: BulkAction;
+  results: BulkResultItem[];
+}
+
 export function useBulkStackActions() {
   const { isPaid } = useLicense();
 
@@ -33,32 +45,43 @@ export function useBulkStackActions() {
 
     cbs?.onBefore?.(files);
 
-    const results = await Promise.allSettled(
-      files.map(file => {
-        const stackName = file.replace(/\.(yml|yaml)$/, '');
-        const headers: Record<string, string> = action === 'update' ? { 'x-bulk-mode': '1' } : {};
-        return apiFetch(`/stacks/${encodeURIComponent(stackName)}/${action}`, {
-          method: 'POST',
-          headers,
-        }).then(res => {
-          if (!res.ok) return Promise.reject(new Error(file));
-          return file;
-        });
-      })
-    );
+    const stackNames = files.map(file => file.replace(/\.(yml|yaml)$/, ''));
 
-    cbs?.onAfter?.(files);
+    try {
+      const response = await apiFetch('/stacks/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ action, stackNames }),
+      });
 
-    const failed = results
-      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-      .map(r => (r.reason as Error).message);
-    const okCount = results.length - failed.length;
+      cbs?.onAfter?.(files);
 
-    if (failed.length === 0) {
-      const noun = okCount === 1 ? 'stack' : 'stacks';
-      toast.success(`${okCount} ${noun} ${pastTense[action]}`);
-    } else {
-      toast.error(`${okCount} of ${files.length} ${pastTense[action]}; ${failed.length} failed: ${failed.join(', ')}`);
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        const errMsg = (errBody as { error?: string })?.error
+          ?? `Bulk ${action} failed (HTTP ${response.status})`;
+        toast.error(errMsg);
+        return;
+      }
+
+      const payload = (await response.json()) as BulkResponse;
+      const results = Array.isArray(payload.results) ? payload.results : [];
+      const okCount = results.filter(r => r.ok).length;
+      const failed = results.filter(r => !r.ok);
+
+      if (failed.length === 0) {
+        const noun = okCount === 1 ? 'stack' : 'stacks';
+        toast.success(`${okCount} ${noun} ${pastTense[action]}`);
+        return;
+      }
+
+      const failedNames = failed.map(r => r.stackName).join(', ');
+      toast.error(
+        `${okCount} of ${results.length} ${pastTense[action]}; ${failed.length} failed: ${failedNames}`,
+      );
+    } catch (err) {
+      cbs?.onAfter?.(files);
+      console.error('Bulk action failed:', err);
+      toast.error(`Bulk ${action} failed: ${(err as Error).message}`);
     }
   }, [isPaid]);
 
