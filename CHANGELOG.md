@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.6](https://github.com/Studio-Saelix/sencho/compare/v0.86.5...v0.86.6) (2026-05-23)
+
+
+### Fixed
+
+* **monitor:** collapse repeated host-metric alerts into per-window summary (F-11) ([#1175](https://github.com/Studio-Saelix/sencho/issues/1175)) ([fcff8e9](https://github.com/Studio-Saelix/sencho/commit/fcff8e90473f030614eeab357d17798995bfa044))
+* **webhooks:** address Codex review of PR [#1177](https://github.com/Studio-Saelix/sencho/issues/1177) ([#1181](https://github.com/Studio-Saelix/sencho/issues/1181)) ([f03c9dc](https://github.com/Studio-Saelix/sencho/commit/f03c9dc7b6e90895d81484117b0271d2f9a55201))
+* **webhooks:** harden trigger response surface ([#1177](https://github.com/Studio-Saelix/sencho/issues/1177)) ([21ec5e7](https://github.com/Studio-Saelix/sencho/commit/21ec5e7e0a2f46273374a225ee6be7a55333f4b6))
+* **webhooks:** hide write affordances from non-admin paid users ([#1176](https://github.com/Studio-Saelix/sencho/issues/1176)) ([a928267](https://github.com/Studio-Saelix/sencho/commit/a9282671d54c8d57a063df3b35b3806841d56490))
+
 ## [0.86.5](https://github.com/Studio-Saelix/sencho/compare/v0.86.4...v0.86.5) (2026-05-23)
 
 
