@@ -36,6 +36,10 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   update: 'updating',
 };
 
+const VALID_STACK_OP_ACTIONS: ReadonlySet<string> = new Set(
+  Object.keys(STACK_OP_PRESENT_PARTICIPLE),
+);
+
 type EditorState = ReturnType<typeof useEditorViewState>;
 type StackListState = ReturnType<typeof useStackListState>;
 type NavState = ReturnType<typeof useViewNavigationState>;
@@ -67,7 +71,8 @@ const parseStackOpInProgress = (rawBody: string): StackOpInProgressInfo | null =
     if (
       !isRecord(inProgress) ||
       typeof inProgress.action !== 'string' ||
-      typeof inProgress.startedAt !== 'number'
+      typeof inProgress.startedAt !== 'number' ||
+      !VALID_STACK_OP_ACTIONS.has(inProgress.action)
     ) {
       return null;
     }

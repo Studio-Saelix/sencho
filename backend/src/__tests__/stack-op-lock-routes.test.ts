@@ -252,6 +252,28 @@ describe('Stack lifecycle mutex', () => {
     await down;
   });
 
+  it('returns 409 for deploy while start is in flight', async () => {
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1' }]);
+    const gate = deferred<void>();
+    mockStartContainer.mockImplementationOnce(() => gate.promise);
+
+    const start = request(app)
+      .post('/api/stacks/web/start')
+      .set('Cookie', authCookie)
+      .then(r => r);
+    await vi.waitFor(() => expect(mockStartContainer).toHaveBeenCalled());
+
+    const deploy = await request(app)
+      .post('/api/stacks/web/deploy')
+      .set('Cookie', authCookie)
+      .send({ skip_scan: true });
+    expect(deploy.status).toBe(409);
+    expect(deploy.body.inProgress.action).toBe('start');
+
+    gate.resolve();
+    await start;
+  });
+
   it('returns 409 for stop while restart is in flight', async () => {
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1' }]);
     const gate = deferred<void>();
