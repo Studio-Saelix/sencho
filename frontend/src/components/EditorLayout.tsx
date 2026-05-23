@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Button } from './ui/button';
 import { Plus } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
@@ -32,8 +32,9 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { StackSidebar } from '@/components/sidebar/StackSidebar';
 import type { StackRowStatus } from '@/components/sidebar/stack-status-utils';
-import { useSidebarActivitySummary } from '@/components/sidebar/useSidebarActivitySummary';
+import { useSidebarActivitySummary, countEnabledAutoUpdates } from '@/components/sidebar/useSidebarActivitySummary';
 import { useNextAutoUpdateRun } from '@/components/sidebar/useNextAutoUpdateRun';
+import { usePanelSessionStartedAt } from '@/components/sidebar/usePanelSessionStartedAt';
 import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivityTicker';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
 import { toast } from '@/components/ui/toast-store';
@@ -183,22 +184,10 @@ export default function EditorLayout() {
     pendingLogsRef,
   } = stackActions;
 
-  // Track the moment a deploy panel transitioned to open so the sidebar footer
-  // can show elapsed time without depending on internal panel state. The
-  // composite key (stack + action) is what flips, so close-then-immediately-reopen
-  // is treated as a new session even if isOpen stays true across the commit.
-  const [panelStartedAt, setPanelStartedAt] = useState<number | null>(null);
-  const panelSessionKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    const nextKey = panelState.isOpen ? `${panelState.stackName}::${panelState.action}` : null;
-    if (nextKey !== panelSessionKeyRef.current) {
-      setPanelStartedAt(nextKey ? Date.now() : null);
-      panelSessionKeyRef.current = nextKey;
-    }
-  }, [panelState.isOpen, panelState.stackName, panelState.action]);
+  const panelStartedAt = usePanelSessionStartedAt(panelState);
 
   const autoUpdateEnabledCount = useMemo(
-    () => files.reduce((acc, f) => acc + (autoUpdateSettings[f] ? 1 : 0), 0),
+    () => countEnabledAutoUpdates(files, autoUpdateSettings),
     [files, autoUpdateSettings],
   );
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { __testing } from '../useSidebarActivitySummary';
+import { __testing, countEnabledAutoUpdates } from '../useSidebarActivitySummary';
 import type { NotificationItem } from '@/components/dashboard/types';
 import type { DeployPanelState } from '@/context/DeployFeedbackContext';
 
@@ -19,9 +19,9 @@ function notif(overrides: Partial<NotificationItem> = {}): NotificationItem {
   };
 }
 
-const IDLE_PANEL: DeployPanelState = { isOpen: false, stackName: '', action: 'deploy', status: 'preparing' };
-const STREAMING_PANEL: DeployPanelState = { isOpen: true, stackName: 'api', action: 'deploy', status: 'streaming' };
-const SUCCEEDED_PANEL: DeployPanelState = { isOpen: true, stackName: 'api', action: 'deploy', status: 'succeeded' };
+const IDLE_PANEL: DeployPanelState = { isOpen: false, stackName: '', action: 'deploy', status: 'preparing', sessionId: 0 };
+const STREAMING_PANEL: DeployPanelState = { isOpen: true, stackName: 'api', action: 'deploy', status: 'streaming', sessionId: 1 };
+const SUCCEEDED_PANEL: DeployPanelState = { isOpen: true, stackName: 'api', action: 'deploy', status: 'succeeded', sessionId: 1 };
 
 function inputs(overrides: Partial<Parameters<typeof deriveSummary>[0]> = {}) {
   return {
@@ -78,11 +78,10 @@ describe('useSidebarActivitySummary.deriveSummary', () => {
   });
 
   it('skips failure that is older than 24h or already read', () => {
-    const oldErr = notif({ id: 9, level: 'error', stack_name: undefined, timestamp: NOW_SECS - 25 * 60 * 60 });
-    const readErr = notif({ id: 10, level: 'error', stack_name: undefined, is_read: 1, timestamp: NOW_SECS - 60 });
+    const oldErr = notif({ id: 9, level: 'error', stack_name: 'web', timestamp: NOW_SECS - 25 * 60 * 60 });
+    const readErr = notif({ id: 10, level: 'error', stack_name: 'web', is_read: 1, timestamp: NOW_SECS - 60 });
     const r = deriveSummary(inputs({ notifications: [oldErr, readErr] }), NOW_SECS);
     expect(r.kind).not.toBe('failure');
-    expect(r.kind).toBe('quiet-live');
   });
 
   it('returns automation when auto-update is enabled and no recent event exists', () => {
@@ -152,5 +151,34 @@ describe('useSidebarActivitySummary.deriveSummary', () => {
     const failure = notif({ level: 'error', timestamp: NOW_SECS - 30 });
     const r = deriveSummary(inputs({ notifications: [failure], tickerConnected: false }), NOW_SECS);
     expect(r.kind).toBe('failure');
+  });
+
+  it('does NOT classify a stackless system error as a sidebar failure (router would no-op)', () => {
+    const systemErr = notif({ id: 21, level: 'error', stack_name: undefined, timestamp: NOW_SECS - 30 });
+    const r = deriveSummary(inputs({ notifications: [systemErr] }), NOW_SECS);
+    expect(r.kind).not.toBe('failure');
+    expect(r.kind).toBe('quiet-live');
+  });
+});
+
+describe('countEnabledAutoUpdates', () => {
+  it('counts a stack with no explicit row as enabled (backend default-true contract)', () => {
+    expect(countEnabledAutoUpdates(['web', 'api'], {})).toBe(2);
+  });
+
+  it('respects an explicit false', () => {
+    expect(countEnabledAutoUpdates(['web', 'api', 'db'], { api: false })).toBe(2);
+  });
+
+  it('respects an explicit true', () => {
+    expect(countEnabledAutoUpdates(['web'], { web: true })).toBe(1);
+  });
+
+  it('returns 0 for an empty file list', () => {
+    expect(countEnabledAutoUpdates([], { web: true })).toBe(0);
+  });
+
+  it('ignores settings rows that do not correspond to known files', () => {
+    expect(countEnabledAutoUpdates(['web'], { ghost: false, web: true })).toBe(1);
   });
 });

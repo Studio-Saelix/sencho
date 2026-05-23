@@ -29,6 +29,10 @@ function findFailure(notifications: NotificationItem[], nowSecs: number): Notifi
   for (const n of notifications) {
     if (n.level !== 'error') continue;
     if (n.is_read) continue;
+    // System-level errors with no stack_name cannot be routed via
+    // navigateToNotification; let the top-bar NotificationPanel surface them
+    // instead so the sidebar footer's "view logs" click always lands somewhere.
+    if (!n.stack_name) continue;
     if (nowSecs - n.timestamp > FAILURE_WINDOW_SECS) continue;
     return n;
   }
@@ -45,6 +49,20 @@ function findRecent(notifications: NotificationItem[], nowSecs: number): Notific
   return null;
 }
 
+/**
+ * Priority cascade (first match wins):
+ *   1. active-op:    a deploy panel is preparing/streaming
+ *   2. failure:      newest unread stack-scoped error in the last 24h
+ *   3. recent-event: newest non-error stack notification in the last hour
+ *   4. automation:   auto-update is enabled and a next run is scheduled
+ *   5. disconnected: notification WebSocket is down
+ *   6. quiet-live:   nothing else to surface
+ *
+ * Note: recent-event preempts automation because a fresh deploy/restart event
+ * is more time-relevant than ambient steady-state ("your last action was 30s
+ * ago" beats "auto-update will run at 02:00"). The PR description and tests
+ * follow the same order; if you change the cascade, update both.
+ */
 function deriveSummary(inputs: SummaryInputs, nowSecs: number): SidebarActivitySummary {
   const { panelState, panelStartedAt, notifications, autoUpdateEnabledCount, totalStackCount, nextAutoUpdateRunAt, tickerConnected } = inputs;
 
@@ -98,6 +116,17 @@ export function useSidebarActivitySummary(inputs: SummaryInputs): SidebarActivit
       inputs.nextAutoUpdateRunAt,
     ],
   );
+}
+
+/**
+ * Count stacks with auto-update enabled. Backend defaults missing rows to
+ * enabled (DatabaseService.getStackAutoUpdateSettingsForNode); callers must
+ * NOT treat absence as disabled.
+ */
+export function countEnabledAutoUpdates(files: string[], settings: Record<string, boolean>): number {
+  let n = 0;
+  for (const f of files) if (settings[f] ?? true) n++;
+  return n;
 }
 
 // Exported for unit tests so we don't need to spin up a renderer to validate cascade logic.

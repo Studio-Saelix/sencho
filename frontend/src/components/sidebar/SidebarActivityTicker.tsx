@@ -124,8 +124,7 @@ function buildConfig(summary: SidebarActivitySummary): RenderConfig {
         action: { kind: 'noop' },
       };
     }
-    case 'quiet-live':
-    default: {
+    case 'quiet-live': {
       return {
         dotClass: 'bg-success shadow-[0_0_6px_var(--success)]',
         pulse: false,
@@ -137,6 +136,11 @@ function buildConfig(summary: SidebarActivitySummary): RenderConfig {
       };
     }
   }
+  // Exhaustiveness guard: any new SidebarActivitySummary variant added later
+  // without a matching case will fail to assign to `never` and TS will
+  // surface the gap at build time.
+  const _exhaustive: never = summary;
+  throw new Error(`Unhandled summary kind: ${JSON.stringify(_exhaustive)}`);
 }
 
 export function SidebarActivityTicker({ summary, onAction }: SidebarActivityTickerProps) {
