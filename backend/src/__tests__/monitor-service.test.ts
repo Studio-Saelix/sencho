@@ -1008,6 +1008,30 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     logSpy.mockRestore();
   });
 
+  it('logs recovery on the first successful call after a full breaker-open cooldown', async () => {
+    // After the breaker opens, the counter is zeroed; once the cooldown
+    // lapses, a successful call must still emit the recovered log so the
+    // operator observability story is symmetric with the partial-failure
+    // recovery path.
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+
+    const svc = MonitorService.getInstance();
+    (svc as any).janitorBreakerUntil = Date.now() - 1; // cooldown just elapsed
+    (svc as any).janitorConsecutiveTimeouts = 0;       // zeroed on open
+    mockGetDiskUsage.mockResolvedValue(RECLAIMABLE_3GB);
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await (svc as any).evaluateJanitor();
+
+    const recoveryLine = logSpy.mock.calls.find(
+      (args) => typeof args[0] === 'string' && args[0].includes('recovered'),
+    );
+    expect(recoveryLine).toBeDefined();
+    expect((svc as any).janitorBreakerUntil).toBe(0);
+    expect((svc as any).janitorConsecutiveTimeouts).toBe(0);
+    logSpy.mockRestore();
+  });
+
   it('does NOT advance the breaker counter on non-timeout errors', async () => {
     mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
     mockGetDiskUsage.mockRejectedValue(Object.assign(new Error('daemon unreachable'), { statusCode: 500 }));

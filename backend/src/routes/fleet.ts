@@ -23,6 +23,11 @@ import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
+import { withTimeout, TimeoutError } from '../utils/withTimeout';
+
+// Mirror the system-maintenance route timeout so fleet's local-node prune
+// paths cap the slow `docker system df` call at the same 8s budget (F-6).
+const FLEET_DF_TIMEOUT_MS = 8_000;
 import { POLICY_SEVERITIES } from '../utils/severity';
 import { sanitizeForLog } from '../utils/safeLog';
 import { formatNoTargetError } from '../utils/remoteTarget';
@@ -1197,9 +1202,17 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
           for (const target of targets) {
             try {
               if (isDryRun) {
+                // estimateSystemReclaim hits `docker system df`; bound it
+                // so a slow local daemon doesn't hang the fleet admin tab
+                // (F-6). estimateManagedReclaim is fast (no df) and stays
+                // unwrapped.
                 const estimate = scope === 'managed'
                   ? await dockerController.estimateManagedReclaim(target, knownStacks)
-                  : await dockerController.estimateSystemReclaim(target, knownStacks);
+                  : await withTimeout(
+                      dockerController.estimateSystemReclaim(target, knownStacks),
+                      FLEET_DF_TIMEOUT_MS,
+                      'docker disk usage',
+                    );
                 targetResults.push({ target, success: true, reclaimedBytes: estimate.reclaimableBytes, dryRun: true });
                 continue;
               }
@@ -1209,7 +1222,10 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
               targetResults.push({ target, success: true, reclaimedBytes: result.reclaimedBytes });
               if (result.reclaimedBytes > 0 || result.success) anySuccess = true;
             } catch (err) {
-              targetResults.push({ target, success: false, reclaimedBytes: 0, error: getErrorMessage(err, 'Prune failed') });
+              const error = err instanceof TimeoutError
+                ? 'Docker daemon is busy. Please try again in a moment.'
+                : getErrorMessage(err, 'Prune failed');
+              targetResults.push({ target, success: false, reclaimedBytes: 0, error });
             }
           }
           if (anySuccess && !isDryRun) invalidateNodeCaches(node.id);
@@ -1370,16 +1386,24 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
           const dockerController = DockerController.getInstance(node.id);
           let nodeBytes = 0;
           for (const target of targets) {
+            // estimateSystemReclaim hits `docker system df`; bound it so a
+            // slow local daemon doesn't hang the fleet estimate (F-6).
             const result = scope === 'managed'
               ? await dockerController.estimateManagedReclaim(target, knownStacks)
-              : await dockerController.estimateSystemReclaim(target, knownStacks);
+              : await withTimeout(
+                  dockerController.estimateSystemReclaim(target, knownStacks),
+                  FLEET_DF_TIMEOUT_MS,
+                  'docker disk usage',
+                );
             nodeBytes += result.reclaimableBytes;
           }
           return { nodeId: node.id, nodeName: node.name, reclaimableBytes: nodeBytes, reachable: true };
         } catch (err) {
+          const error = err instanceof TimeoutError
+            ? 'Docker daemon is busy. Please try again in a moment.'
+            : getErrorMessage(err, 'Failed to estimate locally');
           return {
-            nodeId: node.id, nodeName: node.name, reclaimableBytes: 0, reachable: false,
-            error: getErrorMessage(err, 'Failed to estimate locally'),
+            nodeId: node.id, nodeName: node.name, reclaimableBytes: 0, reachable: false, error,
           };
         }
       }

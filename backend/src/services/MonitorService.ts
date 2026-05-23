@@ -332,9 +332,16 @@ export class MonitorService {
                 return;
             }
 
-            if (this.janitorConsecutiveTimeouts > 0) {
+            // Recovery covers both partial-failure recovery (counter > 0,
+            // breaker still closed) and post-cooldown recovery (counter
+            // zeroed on open, breaker now elapsed). janitorBreakerUntil
+            // remains set to its past timestamp until the next success
+            // clears it; that flag is what distinguishes "always healthy"
+            // from "was sick, now recovered" once the cooldown has passed.
+            if (this.janitorConsecutiveTimeouts > 0 || this.janitorBreakerUntil > 0) {
                 console.log('[Monitor] Janitor disk-usage check recovered');
                 this.janitorConsecutiveTimeouts = 0;
+                this.janitorBreakerUntil = 0;
             }
 
             const totalReclaimableBytes =
