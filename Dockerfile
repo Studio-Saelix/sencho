@@ -99,17 +99,26 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # static binary.
 #
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for TARGET.
-# The --depth 1 clone fetches only the v29.4.1 tag commit, minimising transfer size.
+# The fetch pulls only the v29.4.1 commit, minimising transfer size.
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid SemVer
 # compliance requirements. We copy vendor.mod -> go.mod and build with -mod=vendor
 # so all deps come from the vendored tree (no network access needed).
-FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS cli-builder
+# Base image pinned by digest so the Go toolchain that compiles the static
+# Docker CLI binary cannot change without an explicit Dependabot bump.
+FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine@sha256:91eda9776261207ea25fd06b5b7fed8d397dd2c0a283e77f2ab6e91bfa71079d AS cli-builder
 
 ARG TARGETARCH
 
 RUN apk add --no-cache git
 
-RUN git clone --depth 1 --branch v29.4.1 https://github.com/docker/cli.git /src/docker-cli
+# Fetch by commit SHA rather than by mutable tag. The SHA below resolves to
+# the docker/cli v29.4.1 release; recorded here for traceability since the
+# raw SHA does not carry semantic information.
+RUN git init /src/docker-cli && \
+    cd /src/docker-cli && \
+    git remote add origin https://github.com/docker/cli.git && \
+    git fetch --depth=1 origin 407f3428e5c5a3a4088f9268bc7159f5e0f95bea && \
+    git checkout FETCH_HEAD
 
 WORKDIR /src/docker-cli
 
@@ -135,13 +144,22 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # v0.29.0. The go get step below bumps otel to v1.43.0 to resolve
 # CVE-2026-39883 (BSD kenv) and CVE-2026-39882 (OTLP response OOM) so that
 # the compose binary scans completely clean.
-FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS compose-builder
+# Base image pinned by digest (same image as cli-builder above) so both
+# source builds share an identical, immutable Go toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine@sha256:91eda9776261207ea25fd06b5b7fed8d397dd2c0a283e77f2ab6e91bfa71079d AS compose-builder
 
 ARG TARGETARCH
 
 RUN apk add --no-cache git
 
-RUN git clone --depth 1 --branch v5.1.3 https://github.com/docker/compose.git /src/docker-compose
+# Fetch by commit SHA. The SHA below resolves to the docker/compose v5.1.3
+# release; recorded here for traceability since the raw SHA does not carry
+# semantic information.
+RUN git init /src/docker-compose && \
+    cd /src/docker-compose && \
+    git remote add origin https://github.com/docker/compose.git && \
+    git fetch --depth=1 origin 5b2badbda44f3410b2a6c58dff79def21fe8b13e && \
+    git checkout FETCH_HEAD
 
 WORKDIR /src/docker-compose
 

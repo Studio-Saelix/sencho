@@ -1,0 +1,104 @@
+name: Scheduled Security Scan
+
+# Visibility-only re-scan of the published image and a fresh build of main.
+# Surfaces CVEs disclosed between releases by uploading SARIF to GitHub Code
+# Scanning. The PR-blocking gate in ci.yml and the release-blocking gate in
+# docker-publish.yml are unchanged; this workflow only writes findings.
+on:
+  schedule:
+    - cron: '0 0 * * *'   # Daily 00:00 UTC
+  workflow_dispatch:
+
+# Prevent overlap when a manual workflow_dispatch fires while the daily cron
+# run is still in flight. cancel-in-progress is safe here: the workflow only
+# uploads SARIF for visibility and has no side effects on the registry.
+concurrency:
+  group: security-scan
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan-published:
+    name: Trivy SARIF (published :latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout (trivy.yaml + VEX)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # Same SHA-pinned action used by the PR-blocking and release-blocking
+      # scans. The trivy binary version is whatever this action SHA bundles;
+      # Dependabot's all-actions group moves it forward when the action is
+      # bumped, keeping a single source of truth.
+      - name: Trivy scan of saelix/sencho:latest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: saelix/sencho:latest
+          format: sarif
+          output: trivy-published.sarif
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          trivy-config: trivy.yaml
+          ignore-unfixed: false
+
+      # if: always() so findings still upload when trivy itself failed mid-run
+      # (e.g. CVE DB pull timeout). The categorical separation from the
+      # scan-main job below keeps the two result sets distinct in the UI.
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
+        with:
+          sarif_file: trivy-published.sarif
+          category: trivy-published-image
+
+  scan-main:
+    name: Trivy SARIF (main HEAD build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      # Mirrors the daily-cache-bust logic from ci.yml / docker-publish.yml so
+      # the apk upgrade layer rebuilds at least once per calendar day.
+      - name: Compute daily apk cache bust value
+        id: apk-bust
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Build image from main HEAD
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: localhost/sencho:scheduled-scan
+          cache-from: type=gha
+          build-args: |
+            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+
+      - name: Trivy scan of fresh main build
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: localhost/sencho:scheduled-scan
+          format: sarif
+          output: trivy-main.sarif
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          trivy-config: trivy.yaml
+          ignore-unfixed: false
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
+        with:
+          sarif_file: trivy-main.sarif
+          category: trivy-main-head

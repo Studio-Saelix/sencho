@@ -18,6 +18,9 @@
   "author": "",
   "license": "SEE LICENSE IN LICENSE",
   "type": "commonjs",
+  "engines": {
+    "node": ">=26.0.0"
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bcrypt": "^6.0.0",
