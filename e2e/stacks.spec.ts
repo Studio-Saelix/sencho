@@ -58,15 +58,25 @@ test.describe('Stack management', () => {
     await loginAs(page);
     await waitForStacksLoaded(page);
 
-    // Count POST /api/stacks calls and hold the response briefly so the
-    // disabled-button window is observable from the test. Awaiting
-    // route.continue() avoids the fire-and-forget pattern that can subtly
-    // stall a request on a busy CI runner.
     let postCount = 0;
+    let releaseCreate: () => void = () => undefined;
+    let releasedCreate = false;
+    const createMayContinue = new Promise<void>((resolve) => {
+      releaseCreate = () => {
+        if (releasedCreate) return;
+        releasedCreate = true;
+        resolve();
+      };
+    });
+
+    // Count POST /api/stacks calls and hold the first response until after
+    // the disabled-button state has been observed. A fixed sleep raced CI:
+    // fast runners could complete the request and close the dialog before the
+    // assertion saw the busy state.
     await page.route('**/api/stacks', async (route) => {
       if (route.request().method() === 'POST') {
         postCount += 1;
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        await createMayContinue;
       }
       await route.continue();
     });
@@ -90,10 +100,12 @@ test.describe('Stack management', () => {
       // managed to dispatch the click anyway.
       await createBtn.click({ force: true, timeout: 500 }).catch(() => undefined);
 
+      releaseCreate();
       await expect(page.getByRole('dialog')).toBeHidden({ timeout: 8_000 });
       await expect(page.getByText(`Stack "${stackName}" created.`)).toBeVisible({ timeout: 5_000 });
       expect(postCount).toBe(1);
     } finally {
+      releaseCreate();
       await page.unroute('**/api/stacks');
       // Cleanup
       await page.evaluate(async (name) => {
