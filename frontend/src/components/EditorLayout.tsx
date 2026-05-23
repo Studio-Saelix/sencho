@@ -33,6 +33,7 @@ import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { StackSidebar } from '@/components/sidebar/StackSidebar';
 import type { StackRowStatus } from '@/components/sidebar/stack-status-utils';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
+import { toast } from '@/components/ui/toast-store';
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -90,6 +91,15 @@ export default function EditorLayout() {
   } = stackListState;
 
   const { nodes, activeNode, setActiveNode } = useNodes();
+
+  // Mirror activeNode.id in a ref so async handlers (e.g. CreateStackDialog's
+  // post-create handoff) can detect a node switch that happened mid-flight.
+  // Closure capture of activeNode would always match the value at handler-creation
+  // time and miss the switch.
+  const activeNodeIdRef = useRef<number | null>(activeNode?.id ?? null);
+  useEffect(() => {
+    activeNodeIdRef.current = activeNode?.id ?? null;
+  }, [activeNode?.id]);
 
   const overlayState = useOverlayState();
   const {
@@ -227,8 +237,16 @@ export default function EditorLayout() {
       <CreateStackDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
-        onStackCreated={async (sName) => {
+        onStackCreated={async (sName, sourceNodeId) => {
           await refreshStacks();
+          // loadFile keeps its own unsaved-changes overlay (intentional safety,
+          // shared with every other "switch to a different stack" code path).
+          // Skip the load if the user switched nodes mid-create so we do not
+          // 404 against a stack name that lives on the previous node.
+          if (sourceNodeId != null && activeNodeIdRef.current !== sourceNodeId) {
+            toast.info(`Stack "${sName}" created on the previous node.`);
+            return;
+          }
           await stackActions.loadFile(sName);
         }}
         onStacksChanged={async () => { await refreshStacks(); }}
