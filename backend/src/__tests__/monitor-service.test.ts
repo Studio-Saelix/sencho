@@ -338,8 +338,6 @@ describe('MonitorService - evaluateGlobalSettings', () => {
 // ── F-11: host-metric alert suppression ────────────────────────────────
 
 describe('MonitorService - host alert suppression (F-11)', () => {
-  const SUPPRESSION_MIN = 60;
-
   // Force RAM-over-threshold for every test in this block; CPU/disk are
   // independently controlled per-test so a single mockMem set-up covers the
   // common "I want a breach happening" case without test repetition.
