@@ -163,8 +163,16 @@ export class FileSystemService {
    * state, even if the file is replaced (rename) between the two calls.
    */
   async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number }> {
-    const filePath = await this.getComposeFilePath(stackName);
-    this.assertWithinBase(filePath);
+    let filePath = await this.getComposeFilePath(stackName);
+    // Inline path-traversal barrier: normalize and confirm the result stays
+    // under baseDir. Writing the check inline (rather than via
+    // assertWithinBase) makes the sanitizer visible to CodeQL's taint flow
+    // at every fs sink in this method.
+    const baseResolved = path.resolve(this.baseDir);
+    filePath = path.resolve(filePath);
+    if (filePath !== baseResolved && !filePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
     const fh = await fsPromises.open(filePath, 'r');
     try {
       const stat = await fh.stat();
@@ -205,8 +213,14 @@ export class FileSystemService {
     | { ok: false; currentMtimeMs: number; currentContent: string }
   > {
     const stackDir = this.resolveStackDir(stackName);
-    const filePath = path.join(stackDir, 'compose.yaml');
-    this.assertWithinBase(filePath);
+    // Inline barrier matching CodeQL's documented js/path-injection sanitizer
+    // pattern: path.resolve + startsWith + reassignment to a local variable
+    // the fs sinks then consume.
+    const baseResolved = path.resolve(this.baseDir);
+    const filePath = path.resolve(stackDir, 'compose.yaml');
+    if (filePath !== baseResolved && !filePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
 
     if (expectedMtimeMs !== null) {
       let fh: import('fs/promises').FileHandle | null = null;
@@ -235,18 +249,28 @@ export class FileSystemService {
    * (used for .env files; the path was already validated by the caller).
    */
   async writeFileIfUnchanged(
-    targetPath: string,
+    untrustedTargetPath: string,
     content: string,
     expectedMtimeMs: number | null,
   ): Promise<
     | { ok: true; mtimeMs: number }
     | { ok: false; currentMtimeMs: number; currentContent: string }
   > {
-    this.assertWithinBase(targetPath);
+    // Inline js/path-injection barrier: the caller supplies an absolute path
+    // already resolved against baseDir; we still resolve + startsWith-check
+    // here so CodeQL sees the sanitizer in the same scope as every fs sink
+    // and the runtime is defended against a future caller that skips
+    // upstream validation.
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(untrustedTargetPath);
+    if (safePath !== baseResolved && !safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+
     if (expectedMtimeMs !== null) {
       let fh: import('fs/promises').FileHandle | null = null;
       try {
-        fh = await fsPromises.open(targetPath, 'r');
+        fh = await fsPromises.open(safePath, 'r');
         const stat = await fh.stat();
         if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
           const currentContent = await fh.readFile('utf-8');
@@ -259,15 +283,19 @@ export class FileSystemService {
       }
     }
 
-    await fsPromises.writeFile(targetPath, content, 'utf-8');
-    const newStat = await fsPromises.stat(targetPath);
+    await fsPromises.writeFile(safePath, content, 'utf-8');
+    const newStat = await fsPromises.stat(safePath);
     return { ok: true, mtimeMs: newStat.mtimeMs };
   }
 
-  async statMtime(targetPath: string): Promise<number | null> {
-    this.assertWithinBase(targetPath);
+  async statMtime(untrustedTargetPath: string): Promise<number | null> {
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(untrustedTargetPath);
+    if (safePath !== baseResolved && !safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
     try {
-      const stat = await fsPromises.stat(targetPath);
+      const stat = await fsPromises.stat(safePath);
       return stat.mtimeMs;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
