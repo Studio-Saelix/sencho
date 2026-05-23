@@ -96,11 +96,12 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 if (response.status === 400) {
                     throw new Error('Invalid stack name (use alphanumeric characters and hyphens only).');
                 }
-                if (response.status === 403) {
-                    throw new Error('You do not have permission to create stacks.');
-                }
                 const body = await response.json().catch(() => ({}));
-                throw new Error((body as { error?: string })?.error || 'Failed to create stack.');
+                const backendError = (body as { error?: string })?.error;
+                if (response.status === 403) {
+                    throw new Error(backendError || 'You do not have permission to create stacks.');
+                }
+                throw new Error(backendError || 'Failed to create stack.');
             }
             onOpenChange(false);
             setNewStackName('');
@@ -308,10 +309,13 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 onOpenChange(o);
                 if (!o) {
                     setCreateMode('empty');
-                    creatingEmptyRef.current = false;
-                    setCreatingEmpty(false);
                     resetCreateFromGitForm();
                     resetCreateFromDockerRunForm();
+                    // Intentionally NOT resetting creatingEmptyRef / creatingEmpty
+                    // here: the in-flight POST owns its own lifecycle and clears
+                    // both flags in finally. Resetting on close would let an
+                    // Escape-then-reopen sequence slip past the guard and fire a
+                    // second POST before the first request settled.
                 }
             }}
         >
