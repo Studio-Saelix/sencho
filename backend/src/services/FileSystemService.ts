@@ -164,6 +164,7 @@ export class FileSystemService {
    */
   async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number }> {
     const filePath = await this.getComposeFilePath(stackName);
+    this.assertWithinBase(filePath);
     const fh = await fsPromises.open(filePath, 'r');
     try {
       const stat = await fh.stat();
@@ -205,17 +206,22 @@ export class FileSystemService {
   > {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
+    this.assertWithinBase(filePath);
 
     if (expectedMtimeMs !== null) {
+      let fh: import('fs/promises').FileHandle | null = null;
       try {
-        const stat = await fsPromises.stat(filePath);
+        fh = await fsPromises.open(filePath, 'r');
+        const stat = await fh.stat();
         if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
-          const currentContent = await fsPromises.readFile(filePath, 'utf-8');
+          const currentContent = await fh.readFile('utf-8');
           return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
         }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
         // File doesn't exist yet, treat as fresh write.
+      } finally {
+        if (fh) await fh.close();
       }
     }
 
@@ -236,15 +242,20 @@ export class FileSystemService {
     | { ok: true; mtimeMs: number }
     | { ok: false; currentMtimeMs: number; currentContent: string }
   > {
+    this.assertWithinBase(targetPath);
     if (expectedMtimeMs !== null) {
+      let fh: import('fs/promises').FileHandle | null = null;
       try {
-        const stat = await fsPromises.stat(targetPath);
+        fh = await fsPromises.open(targetPath, 'r');
+        const stat = await fh.stat();
         if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
-          const currentContent = await fsPromises.readFile(targetPath, 'utf-8');
+          const currentContent = await fh.readFile('utf-8');
           return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
         }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      } finally {
+        if (fh) await fh.close();
       }
     }
 
@@ -254,6 +265,7 @@ export class FileSystemService {
   }
 
   async statMtime(targetPath: string): Promise<number | null> {
+    this.assertWithinBase(targetPath);
     try {
       const stat = await fsPromises.stat(targetPath);
       return stat.mtimeMs;
