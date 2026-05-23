@@ -100,7 +100,7 @@ export interface CreateNetworkOptions {
     Config: Array<{
       Subnet?: string;
       Gateway?: string;
-      AuxiliaryAddresses?: Record<string, string>;
+      IPRange?: string;
     }>;
   };
   Labels?: Record<string, string>;
