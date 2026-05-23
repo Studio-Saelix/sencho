@@ -158,15 +158,20 @@ export class FileSystemService {
 
   /**
    * Read the resolved compose file along with its mtimeMs, which the route
-   * layer surfaces as an ETag for optimistic-concurrency on PUT.
+   * layer surfaces as an ETag for optimistic-concurrency on PUT. The stat
+   * and read share a single file descriptor so they observe the same inode
+   * state, even if the file is replaced (rename) between the two calls.
    */
   async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number }> {
     const filePath = await this.getComposeFilePath(stackName);
-    const [content, stat] = await Promise.all([
-      fsPromises.readFile(filePath, 'utf-8'),
-      fsPromises.stat(filePath),
-    ]);
-    return { content, mtimeMs: stat.mtimeMs };
+    const fh = await fsPromises.open(filePath, 'r');
+    try {
+      const stat = await fh.stat();
+      const content = await fh.readFile('utf-8');
+      return { content, mtimeMs: stat.mtimeMs };
+    } finally {
+      await fh.close();
+    }
   }
 
   async saveStackContent(stackName: string, content: string): Promise<void> {

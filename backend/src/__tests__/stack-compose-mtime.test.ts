@@ -152,6 +152,29 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
     expect(fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('fresh');
   });
 
+  it('detects a near-boundary mtime change (Math.floor precision)', async () => {
+    seedStack(STACK, 'original');
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    const etag = getRes.headers.etag as string;
+    const filePath = path.join(composeDir, STACK, 'compose.yaml');
+    const originalStat = fs.statSync(filePath);
+
+    // Bump the mtime by exactly one full second so Math.floor(mtimeMs) is
+    // guaranteed to differ even on filesystems that round to whole seconds.
+    fs.writeFileSync(filePath, 'changed-just-after', 'utf-8');
+    const bumped = (originalStat.mtimeMs + 1000) / 1000;
+    fs.utimesSync(filePath, bumped, bumped);
+
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}`)
+      .set('Cookie', authCookie)
+      .set('If-Match', etag)
+      .send({ content: 'my-edit' });
+
+    expect(putRes.status).toBe(412);
+    expect(putRes.body.code).toBe('stack_file_changed');
+  });
+
   it('ignores malformed If-Match headers and writes through', async () => {
     seedStack(STACK, 'original');
 
