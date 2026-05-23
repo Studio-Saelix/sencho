@@ -483,19 +483,31 @@ describe('MonitorService - host alert suppression (F-11)', () => {
   });
 
   it('metric drop below threshold clears in-memory state and persisted timestamp', async () => {
+    // Recovery now reads system_state before deciding to write '0' (so it
+    // skips a redundant write when persisted is already null/0). Model the
+    // persistence chain so the recovery branch can observe the timestamp
+    // the first-fire path just wrote.
+    let persistedRamTs: string | null = null;
+    mockGetSystemState.mockImplementation((key: string) =>
+      key === 'last_host_ram_alert_ts' ? persistedRamTs : null,
+    );
+    mockSetSystemState.mockImplementation((key: string, value: string) => {
+      if (key === 'last_host_ram_alert_ts') persistedRamTs = value;
+    });
+
     const svc = MonitorService.getInstance();
 
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
     expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
-    expect(mockSetSystemState).toHaveBeenCalledWith('last_host_ram_alert_ts', expect.any(String));
+    expect(persistedRamTs).not.toBeNull();
+    expect(persistedRamTs).not.toBe('0');
 
     // Drop RAM back under threshold.
     mockMem.mockResolvedValue({ used: 4e9, total: 16e9 }); // 25%
-    mockSetSystemState.mockClear();
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
 
     // Recovery branch resets the persisted timestamp to '0'.
-    expect(mockSetSystemState).toHaveBeenCalledWith('last_host_ram_alert_ts', '0');
+    expect(persistedRamTs).toBe('0');
   });
 
   it('re-breach after recovery fires fresh first alert (no Suppressed suffix)', async () => {
@@ -565,6 +577,70 @@ describe('MonitorService - host alert suppression (F-11)', () => {
     // 6 minutes — past the custom window; follow-up should fire.
     nowSpy.mockReturnValue(baseTime + 6 * 60 * 1000);
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80', host_alert_suppression_mins: '5' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockRestore();
+  });
+
+  it('post-restart recovery clears persisted timestamp so re-breach inside the window fires fresh', async () => {
+    // Codex audit scenario:
+    //   T0: breach fires → system_state['last_host_ram_alert_ts'] = T0
+    //   T1: process restart (in-memory state cleared, persisted T0 survives)
+    //   T2: metric drops below threshold → clearHostMetricSuppression() runs
+    //   T3: metric re-breaches within suppression window
+    // Expected: fresh first alert at T3 (no Suppressed suffix).
+    // Pre-fix bug: clearHostMetricSuppression early-returned on missing in-
+    // memory state, leaving persisted T0 alive; T3 hit the restart-survival
+    // path and was silently suppressed.
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime + 5 * 60 * 1000); // T1+T2 = T0+5min
+
+    // Simulate persisted state from a previous process's first fire.
+    let persistedRamTs: string | null = String(baseTime);
+    mockGetSystemState.mockImplementation((key: string) =>
+      key === 'last_host_ram_alert_ts' ? persistedRamTs : null,
+    );
+    mockSetSystemState.mockImplementation((key: string, value: string) => {
+      if (key === 'last_host_ram_alert_ts') persistedRamTs = value;
+    });
+
+    // T2: post-restart cycle finds metric BELOW threshold (recovered).
+    mockMem.mockResolvedValue({ used: 4e9, total: 16e9 });
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    // No dispatch on a non-breach cycle.
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+    // Recovery branch MUST have reset persisted state so a re-breach is
+    // treated as fresh, not as a still-active cooldown.
+    expect(persistedRamTs).toBe('0');
+
+    // T3: re-breach 10 minutes later (well inside the original 60-min window).
+    nowSpy.mockReturnValue(baseTime + 15 * 60 * 1000);
+    mockMem.mockResolvedValue({ used: 15e9, total: 16e9 });
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    const [, , message] = mockDispatchAlert.mock.calls[0];
+    expect(message).not.toContain('Suppressed');
+
+    nowSpy.mockRestore();
+  });
+
+  it('caps host_alert_suppression_mins at 24h (1440) to defend against unvalidated single-key POST writes', async () => {
+    const svc = MonitorService.getInstance();
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    // The single-key POST /api/settings path stores allowlisted keys
+    // without zod re-validation. A 999999999-minute value (or any
+    // accidental garbage above 1440) must not let a metric stay
+    // suppressed for centuries; cap at 24h in the consumer.
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80', host_alert_suppression_mins: '999999999' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // 1441 minutes later — past the 24h cap.
+    nowSpy.mockReturnValue(baseTime + 1441 * 60 * 1000);
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80', host_alert_suppression_mins: '999999999' });
     expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
 
     nowSpy.mockRestore();

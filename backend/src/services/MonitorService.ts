@@ -74,6 +74,10 @@ interface HostAlertSuppressionState {
 // system_state row keeps post-restart re-fires bounded.
 const hostAlertSuppressionState = new Map<HostMetricKey, HostAlertSuppressionState>();
 const DEFAULT_HOST_ALERT_SUPPRESSION_MIN = 60;
+// Mirror the zod schema upper bound in `routes/settings.ts` so the single-key
+// POST path (which lacks zod re-validation) cannot push the consumer past
+// the validated range.
+const MAX_HOST_ALERT_SUPPRESSION_MIN = 1440;
 
 export function _resetHostAlertSuppressionStateForTests(): void {
     hostAlertSuppressionState.clear();
@@ -249,11 +253,14 @@ export class MonitorService {
     private async evaluateGlobalSettings(settings: Record<string, string>) {
         // F-11 suppression window. Default 60 min; configurable via global
         // settings. NaN / non-positive values fall back to the default so a
-        // misconfigured row never disables the dedup entirely.
+        // misconfigured row never disables the dedup entirely. Cap at 24h
+        // to defend against the single-key POST /api/settings path (which
+        // stores allowlisted keys without zod re-validation): an accidental
+        // 999999999-minute value must not silence host alerts for centuries.
         const suppressionMinRaw = parseInt(settings['host_alert_suppression_mins'] || '', 10);
         const suppressionMin = isNaN(suppressionMinRaw) || suppressionMinRaw <= 0
             ? DEFAULT_HOST_ALERT_SUPPRESSION_MIN
-            : suppressionMinRaw;
+            : Math.min(suppressionMinRaw, MAX_HOST_ALERT_SUPPRESSION_MIN);
         const suppressionMs = suppressionMin * 60 * 1000;
 
         // 1. Host Limits — fetch CPU, RAM, disk concurrently
@@ -797,11 +804,26 @@ export class MonitorService {
      * (no "Suppressed N" suffix). Resetting the persisted row to '0' is
      * essential: a stale persisted timestamp inside the window would silently
      * absorb the next breach via the restart-survivability path.
+     *
+     * The persisted reset must run independently of in-memory state because
+     * the two halves can drift after a process restart: the in-memory Map is
+     * empty on a fresh process, but the system_state row from the previous
+     * process still points at the old fire timestamp. If recovery happens
+     * before another evaluate cycle re-seeds in-memory state, an early-return
+     * on the in-memory check alone would leave the persisted row alive, and
+     * the next re-breach within the original window would be silently
+     * suppressed instead of firing fresh (Codex audit on PR #1175).
      */
     private clearHostMetricSuppression(key: HostMetricKey): void {
-        if (!hostAlertSuppressionState.has(key)) return;
-        hostAlertSuppressionState.delete(key);
-        DatabaseService.getInstance().setSystemState(HOST_ALERT_KEYS[key], '0');
+        const stateKey = HOST_ALERT_KEYS[key];
+        const db = DatabaseService.getInstance();
+        const hadInMemory = hostAlertSuppressionState.delete(key);
+        const persisted = db.getSystemState(stateKey);
+        const needsPersistedReset = persisted !== null && persisted !== '0';
+        if (!hadInMemory && !needsPersistedReset) return;
+        if (needsPersistedReset) {
+            db.setSystemState(stateKey, '0');
+        }
     }
 
     private calculateCpuPercent(stats: DockerContainerStats): number {
