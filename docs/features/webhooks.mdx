@@ -100,16 +100,15 @@ By default, the webhook executes the action configured at creation time. You can
 { "action": "restart" }
 ```
 
-Valid override values are: `deploy`, `restart`, `stop`, `start`, `pull`, `git-pull`. An unknown value causes the execution to fail and appear with an error in **Recent executions**.
+Valid override values are: `deploy`, `restart`, `stop`, `start`, `pull`, `git-pull`. An unknown value is rejected with `400 Bad Request` before execution is queued.
 
 ### Responses
 
 | Status | Body | Meaning |
 |--------|------|---------|
 | `202 Accepted` | `{ "message": "Webhook accepted", "action": "deploy" }` | Signature is valid; the action is now running asynchronously. A 202 means accepted, not finished. |
-| `401 Unauthorized` | `{ "error": "Missing X-Webhook-Signature header" }` | The request omitted the signature header. |
-| `401 Unauthorized` | `{ "error": "Invalid signature" }` | The provided signature did not match the expected HMAC. |
-| `404 Not Found` | `{ "error": "Webhook not found or disabled" }` | The webhook id is unknown or its enable toggle is off. |
+| `400 Bad Request` | `{ "error": "action must be one of: deploy, restart, stop, start, pull, git-pull" }` | The request authenticated successfully but the body's `action` override was not in the allowlist. |
+| `404 Not Found` | `{ "error": "Webhook not found or signature invalid" }` | The webhook id is unknown, the webhook is disabled, the signature header is missing, the request body was empty, or the signature did not match. Sencho returns the same response for every unauthenticated case so callers cannot probe ids or licence state. |
 
 ## CI/CD integration examples
 
@@ -166,17 +165,15 @@ Sencho retains the last 100 executions per webhook and surfaces the 20 most rece
     The page requires a **Skipper** or **Admiral** license. If you are on a paid tier but the node switcher in the top-left shows a remote node, switch to **Local** to reveal the page.
   </Accordion>
 
-  <Accordion title="My trigger returns '401 Invalid signature'.">
-    The signature must be computed over the **exact raw bytes** of the request body. Common causes:
+  <Accordion title="My trigger returns 404 'Webhook not found or signature invalid'.">
+    The trigger endpoint returns the same 404 for every unauthenticated case, so the response alone will not tell you which check failed. Work through this checklist:
 
-    - The CI step JSON-encodes the body before signing but sends a different body to curl (or vice versa). Sign the same string you send.
-    - The shell adds a trailing newline (use `echo -n` rather than `echo`).
-    - The header is missing the `sha256=` prefix; the full value is `sha256={hex}`.
+    - The id in the URL is wrong. Copy the trigger URL straight from the webhook card in **Settings → Alerts → Webhooks**.
+    - The webhook's enable toggle is off. Check the **On / Off** switch on the card.
+    - The request omitted the `X-Webhook-Signature` header. Confirm the full value, including the `sha256=` prefix; the header value is `sha256={hex}`.
+    - The request had no body. Send at least `{}` and sign that exact byte sequence.
+    - The signature was computed over different bytes from what the request carried. Sign the exact string you send. Common offenders: the CI step JSON-encodes the body before signing but pipes a different body to curl, or the shell adds a trailing newline (use `echo -n` rather than `echo`).
     - The webhook secret used to sign does not match the secret stored in Sencho. The secret is shown once at creation; if you lost it, delete the webhook and create a new one.
-  </Accordion>
-
-  <Accordion title="My trigger returns '404 Webhook not found or disabled'.">
-    The id in the URL is wrong, or the webhook's enable toggle is off. Copy the trigger URL from the card and check the **On / Off** switch on the webhook in **Settings → Alerts → Webhooks**.
   </Accordion>
 
   <Accordion title="The action returns 202 but the stack does not change.">
