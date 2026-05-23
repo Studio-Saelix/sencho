@@ -58,6 +58,27 @@ const HOST_ALERT_KEYS = {
     janitor: 'last_janitor_alert_timestamp',
 } as const;
 
+type HostMetricKey = 'cpu' | 'ram' | 'disk';
+
+interface HostAlertSuppressionState {
+    firstFiredAt: number;
+    lastFiredAt: number;
+    suppressedCount: number;
+}
+
+// F-11 dedup for host-metric notifications (CPU, RAM, disk). The previous
+// 5-minute cooldown produced 7+ identical messages over a 35-minute window
+// when a host stayed over threshold, flooding Discord/Slack routes. State is
+// per-metric and module-scope so a singleton-replacement (only happens in
+// tests) does not lose tracking. Cleared on process restart; the persisted
+// system_state row keeps post-restart re-fires bounded.
+const hostAlertSuppressionState = new Map<HostMetricKey, HostAlertSuppressionState>();
+const DEFAULT_HOST_ALERT_SUPPRESSION_MIN = 60;
+
+export function _resetHostAlertSuppressionStateForTests(): void {
+    hostAlertSuppressionState.clear();
+}
+
 const STATS_TIMEOUT_MS = 10_000;
 const FLOAT_EQ_EPSILON = 0.01;
 
@@ -226,7 +247,14 @@ export class MonitorService {
     }
 
     private async evaluateGlobalSettings(settings: Record<string, string>) {
-        const HOST_ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between repeat alerts
+        // F-11 suppression window. Default 60 min; configurable via global
+        // settings. NaN / non-positive values fall back to the default so a
+        // misconfigured row never disables the dedup entirely.
+        const suppressionMinRaw = parseInt(settings['host_alert_suppression_mins'] || '', 10);
+        const suppressionMin = isNaN(suppressionMinRaw) || suppressionMinRaw <= 0
+            ? DEFAULT_HOST_ALERT_SUPPRESSION_MIN
+            : suppressionMinRaw;
+        const suppressionMs = suppressionMin * 60 * 1000;
 
         // 1. Host Limits — fetch CPU, RAM, disk concurrently
         try {
@@ -239,23 +267,29 @@ export class MonitorService {
             const cpuUsage = currentLoad.currentLoad;
             const cpuLimit = parseFloat(settings['host_cpu_limit']);
             if (!isNaN(cpuLimit) && cpuLimit > 0 && cpuUsage > cpuLimit) {
-                await this.dispatchWithCooldown(HOST_ALERT_KEYS.cpu, HOST_ALERT_COOLDOWN_MS, 'warning', 'monitor_alert',
+                await this.dispatchHostMetricAlert('cpu', 'warning', suppressionMs,
                     `Host CPU utilization is critically high: ${cpuUsage.toFixed(1)}% (Threshold: ${cpuLimit}%)`);
+            } else {
+                this.clearHostMetricSuppression('cpu');
             }
 
             const ramUsage = (mem.used / mem.total) * 100;
             const ramLimit = parseFloat(settings['host_ram_limit']);
             if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
-                await this.dispatchWithCooldown(HOST_ALERT_KEYS.ram, HOST_ALERT_COOLDOWN_MS, 'warning', 'monitor_alert',
+                await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
                     `Host Memory utilization is critically high: ${ramUsage.toFixed(1)}% (Threshold: ${ramLimit}%)`);
+            } else {
+                this.clearHostMetricSuppression('ram');
             }
 
             const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
             if (mainDisk) {
                 const diskLimit = parseFloat(settings['host_disk_limit']);
                 if (!isNaN(diskLimit) && diskLimit > 0 && mainDisk.use > diskLimit) {
-                    await this.dispatchWithCooldown(HOST_ALERT_KEYS.disk, HOST_ALERT_COOLDOWN_MS, 'warning', 'monitor_alert',
+                    await this.dispatchHostMetricAlert('disk', 'warning', suppressionMs,
                         `Host Disk space utilization is critically high: ${mainDisk.use.toFixed(1)}% (Threshold: ${diskLimit}%)`);
+                } else {
+                    this.clearHostMetricSuppression('disk');
                 }
             }
         } catch (e) {
@@ -685,6 +719,89 @@ export class MonitorService {
             await NotificationService.getInstance().dispatchAlert(severity, category, message, { stackName: stack });
             db.setSystemState(stateKey, Date.now().toString());
         }
+    }
+
+    /**
+     * F-11 host-metric dispatch with per-key suppression window + count
+     * summary. Replaces the old 5-minute hardcoded cooldown for CPU/RAM/disk.
+     *
+     * Behaviour:
+     *  - First breach (no in-memory state, no recent persisted timestamp) →
+     *    dispatch immediately and seed in-memory state.
+     *  - Restart on a still-breaching host (no in-memory state, but persisted
+     *    timestamp falls inside the window) → silently re-seed from the
+     *    persisted timestamp so post-restart cycles do not re-fire.
+     *  - Breach within an open suppression window → silently increment
+     *    suppressedCount; no dispatch, no broadcast.
+     *  - Breach after window elapses → fire one follow-up with the suffix
+     *    `Suppressed N alerts in the last Xm; first over threshold at HH:MM UTC.`
+     *
+     * Recovery is handled by the caller via clearHostMetricSuppression(): when
+     * the metric drops below threshold, in-memory state and the persisted
+     * timestamp are cleared so the next breach fires fresh.
+     */
+    private async dispatchHostMetricAlert(
+        key: HostMetricKey,
+        severity: 'info' | 'warning' | 'error',
+        suppressionMs: number,
+        baseMessage: string,
+    ): Promise<void> {
+        const db = DatabaseService.getInstance();
+        const stateKey = HOST_ALERT_KEYS[key];
+        const now = Date.now();
+        const state = hostAlertSuppressionState.get(key);
+
+        if (!state) {
+            const persistedLast = parseInt(db.getSystemState(stateKey) || '0', 10);
+            if (persistedLast > 0 && now - persistedLast < suppressionMs) {
+                // Post-restart on a still-breaching host: respect the
+                // persisted cooldown so we do not re-fire immediately. Seed
+                // in-memory state from the persisted timestamp; count this
+                // cycle as suppressed for an honest follow-up summary.
+                hostAlertSuppressionState.set(key, {
+                    firstFiredAt: persistedLast,
+                    lastFiredAt: persistedLast,
+                    suppressedCount: 1,
+                });
+                return;
+            }
+            // First-ever fire (fresh process, or post-recovery re-breach).
+            await NotificationService.getInstance().dispatchAlert(severity, 'monitor_alert', baseMessage);
+            hostAlertSuppressionState.set(key, {
+                firstFiredAt: now,
+                lastFiredAt: now,
+                suppressedCount: 0,
+            });
+            db.setSystemState(stateKey, now.toString());
+            return;
+        }
+
+        if (now - state.lastFiredAt < suppressionMs) {
+            state.suppressedCount += 1;
+            return;
+        }
+
+        const windowMin = Math.max(1, Math.round((now - state.lastFiredAt) / 60000));
+        const firstAt = new Date(state.firstFiredAt).toISOString().slice(11, 16);
+        const plural = state.suppressedCount === 1 ? '' : 's';
+        const suffix = ` Suppressed ${state.suppressedCount} alert${plural} in the last ${windowMin}m; first over threshold at ${firstAt} UTC.`;
+        await NotificationService.getInstance().dispatchAlert(severity, 'monitor_alert', baseMessage + suffix);
+        state.lastFiredAt = now;
+        state.suppressedCount = 0;
+        db.setSystemState(stateKey, now.toString());
+    }
+
+    /**
+     * Clear in-memory + persisted suppression state for a host metric. Called
+     * when the metric drops below threshold so the next breach fires fresh
+     * (no "Suppressed N" suffix). Resetting the persisted row to '0' is
+     * essential: a stale persisted timestamp inside the window would silently
+     * absorb the next breach via the restart-survivability path.
+     */
+    private clearHostMetricSuppression(key: HostMetricKey): void {
+        if (!hostAlertSuppressionState.has(key)) return;
+        hostAlertSuppressionState.delete(key);
+        DatabaseService.getInstance().setSystemState(HOST_ALERT_KEYS[key], '0');
     }
 
     private calculateCpuPercent(stats: DockerContainerStats): number {

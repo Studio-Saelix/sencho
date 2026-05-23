@@ -122,11 +122,13 @@ vi.mock('util', () => ({
   promisify: () => mockExecAsync,
 }));
 
-import { MonitorService } from '../services/MonitorService';
+import { MonitorService, _resetHostAlertSuppressionStateForTests } from '../services/MonitorService';
 
 beforeEach(() => {
   vi.clearAllMocks();
   (MonitorService as any).instance = undefined;
+  _resetHostAlertSuppressionStateForTests();
+  mockGetSystemState.mockReturnValue(null);
 });
 
 // ── Pure calculation helpers (accessed via private method reflection) ───
@@ -288,7 +290,7 @@ describe('MonitorService - evaluateGlobalSettings', () => {
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '50' });
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'), { stackName: undefined });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'));
   });
 
   it('does not dispatch when CPU below threshold', async () => {
@@ -297,7 +299,7 @@ describe('MonitorService - evaluateGlobalSettings', () => {
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '50' });
 
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'), { stackName: undefined });
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'));
   });
 
   it('dispatches RAM warning when over threshold', async () => {
@@ -306,7 +308,7 @@ describe('MonitorService - evaluateGlobalSettings', () => {
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'), { stackName: undefined });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
   });
 
   it('dispatches disk warning when over threshold', async () => {
@@ -315,7 +317,7 @@ describe('MonitorService - evaluateGlobalSettings', () => {
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_disk_limit: '90' });
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Disk'), { stackName: undefined });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Disk'));
   });
 
   it('skips host limits when threshold is 0 or NaN', async () => {
@@ -323,15 +325,289 @@ describe('MonitorService - evaluateGlobalSettings', () => {
 
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '0' });
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'), { stackName: undefined });
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'));
 
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: 'abc' });
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'), { stackName: undefined });
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'));
   });
 });
 
 // Crash + healthcheck detection now lives in DockerEventService (event-driven).
 // Tests for those flows live in docker-event-service.test.ts.
+
+// ── F-11: host-metric alert suppression ────────────────────────────────
+
+describe('MonitorService - host alert suppression (F-11)', () => {
+  const SUPPRESSION_MIN = 60;
+
+  // Force RAM-over-threshold for every test in this block; CPU/disk are
+  // independently controlled per-test so a single mockMem set-up covers the
+  // common "I want a breach happening" case without test repetition.
+  beforeEach(() => {
+    mockMem.mockResolvedValue({ used: 15e9, total: 16e9 }); // ~94%
+  });
+
+  it('first breach dispatches immediately', async () => {
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    const [, , message] = mockDispatchAlert.mock.calls[0];
+    expect(message).toContain('Memory');
+    expect(message).not.toContain('Suppressed');
+  });
+
+  it('second breach within window does not dispatch', async () => {
+    const svc = MonitorService.getInstance();
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // 30 seconds later — well inside the 60-minute default window.
+    nowSpy.mockReturnValue(baseTime + 30_000);
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    nowSpy.mockRestore();
+  });
+
+  it('many breaches within window accumulate count without dispatching', async () => {
+    const svc = MonitorService.getInstance();
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    for (let i = 1; i < 10; i++) {
+      nowSpy.mockReturnValue(baseTime + i * 30_000);
+      await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    }
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    nowSpy.mockRestore();
+  });
+
+  it('breach after window elapses dispatches follow-up with count summary and persists new timestamp', async () => {
+    const svc = MonitorService.getInstance();
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    // First dispatch.
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    expect(mockSetSystemState).toHaveBeenCalledWith('last_host_ram_alert_ts', String(baseTime));
+
+    // 5 cycles inside the window, each suppressed.
+    for (let i = 1; i <= 5; i++) {
+      nowSpy.mockReturnValue(baseTime + i * 30_000);
+      await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    }
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // Jump past the suppression window — 61 minutes.
+    const followUpTime = baseTime + 61 * 60 * 1000;
+    nowSpy.mockReturnValue(followUpTime);
+    mockSetSystemState.mockClear();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    const [, , followUpMessage] = mockDispatchAlert.mock.calls[1];
+    expect(followUpMessage).toMatch(/Suppressed 5 alerts in the last \d+m/);
+    expect(followUpMessage).toMatch(/first over threshold at \d{2}:\d{2} UTC/);
+    // Follow-up dispatch must persist the new timestamp so a subsequent
+    // restart-survivability seed picks up the most-recent fire, not the
+    // pre-window first fire (otherwise a restart 30min later would see a
+    // 90min-old persisted row and re-fire immediately).
+    expect(mockSetSystemState).toHaveBeenCalledWith('last_host_ram_alert_ts', String(followUpTime));
+
+    nowSpy.mockRestore();
+  });
+
+  it('dispatches at exactly the suppression window boundary', async () => {
+    const svc = MonitorService.getInstance();
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // Exactly 60 minutes later — at the boundary. The check is `<`, so the
+    // boundary tick should DISPATCH a follow-up rather than suppress.
+    nowSpy.mockReturnValue(baseTime + 60 * 60 * 1000);
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockRestore();
+  });
+
+  it('follow-up summary uses singular "alert" when exactly one cycle was suppressed', async () => {
+    const svc = MonitorService.getInstance();
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // One suppressed cycle.
+    nowSpy.mockReturnValue(baseTime + 30_000);
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    // Past window.
+    nowSpy.mockReturnValue(baseTime + 61 * 60 * 1000);
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    const [, , followUpMessage] = mockDispatchAlert.mock.calls[1];
+    expect(followUpMessage).toContain('Suppressed 1 alert in the last');
+    expect(followUpMessage).not.toContain('Suppressed 1 alerts'); // singular form, not plural
+
+    nowSpy.mockRestore();
+  });
+
+  it('disk-metric path dispatches and suppresses through the same mechanism', async () => {
+    const svc = MonitorService.getInstance();
+    mockFsSize.mockResolvedValue([{ mount: '/', use: 95 }]);
+    // Set RAM below threshold so it does not interfere with the disk-only assertions.
+    mockMem.mockResolvedValue({ used: 4e9, total: 16e9 });
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    await (svc as any).evaluateGlobalSettings({ host_disk_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    expect((mockDispatchAlert.mock.calls[0][2] as string)).toContain('Disk');
+
+    nowSpy.mockReturnValue(baseTime + 30_000);
+    await (svc as any).evaluateGlobalSettings({ host_disk_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1); // suppressed
+
+    nowSpy.mockRestore();
+  });
+
+  it('metric drop below threshold clears in-memory state and persisted timestamp', async () => {
+    const svc = MonitorService.getInstance();
+
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    expect(mockSetSystemState).toHaveBeenCalledWith('last_host_ram_alert_ts', expect.any(String));
+
+    // Drop RAM back under threshold.
+    mockMem.mockResolvedValue({ used: 4e9, total: 16e9 }); // 25%
+    mockSetSystemState.mockClear();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    // Recovery branch resets the persisted timestamp to '0'.
+    expect(mockSetSystemState).toHaveBeenCalledWith('last_host_ram_alert_ts', '0');
+  });
+
+  it('re-breach after recovery fires fresh first alert (no Suppressed suffix)', async () => {
+    const svc = MonitorService.getInstance();
+
+    // Initial breach.
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // Recovery.
+    mockMem.mockResolvedValue({ used: 4e9, total: 16e9 });
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    // Re-breach.
+    mockMem.mockResolvedValue({ used: 15e9, total: 16e9 });
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    const [, , reBreachMessage] = mockDispatchAlert.mock.calls[1];
+    expect(reBreachMessage).not.toContain('Suppressed');
+  });
+
+  it('CPU and RAM suppression states are isolated per metric', async () => {
+    const svc = MonitorService.getInstance();
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 95 });
+
+    // First cycle: both fire.
+    await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '80', host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+    const messages1 = mockDispatchAlert.mock.calls.map(c => c[2] as string);
+    expect(messages1.some(m => m.includes('CPU'))).toBe(true);
+    expect(messages1.some(m => m.includes('Memory'))).toBe(true);
+
+    // Second cycle: both suppressed.
+    await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '80', host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+    // CPU drops below threshold (recovers); RAM stays high.
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 10 });
+    await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '80', host_ram_limit: '80' });
+
+    // CPU re-breaches; RAM still in suppression window.
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 95 });
+    await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '80', host_ram_limit: '80' });
+
+    // CPU fires fresh; RAM stays silent.
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(3);
+    const newCpuMessage = mockDispatchAlert.mock.calls[2][2] as string;
+    expect(newCpuMessage).toContain('CPU');
+    expect(newCpuMessage).not.toContain('Suppressed');
+  });
+
+  it('respects custom host_alert_suppression_mins setting (5 minutes)', async () => {
+    const svc = MonitorService.getInstance();
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80', host_alert_suppression_mins: '5' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // 3 minutes — still within custom 5-minute window.
+    nowSpy.mockReturnValue(baseTime + 3 * 60 * 1000);
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80', host_alert_suppression_mins: '5' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // 6 minutes — past the custom window; follow-up should fire.
+    nowSpy.mockReturnValue(baseTime + 6 * 60 * 1000);
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80', host_alert_suppression_mins: '5' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockRestore();
+  });
+
+  it('post-restart with persisted timestamp inside window does not re-fire', async () => {
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime + 10 * 60 * 1000); // "now" = T+10min
+
+    // Simulate a previous process having persisted a fire 10 minutes ago.
+    mockGetSystemState.mockImplementation((key: string) =>
+      key === 'last_host_ram_alert_ts' ? String(baseTime) : null,
+    );
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    // Post-restart cycle must NOT re-fire because the persisted cooldown
+    // is still active (10 min into the default 60 min window).
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+
+    nowSpy.mockRestore();
+  });
+
+  it('zero or negative suppression_mins falls back to default', async () => {
+    const svc = MonitorService.getInstance();
+    const baseTime = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80', host_alert_suppression_mins: '0' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    // Default 60-minute window applies — a cycle 30 minutes later stays
+    // suppressed even though the setting said 0.
+    nowSpy.mockReturnValue(baseTime + 30 * 60 * 1000);
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80', host_alert_suppression_mins: '0' });
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+    nowSpy.mockRestore();
+  });
+});
 
 // ── Alert breach state machine ─────────────────────────────────────────
 
