@@ -68,7 +68,30 @@ settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
       res.status(400).json({ error: 'Setting value is required' });
       return;
     }
-    DatabaseService.getInstance().updateGlobalSetting(key, String(value));
+    // Route the single-key write through the same per-key schema used by
+    // the bulk PATCH so allowlisted-but-malformed values (e.g. `true`,
+    // `banana`, out-of-range integers) cannot bypass validation just
+    // because they came in via the single-key path. The schema coerces
+    // numeric settings to strings and rejects enum-shaped settings that
+    // are not one of the allowed literals.
+    const parsed = SettingsPatchSchema.safeParse({ [key]: value });
+    if (!parsed.success) {
+      res.status(400).json({
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      });
+      return;
+    }
+    const validated = (parsed.data as Record<string, string>)[key];
+    if (validated === undefined) {
+      // Defensive: the schema is `.partial()`, so an unknown key would
+      // pass through silently. We already gated on ALLOWED_SETTING_KEYS,
+      // but reject explicitly if the key is somehow missing from the
+      // schema's shape (drift between the allowlist and the schema).
+      res.status(400).json({ error: `Setting key has no validator: ${key}` });
+      return;
+    }
+    DatabaseService.getInstance().updateGlobalSetting(key, validated);
     res.json({ success: true });
   } catch (error) {
     console.error('Failed to update setting:', error);

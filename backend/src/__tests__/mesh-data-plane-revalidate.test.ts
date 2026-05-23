@@ -492,6 +492,80 @@ describe('MeshService.attemptInPlaceRecreate — auto-recreate on', () => {
         expect(status.subnet).toBe('172.30.0.0/24');
     });
 
+    it('preserves senchoIp across a create failure, then re-attaches on the next successful retry', async () => {
+        // Tick 1: createNetwork throws overlap. recordRecreateFailure
+        // must NOT clear `senchoIp`, otherwise the next tick's
+        // attachment check (gated on `this.senchoIp`) is skipped and
+        // the revalidator could silently flip back to `ok` against a
+        // newly created but un-attached network.
+        const inspectNetwork = vi.fn().mockRejectedValueOnce(
+            Object.assign(new Error('no such network'), { statusCode: 404 }),
+        );
+        const createNetwork = vi.fn()
+            .mockRejectedValueOnce(Object.assign(
+                new Error('Pool overlaps with other one on this address space'),
+                { statusCode: 500 },
+            ))
+            .mockResolvedValueOnce(undefined);
+        const connectContainerToNetwork = vi.fn().mockResolvedValue(undefined);
+        const fake = mockDocker({ inspectNetwork, createNetwork, connectContainerToNetwork });
+        const svc = MeshService.getInstance() as unknown as MutableSvc;
+        const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(5_000_000);
+        await MeshService.getInstance().revalidateDataPlane();
+        expect(svc.dataPlaneStatus.reason).toBe('subnet_overlap');
+        expect(svc.senchoIp).toBe('172.30.0.2');
+
+        // Advance past throttle and let the next tick succeed.
+        // From this tick the inspect returns the freshly created network.
+        nowSpy.mockReturnValue(5_000_000 + MESH_RECREATE_THROTTLE_MS + 1);
+        inspectNetwork.mockRejectedValueOnce(
+            Object.assign(new Error('no such network'), { statusCode: 404 }),
+        );
+        await MeshService.getInstance().revalidateDataPlane();
+        // createNetwork now succeeds, ensureSelfAttached runs against the
+        // preserved senchoIp and binds Sencho back to the new network.
+        expect(createNetwork).toHaveBeenCalledTimes(2);
+        expect(connectContainerToNetwork).toHaveBeenCalledWith(
+            'sencho_mesh',
+            'sencho',
+            { ipv4Address: '172.30.0.2' },
+        );
+        expect(svc.dataPlaneStatus.reason).toBe('ok');
+        expect(svc.senchoIp).toBe('172.30.0.2');
+        expect(fake.inspectNetwork).toHaveBeenCalled();
+    });
+
+    it('surfaces attach_failed honestly when createNetwork succeeds but ensureSelfAttached throws', async () => {
+        // Tick 1: createNetwork succeeds, connectContainerToNetwork
+        // throws (e.g. another workload is squatting `.2`).
+        // recordRecreateFailure preserves `senchoIp` so the next tick
+        // can still classify the attachment state correctly via the
+        // snapshot path.
+        const createNetwork = vi.fn().mockResolvedValue(undefined);
+        const connectContainerToNetwork = vi.fn()
+            .mockRejectedValueOnce(new Error('Address already in use'));
+        const inspectNetwork = vi.fn()
+            .mockRejectedValueOnce(Object.assign(new Error('no such network'), { statusCode: 404 }))
+            // Tick 2: network now exists from the tick-1 createNetwork
+            // success, but Sencho's container is NOT in the Containers
+            // map (attach threw).
+            .mockResolvedValueOnce(
+                networkPresent('172.30.0.0/24', [{ id: 'squatter-id', name: 'squatter' }]),
+            );
+        mockDocker({ inspectNetwork, createNetwork, connectContainerToNetwork });
+        const svc = MeshService.getInstance() as unknown as MutableSvc;
+        await MeshService.getInstance().revalidateDataPlane();
+        expect(svc.dataPlaneStatus.reason).toBe('ip_in_use');
+        expect(svc.senchoIp).toBe('172.30.0.2'); // preserved
+        // Next revalidator tick sees the new network but no self-
+        // attachment. The reason flips to `attach_failed` honestly
+        // instead of silently reporting `ok` against an un-attached
+        // network (the BLOCKER scenario this fix exists for).
+        await MeshService.getInstance().revalidateDataPlane();
+        expect(svc.dataPlaneStatus.reason).toBe('attach_failed');
+        expect(svc.senchoIp).toBe('172.30.0.2');
+    });
+
     it('does NOT flap subnet_overlap back to not_found during the recreate throttle window', async () => {
         const fake = mockDocker({
             inspectNetwork: vi.fn().mockRejectedValue(

@@ -105,6 +105,47 @@ describe('POST /api/settings (single-key write)', () => {
     const settings = DatabaseService.getInstance().getGlobalSettings();
     expect(settings.host_cpu_limit).toBe('75');
   });
+
+  it('rejects an enum-shaped key whose value is not one of the allowed literals', async () => {
+    // Regression: the single-key POST previously wrote `String(value)`
+    // without re-validating, so an allowlisted enum-shaped key like
+    // `mesh_auto_recreate` could store arbitrary strings (`'banana'`)
+    // that the bulk PATCH would later refuse. The single-key path now
+    // routes through the same SettingsPatchSchema as PATCH.
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'mesh_auto_recreate', value: 'banana' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(res.body.details).toBeInstanceOf(Object);
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    // Confirm the bad write did NOT leak through.
+    expect(settings.mesh_auto_recreate).not.toBe('banana');
+  });
+
+  it('accepts a well-formed mesh_auto_recreate write', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'mesh_auto_recreate', value: '1' });
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(DatabaseService.getInstance().getGlobalSettings().mesh_auto_recreate).toBe('1');
+    // Reset for any later tests that read the value.
+    DatabaseService.getInstance().updateGlobalSetting('mesh_auto_recreate', '0');
+  });
+
+  it('rejects an out-of-range numeric value on the single-key path (now schema-validated)', async () => {
+    // Same regression class as mesh_auto_recreate=banana, but exercised
+    // on a numeric setting to lock down the schema routing.
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'host_cpu_limit', value: '9999' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+  });
 });
 
 describe('PATCH /api/settings (bulk update)', () => {

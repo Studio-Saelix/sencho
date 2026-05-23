@@ -1305,6 +1305,31 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     /**
+     * Records a runtime recreate failure WITHOUT clearing `senchoIp`.
+     * Distinct from `recordSetupFailure`, which is boot-only and clears
+     * the IP as part of the failure-disables-mesh contract. At runtime
+     * the boot-resolved IP must survive a transient failure so a later
+     * successful attempt can drive `ensureSelfAttached` and re-bind
+     * Sencho to the freshly created network. Otherwise the next
+     * revalidator tick that observes the new network would skip the
+     * attachment check (gated on `this.senchoIp`) and silently report
+     * `ok` while Sencho is in fact detached.
+     */
+    private recordRecreateFailure(
+        reason: Exclude<MeshDataPlaneReason, 'ok' | 'not_started' | 'not_found'>,
+        err: unknown,
+        subnet: string,
+    ): void {
+        const message = err instanceof Error ? err.message : String(err);
+        this.transitionDataPlane({
+            ok: false,
+            reason,
+            message,
+            subnet,
+        });
+    }
+
+    /**
      * Opt-in auto-recreate path. Only invoked from the revalidator when
      * the network was observed missing AND the operator has flipped
      * `mesh_auto_recreate` to `'1'` in Settings -> System. Hard-prefers
@@ -1324,6 +1349,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             return;
         }
         this.lastRecreateAttemptAt = now;
+        // A revalidator-driven recreate is only meaningful when the
+        // boot-resolved Sencho IP is known. If `senchoIp` is null,
+        // setupMeshNetwork either never ran (impossible: revalidator
+        // short-circuits on `not_started`) or recorded a hard failure
+        // (`subnet_invalid` / `not_in_docker`, both of which also
+        // short-circuit). Defensive bail.
+        if (!this.senchoIp) return;
         this.logActivity({
             source: 'mesh',
             level: 'info',
@@ -1334,10 +1366,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         try {
             await this.createMeshNetwork(this.meshSubnet);
         } catch (err) {
-            this.recordSetupFailure(
+            // Preserve `senchoIp` so a later successful retry (after the
+            // throttle elapses + the overlap clears) can re-attach.
+            this.recordRecreateFailure(
                 this.classifyMeshNetworkError(err),
                 err,
-                'error',
                 this.meshSubnet,
             );
             return;
@@ -1345,18 +1378,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         try {
             await this.ensureSelfAttached();
         } catch (err) {
-            this.recordSetupFailure(
+            // Same preservation rationale; the attach can succeed on a
+            // later attempt (e.g. when whatever was squatting the IP
+            // gets out of the way). The network now exists, so the next
+            // revalidator tick will surface the attachment failure
+            // honestly through the snapshot path.
+            this.recordRecreateFailure(
                 this.classifySelfAttachError(err),
                 err,
-                'error',
                 this.meshSubnet,
             );
-            return;
-        }
-        if (!this.senchoIp) {
-            // `ensureSelfAttached` short-circuited on the not-in-Docker
-            // path. Status already reflects this via recordSetupFailure;
-            // do not flip it back to `ok`.
             return;
         }
         this.transitionDataPlane({

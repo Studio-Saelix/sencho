@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
+import { useAuth } from '@/context/AuthContext';
 import { DEFAULT_SETTINGS } from './types';
 import type { PatchableSettings } from './types';
 import { SettingsSection } from './SettingsSection';
@@ -146,6 +147,7 @@ const DEFAULT_SYSTEM: SystemFields = {
 
 export function SystemSection({ onDirtyChange }: SystemSectionProps) {
     const { activeNode } = useNodes();
+    const { isAdmin } = useAuth();
     const [settings, setSettings] = useState<SystemFields>({ ...DEFAULT_SYSTEM });
     const serverSettingsRef = useRef<SystemFields>({ ...DEFAULT_SYSTEM });
     const [isLoading, setIsLoading] = useState(false);
@@ -317,17 +319,28 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsSection title="Mesh data plane">
-                <SettingsField
-                    label="Auto-recreate mesh network"
-                    helper="If sencho_mesh is removed at runtime, rebuild it at the same subnet on the next 10s tick. Off by default; leave off and restart Sencho manually for the safest path."
-                >
-                    <TogglePill
-                        checked={settings.mesh_auto_recreate === '1'}
-                        onChange={(next) => onSettingChange('mesh_auto_recreate', next ? '1' : '0')}
-                    />
-                </SettingsField>
-            </SettingsSection>
+            {/*
+              Mesh-data-plane recreate touches Docker (createNetwork +
+              connectContainerToNetwork) on the backend, which is admin-gated
+              by `requireAdmin` on the settings route. Hide the affordance
+              for non-admins so the toggle does not surface a 403 on save.
+              The rest of the System section stays visible because it
+              matches the existing pattern (host thresholds, janitor, alert
+              suppression all visible read-only to non-admins).
+            */}
+            {isAdmin && (
+                <SettingsSection title="Mesh data plane">
+                    <SettingsField
+                        label="Auto-recreate mesh network"
+                        helper="If sencho_mesh is removed at runtime, rebuild it at the same subnet on the next 10s tick. Off by default; leave off and restart Sencho manually for the safest path."
+                    >
+                        <TogglePill
+                            checked={settings.mesh_auto_recreate === '1'}
+                            onChange={(next) => onSettingChange('mesh_auto_recreate', next ? '1' : '0')}
+                        />
+                    </SettingsField>
+                </SettingsSection>
+            )}
 
             <SettingsActions hint={hasChanges ? `${dirtyCount} unsaved` : undefined}>
                 <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges}>
