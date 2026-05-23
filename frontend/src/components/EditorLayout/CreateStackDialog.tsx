@@ -37,6 +37,12 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
     const { activeNode } = useNodes();
     const [createMode, setCreateMode] = useState<CreateMode>('empty');
     const [newStackName, setNewStackName] = useState('');
+    // Synchronous guard. The disabled-button + setState pair can race a rapid
+    // second click that lands before React has committed the disabled state,
+    // re-entering the handler with a stale closure value of creatingEmpty and
+    // firing a second POST. The ref check is read/written synchronously inside
+    // the handler so the second invocation bails before issuing another POST.
+    const creatingEmptyRef = useRef(false);
     const [creatingEmpty, setCreatingEmpty] = useState(false);
     const [dockerRunInput, setDockerRunInput] = useState('');
     const [convertedYaml, setConvertedYaml] = useState<string | null>(null);
@@ -72,10 +78,11 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
     };
 
     const handleCreateStack = async () => {
-        if (creatingEmpty) return;
+        if (creatingEmptyRef.current) return;
         if (!newStackName.trim()) return;
         const stackName = newStackName.trim();
         const sourceNodeId = activeNode?.id;
+        creatingEmptyRef.current = true;
         setCreatingEmpty(true);
         try {
             const response = await apiFetch('/stacks', {
@@ -104,6 +111,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             console.error('Failed to create stack:', error);
             toast.error((error as Error).message || 'Failed to create stack.');
         } finally {
+            creatingEmptyRef.current = false;
             setCreatingEmpty(false);
         }
     };
@@ -300,6 +308,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 onOpenChange(o);
                 if (!o) {
                     setCreateMode('empty');
+                    creatingEmptyRef.current = false;
                     setCreatingEmpty(false);
                     resetCreateFromGitForm();
                     resetCreateFromDockerRunForm();

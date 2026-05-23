@@ -72,9 +72,15 @@ test.describe('Stack management', () => {
       await page.locator('#create-stack-name').fill(stackName);
 
       const createBtn = page.locator('[role="dialog"]').getByRole('button', { name: /^Create/ });
-      // Rapid double-click; the busy guard must reject the second click synchronously.
-      await createBtn.click();
-      await createBtn.click({ force: true }).catch(() => { /* second click may land on disabled btn */ });
+      // Fire both clicks in the same microtask via Promise.all so the second
+      // dispatches without an awaited gap that would let React commit the
+      // disabled state in between. The 1s timeout on the second click prevents
+      // a 30s hang on locator resolution if the first POST has already closed
+      // the dialog.
+      await Promise.all([
+        createBtn.click(),
+        createBtn.click({ force: true, timeout: 1_000 }).catch(() => undefined),
+      ]);
 
       await expect(page.getByRole('dialog')).toBeHidden({ timeout: 8_000 });
       await expect(page.getByText(`Stack "${stackName}" created.`)).toBeVisible({ timeout: 5_000 });
