@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent } from 'react';
+import { useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Plus, GitBranch, FileCode2, Loader2, type LucideIcon } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/modal';
 import { Button } from '../ui/button';
@@ -9,12 +9,16 @@ import { Checkbox } from '../ui/checkbox';
 import { GitSourceFields, type ApplyMode } from '../stack/GitSourceFields';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
+import { useNodes } from '@/context/NodeContext';
 import { cn } from '@/lib/utils';
 
 export interface CreateStackDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
-    onStackCreated: (stackName: string) => void | Promise<void>;
+    // sourceNodeId is the active node ID captured at the moment the user clicked
+    // Create. Parent compares against the current active node before navigating
+    // so a mid-flight node switch does not land the user on a 404.
+    onStackCreated: (stackName: string, sourceNodeId: number | null | undefined) => void | Promise<void>;
     onStacksChanged: () => void | Promise<void>;
 }
 
@@ -30,8 +34,10 @@ const tabId = (m: CreateMode) => `create-stack-tab-${m}`;
 const panelId = (m: CreateMode) => `create-stack-panel-${m}`;
 
 export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacksChanged }: CreateStackDialogProps) {
+    const { activeNode } = useNodes();
     const [createMode, setCreateMode] = useState<CreateMode>('empty');
     const [newStackName, setNewStackName] = useState('');
+    const [creatingEmpty, setCreatingEmpty] = useState(false);
     const [dockerRunInput, setDockerRunInput] = useState('');
     const [convertedYaml, setConvertedYaml] = useState<string | null>(null);
     const [isConverting, setIsConverting] = useState(false);
@@ -66,8 +72,11 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
     };
 
     const handleCreateStack = async () => {
+        if (creatingEmpty) return;
         if (!newStackName.trim()) return;
         const stackName = newStackName.trim();
+        const sourceNodeId = activeNode?.id;
+        setCreatingEmpty(true);
         try {
             const response = await apiFetch('/stacks', {
                 method: 'POST',
@@ -75,19 +84,33 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             });
             if (!response.ok) {
                 if (response.status === 409) {
-                    throw new Error('Stack already exists');
-                } else if (response.status === 400) {
-                    throw new Error('Invalid stack name (use alphanumeric characters and hyphens only)');
+                    throw new Error('Stack already exists.');
                 }
-                throw new Error('Failed to create stack');
+                if (response.status === 400) {
+                    throw new Error('Invalid stack name (use alphanumeric characters and hyphens only).');
+                }
+                if (response.status === 403) {
+                    throw new Error('You do not have permission to create stacks.');
+                }
+                const body = await response.json().catch(() => ({}));
+                throw new Error((body as { error?: string })?.error || 'Failed to create stack.');
             }
             onOpenChange(false);
             setNewStackName('');
-            await onStackCreated(stackName);
+            setCreateMode('empty');
+            toast.success(`Stack "${stackName}" created.`);
+            await onStackCreated(stackName, sourceNodeId);
         } catch (error) {
             console.error('Failed to create stack:', error);
-            toast.error((error as Error).message || 'Failed to create stack');
+            toast.error((error as Error).message || 'Failed to create stack.');
+        } finally {
+            setCreatingEmpty(false);
         }
+    };
+
+    const handleEmptyFormSubmit = (e: FormEvent<HTMLFormElement>) => {
+        e.preventDefault();
+        void handleCreateStack();
     };
 
     const handleCreateStackFromGit = async () => {
@@ -104,6 +127,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             toast.error('Only HTTPS repository URLs are supported.');
             return;
         }
+        const sourceNodeId = activeNode?.id;
         setCreatingFromGit(true);
         const loadingId = toast.loading(gitDeployNow ? 'Fetching, creating, and deploying...' : 'Fetching and creating stack...');
         try {
@@ -154,7 +178,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             }
             onOpenChange(false);
             resetCreateFromGitForm();
-            await onStackCreated(stackName);
+            await onStackCreated(stackName, sourceNodeId);
         } catch (error) {
             console.error('Failed to create stack from Git:', error);
             toast.error((error as Error)?.message || 'Failed to create stack from Git.');
@@ -209,6 +233,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             toast.error('Convert the command before creating the stack.');
             return;
         }
+        const sourceNodeId = activeNode?.id;
         setCreatingFromDockerRun(true);
         const loadingId = toast.loading('Creating stack from converted YAML...');
         let createdStack = false;
@@ -245,7 +270,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             onOpenChange(false);
             resetCreateFromDockerRunForm();
             setNewStackName('');
-            await onStackCreated(stackName);
+            await onStackCreated(stackName, sourceNodeId);
         } catch (error) {
             console.error('Failed to create stack from docker run:', error);
             const err = error as { message?: string; error?: string; data?: { error?: string } };
@@ -265,7 +290,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
         }
     };
 
-    const busy = creatingFromGit || creatingFromDockerRun;
+    const busy = creatingEmpty || creatingFromGit || creatingFromDockerRun;
 
     return (
         <Modal
@@ -275,6 +300,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 onOpenChange(o);
                 if (!o) {
                     setCreateMode('empty');
+                    setCreatingEmpty(false);
                     resetCreateFromGitForm();
                     resetCreateFromDockerRunForm();
                 }
@@ -289,31 +315,43 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
 
             {createMode === 'empty' && (
                 <div role="tabpanel" id={panelId('empty')} aria-labelledby={tabId('empty')}>
-                    <ModalBody>
-                        <div className="space-y-2">
-                            <Label htmlFor="create-stack-name">Stack Name</Label>
-                            <Input
-                                id="create-stack-name"
-                                placeholder="Stack name (e.g., myapp)"
-                                value={newStackName}
-                                onChange={(e) => setNewStackName(e.target.value)}
-                                autoFocus
-                            />
-                        </div>
-                    </ModalBody>
-                    <ModalFooter
-                        hint="ALPHANUMERIC · HYPHENS"
-                        secondary={
-                            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-                                Cancel
-                            </Button>
-                        }
-                        primary={
-                            <Button onClick={handleCreateStack} disabled={!newStackName.trim()}>
-                                Create
-                            </Button>
-                        }
-                    />
+                    <form onSubmit={handleEmptyFormSubmit}>
+                        <ModalBody>
+                            <div className="space-y-2">
+                                <Label htmlFor="create-stack-name">Stack Name</Label>
+                                <Input
+                                    id="create-stack-name"
+                                    placeholder="Stack name (e.g., myapp)"
+                                    value={newStackName}
+                                    onChange={(e) => setNewStackName(e.target.value)}
+                                    disabled={creatingEmpty}
+                                    autoFocus
+                                />
+                            </div>
+                        </ModalBody>
+                        <ModalFooter
+                            hint="ALPHANUMERIC · HYPHENS"
+                            secondary={
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    onClick={() => onOpenChange(false)}
+                                    disabled={creatingEmpty}
+                                >
+                                    Cancel
+                                </Button>
+                            }
+                            primary={
+                                <Button type="submit" disabled={creatingEmpty || !newStackName.trim()}>
+                                    {creatingEmpty ? (
+                                        <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />Creating</>
+                                    ) : (
+                                        <><Plus className="w-4 h-4 mr-1.5" strokeWidth={1.5} />Create</>
+                                    )}
+                                </Button>
+                            }
+                        />
+                    </form>
                 </div>
             )}
 
