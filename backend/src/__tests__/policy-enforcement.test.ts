@@ -1,7 +1,7 @@
 /**
- * Covers the pre-deploy policy gate across the six behaviours defined in the
- * PR 1 plan: no-policy, disabled-policy, Trivy-missing (fail open),
- * violation, admin bypass (audit-logged), compose-parse-failure (fail closed).
+ * Covers the pre-deploy policy gate: no-policy, disabled-policy, Trivy-missing
+ * (fail open + notification de-dup), violation, admin bypass (audit-logged),
+ * and compose-parse-failure (fail closed) paths.
  *
  * The gate is the only code path that can block a `docker compose up`, so
  * regressions here are high-impact. We stub the four collaborators the helper
@@ -57,7 +57,11 @@ vi.mock('../services/FleetSyncService', () => ({
   FleetSyncService: { getSelfIdentity: () => 'self-node' },
 }));
 
-import { enforcePolicyForImageRefs, enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import {
+  _resetTrivyMissingNotificationStateForTests,
+  enforcePolicyForImageRefs,
+  enforcePolicyPreDeploy,
+} from '../services/PolicyEnforcement';
 
 function mkPolicy(overrides: Partial<ScanPolicy> = {}): ScanPolicy {
   return {
@@ -114,6 +118,7 @@ describe('enforcePolicyPreDeploy', () => {
     dbStub.getMatchingPolicy.mockReset();
     dbStub.insertAuditLog.mockReset();
     notificationStub.dispatchAlert.mockReset();
+    _resetTrivyMissingNotificationStateForTests();
   });
 
   it('allows deploy when no matching policy exists', async () => {
@@ -179,6 +184,63 @@ describe('enforcePolicyPreDeploy', () => {
     expect(notificationStub.dispatchAlert.mock.calls[0][1]).toBe('scan_finding');
     expect(notificationStub.dispatchAlert.mock.calls[0][2]).toContain('Trivy not installed');
     expect(composeStub.listStackImages).not.toHaveBeenCalled();
+  });
+
+  it('collapses repeated trivy-missing notifications for the same stack within the cooldown', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+
+    for (let i = 0; i < 5; i++) {
+      const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+      expect(result.trivyMissing).toBe(true);
+    }
+
+    expect(notificationStub.dispatchAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatches a separate trivy-missing notification per stack', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+    await enforcePolicyPreDeploy('db', 1, { bypass: false, actor: 'u' });
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+    await enforcePolicyPreDeploy('db', 1, { bypass: false, actor: 'u' });
+
+    expect(notificationStub.dispatchAlert).toHaveBeenCalledTimes(2);
+    const stackNames = notificationStub.dispatchAlert.mock.calls.map((c) => (c[3] as { stackName: string }).stackName);
+    expect(stackNames).toEqual(['web', 'db']);
+  });
+
+  it('dispatches a separate trivy-missing notification per node for the same stack name', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+    await enforcePolicyPreDeploy('web', 2, { bypass: false, actor: 'u' });
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+    await enforcePolicyPreDeploy('web', 2, { bypass: false, actor: 'u' });
+
+    expect(notificationStub.dispatchAlert).toHaveBeenCalledTimes(2);
+  });
+
+  it('redispatches the trivy-missing notification after the cooldown elapses', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+    const nowSpy = vi.spyOn(Date, 'now');
+    const start = 1_700_000_000_000;
+    nowSpy.mockReturnValue(start);
+
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+    nowSpy.mockReturnValue(start + 30 * 60 * 1000);
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+    expect(notificationStub.dispatchAlert).toHaveBeenCalledTimes(1);
+
+    nowSpy.mockReturnValue(start + 60 * 60 * 1000 + 1);
+    await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+    expect(notificationStub.dispatchAlert).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockRestore();
   });
 
   it('blocks deploy when a scanned image exceeds the policy severity', async () => {
