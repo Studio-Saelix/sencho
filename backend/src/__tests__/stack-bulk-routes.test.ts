@@ -283,8 +283,9 @@ describe('POST /api/stacks/bulk execution', () => {
     const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
     const policySpy = vi.spyOn(policyMod, 'enforcePolicyPreDeploy').mockResolvedValue({
       ok: false,
-      policy: { id: 1, name: 'block-criticals', max_severity: 'high', enabled: 1, scope: 'all', allowed_stacks: null, blocking: 1, created_at: Date.now(), updated_at: Date.now() },
-      violations: [{ image: 'nginx:latest', critical_count: 3, high_count: 0, medium_count: 0, low_count: 0, exceeds: 'critical' }],
+      bypassed: false,
+      policy: { id: 1, name: 'block-criticals', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'HIGH', block_on_deploy: 1, enabled: 1, replicated_from_control: 0, created_at: Date.now(), updated_at: Date.now() },
+      violations: [{ imageRef: 'nginx:latest', severity: 'CRITICAL', criticalCount: 3, highCount: 0, scanId: 1 }],
     });
     mockUpdateStack.mockResolvedValue(undefined);
     try {
@@ -302,6 +303,31 @@ describe('POST /api/stacks/bulk execution', () => {
       tierSpy.mockRestore();
       policySpy.mockRestore();
     }
+  });
+
+  it('dedupes repeated stackNames before scheduling work', async () => {
+    const res = await request(app)
+      .post('/api/stacks/bulk')
+      .set('Cookie', authCookie)
+      .send({ action: 'restart', stackNames: ['web', 'web', 'web'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(1);
+    expect(res.body.results[0].ok).toBe(true);
+    expect(mockRestartContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not shadow POST /:stackName/restart for a stack literally named bulk', async () => {
+    // The bulk endpoint is mounted at /api/stacks/bulk (no trailing path).
+    // A stack named "bulk" must still be reachable at /api/stacks/bulk/restart
+    // because Express matches /:stackName/restart there, not the bulk handler.
+    const res = await request(app)
+      .post('/api/stacks/bulk/restart')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(mockRestartContainer).toHaveBeenCalledTimes(1);
+    expect(res.body.success).toBe(true);
   });
 
   it('returns 403 on update action when caller is not on a paid tier', async () => {

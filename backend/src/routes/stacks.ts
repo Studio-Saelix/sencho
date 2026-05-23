@@ -384,10 +384,15 @@ stacksRouter.post('/bulk', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'stackNames must be an array of strings' });
   }
 
+  // Bulk update is paid-only by deliberate asymmetry with the single-stack
+  // POST /:stackName/update, which is open to all tiers (atomic backup is
+  // separately gated by effectiveTier inside the route). The bulk fan-out
+  // amplifies blast radius enough that we want a hard tier check here even
+  // though the per-stack route does not.
   if (action === 'update' && !requirePaid(req, res)) return;
 
   const typedAction = action as BulkLifecycleAction;
-  const typedNames = stackNames as string[];
+  const typedNames = Array.from(new Set(stackNames as string[]));
 
   const results = await runWithBoundedParallelism(
     typedNames,
