@@ -4,7 +4,7 @@ description: Trigger stack actions from CI/CD pipelines via HTTP webhooks with H
 ---
 
 <Note>
-  Webhooks require a **Skipper** or **Admiral** license. Creating, editing, and deleting webhooks is restricted to admin users; non-admins on a paid tier can view the list but cannot manage it.
+  Webhooks require a **Skipper** or **Admiral** license. Managing webhooks is admin-only.
 </Note>
 
 Sencho webhooks let external systems trigger stack actions over HTTP. The typical use case: your CI pipeline builds a new image, then calls a Sencho webhook to deploy the updated stack, with no manual intervention required.
@@ -109,6 +109,7 @@ Valid override values are: `deploy`, `restart`, `stop`, `start`, `pull`, `git-pu
 | `202 Accepted` | `{ "message": "Webhook accepted", "action": "deploy" }` | Signature is valid; the action is now running asynchronously. A 202 means accepted, not finished. |
 | `400 Bad Request` | `{ "error": "action must be one of: deploy, restart, stop, start, pull, git-pull" }` | The request authenticated successfully but the body's `action` override was not in the allowlist. |
 | `404 Not Found` | `{ "error": "Webhook not found or signature invalid" }` | The webhook id is unknown, the webhook is disabled, the signature header is missing, the request body was empty, or the signature did not match. Sencho returns the same response for every unauthenticated case so callers cannot probe ids or licence state. |
+| `429 Too Many Requests` | `{ "error": "Too many webhook triggers. Please try again shortly." }` | The trigger endpoint allows 500 requests per minute per source IP. CI/CD callers behind shared NAT or datacenter egress may share that budget. |
 
 ## CI/CD integration examples
 
@@ -178,6 +179,10 @@ Sencho retains the last 100 executions per webhook and surfaces the 20 most rece
 
   <Accordion title="The action returns 202 but the stack does not change.">
     A 202 means the action was accepted, not that it produced a visible change. **Pull & Update** is a no-op if the registry has no newer image for any service in the stack; **Start** is a no-op on an already-running stack. Check the stack's **Activity** sheet to confirm what actually ran, and the webhook's **Recent executions** for the action's status and duration.
+  </Accordion>
+
+  <Accordion title="My trigger returns 429 'Too many webhook triggers'.">
+    The trigger endpoint is rate limited to 500 requests per minute per source IP. CI/CD runners behind shared NAT or a datacenter egress pool all share that budget. Either space the calls out, send them from a less crowded egress, or split the work across multiple webhooks if a single workflow fires hundreds of triggers in close succession.
   </Accordion>
 
   <Accordion title="I cannot create a Git source sync webhook for this stack.">
