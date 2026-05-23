@@ -132,12 +132,13 @@ function SettingsSkeleton() {
     );
 }
 
-type SystemFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'docker_janitor_gb' | 'global_crash'>;
+type SystemFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'docker_janitor_gb' | 'global_crash'>;
 
 const DEFAULT_SYSTEM: SystemFields = {
     host_cpu_limit: DEFAULT_SETTINGS.host_cpu_limit,
     host_ram_limit: DEFAULT_SETTINGS.host_ram_limit,
     host_disk_limit: DEFAULT_SETTINGS.host_disk_limit,
+    host_alert_suppression_mins: DEFAULT_SETTINGS.host_alert_suppression_mins,
     docker_janitor_gb: DEFAULT_SETTINGS.docker_janitor_gb,
     global_crash: DEFAULT_SETTINGS.global_crash,
 };
@@ -155,6 +156,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
         if (settings.host_cpu_limit !== baseline.host_cpu_limit) n++;
         if (settings.host_ram_limit !== baseline.host_ram_limit) n++;
         if (settings.host_disk_limit !== baseline.host_disk_limit) n++;
+        if (settings.host_alert_suppression_mins !== baseline.host_alert_suppression_mins) n++;
         if (settings.docker_janitor_gb !== baseline.docker_janitor_gb) n++;
         if (settings.global_crash !== baseline.global_crash) n++;
         return n;
@@ -188,6 +190,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                     host_cpu_limit: nodeData.host_cpu_limit ?? DEFAULT_SETTINGS.host_cpu_limit,
                     host_ram_limit: nodeData.host_ram_limit ?? DEFAULT_SETTINGS.host_ram_limit,
                     host_disk_limit: nodeData.host_disk_limit ?? DEFAULT_SETTINGS.host_disk_limit,
+                    host_alert_suppression_mins: nodeData.host_alert_suppression_mins ?? DEFAULT_SETTINGS.host_alert_suppression_mins,
                     docker_janitor_gb: nodeData.docker_janitor_gb ?? DEFAULT_SETTINGS.docker_janitor_gb,
                     global_crash: (nodeData.global_crash as '0' | '1') ?? DEFAULT_SETTINGS.global_crash,
                 };
@@ -235,7 +238,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
             <SettingsSection title="Host thresholds">
                 <SettingsField
                     label="CPU limit"
-                    helper="Alerts fire when the 5-minute average exceeds this percentage."
+                    helper="Alerts fire when host CPU utilization exceeds this percentage."
                 >
                     <NumberChip
                         value={settings.host_cpu_limit || '90'}
@@ -270,6 +273,18 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                         min={1}
                         max={100}
                         warnOver={95}
+                    />
+                </SettingsField>
+                <SettingsField
+                    label="Alert suppression"
+                    helper="How long to wait before resending a host alert while the metric stays over threshold. The follow-up message includes a count of suppressed cycles."
+                >
+                    <NumberChip
+                        value={settings.host_alert_suppression_mins || '60'}
+                        onChange={(v) => onSettingChange('host_alert_suppression_mins', v)}
+                        suffix="min"
+                        min={1}
+                        max={1440}
                     />
                 </SettingsField>
             </SettingsSection>

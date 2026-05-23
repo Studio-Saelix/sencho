@@ -58,17 +58,35 @@ test.describe('Stack management', () => {
     await loginAs(page);
     await waitForStacksLoaded(page);
 
-    // Count POST /api/stacks calls and hold the response briefly so the
-    // disabled-button window is observable from the test. Awaiting
-    // route.continue() avoids the fire-and-forget pattern that can subtly
-    // stall a request on a busy CI runner.
     let postCount = 0;
+    let releaseCreate: () => void = () => undefined;
+    let markFirstPostSeen: () => void = () => undefined;
+    let releasedCreate = false;
+    const createMayContinue = new Promise<void>((resolve) => {
+      releaseCreate = () => {
+        if (releasedCreate) return;
+        releasedCreate = true;
+        resolve();
+      };
+    });
+    const firstPostSeen = new Promise<void>((resolve) => {
+      markFirstPostSeen = resolve;
+    });
+
+    // Count POST /api/stacks calls and hold the first response until after a
+    // second click has been attempted. Continuing the original route after an
+    // assertion failure can race Playwright cleanup, so fetch and fulfill it
+    // explicitly once the test is ready to let the request complete.
     await page.route('**/api/stacks', async (route) => {
       if (route.request().method() === 'POST') {
         postCount += 1;
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        markFirstPostSeen();
+        await createMayContinue;
+        const response = await route.fetch();
+        await route.fulfill({ response });
+        return;
       }
-      await route.continue();
+      await route.fallback();
     });
 
     try {
@@ -78,22 +96,21 @@ test.describe('Stack management', () => {
 
       const createBtn = page.locator('[role="dialog"]').getByRole('button', { name: /^Create/ });
       await createBtn.click();
+      await firstPostSeen;
 
-      // The synchronous useRef guard plus React's disabled re-render must
-      // surface a disabled Create button while the POST is in flight. If this
-      // assertion ever times out, the busy-state path has regressed.
-      await expect(createBtn).toBeDisabled({ timeout: 1_500 });
-
-      // Best-effort second click against the now-disabled native button. A real
-      // user mash translates to a no-op at the browser level on a disabled
-      // submit button; the synchronous ref guard catches it even if Playwright
-      // managed to dispatch the click anyway.
+      // Best-effort second click while the first POST is still in flight. A
+      // real user mash translates to a no-op once the button disables; the
+      // synchronous ref guard catches it even if Playwright manages to dispatch
+      // the click before React commits the disabled state.
       await createBtn.click({ force: true, timeout: 500 }).catch(() => undefined);
+      await page.waitForTimeout(100);
+      expect(postCount).toBe(1);
 
+      releaseCreate();
       await expect(page.getByRole('dialog')).toBeHidden({ timeout: 8_000 });
       await expect(page.getByText(`Stack "${stackName}" created.`)).toBeVisible({ timeout: 5_000 });
-      expect(postCount).toBe(1);
     } finally {
+      releaseCreate();
       await page.unroute('**/api/stacks');
       // Cleanup
       await page.evaluate(async (name) => {

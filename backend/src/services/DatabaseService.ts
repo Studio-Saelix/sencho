@@ -1229,6 +1229,7 @@ export class DatabaseService {
         stmt.run('host_cpu_limit', '90');
         stmt.run('host_ram_limit', '90');
         stmt.run('host_disk_limit', '90');
+        stmt.run('host_alert_suppression_mins', '60');
         stmt.run('global_crash', '1');
         stmt.run('docker_janitor_gb', '5');
         stmt.run('developer_mode', '0');
