@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.4](https://github.com/Studio-Saelix/sencho/compare/v0.86.3...v0.86.4) (2026-05-23)
+
+
+### Fixed
+
+* **monitor:** decouple janitor disk-usage check from 30s cycle (F-6) ([#1164](https://github.com/Studio-Saelix/sencho/issues/1164)) ([a51547a](https://github.com/Studio-Saelix/sencho/commit/a51547a1582a1f0dc85dad461d94fd6e752e40c9))
+
 ## [0.86.3](https://github.com/Studio-Saelix/sencho/compare/v0.86.2...v0.86.3) (2026-05-23)
 
 
