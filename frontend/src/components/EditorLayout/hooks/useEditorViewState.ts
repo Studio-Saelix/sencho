@@ -31,8 +31,10 @@ export function useEditorViewState() {
 
   const [content, setContent] = useState<string>('');
   const [originalContent, setOriginalContent] = useState<string>('');
+  const [composeEtag, setComposeEtag] = useState<string | null>(null);
   const [envContent, setEnvContent] = useState<string>('');
   const [originalEnvContent, setOriginalEnvContent] = useState<string>('');
+  const [envEtag, setEnvEtag] = useState<string | null>(null);
   const [envExists, setEnvExists] = useState<boolean>(false);
   const [envFiles, setEnvFiles] = useState<string[]>([]);
   const [selectedEnvFile, setSelectedEnvFile] = useState<string>('');
@@ -57,8 +59,10 @@ export function useEditorViewState() {
     copiedDigestTimerRef,
     content, setContent,
     originalContent, setOriginalContent,
+    composeEtag, setComposeEtag,
     envContent, setEnvContent,
     originalEnvContent, setOriginalEnvContent,
+    envEtag, setEnvEtag,
     envExists, setEnvExists,
     envFiles, setEnvFiles,
     selectedEnvFile, setSelectedEnvFile,

@@ -156,6 +156,19 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * Read the resolved compose file along with its mtimeMs, which the route
+   * layer surfaces as an ETag for optimistic-concurrency on PUT.
+   */
+  async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number }> {
+    const filePath = await this.getComposeFilePath(stackName);
+    const [content, stat] = await Promise.all([
+      fsPromises.readFile(filePath, 'utf-8'),
+      fsPromises.stat(filePath),
+    ]);
+    return { content, mtimeMs: stat.mtimeMs };
+  }
+
   async saveStackContent(stackName: string, content: string): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
@@ -164,6 +177,84 @@ export class FileSystemService {
     } catch (error) {
       console.error('Error writing file:', error);
       throw new Error(`Failed to save stack: ${stackName}`);
+    }
+  }
+
+  /**
+   * Optimistic-concurrency write: if `expectedMtimeMs` is provided, stat the
+   * write target first and return `{ok: false}` with the current content and
+   * mtime when they don't match. The route maps that to 412. Mtime comparison
+   * uses Math.floor to absorb sub-millisecond jitter from different file
+   * systems / Node versions.
+   *
+   * If the file doesn't exist yet, the write proceeds (no mtime to compare).
+   * Returns the new mtimeMs so the route can emit a fresh ETag.
+   */
+  async saveStackContentIfUnchanged(
+    stackName: string,
+    content: string,
+    expectedMtimeMs: number | null,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
+    const stackDir = this.resolveStackDir(stackName);
+    const filePath = path.join(stackDir, 'compose.yaml');
+
+    if (expectedMtimeMs !== null) {
+      try {
+        const stat = await fsPromises.stat(filePath);
+        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+          const currentContent = await fsPromises.readFile(filePath, 'utf-8');
+          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        // File doesn't exist yet, treat as fresh write.
+      }
+    }
+
+    await fsPromises.writeFile(filePath, content, 'utf-8');
+    const newStat = await fsPromises.stat(filePath);
+    return { ok: true, mtimeMs: newStat.mtimeMs };
+  }
+
+  /**
+   * Optimistic-concurrency write for arbitrary paths under the stack dir
+   * (used for .env files; the path was already validated by the caller).
+   */
+  async writeFileIfUnchanged(
+    targetPath: string,
+    content: string,
+    expectedMtimeMs: number | null,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
+    if (expectedMtimeMs !== null) {
+      try {
+        const stat = await fsPromises.stat(targetPath);
+        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+          const currentContent = await fsPromises.readFile(targetPath, 'utf-8');
+          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
+
+    await fsPromises.writeFile(targetPath, content, 'utf-8');
+    const newStat = await fsPromises.stat(targetPath);
+    return { ok: true, mtimeMs: newStat.mtimeMs };
+  }
+
+  async statMtime(targetPath: string): Promise<number | null> {
+    try {
+      const stat = await fsPromises.stat(targetPath);
+      return stat.mtimeMs;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
     }
   }
 
