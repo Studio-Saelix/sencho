@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.3](https://github.com/Studio-Saelix/sencho/compare/v0.86.2...v0.86.3) (2026-05-23)
+
+
+### Fixed
+
+* **mesh:** bias Sencho static IP via IPAM IPRange (F-13) ([#1162](https://github.com/Studio-Saelix/sencho/issues/1162)) ([64bf634](https://github.com/Studio-Saelix/sencho/commit/64bf6344a3c883cb39671dec43b07a4681b54b36))
+
 ## [0.86.2](https://github.com/Studio-Saelix/sencho/compare/v0.86.1...v0.86.2) (2026-05-22)
 
 
