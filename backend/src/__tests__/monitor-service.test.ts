@@ -10,7 +10,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockCleanupOldMetrics, mockCleanupOldNotifications, mockCleanupOldAuditLogs,
   mockUpdateStackAlertLastFired, mockGetSystemState, mockSetSystemState,
   mockGetRunningContainers, mockGetAllContainers, mockGetContainerStatsStream,
-  mockGetContainerRestartCount,
+  mockGetContainerRestartCount, mockGetDiskUsage,
   mockDispatchAlert,
   mockCurrentLoad, mockMem, mockFsSize,
   mockExecAsync,
@@ -32,6 +32,10 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockGetAllContainers: vi.fn().mockResolvedValue([]),
   mockGetContainerStatsStream: vi.fn().mockResolvedValue('{}'),
   mockGetContainerRestartCount: vi.fn().mockResolvedValue(0),
+  mockGetDiskUsage: vi.fn().mockResolvedValue({
+    reclaimableImages: 0, reclaimableContainers: 0, reclaimableVolumes: 0, reclaimableBuildCache: 0,
+    reclaimableImageCount: 0, reclaimableContainerCount: 0, reclaimableVolumeCount: 0, reclaimableBuildCacheCount: 0,
+  }),
   mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
   mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10 }),
   mockMem: vi.fn().mockResolvedValue({ used: 4e9, total: 16e9 }),
@@ -66,6 +70,7 @@ vi.mock('../services/DockerController', () => ({
       getAllContainers: mockGetAllContainers,
       getContainerStatsStream: mockGetContainerStatsStream,
       getContainerRestartCount: mockGetContainerRestartCount,
+      getDiskUsage: mockGetDiskUsage,
     }),
   },
 }));
@@ -88,6 +93,15 @@ vi.mock('../services/NotificationService', () => ({
   NotificationService: {
     getInstance: () => ({
       dispatchAlert: mockDispatchAlert,
+    }),
+  },
+}));
+
+vi.mock('../services/NodeRegistry', () => ({
+  NodeRegistry: {
+    getInstance: () => ({
+      getDefaultNodeId: () => 1,
+      getNode: () => ({ id: 1, name: 'local-test', type: 'local' }),
     }),
   },
 }));
@@ -829,5 +843,234 @@ describe('MonitorService - parallel container processing', () => {
     // close to the cap when we have many more items than workers.
     expect(peakInFlight).toBeGreaterThan(1);
     expect(mockAddContainerMetric).toHaveBeenCalledTimes(containerCount);
+  });
+});
+
+// ── Janitor cycle and circuit breaker (F-6) ────────────────────────────
+
+describe('MonitorService - janitor cycle and circuit breaker', () => {
+  // Convenience: builds a never-settling promise used to simulate a hung df().
+  function hangForever(): Promise<never> {
+    return new Promise<never>(() => { /* never resolves */ });
+  }
+
+  // Reclaimable payload large enough to cross a 0.5 GB janitor threshold.
+  const RECLAIMABLE_3GB = {
+    reclaimableImages: 3 * 1024 * 1024 * 1024,
+    reclaimableContainers: 0,
+    reclaimableVolumes: 0,
+    reclaimableBuildCache: 0,
+    reclaimableImageCount: 5,
+    reclaimableContainerCount: 0,
+    reclaimableVolumeCount: 0,
+    reclaimableBuildCacheCount: 0,
+  };
+
+  it('evaluate() does NOT call getDiskUsage (decoupling guardrail)', async () => {
+    // F-6 regression guard: the 30s monitor cycle must never call df().
+    // If someone re-couples the janitor into evaluate(), this test fails.
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+    mockGetNodes.mockReturnValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockGetDiskUsage).not.toHaveBeenCalled();
+  });
+
+  it('evaluate() completes promptly even when getDiskUsage would hang (F-6 regression)', async () => {
+    // If df() were still on the 30s cycle, hangForever would compound the
+    // cycle beyond its 25s threshold. Decoupled, evaluate() must return
+    // within a small wall-clock budget regardless.
+    mockGetDiskUsage.mockReturnValue(hangForever());
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+    mockGetNodes.mockReturnValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+
+    const svc = MonitorService.getInstance();
+    const t0 = Date.now();
+    await (svc as any).evaluate();
+    const elapsed = Date.now() - t0;
+
+    expect(elapsed).toBeLessThan(2000);
+    expect(mockGetDiskUsage).not.toHaveBeenCalled();
+  });
+
+  it('evaluateJanitor() honors isJanitorProcessing re-entrancy guard', async () => {
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+    mockGetDiskUsage.mockResolvedValue(RECLAIMABLE_3GB);
+
+    const svc = MonitorService.getInstance();
+    (svc as any).isJanitorProcessing = true;
+
+    await (svc as any).evaluateJanitor();
+
+    // Second concurrent call must skip without touching settings or df.
+    expect(mockGetGlobalSettings).not.toHaveBeenCalled();
+    expect(mockGetDiskUsage).not.toHaveBeenCalled();
+  });
+
+  it('skips when docker_janitor_gb is unset, zero, or NaN', async () => {
+    const svc = MonitorService.getInstance();
+
+    mockGetGlobalSettings.mockReturnValue({});
+    await (svc as any).evaluateJanitor();
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0' });
+    await (svc as any).evaluateJanitor();
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: 'abc' });
+    await (svc as any).evaluateJanitor();
+
+    expect(mockGetDiskUsage).not.toHaveBeenCalled();
+  });
+
+  it('dispatches an alert when reclaimable exceeds the threshold', async () => {
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+    mockGetDiskUsage.mockResolvedValue(RECLAIMABLE_3GB);
+    mockGetSystemState.mockReturnValue('0'); // No prior alert; cooldown elapsed.
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateJanitor();
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'info', 'system', expect.stringContaining('3.0 GB'), { stackName: undefined },
+    );
+  });
+
+  it('does NOT alert when reclaimable is below MIN_RECLAIMABLE_GB even if threshold is aggressive', async () => {
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.001' });
+    mockGetDiskUsage.mockResolvedValue({
+      ...RECLAIMABLE_3GB,
+      reclaimableImages: 50 * 1024 * 1024, // 50 MB, below the 100 MB floor
+    });
+    mockGetSystemState.mockReturnValue('0');
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateJanitor();
+
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('opens the circuit breaker after JANITOR_BREAKER_THRESHOLD consecutive timeouts', async () => {
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+    mockGetDiskUsage.mockReturnValue(hangForever());
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateJanitor();
+    await (svc as any).evaluateJanitor();
+    expect(warnSpy).not.toHaveBeenCalled(); // Threshold not yet reached.
+    await (svc as any).evaluateJanitor(); // Third timeout trips the breaker.
+
+    const breakerLine = warnSpy.mock.calls.find(
+      (args) => typeof args[0] === 'string' && args[0].includes('circuit breaker opened'),
+    );
+    expect(breakerLine).toBeDefined();
+    expect((svc as any).janitorBreakerUntil).toBeGreaterThan(Date.now());
+    // Counter resets on open so the cooldown is what gates the next attempt.
+    expect((svc as any).janitorConsecutiveTimeouts).toBe(0);
+
+    warnSpy.mockRestore();
+  });
+
+  it('respects the breaker cooldown; does not call getDiskUsage while open', async () => {
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+
+    const svc = MonitorService.getInstance();
+    (svc as any).janitorBreakerUntil = Date.now() + 60 * 60 * 1000;
+
+    await (svc as any).evaluateJanitor();
+
+    expect(mockGetDiskUsage).not.toHaveBeenCalled();
+    expect(mockGetGlobalSettings).not.toHaveBeenCalled();
+  });
+
+  it('resets the timeout counter on a successful call after partial failures', async () => {
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+    mockGetDiskUsage
+      .mockReturnValueOnce(hangForever())
+      .mockReturnValueOnce(hangForever())
+      .mockResolvedValueOnce(RECLAIMABLE_3GB);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateJanitor();
+    await (svc as any).evaluateJanitor();
+    expect((svc as any).janitorConsecutiveTimeouts).toBe(2);
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await (svc as any).evaluateJanitor();
+
+    expect((svc as any).janitorConsecutiveTimeouts).toBe(0);
+    const recoveryLine = logSpy.mock.calls.find(
+      (args) => typeof args[0] === 'string' && args[0].includes('recovered'),
+    );
+    expect(recoveryLine).toBeDefined();
+    logSpy.mockRestore();
+  });
+
+  it('logs recovery on the first successful call after a full breaker-open cooldown', async () => {
+    // After the breaker opens, the counter is zeroed; once the cooldown
+    // lapses, a successful call must still emit the recovered log so the
+    // operator observability story is symmetric with the partial-failure
+    // recovery path.
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+
+    const svc = MonitorService.getInstance();
+    (svc as any).janitorBreakerUntil = Date.now() - 1; // cooldown just elapsed
+    (svc as any).janitorConsecutiveTimeouts = 0;       // zeroed on open
+    mockGetDiskUsage.mockResolvedValue(RECLAIMABLE_3GB);
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await (svc as any).evaluateJanitor();
+
+    const recoveryLine = logSpy.mock.calls.find(
+      (args) => typeof args[0] === 'string' && args[0].includes('recovered'),
+    );
+    expect(recoveryLine).toBeDefined();
+    expect((svc as any).janitorBreakerUntil).toBe(0);
+    expect((svc as any).janitorConsecutiveTimeouts).toBe(0);
+    logSpy.mockRestore();
+  });
+
+  it('does NOT advance the breaker counter on non-timeout errors', async () => {
+    mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
+    mockGetDiskUsage.mockRejectedValue(Object.assign(new Error('daemon unreachable'), { statusCode: 500 }));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateJanitor();
+    await (svc as any).evaluateJanitor();
+    await (svc as any).evaluateJanitor();
+    await (svc as any).evaluateJanitor();
+
+    expect((svc as any).janitorConsecutiveTimeouts).toBe(0);
+    expect((svc as any).janitorBreakerUntil).toBe(0);
+    // The original support-grep line must still fire on every non-timeout error.
+    const janitorErrorLines = errSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('Error checking docker janitor limits'),
+    );
+    expect(janitorErrorLines.length).toBe(4);
+
+    errSpy.mockRestore();
+  });
+
+  it('stop() clears both intervals AND both deferred first-tick timeouts', () => {
+    // Without canceling the first-tick setTimeouts, stop() would let
+    // evaluate() / evaluateJanitor() fire on a service that the caller
+    // believes is dormant. The 5s and 45s windows are wider than typical
+    // graceful-shutdown budgets, so this matters.
+    const svc = MonitorService.getInstance();
+    svc.start();
+    expect((svc as any).intervalId).not.toBeNull();
+    expect((svc as any).firstTickTimeoutId).not.toBeNull();
+    expect((svc as any).janitorIntervalId).not.toBeNull();
+    expect((svc as any).janitorFirstTickTimeoutId).not.toBeNull();
+
+    svc.stop();
+
+    expect((svc as any).intervalId).toBeNull();
+    expect((svc as any).firstTickTimeoutId).toBeNull();
+    expect((svc as any).janitorIntervalId).toBeNull();
+    expect((svc as any).janitorFirstTickTimeoutId).toBeNull();
   });
 });
