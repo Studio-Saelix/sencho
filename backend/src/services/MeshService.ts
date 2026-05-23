@@ -26,6 +26,16 @@ const ALIAS_REFRESH_INTERVAL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const SLOW_PROBE_THRESHOLD_MS = 500;
 const DEFAULT_MESH_SUBNET = '172.30.0.0/24';
+// Cadence at which `revalidateDataPlane` re-evaluates the Docker network and
+// Sencho's attachment. Bounds the staleness of `getDataPlaneStatus()` between
+// runtime mesh changes (operator `docker network rm`, external recreate at a
+// different subnet, container detach) and the next /api/health response.
+export const DATA_PLANE_REVALIDATE_INTERVAL_MS = 10_000;
+// After a failed in-place recreate attempt, refuse to retry within this
+// window so a persistent CIDR overlap does not spam the Docker daemon on
+// every 10s tick. Matches the cadence pattern used by other notification
+// dedup paths (e.g. PolicyEnforcement.notifyTrivyMissingOnce).
+export const MESH_RECREATE_THROTTLE_MS = 60_000;
 
 /**
  * Subnets attempted in order when SENCHO_MESH_SUBNET is unset and no
@@ -129,7 +139,8 @@ export type MeshDataPlaneReason =
     | 'subnet_mismatch'  // sencho_mesh already exists with a different subnet
     | 'ip_in_use'        // another container squats <network>+2
     | 'attach_failed'    // self-attach failed for any other reason
-    | 'not_in_docker';   // HOSTNAME unset or self-container lookup returned 404
+    | 'not_in_docker'    // HOSTNAME unset or self-container lookup returned 404
+    | 'not_found';       // sencho_mesh was removed after boot (revalidator-only)
 
 export interface MeshDataPlaneStatus {
     ok: boolean;
@@ -362,6 +373,19 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     // upstream tunnel is the most authoritative source. Cleared on tunnel
     // close.
     private proxyTunnelSelfCentralNodeId: number | null = null;
+    // 10s revalidator timer that re-evaluates the mesh data plane against
+    // Docker's current state so `/api/health` and the dashboard banner do
+    // not serve stale values after the operator removes or recreates
+    // sencho_mesh while Sencho is running.
+    private dataPlaneRevalidateTimer?: NodeJS.Timeout;
+    // Re-entrancy guard: two ticks of the revalidator can in principle
+    // overlap if a Docker inspect takes longer than the cadence. Skip the
+    // overlapping tick rather than fire concurrent network inspects.
+    private dataPlaneRevalidateInFlight = false;
+    // Wall-clock of the last auto-recreate attempt (success or failure).
+    // Used by `attemptInPlaceRecreate` to enforce MESH_RECREATE_THROTTLE_MS
+    // so a persistent overlap does not spam createNetwork on every tick.
+    private lastRecreateAttemptAt = 0;
 
     private constructor() {
         super();
@@ -454,6 +478,17 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 }
             })();
         }, ALIAS_REFRESH_INTERVAL_MS);
+        // Data-plane revalidator: bounds /api/health staleness at
+        // DATA_PLANE_REVALIDATE_INTERVAL_MS when the operator removes,
+        // recreates, or disconnects Sencho from sencho_mesh at runtime.
+        this.dataPlaneRevalidateTimer = setInterval(() => {
+            void this.revalidateDataPlane().catch((err) => {
+                console.warn(
+                    '[MeshService] data plane revalidate failed:',
+                    sanitizeForLog((err as Error).message),
+                );
+            });
+        }, DATA_PLANE_REVALIDATE_INTERVAL_MS);
 
         const dpReason = this.dataPlaneStatus.reason;
         const dataPlane = this.senchoIp ? 'ok' : `unavailable (${dpReason}: ${this.networkSetupError ?? 'unknown'})`;
@@ -482,6 +517,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (this.aliasRefreshTimer) {
             clearInterval(this.aliasRefreshTimer);
             this.aliasRefreshTimer = undefined;
+        }
+        if (this.dataPlaneRevalidateTimer) {
+            clearInterval(this.dataPlaneRevalidateTimer);
+            this.dataPlaneRevalidateTimer = undefined;
         }
         this.stopBridgeReconcileLoop();
         await this.forwarder.shutdown();
@@ -586,7 +625,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * real failures.
      */
     private recordSetupFailure(
-        reason: Exclude<MeshDataPlaneReason, 'ok' | 'not_started'>,
+        reason: Exclude<MeshDataPlaneReason, 'ok' | 'not_started' | 'not_found'>,
         err: unknown,
         level: MeshActivityLevel,
         // The subnet_invalid path fires before `this.meshSubnet` is assigned,
@@ -993,6 +1032,339 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             }
             throw err;
         }
+    }
+
+    /**
+     * One-shot snapshot of `sencho_mesh`: subnet, IPRange, and the set of
+     * attached containers (full ID + Name). Returns `null` when the
+     * network does not exist (Docker inspect 404). Used by the
+     * revalidator to keep `/api/health` fresh after the operator
+     * removes, recreates, or disconnects Sencho from the mesh at
+     * runtime. Real daemon errors propagate so the revalidator can
+     * preserve the prior status rather than flap it on a single
+     * transient.
+     */
+    private async inspectMeshNetworkSnapshot(): Promise<
+        {
+            subnet: string;
+            ipRange: string | null;
+            containers: Array<{ id: string; name: string | null }>;
+        } | null
+    > {
+        const dc = DockerController.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
+        try {
+            const info = await dc.inspectNetwork(SENCHO_MESH_NETWORK) as {
+                IPAM?: { Config?: Array<{ Subnet?: string; IPRange?: string }> };
+                Containers?: Record<string, { Name?: string }>;
+            } | undefined;
+            const cfg = info?.IPAM?.Config?.[0];
+            if (!cfg?.Subnet) return null;
+            const containers = Object.entries(info?.Containers ?? {}).map(([id, c]) => ({
+                id,
+                name: c?.Name ?? null,
+            }));
+            return {
+                subnet: cfg.Subnet,
+                ipRange: cfg.IPRange ?? null,
+                containers,
+            };
+        } catch (err) {
+            const e = err as { statusCode?: number };
+            if (e?.statusCode === 404) return null;
+            throw err;
+        }
+    }
+
+    /**
+     * Result of the self-attachment check during revalidation:
+     *   - `attached`: Sencho's container is in the network's Containers map.
+     *   - `detached`: Sencho's identity was determinable AND not present.
+     *   - `unknown`: cannot determine (HOSTNAME unset / too short to be a
+     *      safe container-ID prefix). Caller preserves prior status.
+     */
+    private isSelfStillAttached(
+        containers: Array<{ id: string; name: string | null }>,
+    ): 'attached' | 'detached' | 'unknown' {
+        const hostname = process.env.HOSTNAME;
+        if (!hostname) return 'unknown';
+        // Match either by container Name (operator set `--hostname`, the
+        // container's `Name` in the network's Containers map equals that
+        // value with a leading `/`) or by full container-ID prefix
+        // (Docker's default HOSTNAME is the 12-char short ID; the
+        // Containers map keys are the full 64-char IDs).
+        //
+        // The ID-prefix path is gated by two checks to avoid false
+        // positives: HOSTNAME must be all hex (`0-9a-f`) AND at least 12
+        // chars. Container IDs are pure hex, so a non-hex HOSTNAME (e.g.
+        // operator-set `--hostname sencho`) cannot collide with any
+        // container ID regardless of length, and a short hex HOSTNAME
+        // (e.g. `--hostname ab`) could match unrelated containers.
+        //
+        // Network-inspect's `Name` field carries a leading `/`; normalize
+        // before comparing against HOSTNAME which never has it.
+        const matchByName = (name: string | null): boolean => {
+            if (!name) return false;
+            const normalized = name.startsWith('/') ? name.slice(1) : name;
+            return normalized === hostname;
+        };
+        const isHexOnly = /^[0-9a-f]+$/.test(hostname);
+        const idPrefixUsable = isHexOnly && hostname.length >= 12;
+        for (const c of containers) {
+            if (matchByName(c.name)) return 'attached';
+            if (idPrefixUsable && c.id.startsWith(hostname)) return 'attached';
+        }
+        // No match.
+        // - Non-hex HOSTNAME (e.g. `sencho`, `mynode`): the operator set
+        //   it explicitly. It cannot be a container-ID prefix. The Name
+        //   path was the only reliable signal and it failed, so we are
+        //   detached.
+        // - Hex HOSTNAME >= 12 chars: ID-prefix path was run and missed.
+        //   Detached.
+        // - Hex HOSTNAME < 12 chars (rare, only when an operator passes
+        //   `--hostname` with a hex string shorter than 12 chars): we
+        //   could not safely ID-prefix-match and Name did not match. We
+        //   genuinely do not know; preserve the prior status.
+        if (!isHexOnly) return 'detached';
+        if (hostname.length >= 12) return 'detached';
+        return 'unknown';
+    }
+
+    /**
+     * Reads the persisted `mesh_auto_recreate` global setting. Defaults to
+     * off (`'0'`); only `'1'` enables the auto-recreate behaviour in
+     * `attemptInPlaceRecreate`. Wrapped in try/catch so a transient DB
+     * failure (e.g. SQLite briefly locked during a backup) cannot crash
+     * the revalidator timer; on failure we default to off so a missing
+     * read never accidentally triggers a Docker mutation.
+     */
+    private isMeshAutoRecreateEnabled(): boolean {
+        try {
+            const settings = DatabaseService.getInstance().getGlobalSettings();
+            return settings['mesh_auto_recreate'] === '1';
+        } catch (err) {
+            console.warn(
+                '[MeshService] could not read mesh_auto_recreate setting:',
+                sanitizeForLog((err as Error).message),
+            );
+            return false;
+        }
+    }
+
+    /**
+     * Single transition path for `dataPlaneStatus`. Two-tier semantics:
+     *   - Fields (`message`, `subnet`) are always refreshed when they
+     *     drift, so `/api/health` never carries stale numbers (e.g. two
+     *     consecutive `subnet_mismatch` observations against different
+     *     external subnets both show their own remote subnet).
+     *   - Activity ring + `console.{log,warn}` mirrors fire only when
+     *     the `reason` discriminator actually changes, so the 10s timer
+     *     can tick indefinitely on a stable mesh without spamming the
+     *     log surface.
+     * `networkSetupError` follows the same coherence rule it had before
+     * the revalidator landed: cleared on recovery to `ok`, otherwise
+     * tracks the typed status's `message`.
+     */
+    private transitionDataPlane(next: MeshDataPlaneStatus): void {
+        const prev = this.dataPlaneStatus;
+        const reasonChanged = prev.reason !== next.reason;
+        const fieldsChanged =
+            reasonChanged ||
+            prev.message !== next.message ||
+            prev.subnet !== next.subnet ||
+            prev.ok !== next.ok;
+        if (!fieldsChanged) return;
+        this.dataPlaneStatus = next;
+        if (next.ok) {
+            this.networkSetupError = null;
+        } else if (next.message) {
+            // Keep the legacy raw-error string in step with the typed
+            // discriminator so callers that still read `networkSetupError`
+            // (optInStack, applyLocalOverride, regenerateAllOverrides) see
+            // the same message the typed status surfaces.
+            this.networkSetupError = next.message;
+        }
+        if (!reasonChanged) return;
+        const line = next.ok
+            ? `[Mesh] data plane recovered (reason ${prev.reason} -> ${next.reason}, subnet ${next.subnet})`
+            : `[Mesh] data plane changed (reason ${prev.reason} -> ${next.reason}, subnet ${next.subnet}): ${next.message ?? 'no detail'}`;
+        if (next.ok) console.log(line);
+        else console.warn(line);
+        this.logActivity({
+            source: 'mesh',
+            level: next.ok ? 'info' : 'warn',
+            type: next.ok ? 'mesh.enable' : 'mesh.disable',
+            message: line,
+            details: { prevReason: prev.reason, nextReason: next.reason, subnet: next.subnet },
+        });
+    }
+
+    /**
+     * 10s tick body. Reports current Docker reality into
+     * `dataPlaneStatus`; never mutates `senchoIp` or `meshSubnet`
+     * (those are pinned at boot to keep override files stable). The
+     * `mesh_auto_recreate` setting opts into a single bounded
+     * recreate-on-the-same-subnet attempt via `attemptInPlaceRecreate`
+     * when the network has been removed. Public so unit tests can call
+     * it directly without manipulating timers.
+     *
+     * Short-circuits in states where the truth cannot have changed
+     * within this process: `not_started` (boot still in flight),
+     * `not_in_docker` (dev mode; HOSTNAME unset for the whole process),
+     * and `subnet_invalid` (env config error; resolved only by restart
+     * with new env).
+     */
+    public async revalidateDataPlane(): Promise<void> {
+        if (this.dataPlaneRevalidateInFlight) return;
+        const reason = this.dataPlaneStatus.reason;
+        if (reason === 'not_started' || reason === 'not_in_docker' || reason === 'subnet_invalid') {
+            return;
+        }
+        this.dataPlaneRevalidateInFlight = true;
+        try {
+            let snapshot: Awaited<ReturnType<typeof this.inspectMeshNetworkSnapshot>>;
+            try {
+                snapshot = await this.inspectMeshNetworkSnapshot();
+            } catch {
+                // Transient Docker daemon failure. Preserve current status;
+                // next tick retries. Anti-flap by design.
+                return;
+            }
+
+            if (snapshot === null) {
+                // Anti-flap during the auto-recreate throttle window:
+                // `attemptInPlaceRecreate` may have just classified the
+                // failure (`subnet_overlap`, `ip_in_use`, `attach_failed`).
+                // Those reasons are more actionable than the generic
+                // `not_found`, and the network is still missing because the
+                // recreate could not finish, not because the operator just
+                // removed it. Preserve the recreate-failure status until
+                // the throttle elapses and the next attempt re-classifies.
+                const prev = this.dataPlaneStatus;
+                const inThrottleWindow =
+                    this.lastRecreateAttemptAt > 0 &&
+                    Date.now() - this.lastRecreateAttemptAt < MESH_RECREATE_THROTTLE_MS;
+                const isRecreateFailureReason =
+                    prev.reason === 'subnet_overlap' ||
+                    prev.reason === 'subnet_mismatch' ||
+                    prev.reason === 'ip_in_use' ||
+                    prev.reason === 'attach_failed';
+                if (inThrottleWindow && isRecreateFailureReason) {
+                    return;
+                }
+                this.transitionDataPlane({
+                    ok: false,
+                    reason: 'not_found',
+                    message: `${SENCHO_MESH_NETWORK} is not present on this host. Mesh routing is offline; restart Sencho to recreate the network.`,
+                    subnet: this.meshSubnet,
+                });
+                if (this.isMeshAutoRecreateEnabled()) {
+                    await this.attemptInPlaceRecreate();
+                }
+                return;
+            }
+
+            if (this.meshSubnet && snapshot.subnet !== this.meshSubnet) {
+                this.transitionDataPlane({
+                    ok: false,
+                    reason: 'subnet_mismatch',
+                    message: `${SENCHO_MESH_NETWORK} now uses ${snapshot.subnet}, Sencho is configured for ${this.meshSubnet}. Restart Sencho to adopt the new subnet.`,
+                    subnet: this.meshSubnet,
+                });
+                return;
+            }
+
+            if (this.senchoIp) {
+                const attachment = this.isSelfStillAttached(snapshot.containers);
+                if (attachment === 'unknown') {
+                    // Cannot determine our own identity (HOSTNAME unset or
+                    // too short to be a safe ID prefix). Preserve the prior
+                    // status; the boot-time `ensureSelfAttached` already
+                    // classified the not-in-Docker case.
+                    return;
+                }
+                if (attachment === 'detached') {
+                    this.transitionDataPlane({
+                        ok: false,
+                        reason: 'attach_failed',
+                        message: `Sencho is no longer attached to ${SENCHO_MESH_NETWORK}; restart Sencho to re-attach.`,
+                        subnet: this.meshSubnet,
+                    });
+                    return;
+                }
+            }
+
+            this.transitionDataPlane({
+                ok: true,
+                reason: 'ok',
+                message: null,
+                subnet: this.meshSubnet,
+            });
+        } finally {
+            this.dataPlaneRevalidateInFlight = false;
+        }
+    }
+
+    /**
+     * Opt-in auto-recreate path. Only invoked from the revalidator when
+     * the network was observed missing AND the operator has flipped
+     * `mesh_auto_recreate` to `'1'` in Settings -> System. Hard-prefers
+     * `this.meshSubnet` (the subnet chosen at boot) and never iterates
+     * the candidate list, because changing the chosen subnet here would
+     * invalidate every existing `extra_hosts` override on disk and
+     * silently break cross-node routing for opted-in stacks. A real
+     * overlap on the prior subnet is reported via `subnet_overlap` so
+     * the operator can take action.
+     *
+     * Throttled by MESH_RECREATE_THROTTLE_MS to keep a persistent
+     * conflict from spamming the daemon on every 10s tick.
+     */
+    private async attemptInPlaceRecreate(): Promise<void> {
+        const now = Date.now();
+        if (now - this.lastRecreateAttemptAt < MESH_RECREATE_THROTTLE_MS) {
+            return;
+        }
+        this.lastRecreateAttemptAt = now;
+        this.logActivity({
+            source: 'mesh',
+            level: 'info',
+            type: 'mesh.enable',
+            message: `attempting auto-recreate of ${SENCHO_MESH_NETWORK} at ${this.meshSubnet}`,
+            details: { subnet: this.meshSubnet },
+        });
+        try {
+            await this.createMeshNetwork(this.meshSubnet);
+        } catch (err) {
+            this.recordSetupFailure(
+                this.classifyMeshNetworkError(err),
+                err,
+                'error',
+                this.meshSubnet,
+            );
+            return;
+        }
+        try {
+            await this.ensureSelfAttached();
+        } catch (err) {
+            this.recordSetupFailure(
+                this.classifySelfAttachError(err),
+                err,
+                'error',
+                this.meshSubnet,
+            );
+            return;
+        }
+        if (!this.senchoIp) {
+            // `ensureSelfAttached` short-circuited on the not-in-Docker
+            // path. Status already reflects this via recordSetupFailure;
+            // do not flip it back to `ok`.
+            return;
+        }
+        this.transitionDataPlane({
+            ok: true,
+            reason: 'ok',
+            message: null,
+            subnet: this.meshSubnet,
+        });
     }
 
     /**

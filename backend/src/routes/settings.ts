@@ -22,6 +22,7 @@ const ALLOWED_SETTING_KEYS = new Set([
   'metrics_retention_hours',
   'log_retention_days',
   'audit_retention_days',
+  'mesh_auto_recreate',
 ]);
 
 // Bulk PATCH schema. All keys optional; present keys are fully validated.
@@ -37,6 +38,7 @@ const SettingsPatchSchema = z.object({
   metrics_retention_hours: z.coerce.number().int().min(1).max(8760).transform(String),
   log_retention_days: z.coerce.number().int().min(1).max(365).transform(String),
   audit_retention_days: z.coerce.number().int().min(1).max(365).transform(String),
+  mesh_auto_recreate: z.enum(['0', '1']),
 }).partial();
 
 export const settingsRouter = Router();

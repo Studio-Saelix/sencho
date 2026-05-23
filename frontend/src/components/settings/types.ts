@@ -10,6 +10,7 @@ export interface PatchableSettings {
     metrics_retention_hours?: string;
     log_retention_days?: string;
     audit_retention_days?: string;
+    mesh_auto_recreate?: '0' | '1';
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -24,6 +25,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     metrics_retention_hours: '24',
     log_retention_days: '30',
     audit_retention_days: '90',
+    mesh_auto_recreate: '0',
 };
 
 export type SectionId =

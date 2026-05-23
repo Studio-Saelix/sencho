@@ -1237,6 +1237,7 @@ export class DatabaseService {
         stmt.run('log_retention_days', '30');
         stmt.run('trivy_auto_update', '0');
         stmt.run('trivy_last_notified_version', '');
+        stmt.run('mesh_auto_recreate', '0');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
