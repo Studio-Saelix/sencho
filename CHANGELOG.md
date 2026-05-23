@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.5](https://github.com/Studio-Saelix/sencho/compare/v0.86.4...v0.86.5) (2026-05-23)
+
+
+### Fixed
+
+* **security:** collapse repeated trivy-missing pre-deploy notifications ([#1166](https://github.com/Studio-Saelix/sencho/issues/1166)) ([0947da1](https://github.com/Studio-Saelix/sencho/commit/0947da13ae9280ff41026d5b803be7e0ffe20002))
+* **stacks:** close dialog and toast on Empty create (F-2) ([#1168](https://github.com/Studio-Saelix/sencho/issues/1168)) ([9d8d8ab](https://github.com/Studio-Saelix/sencho/commit/9d8d8abcbacadc46b4b0a3713243d925ae4e13cc))
+
 ## [0.86.4](https://github.com/Studio-Saelix/sencho/compare/v0.86.3...v0.86.4) (2026-05-23)
 
 
