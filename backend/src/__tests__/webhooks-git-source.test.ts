@@ -173,7 +173,7 @@ describe('node-aware Git source webhooks', () => {
             enabled: true,
         });
 
-        const result = await WebhookService.getInstance().execute(webhookId, 'git-pull', 'test');
+        const result = await WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'git-pull', 'test');
 
         expect(result.success).toBe(false);
         expect(result.error).toMatch(/unreachable|configured/i);
@@ -206,7 +206,7 @@ describe('node-aware Git source webhooks', () => {
             signal?.addEventListener('abort', () => reject(new Error('aborted')));
         }));
 
-        const pending = WebhookService.getInstance().execute(webhookId, 'git-pull', 'test');
+        const pending = WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'git-pull', 'test');
         await vi.advanceTimersByTimeAsync(30_000);
         const result = await pending;
 
