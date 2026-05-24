@@ -165,6 +165,7 @@ export interface EditorViewProps {
     // Stack data (raw; safe-wrapped locally for backwards-compat with prior idiom)
     containers: ContainerInfo[];
     containerStats: Record<string, ContainerStatsEntry>;
+    containerStatsError: string | null;
     content: string;
     envContent: string;
     envExists: boolean;
@@ -235,6 +236,7 @@ export function EditorView({
     isDarkMode,
     containers,
     containerStats,
+    containerStatsError,
     content,
     envContent,
     envExists,
@@ -281,6 +283,22 @@ export function EditorView({
     requestDeleteStack,
 }: EditorViewProps) {
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
+
+    // Dispose the underlying Monaco model when EditorView unmounts. The
+    // @monaco-editor/react wrapper reuses a single model per editor instance
+    // (we do not pass a `path`), so this catches the unmount case rather than
+    // a per-stack-switch leak.
+    useEffect(() => {
+        return () => {
+            const editor = monacoEditorRef.current;
+            if (!editor) return;
+            try {
+                editor.getModel()?.dispose();
+            } catch {
+                // Editor already torn down by Monaco; nothing to do.
+            }
+        };
+    }, []);
 
     // Force Monaco to re-measure its container after the tab switch DOM settles.
     // Monaco's internal child is position:static with an explicit pixel height that
@@ -373,35 +391,45 @@ export function EditorView({
                                         );
                                     })()}
                                 </div>
-                                {/* Action Bar */}
-                                {can('stack:deploy', 'stack', stackName) && (
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                        {isRunning ? (
-                                            <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg bg-brand text-brand-foreground hover:bg-brand/90" onClick={restartStack} disabled={loadingAction !== null}>
-                                                <RotateCw className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                {loadingAction === 'restart' ? 'Restarting...' : 'Restart'}
-                                            </Button>
-                                        ) : (
-                                            <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg bg-brand text-brand-foreground hover:bg-brand/90" onClick={deployStack} disabled={loadingAction !== null}>
-                                                <Play className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                {loadingAction === 'deploy' ? 'Starting...' : 'Start'}
-                                            </Button>
-                                        )}
-                                        {isRunning && (
-                                            <Button type="button" size="sm" variant="outline" className="rounded-lg" onClick={stopStack} disabled={loadingAction !== null}>
-                                                <Square className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                {loadingAction === 'stop' ? 'Stopping...' : 'Stop'}
-                                            </Button>
-                                        )}
-                                        <Button type="button" size="sm" variant="outline" className="rounded-lg" onClick={updateStack} disabled={loadingAction !== null}>
-                                            <CloudDownload className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                            {loadingAction === 'update' ? 'Updating...' : 'Update'}
-                                        </Button>
-                                        {(() => {
-                                            const canRollback = isPaid && backupInfo.exists;
-                                            const canScan = trivy.available && isAdmin;
-                                            const hasOverflowExtras = canRollback || canScan;
-                                            return (
+                                {/* Action Bar — deploy / delete affordances render against
+                                    their own backend permissions so a delete-only or
+                                    deploy-only persona sees exactly what they can act on. */}
+                                {(() => {
+                                    const canDeploy = can('stack:deploy', 'stack', stackName);
+                                    const canDelete = can('stack:delete', 'stack', stackName);
+                                    const canRollback = canDeploy && isPaid && backupInfo.exists;
+                                    const canScan = trivy.available && isAdmin;
+                                    const hasOverflowExtras = canRollback || canScan;
+                                    const hasOverflow = hasOverflowExtras || canDelete;
+                                    if (!canDeploy && !hasOverflow) return null;
+                                    return (
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            {canDeploy && (
+                                                <>
+                                                    {isRunning ? (
+                                                        <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg bg-brand text-brand-foreground hover:bg-brand/90" onClick={restartStack} disabled={loadingAction !== null}>
+                                                            <RotateCw className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                            {loadingAction === 'restart' ? 'Restarting...' : 'Restart'}
+                                                        </Button>
+                                                    ) : (
+                                                        <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg bg-brand text-brand-foreground hover:bg-brand/90" onClick={deployStack} disabled={loadingAction !== null}>
+                                                            <Play className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                            {loadingAction === 'deploy' ? 'Starting...' : 'Start'}
+                                                        </Button>
+                                                    )}
+                                                    {isRunning && (
+                                                        <Button type="button" size="sm" variant="outline" className="rounded-lg" onClick={stopStack} disabled={loadingAction !== null}>
+                                                            <Square className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                            {loadingAction === 'stop' ? 'Stopping...' : 'Stop'}
+                                                        </Button>
+                                                    )}
+                                                    <Button type="button" size="sm" variant="outline" className="rounded-lg" onClick={updateStack} disabled={loadingAction !== null}>
+                                                        <CloudDownload className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                        {loadingAction === 'update' ? 'Updating...' : 'Update'}
+                                                    </Button>
+                                                </>
+                                            )}
+                                            {hasOverflow && (
                                                 <DropdownMenu>
                                                     <DropdownMenuTrigger asChild>
                                                         <Button type="button" size="sm" variant="ghost" className="rounded-lg h-8 w-8 p-0" disabled={loadingAction !== null} aria-label="More actions">
@@ -430,27 +458,39 @@ export function EditorView({
                                                                 {stackMisconfigScanning ? 'Scanning...' : 'Scan config'}
                                                             </DropdownMenuItem>
                                                         )}
-                                                        {hasOverflowExtras && <DropdownMenuSeparator />}
-                                                        <DropdownMenuItem
-                                                            className="text-destructive focus:text-destructive focus:bg-destructive/10"
-                                                            disabled={loadingAction !== null}
-                                                            onClick={requestDeleteStack}
-                                                        >
-                                                            <Trash2 className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                            {loadingAction === 'delete' ? 'Deleting...' : 'Delete'}
-                                                        </DropdownMenuItem>
+                                                        {hasOverflowExtras && canDelete && <DropdownMenuSeparator />}
+                                                        {canDelete && (
+                                                            <DropdownMenuItem
+                                                                className="text-destructive focus:text-destructive focus:bg-destructive/10"
+                                                                disabled={loadingAction !== null}
+                                                                onClick={requestDeleteStack}
+                                                            >
+                                                                <Trash2 className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                                {loadingAction === 'delete' ? 'Deleting...' : 'Delete'}
+                                                            </DropdownMenuItem>
+                                                        )}
                                                     </DropdownMenuContent>
                                                 </DropdownMenu>
-                                            );
-                                        })()}
-                                    </div>
-                                )}
+                                            )}
+                                        </div>
+                                    );
+                                })()}
                             </div>
                         </CardHeader>
                         <CardContent className="p-4 pt-2">
                             {/* Per-container health strip */}
                             <div className="mt-4">
-                                <h4 className="text-sm font-medium text-muted-foreground mb-3">CONTAINERS</h4>
+                                <div className="flex items-center justify-between mb-3">
+                                    <h4 className="text-sm font-medium text-muted-foreground">CONTAINERS</h4>
+                                    {containerStatsError && safeContainers.length > 0 && (
+                                        <span
+                                            className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground bg-warning/10 border border-warning/30 rounded-md px-2 py-0.5"
+                                            title={containerStatsError}
+                                        >
+                                            Stats unavailable
+                                        </span>
+                                    )}
+                                </div>
                                 {safeContainers.length === 0 ? (
                                     <div className="text-muted-foreground text-sm">No containers running for this stack.</div>
                                 ) : (
