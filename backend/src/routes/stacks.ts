@@ -11,7 +11,7 @@ import { CacheService } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
-import { requirePermission } from '../middleware/permissions';
+import { requirePermission, checkPermission } from '../middleware/permissions';
 import { requirePaid, requireAdmin, effectiveTier } from '../middleware/tierGates';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
@@ -250,6 +250,163 @@ stacksRouter.get('/auto-update-settings', (req: Request, res: Response): void =>
     console.error('[Stacks] Failed to fetch auto-update settings:', error);
     res.status(500).json({ error: 'Failed to fetch auto-update settings' });
   }
+});
+
+type BulkLifecycleAction = 'start' | 'stop' | 'restart' | 'update';
+const VALID_BULK_ACTIONS: ReadonlySet<BulkLifecycleAction> = new Set(['start', 'stop', 'restart', 'update']);
+const BULK_PARALLELISM = 4;
+const BULK_MAX_STACKS = 100;
+
+interface BulkResultItem {
+  stackName: string;
+  ok: boolean;
+  error?: string;
+  code?: string;
+}
+
+async function runStackBulkOp(
+  req: Request,
+  stackName: string,
+  action: BulkLifecycleAction,
+): Promise<BulkResultItem> {
+  if (!isValidStackName(stackName)) {
+    return { stackName, ok: false, error: 'Invalid stack name', code: 'invalid_name' };
+  }
+  if (!checkPermission(req, 'stack:deploy', 'stack', stackName)) {
+    return { stackName, ok: false, error: 'Permission denied', code: 'PERMISSION_DENIED' };
+  }
+
+  const fsSvc = FileSystemService.getInstance(req.nodeId);
+  const stackDir = path.join(fsSvc.getBaseDir(), stackName);
+  try {
+    if (!(await fsSvc.hasComposeFile(stackDir))) {
+      return { stackName, ok: false, error: 'Stack not found', code: 'not_found' };
+    }
+  } catch {
+    return { stackName, ok: false, error: 'Stack not found', code: 'not_found' };
+  }
+
+  const user = req.user?.username ?? 'system';
+  const lockAction: StackOpAction = action;
+  const lockResult = StackOpLockService.getInstance().tryAcquire(req.nodeId, stackName, lockAction, user);
+  if (!lockResult.acquired) {
+    return {
+      stackName,
+      ok: false,
+      error: `${stackName} is already ${STACK_OP_PRESENT_PARTICIPLE[lockResult.existing.action]}`,
+      code: 'stack_op_in_progress',
+    };
+  }
+
+  try {
+    if (action === 'update') {
+      const gate = await enforcePolicyPreDeploy(stackName, req.nodeId, buildPolicyGateOptions(req));
+      if (!gate.ok) {
+        return {
+          stackName,
+          ok: false,
+          error: `Policy "${gate.policy?.name}" blocked update`,
+          code: 'policy_blocked',
+        };
+      }
+      const atomic = effectiveTier(req) === 'paid';
+      await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
+      DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
+      NotificationService.getInstance().broadcastEvent({
+        type: 'state-invalidate',
+        scope: 'image-updates',
+        nodeId: req.nodeId,
+        stackName,
+        action: 'stack-updated',
+        ts: Date.now(),
+      });
+      notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, user);
+      triggerPostDeployScan(stackName, req.nodeId).catch(err =>
+        console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
+      );
+    } else {
+      const outcome = await containerActionForStack(req.nodeId, stackName, action);
+      if (outcome.kind === 'no-containers') {
+        return { stackName, ok: false, error: 'No containers found for this stack', code: 'no_containers' };
+      }
+      if (outcome.kind === 'error') {
+        if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message));
+        return { stackName, ok: false, error: outcome.message, code: 'op_failed' };
+      }
+      const meta = CONTAINER_ACTION_META[action];
+      notifyActionSuccess(meta.category, `${stackName} ${meta.pastTense}`, stackName, user);
+    }
+    return { stackName, ok: true };
+  } catch (err) {
+    if (action !== 'start') notifyActionFailure(action, stackName, err);
+    return { stackName, ok: false, error: getErrorMessage(err, `${action} failed`), code: 'op_failed' };
+  } finally {
+    StackOpLockService.getInstance().release(req.nodeId, stackName);
+  }
+}
+
+async function runWithBoundedParallelism<T, R>(
+  items: T[],
+  limit: number,
+  task: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const idx = next;
+      next += 1;
+      results[idx] = await task(items[idx]);
+    }
+  };
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+stacksRouter.post('/bulk', async (req: Request, res: Response) => {
+  const body = req.body as { action?: unknown; stackNames?: unknown } | undefined;
+  const action = body?.action;
+  const stackNames = body?.stackNames;
+
+  if (typeof action !== 'string' || !VALID_BULK_ACTIONS.has(action as BulkLifecycleAction)) {
+    return res.status(400).json({
+      error: `Invalid action. Must be one of: ${[...VALID_BULK_ACTIONS].join(', ')}`,
+    });
+  }
+  if (!Array.isArray(stackNames) || stackNames.length === 0) {
+    return res.status(400).json({ error: 'stackNames must be a non-empty array' });
+  }
+  if (stackNames.length > BULK_MAX_STACKS) {
+    return res.status(400).json({ error: `Bulk operations are limited to ${BULK_MAX_STACKS} stacks per request` });
+  }
+  if (!stackNames.every(s => typeof s === 'string')) {
+    return res.status(400).json({ error: 'stackNames must be an array of strings' });
+  }
+
+  // Bulk update is paid-only by deliberate asymmetry with the single-stack
+  // POST /:stackName/update, which is open to all tiers (atomic backup is
+  // separately gated by effectiveTier inside the route). The bulk fan-out
+  // amplifies blast radius enough that we want a hard tier check here even
+  // though the per-stack route does not.
+  if (action === 'update' && !requirePaid(req, res)) return;
+
+  const typedAction = action as BulkLifecycleAction;
+  const typedNames = Array.from(new Set(stackNames as string[]));
+
+  const results = await runWithBoundedParallelism(
+    typedNames,
+    BULK_PARALLELISM,
+    name => runStackBulkOp(req, name, typedAction),
+  );
+
+  invalidateNodeCaches(req.nodeId);
+  const okCount = results.filter(r => r.ok).length;
+  console.log(
+    `[Stacks] Bulk ${sanitizeForLog(action)} completed: ${okCount}/${results.length} on node ${req.nodeId}`,
+  );
+
+  res.json({ action: typedAction, results });
 });
 
 stacksRouter.get('/:stackName/auto-update', (req: Request, res: Response): void => {
