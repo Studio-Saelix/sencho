@@ -19,6 +19,27 @@ interface RunResult {
 
 type StackActionError = Error & { rolledBack?: boolean };
 
+type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update';
+
+interface StackOpInProgressInfo {
+  action: StackOpAction;
+  startedAt: number;
+  user: string;
+}
+
+const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
+  deploy: 'deploying',
+  down: 'stopping',
+  restart: 'restarting',
+  stop: 'stopping',
+  start: 'starting',
+  update: 'updating',
+};
+
+const VALID_STACK_OP_ACTIONS: ReadonlySet<string> = new Set(
+  Object.keys(STACK_OP_PRESENT_PARTICIPLE),
+);
+
 type EditorState = ReturnType<typeof useEditorViewState>;
 type StackListState = ReturnType<typeof useStackListState>;
 type NavState = ReturnType<typeof useViewNavigationState>;
@@ -41,6 +62,35 @@ interface UseStackActionsOptions {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
+
+const parseStackOpInProgress = (rawBody: string): StackOpInProgressInfo | null => {
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    if (!isRecord(parsed) || parsed.code !== 'stack_op_in_progress') return null;
+    const inProgress = parsed.inProgress;
+    if (
+      !isRecord(inProgress) ||
+      typeof inProgress.action !== 'string' ||
+      typeof inProgress.startedAt !== 'number' ||
+      !VALID_STACK_OP_ACTIONS.has(inProgress.action)
+    ) {
+      return null;
+    }
+    return {
+      action: inProgress.action as StackOpAction,
+      startedAt: inProgress.startedAt,
+      user: typeof inProgress.user === 'string' ? inProgress.user : '',
+    };
+  } catch {
+    return null;
+  }
+};
+
+const stackOpInProgressMessage = (stackName: string, info: StackOpInProgressInfo): string => {
+  const verb = STACK_OP_PRESENT_PARTICIPLE[info.action] ?? 'busy';
+  const actor = info.user && info.user !== 'system' ? ` (started by ${info.user})` : '';
+  return `${stackName} is already ${verb}${actor}.`;
+};
 
 const parseStackActionError = (rawBody: string, fallback: string): StackActionError => {
   let message = rawBody || fallback;
@@ -388,6 +438,17 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (!response.ok) {
         const rawBody = await response.text();
         if (response.status === 409) {
+          const inProgress = parseStackOpInProgress(rawBody);
+          if (inProgress) {
+            const message = stackOpInProgressMessage(stackName, inProgress);
+            if (previousStatus !== undefined)
+              stackListState.setOptimisticStatus(
+                stackFile,
+                previousStatus as 'running' | 'exited',
+              );
+            toast.error(message);
+            return { ok: false, errorMessage: message };
+          }
           let parsed: PolicyBlockPayload | null = null;
           try {
             parsed = JSON.parse(rawBody) as PolicyBlockPayload;
@@ -578,6 +639,14 @@ export function useStackActions(options: UseStackActionsOptions) {
           const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST' });
           if (!response.ok) {
             const errText = await response.text();
+            if (response.status === 409) {
+              const inProgress = parseStackOpInProgress(errText);
+              if (inProgress) {
+                const message = stackOpInProgressMessage(stackName, inProgress);
+                toast.error(message);
+                return { ok: false as const, errorMessage: message };
+              }
+            }
             const actionError = parseStackActionError(errText, `${action} failed`);
             return {
               ok: false as const,
@@ -728,6 +797,13 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST' });
       if (!response.ok) {
         const errText = await response.text();
+        if (response.status === 409) {
+          const inProgress = parseStackOpInProgress(errText);
+          if (inProgress) {
+            toast.error(stackOpInProgressMessage(stackName, inProgress));
+            return;
+          }
+        }
         throw parseStackActionError(errText, `${action} failed`);
       }
       toast.success(`Stack ${action}ed successfully!`);
