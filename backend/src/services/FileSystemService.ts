@@ -234,9 +234,10 @@ export class FileSystemService {
     const boilerplate = `services:
   app:
     image: nginx:latest
-    ports:
-      - "8080:80"
     restart: always
+    # Uncomment to expose a host port:
+    # ports:
+    #   - "8080:80"
 `;
     try {
       await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), boilerplate, 'utf-8');
