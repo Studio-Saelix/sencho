@@ -1309,7 +1309,8 @@ type FsErrorCode =
   | 'NOT_EMPTY'
   | 'NOT_FOUND'
   | 'TOO_LARGE'
-  | 'ALREADY_EXISTS';
+  | 'ALREADY_EXISTS'
+  | 'PROTECTED_FILE';
 
 function sendFsError(
   res: Response,
@@ -1326,6 +1327,9 @@ function sendFsError(
   }
   if (e.code === 'NOT_EMPTY') {
     return res.status(409).json({ error: e.message, code: e.code as FsErrorCode });
+  }
+  if (e.code === 'PROTECTED_FILE') {
+    return res.status(409).json({ error: e.message, code: 'PROTECTED_FILE' satisfies FsErrorCode });
   }
   if (e.code === 'EEXIST') {
     return res.status(409).json({ error: e.message, code: 'ALREADY_EXISTS' satisfies FsErrorCode });

@@ -35,6 +35,25 @@ const PROTECTED_STACK_FILES = new Set([
   '.env',
 ]);
 
+function isProtectedRelPath(relPath: string): boolean {
+  if (!relPath) return false;
+  // Strip trailing slashes so 'compose.yaml/' cannot bypass via split('/').pop() === ''.
+  const normalized = relPath.replace(/\/+$/, '');
+  // Only files at the stack root are protected; compose CLI reads compose.yaml from
+  // the stack directory itself, so a subdirectory entry named compose.yaml is just
+  // an arbitrary file and the user may want to delete it.
+  if (normalized.includes('/')) return false;
+  return PROTECTED_STACK_FILES.has(normalized);
+}
+
+function protectedFileError(relPath: string): Error & { code: string } {
+  const basename = relPath.replace(/\/+$/, '').split('/').pop() ?? relPath;
+  return Object.assign(
+    new Error(`${basename} is a protected stack file. Delete the stack itself via Stack Actions instead.`),
+    { code: 'PROTECTED_FILE' as const },
+  );
+}
+
 const MIME_MAP: Record<string, string> = {
   '.yaml': 'text/yaml',
   '.yml': 'text/yaml',
@@ -685,6 +704,7 @@ export class FileSystemService {
   }
 
   async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false): Promise<void> {
+    if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
 
     if (recursive) {
@@ -717,6 +737,8 @@ export class FileSystemService {
   }
 
   async renameStackPath(stackName: string, fromRel: string, toRel: string): Promise<void> {
+    if (isProtectedRelPath(fromRel)) throw protectedFileError(fromRel);
+    if (isProtectedRelPath(toRel)) throw protectedFileError(toRel);
     const fromPath = await this.resolveSafeStackPath(stackName, fromRel);
     // toRel must resolve to the same parent directory (rename only, no cross-dir move).
     const toPath = await this.resolveSafeStackPath(stackName, toRel);
@@ -749,6 +771,7 @@ export class FileSystemService {
     if (!Number.isInteger(mode) || mode < 0 || mode > 0o777) {
       throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
     }
+    if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     await fsPromises.chmod(safePath, mode);
   }
