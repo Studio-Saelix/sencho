@@ -49,6 +49,7 @@ import { containersRouter, portsRouter } from './routes/containers';
 import { nodesRouter } from './routes/nodes';
 import { stacksRouter } from './routes/stacks';
 import { stackActivityRouter } from './routes/stackActivity';
+import { stackMetricsRouter } from './routes/stackMetrics';
 import { secretsRouter } from './routes/secrets';
 
 // Suppress [DEP0060] DeprecationWarning emitted by http-proxy@1.18.1 which calls
@@ -141,6 +142,7 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/nodes', nodesRouter);
 app.use('/api/stacks', stackActivityRouter);
 app.use('/api/stacks', stacksRouter);
+app.use('/api/stack-metrics', stackMetricsRouter);
 
 const { server, wss, pilotTunnelWss } = createServer(app);
 attachUpgrade(server, { wss, pilotTunnelWss });
