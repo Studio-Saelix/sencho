@@ -754,7 +754,13 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     }
     const message = getErrorMessage(error, 'Failed to deploy stack');
     notifyActionFailure('deploy', stackName, error);
-    if (!res.headersSent) res.status(500).json({ error: message, rolledBack });
+    if (!res.headersSent) {
+      if (isDockerUnavailableError(error)) {
+        res.status(503).json({ error: message, code: 'docker_unavailable', rolledBack });
+      } else {
+        res.status(500).json({ error: message, rolledBack });
+      }
+    }
   } finally {
     releaseStackOpLock(req, stackName);
   }
@@ -775,7 +781,13 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
     notifyActionFailure('down', stackName, error);
-    if (!res.headersSent) res.status(500).json({ error: 'Failed to start command' });
+    if (!res.headersSent) {
+      if (isDockerUnavailableError(error)) {
+        res.status(503).json({ error: getErrorMessage(error, 'Docker daemon is unreachable'), code: 'docker_unavailable' });
+      } else {
+        res.status(500).json({ error: 'Failed to start command' });
+      }
+    }
   } finally {
     releaseStackOpLock(req, stackName);
   }
@@ -792,7 +804,30 @@ const CONTAINER_ACTION_META: Record<StackContainerAction, { category: Notificati
 export type ContainerActionOutcome =
   | { kind: 'ok'; count: number }
   | { kind: 'no-containers' }
+  | { kind: 'docker-unavailable'; message: string }
   | { kind: 'error'; message: string };
+
+/**
+ * Returns true when the error looks like a Docker-engine reachability
+ * failure (socket gone, daemon down, connection refused). The string match
+ * is intentionally permissive: Dockerode wraps the underlying Node error
+ * differently depending on the transport (unix socket vs tcp vs ssh) and
+ * the OS, so a code-only check (`err.code === 'ECONNREFUSED'`) would miss
+ * some shapes.
+ */
+export function isDockerUnavailableError(error: unknown): boolean {
+  if (!error) return false;
+  const err = error as NodeJS.ErrnoException & { errno?: number };
+  if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT' && /docker\.sock/i.test(err.message ?? '')) {
+    return true;
+  }
+  const message = String(err.message ?? '').toLowerCase();
+  return (
+    message.includes('econnrefused') ||
+    message.includes('cannot connect to the docker daemon') ||
+    message.includes('docker.sock') && (message.includes('connect') || message.includes('no such'))
+  );
+}
 
 export async function containerActionForStack(
   nodeId: number,
@@ -810,6 +845,9 @@ export async function containerActionForStack(
     await Promise.all(containers.map(c => op(c.Id)));
     return { kind: 'ok', count: containers.length };
   } catch (error: unknown) {
+    if (isDockerUnavailableError(error)) {
+      return { kind: 'docker-unavailable', message: getErrorMessage(error, 'Docker daemon is unreachable') };
+    }
     return { kind: 'error', message: getErrorMessage(error, `Failed to ${action} containers`) };
   }
 }
@@ -830,6 +868,12 @@ async function bulkContainerOp(
 
     if (outcome.kind === 'no-containers') {
       res.status(404).json({ error: 'No containers found for this stack.' });
+      return;
+    }
+    if (outcome.kind === 'docker-unavailable') {
+      console.error('[Stacks] %s failed: docker unavailable for %s', sanitizeForLog(titleCase), sanitizeForLog(stackName));
+      if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message));
+      res.status(503).json({ error: outcome.message, code: 'docker_unavailable' });
       return;
     }
     if (outcome.kind === 'error') {
@@ -968,7 +1012,11 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     }
     notifyActionFailure('update', stackName, error);
     if (!res.headersSent) {
-      res.status(500).json({ error: getErrorMessage(error, 'Failed to update'), rolledBack });
+      if (isDockerUnavailableError(error)) {
+        res.status(503).json({ error: getErrorMessage(error, 'Docker daemon is unreachable'), code: 'docker_unavailable', rolledBack });
+      } else {
+        res.status(500).json({ error: getErrorMessage(error, 'Failed to update'), rolledBack });
+      }
     }
   } finally {
     releaseStackOpLock(req, stackName);
