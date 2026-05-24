@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button';
 import { StructuredLogRow } from '@/components/log-rendering/StructuredLogRow';
 import TerminalComponent from '@/components/Terminal';
 import { useDeployFeedback, VERB_LABELS } from '@/context/DeployFeedbackContext';
+import { useLicense } from '@/context/LicenseContext';
 
 const AUTO_CLOSE_SECONDS = 4;
 
@@ -32,6 +33,7 @@ function formatElapsed(seconds: number): string {
 
 export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackModalProps) {
   const { panelState, logRows, onTerminalReady, onMessage, onPanelClose } = useDeployFeedback();
+  const { isPaid } = useLicense();
 
   const [showRaw, setShowRaw] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -212,6 +214,16 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
             </Button>
           </div>
         </div>
+
+        {/* Atomic-deploy notice for Community: deploys without auto-rollback. */}
+        {!isPaid && (action === 'deploy' || action === 'update') && (
+          <div
+            className="px-4 py-1.5 text-xs text-muted-foreground bg-muted/40 border-b border-glass-border shrink-0"
+            role="note"
+          >
+            Auto-rollback on failure is a Skipper feature.
+          </div>
+        )}
 
         {/* Body */}
         <div
