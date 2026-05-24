@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './ui/button';
-import { Download } from 'lucide-react';
+import { Download, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface StructuredLogViewerProps {
@@ -14,6 +14,8 @@ interface LogRow {
   ts: string | null;
   level: LogLevel;
   message: string;
+  /** True when this row was synthesized by the client (e.g. reconnect sentinel). */
+  synthetic?: boolean;
 }
 
 type Filter = 'all' | LogLevel;
@@ -24,6 +26,12 @@ const TIMESTAMP_REGEX = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+(.*
 const ANSI_REGEX = /\x1b\[[0-9;]*[A-Za-z]/g;
 const ERROR_REGEX = /\b(ERROR|ERR|FATAL|Exception)\b/i;
 const WARN_REGEX = /\b(WARN|WARNING|WRN)\b/i;
+
+// Reconnect backoff: 1s, 2s, 4s, 8s, 16s, 30s cap. After each successful
+// open the schedule resets. docker logs -f has no resumable offset, so on
+// reconnect we drop a synthetic sentinel row to mark the gap rather than
+// pretend nothing was missed.
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 
 function parseLine(raw: string): Omit<LogRow, 'id'> {
   const stripped = raw.replace(ANSI_REGEX, '').replace(/[\r\n]+$/, '');
@@ -50,6 +58,7 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
   const [rows, setRows] = useState<LogRow[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [following, setFollowing] = useState(true);
+  const [connectionState, setConnectionState] = useState<'connecting' | 'open' | 'reconnecting'>('connecting');
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
   const rowIdRef = useRef(0);
@@ -64,11 +73,11 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
     const activeNodeId = localStorage.getItem('sencho-active-node') || '';
     const wsUrl = `${wsProtocol}//${window.location.host}/api/stacks/${cleanStackName}/logs${activeNodeId ? `?nodeId=${activeNodeId}` : ''}`;
 
-    let closed = false;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
+    let closedByCleanup = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
     let rafId = 0;
+
     const flushPending = () => {
       rafId = 0;
       if (pendingRef.current.length === 0) return;
@@ -84,26 +93,79 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
       rafId = requestAnimationFrame(flushPending);
     };
 
-    ws.onmessage = (event) => {
-      if (closed) return;
-      const text = typeof event.data === 'string' ? event.data : '';
-      if (!text) return;
-      for (const line of text.split(/\r?\n/)) {
-        if (!line) continue;
-        const parsed = parseLine(line);
-        if (!parsed.message) continue;
-        rowIdRef.current += 1;
-        pendingRef.current.push({ id: rowIdRef.current, ...parsed });
-      }
+    const pushSyntheticRow = (level: LogLevel, message: string) => {
+      rowIdRef.current += 1;
+      pendingRef.current.push({
+        id: rowIdRef.current,
+        ts: new Date().toISOString(),
+        level,
+        message,
+        synthetic: true,
+      });
       scheduleFlush();
     };
 
-    ws.onerror = () => { /* surface nothing; reconnection is backend's job */ };
+    const connect = () => {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      if (attempt === 0) setConnectionState('connecting');
+
+      ws.onopen = () => {
+        if (closedByCleanup) {
+          try { ws.close(); } catch { /* ignore */ }
+          return;
+        }
+        if (attempt > 0) {
+          // Recovered from a disconnect. Mark the gap so the operator knows
+          // older lines may be missing - docker logs -f has no offset we
+          // could resume from.
+          pushSyntheticRow('warn', '--- reconnected; older lines may be missing ---');
+        }
+        attempt = 0;
+        setConnectionState('open');
+      };
+
+      ws.onmessage = (event) => {
+        if (closedByCleanup) return;
+        const text = typeof event.data === 'string' ? event.data : '';
+        if (!text) return;
+        for (const line of text.split(/\r?\n/)) {
+          if (!line) continue;
+          const parsed = parseLine(line);
+          if (!parsed.message) continue;
+          rowIdRef.current += 1;
+          pendingRef.current.push({ id: rowIdRef.current, ...parsed });
+        }
+        scheduleFlush();
+      };
+
+      ws.onerror = () => { /* fall through to onclose, which schedules reconnect */ };
+
+      ws.onclose = () => {
+        if (closedByCleanup) return;
+        const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+        attempt += 1;
+        setConnectionState('reconnecting');
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          if (!closedByCleanup) connect();
+        }, delay);
+      };
+    };
+
+    connect();
 
     return () => {
-      closed = true;
+      closedByCleanup = true;
       if (rafId !== 0) cancelAnimationFrame(rafId);
-      try { ws.close(); } catch { /* ignore */ }
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      const ws = wsRef.current;
+      if (ws) {
+        try { ws.close(); } catch { /* ignore */ }
+      }
       wsRef.current = null;
       pendingRef.current = [];
     };
@@ -160,7 +222,12 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
       <div className="flex items-center justify-between border-b border-muted px-3 py-2 gap-3">
         <div className="flex items-center gap-3 min-w-0">
           <span className="font-mono text-xs text-stat-subtitle truncate">{label}</span>
-          {following ? (
+          {connectionState === 'reconnecting' ? (
+            <span className="flex items-center gap-1.5 text-[10px] font-mono text-warning" role="status">
+              <RefreshCw className="h-2.5 w-2.5 animate-spin" strokeWidth={2} />
+              reconnecting…
+            </span>
+          ) : following ? (
             <span className="flex items-center gap-1.5 text-[10px] font-mono text-success">
               <span className="h-1.5 w-1.5 rounded-full bg-success animate-[pulse_2.4s_ease-in-out_infinite]" />
               following
@@ -210,6 +277,7 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
                 'grid grid-cols-[64px_44px_1fr] items-start gap-2 border-l-2 border-transparent px-3 py-0.5',
                 row.level === 'err' && 'border-destructive bg-destructive/[0.04]',
                 row.level === 'warn' && 'bg-warning/[0.04]',
+                row.synthetic && 'opacity-70',
               )}
             >
               <span className="text-stat-subtitle">{formatTs(row.ts)}</span>
