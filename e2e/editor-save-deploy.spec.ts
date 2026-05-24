@@ -66,7 +66,7 @@ test.describe('EditorView save-and-deploy', () => {
     // No need to modify Monaco content: saveFile fires the PUT regardless of
     // dirty state. The route interceptor forces it to 500; the gated handler
     // then must not call POST /deploy.
-    await page.getByRole('button', { name: /save.*deploy/i }).click();
+    await page.getByRole('button', { name: 'Save & Deploy', exact: true }).click();
 
     // Failure toast must appear.
     await expect(page.getByText(/failed to save file/i)).toBeVisible({ timeout: 5_000 });
