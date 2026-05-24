@@ -82,7 +82,13 @@ export async function triggerPostDeployScan(
   nodeId: number,
 ): Promise<void> {
   const svc = TrivyService.getInstance();
-  if (!svc.isTrivyAvailable()) return;
+  const db = DatabaseService.getInstance();
+  if (!svc.isTrivyAvailable()) {
+    db.recordStackScanAttempt(nodeId, stackName, 'skipped', 'Trivy is not available on this node');
+    return;
+  }
+  let imageFailures = 0;
+  let imageSuccesses = 0;
   try {
     const docker = DockerController.getInstance(nodeId).getDocker();
     const containers = await docker.listContainers({
@@ -93,18 +99,23 @@ export async function triggerPostDeployScan(
     for (const c of containers as Array<{ Image?: string }>) {
       if (c.Image && !c.Image.startsWith('sha256:')) imageRefs.add(c.Image);
     }
-    if (imageRefs.size === 0) return;
-
-    const db = DatabaseService.getInstance();
+    if (imageRefs.size === 0) {
+      db.recordStackScanAttempt(nodeId, stackName, 'skipped', 'No images to scan');
+      return;
+    }
 
     for (const imageRef of imageRefs) {
       try {
         const digest = await svc.getImageDigest(imageRef, nodeId);
         if (digest) {
           const cached = db.getLatestScanByDigest(digest, 'vuln');
-          if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) continue;
+          if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
+            imageSuccesses += 1;
+            continue;
+          }
         }
         const scan = await svc.runScanAndPersist(imageRef, nodeId, 'deploy', stackName);
+        imageSuccesses += 1;
 
         if (scan.critical_count > 0 || scan.high_count > 0) {
           NotificationService.getInstance().dispatchAlert(
@@ -115,6 +126,7 @@ export async function triggerPostDeployScan(
           );
         }
       } catch (err) {
+        imageFailures += 1;
         const message = getErrorMessage(err, 'unknown error');
         console.error(`[Security] Post-deploy scan failed for ${imageRef}:`, message);
         NotificationService.getInstance().dispatchAlert(
@@ -125,7 +137,17 @@ export async function triggerPostDeployScan(
         );
       }
     }
+
+    if (imageFailures === 0) {
+      db.recordStackScanAttempt(nodeId, stackName, 'ok', null);
+    } else if (imageSuccesses === 0) {
+      db.recordStackScanAttempt(nodeId, stackName, 'failed', `${imageFailures} image(s) failed to scan`);
+    } else {
+      db.recordStackScanAttempt(nodeId, stackName, 'partial', `${imageFailures} of ${imageFailures + imageSuccesses} image(s) failed`);
+    }
   } catch (err) {
-    console.error('[Security] triggerPostDeployScan error for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown error')));
+    const message = getErrorMessage(err, 'unknown error');
+    console.error('[Security] triggerPostDeployScan error for %s:', sanitizeForLog(stackName), sanitizeForLog(message));
+    db.recordStackScanAttempt(nodeId, stackName, 'failed', message);
   }
 }

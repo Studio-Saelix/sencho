@@ -249,6 +249,11 @@ export default function StackAnatomyPanel({
 
   const [gitSource, setGitSource] = useState<GitSourceInfo | null>(null);
   const [updatePreview, setUpdatePreview] = useState<UpdatePreview | null>(null);
+  const [scanStatus, setScanStatus] = useState<{
+    status: 'ok' | 'partial' | 'failed' | 'skipped' | null;
+    attemptedAt?: number;
+    errorMessage?: string | null;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -284,6 +289,25 @@ export default function StackAnatomyPanel({
         }
       } catch {
         if (!cancelled) setUpdatePreview(null);
+      }
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [stackName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const res = await apiFetch(`/stacks/${stackName}/scan-status`);
+        if (cancelled) return;
+        if (res.ok) {
+          setScanStatus(await res.json());
+        } else {
+          setScanStatus(null);
+        }
+      } catch {
+        if (!cancelled) setScanStatus(null);
       }
     };
     void run();
@@ -508,6 +532,21 @@ export default function StackAnatomyPanel({
                 </Button>
               )}
             </div>
+          </div>
+        )}
+        {scanStatus && scanStatus.status && scanStatus.status !== 'ok' && (
+          <div
+            className="mx-3 my-2 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/[0.06] px-2 py-1.5 text-[11px] text-warning"
+            role="status"
+            title={scanStatus.errorMessage ?? undefined}
+          >
+            <span className="font-mono text-[9px] uppercase tracking-wide shrink-0 mt-0.5">scan</span>
+            <span className="flex-1">
+              {scanStatus.status === 'failed' && 'Last post-deploy scan failed.'}
+              {scanStatus.status === 'partial' && 'Last post-deploy scan partially failed.'}
+              {scanStatus.status === 'skipped' && 'Post-deploy scan did not run.'}
+              {scanStatus.errorMessage ? ` ${scanStatus.errorMessage}` : ''}
+            </span>
           </div>
         )}
       </div>
