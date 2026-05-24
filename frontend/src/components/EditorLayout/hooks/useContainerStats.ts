@@ -9,8 +9,17 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-export function useContainerStats(containers: ContainerInfo[]): Record<string, ContainerStatsEntry> {
+export interface ContainerStatsHookResult {
+  stats: Record<string, ContainerStatsEntry>;
+  error: string | null;
+}
+
+export function useContainerStats(
+  containers: ContainerInfo[],
+  activeNodeId: number | null | undefined,
+): ContainerStatsHookResult {
   const [containerStats, setContainerStats] = useState<Record<string, ContainerStatsEntry>>({});
+  const [error, setError] = useState<string | null>(null);
 
   const pendingStatsRef = useRef<Record<string, {
     cpu: string; ram: string; net: string;
@@ -20,22 +29,49 @@ export function useContainerStats(containers: ContainerInfo[]): Record<string, C
 
   const rawBytesRef = useRef<Record<string, { lastRx: number; lastTx: number }>>({});
 
+  // Reset the error banner only on an actual node switch. Doing it inside the
+  // main effect would clear the banner on every containers-array identity
+  // change (which fires at the dashboard's refresh cadence) and cause the
+  // banner to visibly flap against a persistently-flaky daemon.
+  useEffect(() => {
+    setError(null);
+  }, [activeNodeId]);
+
   useEffect(() => {
     const wsMap: Record<string, WebSocket> = {};
+    // Track which WSs have already emitted a console.warn for the lifetime of
+    // this effect, so a flaky daemon does not spam the console at message rate.
+    const warnedOnce = new Set<string>();
+
+    const nodeQuery = activeNodeId != null ? `?nodeId=${activeNodeId}` : '';
 
     (containers || []).forEach(container => {
       if (!container?.Id) return;
+
+      const recordFailure = (kind: 'ws-error' | 'ws-closed' | 'parse-error' | 'ws-create') => {
+        if (!warnedOnce.has(container.Id)) {
+          warnedOnce.add(container.Id);
+          console.warn('[useContainerStats] stats stream failure:', { kind, containerId: container.Id });
+        }
+        setError('Container stats unavailable. The node may be unreachable.');
+      };
+
       try {
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const activeNodeId = localStorage.getItem('sencho-active-node') || '';
-        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws${activeNodeId ? `?nodeId=${activeNodeId}` : ''}`);
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws${nodeQuery}`);
         wsMap[container.Id] = ws;
 
         ws.onopen = () => ws.send(JSON.stringify({
           action: 'streamStats',
           containerId: container.Id,
-          nodeId: activeNodeId || undefined,
+          nodeId: activeNodeId ?? undefined,
         }));
+
+        ws.onerror = () => recordFailure('ws-error');
+        ws.onclose = (event) => {
+          // 1000 normal, 1001 going-away are expected during cleanup or navigation.
+          if (event.code !== 1000 && event.code !== 1001) recordFailure('ws-closed');
+        };
 
         ws.onmessage = (event) => {
           try {
@@ -74,11 +110,11 @@ export function useContainerStats(containers: ContainerInfo[]): Record<string, C
               netOutNum: txRate,
             };
           } catch {
-            // Ignore parse errors
+            recordFailure('parse-error');
           }
         };
       } catch {
-        // Ignore WebSocket errors
+        recordFailure('ws-create');
       }
     });
 
@@ -111,9 +147,9 @@ export function useContainerStats(containers: ContainerInfo[]): Record<string, C
     return () => {
       clearInterval(flushInterval);
       pendingStatsRef.current = {};
-      Object.values(wsMap).forEach(ws => { try { ws.close(); } catch { /* ignore */ } });
+      Object.values(wsMap).forEach(ws => { try { ws.close(1000); } catch { /* ignore */ } });
     };
-  }, [containers]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [containers, activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return containerStats;
+  return { stats: containerStats, error };
 }
