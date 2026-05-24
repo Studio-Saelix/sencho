@@ -575,7 +575,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     await ComposeService.getInstance(req.nodeId).downStack(stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: down OK`, { stackName: sanitizedName });
   } catch (downErr) {
-    console.warn(`[Stacks] Compose down failed or no-op for ${sanitizeForLog(stackName)}:`, downErr);
+    console.warn('[Stacks] Compose down failed or no-op for %s:', sanitizeForLog(stackName), downErr);
   }
 
   // Step 2: volume prune (only if requested). Best-effort.
