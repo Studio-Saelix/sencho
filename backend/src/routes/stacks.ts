@@ -647,6 +647,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   try {
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     DatabaseService.getInstance().clearStackAutoUpdateSetting(req.nodeId, stackName);
+    DatabaseService.getInstance().clearStackScanAttempts(req.nodeId, stackName);
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
@@ -1058,6 +1059,26 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
     const message = getErrorMessage(error, 'Failed to get backup info.');
     res.status(500).json({ error: message });
   }
+});
+
+/**
+ * Returns the latest post-deploy scan attempt for this stack, or null if
+ * no scan has been attempted yet. Used by the editor UI to flag stacks
+ * whose latest deploy did not trigger a successful scan (Trivy missing,
+ * registry rejection, etc).
+ */
+stacksRouter.get('/:stackName/scan-status', (req: Request, res: Response): void => {
+  const stackName = req.params.stackName as string;
+  const row = DatabaseService.getInstance().getStackScanAttempt(req.nodeId, stackName);
+  if (!row) {
+    res.json({ status: null });
+    return;
+  }
+  res.json({
+    status: row.status,
+    attemptedAt: row.attempted_at,
+    errorMessage: row.error_message,
+  });
 });
 
 // ── File explorer endpoints ──

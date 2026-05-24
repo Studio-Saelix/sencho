@@ -746,6 +746,15 @@ export class DatabaseService {
         PRIMARY KEY (node_id, stack_name)
       );
 
+      CREATE TABLE IF NOT EXISTS stack_scan_attempts (
+        node_id INTEGER NOT NULL DEFAULT 0,
+        stack_name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempted_at INTEGER NOT NULL,
+        error_message TEXT,
+        PRIMARY KEY (node_id, stack_name)
+      );
+
       CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
@@ -2386,6 +2395,43 @@ export class DatabaseService {
 
     public clearStackAutoUpdateSetting(nodeId: number, stackName: string): void {
         this.db.prepare('DELETE FROM stack_auto_update_settings WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    }
+
+    // --- Stack Scan Attempts ---
+    //
+    // Tracks the latest post-deploy scan attempt per (nodeId, stackName) so
+    // operators can see when a scan was skipped or failed without scrolling
+    // logs. One row per stack; the table is overwritten on every attempt.
+
+    public recordStackScanAttempt(
+        nodeId: number,
+        stackName: string,
+        status: 'ok' | 'partial' | 'failed' | 'skipped',
+        errorMessage: string | null,
+    ): void {
+        this.db.prepare(
+            `INSERT INTO stack_scan_attempts (node_id, stack_name, status, attempted_at, error_message)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, stack_name) DO UPDATE SET
+               status = excluded.status,
+               attempted_at = excluded.attempted_at,
+               error_message = excluded.error_message`
+        ).run(nodeId, stackName, status, Date.now(), errorMessage);
+    }
+
+    public getStackScanAttempt(nodeId: number, stackName: string): {
+        status: string;
+        attempted_at: number;
+        error_message: string | null;
+    } | null {
+        const row = this.db.prepare(
+            'SELECT status, attempted_at, error_message FROM stack_scan_attempts WHERE node_id = ? AND stack_name = ?'
+        ).get(nodeId, stackName) as { status: string; attempted_at: number; error_message: string | null } | undefined;
+        return row ?? null;
+    }
+
+    public clearStackScanAttempts(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM stack_scan_attempts WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
     public getNodeUpdateSummary(): Array<{ node_id: number; stacks_with_updates: number }> {
