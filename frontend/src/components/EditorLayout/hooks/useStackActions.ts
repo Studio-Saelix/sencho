@@ -239,6 +239,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEnvContent('');
     editorState.setOriginalEnvContent('');
     editorState.setEnvExists(false);
+    editorState.setEnvEtag(null);
   };
 
   const loadEnvState = async (filename: string, signal?: AbortSignal) => {
@@ -265,9 +266,11 @@ export function useStackActions(options: UseStackActionsOptions) {
           const envText = await envContentRes.text();
           editorState.setEnvContent(envText || '');
           editorState.setOriginalEnvContent(envText || '');
+          editorState.setEnvEtag(envContentRes.headers.get('etag'));
         } else {
           editorState.setEnvContent('');
           editorState.setOriginalEnvContent('');
+          editorState.setEnvEtag(null);
         }
       } else {
         clearEnvState();
@@ -334,6 +337,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       navState.setActiveView('editor');
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
+      editorState.setComposeEtag(res.headers.get('etag'));
       await loadEnvState(filename, signal);
       await loadContainerState(filename, signal);
       await loadBackupState(filename, signal);
@@ -343,8 +347,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       stackListState.setSelectedFile(null);
       editorState.setContent('');
       editorState.setOriginalContent('');
+      editorState.setComposeEtag(null);
       editorState.setEnvContent('');
       editorState.setOriginalEnvContent('');
+      editorState.setEnvEtag(null);
       editorState.setContainers([]);
     } finally {
       if (!signal.aborted) {
@@ -380,45 +386,81 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (!res.ok) {
         editorState.setEnvContent('');
         editorState.setOriginalEnvContent('');
+        editorState.setEnvEtag(null);
         toast.error('Could not load env file');
         return;
       }
       const text = await res.text();
       editorState.setEnvContent(text || '');
       editorState.setOriginalEnvContent(text || '');
+      editorState.setEnvEtag(res.headers.get('etag'));
     } catch (e) {
       console.error('Failed to switch env file', e);
       editorState.setEnvContent('');
       editorState.setOriginalEnvContent('');
+      editorState.setEnvEtag(null);
       toast.error('Failed to load env file');
     } finally {
       editorState.setIsFileLoading(false);
     }
   };
 
-  const saveFile = async (): Promise<boolean> => {
+  const saveFile = async (options?: { force?: boolean }): Promise<boolean> => {
     if (editorState.activeTab === 'files') return false;
     if (!stackListState.selectedFile) return false;
-    const currentContent =
-      editorState.activeTab === 'compose'
-        ? editorState.content || ''
-        : editorState.envContent || '';
-    const endpoint =
-      editorState.activeTab === 'compose'
-        ? `/stacks/${stackListState.selectedFile}`
-        : `/stacks/${stackListState.selectedFile}/env?file=${encodeURIComponent(editorState.selectedEnvFile)}`;
+    const force = options?.force === true;
+    const isCompose = editorState.activeTab === 'compose';
+    const currentContent = isCompose
+      ? editorState.content || ''
+      : editorState.envContent || '';
+    const endpoint = isCompose
+      ? `/stacks/${stackListState.selectedFile}`
+      : `/stacks/${stackListState.selectedFile}/env?file=${encodeURIComponent(editorState.selectedEnvFile)}`;
+    const etag = isCompose ? editorState.composeEtag : editorState.envEtag;
+    const headers: Record<string, string> = {};
+    if (!force && etag) headers['If-Match'] = etag;
     try {
       const response = await apiFetch(endpoint, {
         method: 'PUT',
+        headers,
         body: JSON.stringify({ content: currentContent }),
       });
+      if (response.status === 412) {
+        const payload = await response.json().catch(() => null);
+        const currentRemoteContent =
+          payload && typeof payload.currentContent === 'string' ? payload.currentContent : '';
+        const fileName = isCompose
+          ? 'compose.yaml'
+          : (editorState.selectedEnvFile || '.env').split('/').pop() ?? '.env';
+        const confirmed = window.confirm(
+          `${fileName} was changed by another tab or process. Overwrite their changes with yours? Click Cancel to discard your local edits and reload the latest version.`,
+        );
+        if (confirmed) {
+          return await saveFile({ force: true });
+        }
+        if (isCompose) {
+          editorState.setContent(currentRemoteContent);
+          editorState.setOriginalContent(currentRemoteContent);
+          editorState.setComposeEtag(response.headers.get('etag'));
+        } else {
+          editorState.setEnvContent(currentRemoteContent);
+          editorState.setOriginalEnvContent(currentRemoteContent);
+          editorState.setEnvEtag(response.headers.get('etag'));
+        }
+        editorState.setIsEditing(false);
+        toast.success('Reloaded the latest version of the file.');
+        return false;
+      }
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${await response.text()}`);
       }
-      if (editorState.activeTab === 'compose') {
+      const newEtag = response.headers.get('etag');
+      if (isCompose) {
         editorState.setOriginalContent(editorState.content);
+        if (newEtag) editorState.setComposeEtag(newEtag);
       } else {
         editorState.setOriginalEnvContent(editorState.envContent);
+        if (newEtag) editorState.setEnvEtag(newEtag);
       }
       editorState.setIsEditing(false);
       toast.success('File saved successfully!');

@@ -79,6 +79,18 @@ function releaseStackOpLock(req: Request, stackName: string): void {
   StackOpLockService.getInstance().release(req.nodeId, stackName);
 }
 
+function stackFileEtag(mtimeMs: number): string {
+  return `W/"${Math.floor(mtimeMs)}"`;
+}
+
+function parseIfMatchMtime(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const m = /(?:W\/)?"(\d+)"/.exec(raw);
+  if (!m) return null;
+  const value = Number(m[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
 async function requireStackExists(nodeId: number, stackName: string, res: Response): Promise<boolean> {
   if (!isValidStackName(stackName)) {
     res.status(400).json({ error: 'Invalid stack name' });
@@ -280,7 +292,8 @@ stacksRouter.put('/:stackName/auto-update', (req: Request, res: Response): void 
 stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
   try {
     const stackName = req.params.stackName as string;
-    const content = await FileSystemService.getInstance(req.nodeId).getStackContent(stackName);
+    const { content, mtimeMs } = await FileSystemService.getInstance(req.nodeId).getStackContentWithMtime(stackName);
+    res.setHeader('ETag', stackFileEtag(mtimeMs));
     res.send(content);
   } catch (error) {
     res.status(500).json({ error: 'Failed to read stack' });
@@ -297,10 +310,22 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Content must be a string' });
     }
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Save starting`, { stackName: sanitizeForLog(stackName), bytes: content.length, nodeId: req.nodeId });
-    await FileSystemService.getInstance(req.nodeId).saveStackContent(stackName, content);
+    const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
+    const result = await FileSystemService.getInstance(req.nodeId)
+      .saveStackContentIfUnchanged(stackName, content, expectedMtimeMs);
+    if (!result.ok) {
+      res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      return res.status(412).json({
+        error: `${stackName}'s compose file changed since you opened it.`,
+        code: 'stack_file_changed',
+        currentMtimeMs: result.currentMtimeMs,
+        currentContent: result.currentContent,
+      });
+    }
     invalidateNodeCaches(req.nodeId);
     console.log(`[Stacks] Compose file saved: ${sanitizeForLog(stackName)}`);
-    res.json({ message: 'Stack saved successfully' });
+    res.setHeader('ETag', stackFileEtag(result.mtimeMs));
+    res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs });
   } catch (error) {
     console.error('Failed to save stack:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to save stack' });
@@ -363,6 +388,8 @@ stacksRouter.get('/:stackName/env', async (req: Request, res: Response) => {
 
     try {
       const content = await fsService.readFile(envPath, 'utf-8');
+      const mtimeMs = await fsService.statMtime(envPath);
+      if (mtimeMs !== null) res.setHeader('ETag', stackFileEtag(mtimeMs));
       res.setHeader('X-Env-Exists', 'true');
       return res.send(content);
     } catch (e: unknown) {
@@ -405,11 +432,22 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     }
 
     const fsService = FileSystemService.getInstance(req.nodeId);
-    await fsService.writeFile(envPath, content, 'utf-8');
+    const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
+    const result = await fsService.writeFileIfUnchanged(envPath, content, expectedMtimeMs);
+    if (!result.ok) {
+      res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      return res.status(412).json({
+        error: `${stackName}'s env file changed since you opened it.`,
+        code: 'stack_file_changed',
+        currentMtimeMs: result.currentMtimeMs,
+        currentContent: result.currentContent,
+      });
+    }
     invalidateNodeCaches(req.nodeId);
     const envFileName = path.basename(envPath);
     console.log(`[Stacks] Env file saved: ${sanitizeForLog(stackName)}/${sanitizeForLog(envFileName)}`);
-    res.json({ message: 'Env file saved successfully' });
+    res.setHeader('ETag', stackFileEtag(result.mtimeMs));
+    res.json({ message: 'Env file saved successfully', mtimeMs: result.mtimeMs });
   } catch (error) {
     console.error('[Stacks] Failed to save env file:', error);
     res.status(500).json({ error: 'Failed to save env file' });

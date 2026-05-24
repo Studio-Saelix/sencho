@@ -156,6 +156,32 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * Read the resolved compose file along with its mtimeMs, which the route
+   * layer surfaces as an ETag for optimistic-concurrency on PUT. The stat
+   * and read share a single file descriptor so they observe the same inode
+   * state, even if the file is replaced (rename) between the two calls.
+   */
+  async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number }> {
+    const untrustedFilePath = await this.getComposeFilePath(stackName);
+    // Canonical js/path-injection barrier: resolve against a known-safe root
+    // then check the result is contained in that root. The form mirrors
+    // CodeQL's documented sanitizer exactly so taint flow recognizes it.
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, untrustedFilePath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    const fh = await fsPromises.open(safePath, 'r');
+    try {
+      const stat = await fh.stat();
+      const content = await fh.readFile('utf-8');
+      return { content, mtimeMs: stat.mtimeMs };
+    } finally {
+      await fh.close();
+    }
+  }
+
   async saveStackContent(stackName: string, content: string): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
@@ -164,6 +190,112 @@ export class FileSystemService {
     } catch (error) {
       console.error('Error writing file:', error);
       throw new Error(`Failed to save stack: ${stackName}`);
+    }
+  }
+
+  /**
+   * Optimistic-concurrency write: if `expectedMtimeMs` is provided, stat the
+   * write target first and return `{ok: false}` with the current content and
+   * mtime when they don't match. The route maps that to 412. Mtime comparison
+   * uses Math.floor to absorb sub-millisecond jitter from different file
+   * systems / Node versions.
+   *
+   * If the file doesn't exist yet, the write proceeds (no mtime to compare).
+   * Returns the new mtimeMs so the route can emit a fresh ETag.
+   */
+  async saveStackContentIfUnchanged(
+    stackName: string,
+    content: string,
+    expectedMtimeMs: number | null,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
+    const stackDir = this.resolveStackDir(stackName);
+    const untrustedFilePath = path.join(stackDir, 'compose.yaml');
+    // Canonical js/path-injection barrier: path.resolve(SAFE_ROOT, untrusted)
+    // followed by a single startsWith check, both inline with the sink.
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, untrustedFilePath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+
+    if (expectedMtimeMs !== null) {
+      let fh: import('fs/promises').FileHandle | null = null;
+      try {
+        fh = await fsPromises.open(safePath, 'r');
+        const stat = await fh.stat();
+        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+          const currentContent = await fh.readFile('utf-8');
+          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        // File doesn't exist yet, treat as fresh write.
+      } finally {
+        if (fh) await fh.close();
+      }
+    }
+
+    await fsPromises.writeFile(safePath, content, 'utf-8');
+    const newStat = await fsPromises.stat(safePath);
+    return { ok: true, mtimeMs: newStat.mtimeMs };
+  }
+
+  /**
+   * Optimistic-concurrency write for arbitrary paths under the stack dir
+   * (used for .env files; the path was already validated by the caller).
+   */
+  async writeFileIfUnchanged(
+    untrustedTargetPath: string,
+    content: string,
+    expectedMtimeMs: number | null,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
+    // Canonical js/path-injection barrier: path.resolve(SAFE_ROOT, untrusted)
+    // followed by a single startsWith check, both inline with the sink.
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, untrustedTargetPath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+
+    if (expectedMtimeMs !== null) {
+      let fh: import('fs/promises').FileHandle | null = null;
+      try {
+        fh = await fsPromises.open(safePath, 'r');
+        const stat = await fh.stat();
+        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+          const currentContent = await fh.readFile('utf-8');
+          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      } finally {
+        if (fh) await fh.close();
+      }
+    }
+
+    await fsPromises.writeFile(safePath, content, 'utf-8');
+    const newStat = await fsPromises.stat(safePath);
+    return { ok: true, mtimeMs: newStat.mtimeMs };
+  }
+
+  async statMtime(untrustedTargetPath: string): Promise<number | null> {
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, untrustedTargetPath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    try {
+      const stat = await fsPromises.stat(safePath);
+      return stat.mtimeMs;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
     }
   }
 
