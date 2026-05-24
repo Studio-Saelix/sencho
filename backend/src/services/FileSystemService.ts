@@ -1,5 +1,6 @@
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { promises as fsPromises, createReadStream } from 'fs';
 import type { Readable } from 'stream';
 import { NodeRegistry } from './NodeRegistry';
@@ -691,7 +692,9 @@ export class FileSystemService {
     opts: { exclusive?: boolean } = {},
   ): Promise<void> {
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
-    const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // crypto.randomBytes gives a guaranteed-length high-entropy suffix; Math.random
+    // can drop leading zeros which narrows entropy unpredictably.
+    const suffix = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
     const tmpPath = `${safePath}.sencho-tmp-${suffix}`;
     let stagedTmp = false;
     try {
@@ -704,6 +707,9 @@ export class FileSystemService {
         await fh.close();
       }
       if (opts.exclusive) {
+        // link() is atomic against EEXIST. Tmp and target are guaranteed to live
+        // in the same directory (same filesystem); link works on NTFS and any
+        // POSIX FS without elevated privileges.
         try {
           await fsPromises.link(tmpPath, safePath);
         } catch (err: unknown) {
