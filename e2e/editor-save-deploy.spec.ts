@@ -57,11 +57,15 @@ test.describe('EditorView save-and-deploy', () => {
       await route.continue();
     });
 
-    // Enter edit mode and modify the compose content.
-    await page.getByRole('button', { name: /^edit$/i }).click();
-    await page.locator('.monaco-editor textarea').first().fill('services: {}\n# edit\n');
+    // The editor surface has two distinct edit affordances. First click swaps
+    // the right panel from Anatomy to the editor tabs (Monaco mounts read-only);
+    // second click flips Monaco into edit mode and reveals Save & Deploy.
+    await page.getByRole('button', { name: /^edit$/ }).click();
+    await page.getByRole('button', { name: /^Edit$/ }).click();
 
-    // Click Save & Deploy.
+    // No need to modify Monaco content: saveFile fires the PUT regardless of
+    // dirty state. The route interceptor forces it to 500; the gated handler
+    // then must not call POST /deploy.
     await page.getByRole('button', { name: /save.*deploy/i }).click();
 
     // Failure toast must appear.
