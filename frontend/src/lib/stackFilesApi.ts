@@ -135,6 +135,9 @@ export async function uploadStackFile(
     if (body.code === 'FILE_EXISTS') {
       throw new UploadConflictError(body.error ?? `${file.name} already exists.`);
     }
+    // DIR_EXISTS and any other 409 fall through to the generic Error path so the
+    // dropzone surfaces the server message as a toast and does NOT offer a Replace
+    // confirmation (a directory cannot be replaced by a file upload).
   }
 
   if (!res.ok) {

@@ -350,7 +350,7 @@ describe('POST /api/stacks/:stackName/files/upload', () => {
     await fs.unlink(target);
   });
 
-  it('returns 409 FILE_EXISTS when overwriting an entry that is a directory', async () => {
+  it('returns 409 DIR_EXISTS when a directory occupies the upload target name', async () => {
     const dir = path.join(stacksDir, STACK, 'collide-dir');
     await fs.mkdir(dir, { recursive: true });
     const res = await request(app)
@@ -358,7 +358,23 @@ describe('POST /api/stacks/:stackName/files/upload', () => {
       .set('Cookie', adminCookie)
       .attach('file', Buffer.from('whatever'), 'collide-dir');
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('FILE_EXISTS');
+    expect(res.body.code).toBe('DIR_EXISTS');
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('still returns 409 DIR_EXISTS even when ?overwrite=1 is set (directories are never replaced)', async () => {
+    const dir = path.join(stacksDir, STACK, 'collide-dir-2');
+    await fs.mkdir(dir, { recursive: true });
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('whatever'), 'collide-dir-2');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DIR_EXISTS');
+    // The directory must still exist after the rejected upload.
+    const stat = await fs.stat(dir);
+    expect(stat.isDirectory()).toBe(true);
     await fs.rm(dir, { recursive: true, force: true });
   });
 });

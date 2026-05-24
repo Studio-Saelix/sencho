@@ -684,14 +684,21 @@ export class FileSystemService {
     await fsPromises.writeFile(safePath, buffer);
   }
 
-  async pathExists(stackName: string, relPath: string): Promise<boolean> {
+  /**
+   * Returns 'file' or 'directory' if the resolved path exists, null if it
+   * does not. Path-resolution errors (INVALID_PATH, SYMLINK_ESCAPE) propagate
+   * so callers do not silently treat a malformed path as 'available for write'.
+   * Callers should validate inputs upstream before invoking this helper.
+   */
+  async pathKind(stackName: string, relPath: string): Promise<'file' | 'directory' | null> {
+    const safePath = await this.resolveSafeStackPath(stackName, relPath);
     try {
-      const safePath = await this.resolveSafeStackPath(stackName, relPath);
-      await fsPromises.access(safePath);
-      return true;
+      const stat = await fsPromises.lstat(safePath);
+      if (stat.isDirectory()) return 'directory';
+      return 'file';
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException;
-      if (e.code === 'ENOENT' || e.code === 'INVALID_PATH' || e.code === 'SYMLINK_ESCAPE') return false;
+      if (e.code === 'ENOENT') return null;
       throw err;
     }
   }

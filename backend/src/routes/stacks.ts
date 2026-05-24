@@ -1310,7 +1310,8 @@ type FsErrorCode =
   | 'NOT_FOUND'
   | 'TOO_LARGE'
   | 'ALREADY_EXISTS'
-  | 'FILE_EXISTS';
+  | 'FILE_EXISTS'
+  | 'DIR_EXISTS';
 
 function sendFsError(
   res: Response,
@@ -1471,18 +1472,24 @@ stacksRouter.post(
       return res.status(400).json({ error: 'Invalid filename' });
     }
     const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
-    const overwrite = req.query.overwrite === '1';
+    const overwrite = String(req.query.overwrite) === '1';
     const startedAt = Date.now();
     logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
     try {
-      if (!overwrite) {
-        const exists = await FileSystemService.getInstance(req.nodeId).pathExists(stackName, targetRelPath);
-        if (exists) {
-          return res.status(409).json({
-            error: `${originalName} already exists in this folder. Confirm to replace.`,
-            code: 'FILE_EXISTS',
-          });
-        }
+      const existing = await FileSystemService.getInstance(req.nodeId).pathKind(stackName, targetRelPath);
+      if (existing === 'directory') {
+        // A directory can never be replaced by an upload; surface a distinct code
+        // so the UI does not offer a useless "Replace" button.
+        return res.status(409).json({
+          error: `A folder named ${originalName} already exists in this folder. Rename the upload or remove the folder first.`,
+          code: 'DIR_EXISTS',
+        });
+      }
+      if (existing === 'file' && !overwrite) {
+        return res.status(409).json({
+          error: `${originalName} already exists in this folder. Confirm to replace.`,
+          code: 'FILE_EXISTS',
+        });
       }
       await FileSystemService.getInstance(req.nodeId).writeStackFileBuffer(stackName, targetRelPath, req.file.buffer);
       logFileOperation('info', 'upload complete', { nodeId: req.nodeId, size: req.file.size, overwrite });
