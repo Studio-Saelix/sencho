@@ -15,6 +15,12 @@ export interface StackHit {
     status: StackStatus;
 }
 
+export interface FailedNode {
+    nodeId: number;
+    nodeName: string;
+    reason: string;
+}
+
 interface Options {
     query: string;
     enabled: boolean;
@@ -23,9 +29,15 @@ interface Options {
 
 const DEBOUNCE_MS = 250;
 
+interface NodeOutcome {
+    hits: StackHit[];
+    failure: FailedNode | null;
+}
+
 export function useCrossNodeStackSearch({ query, enabled, excludeNodeId }: Options) {
     const { nodes } = useNodes();
     const [hits, setHits] = useState<StackHit[]>([]);
+    const [failedNodes, setFailedNodes] = useState<FailedNode[]>([]);
     const [loading, setLoading] = useState(false);
 
     // Ref avoids re-running the effect on every NodeContext status tick
@@ -36,6 +48,7 @@ export function useCrossNodeStackSearch({ query, enabled, excludeNodeId }: Optio
         const q = query.trim().toLowerCase();
         if (!enabled || !q) {
             setHits([]);
+            setFailedNodes([]);
             setLoading(false);
             return;
         }
@@ -44,19 +57,29 @@ export function useCrossNodeStackSearch({ query, enabled, excludeNodeId }: Optio
         );
         if (targets.length === 0) {
             setHits([]);
+            setFailedNodes([]);
             return;
         }
         const controller = new AbortController();
         const timer = setTimeout(async () => {
             setLoading(true);
             try {
-                const perNode = await Promise.all(targets.map(async (node) => {
+                const perNode = await Promise.all(targets.map(async (node): Promise<NodeOutcome> => {
                     try {
                         const [listRes, statusRes] = await Promise.all([
                             fetchForNode('/stacks', node.id, { signal: controller.signal }),
                             fetchForNode('/stacks/statuses', node.id, { signal: controller.signal }),
                         ]);
-                        if (!listRes.ok) return [] as StackHit[];
+                        if (!listRes.ok) {
+                            return {
+                                hits: [],
+                                failure: {
+                                    nodeId: node.id,
+                                    nodeName: node.name,
+                                    reason: `list returned HTTP ${listRes.status}`,
+                                },
+                            };
+                        }
                         const rawList = await listRes.json();
                         const files: string[] = Array.isArray(rawList) ? rawList : [];
                         const statuses: Record<string, StackStatus> = {};
@@ -70,7 +93,7 @@ export function useCrossNodeStackSearch({ query, enabled, excludeNodeId }: Optio
                                 }
                             }
                         }
-                        return files
+                        const nodeHits = files
                             .filter(f => f.toLowerCase().includes(q))
                             .map<StackHit>(file => ({
                                 nodeId: node.id,
@@ -78,12 +101,26 @@ export function useCrossNodeStackSearch({ query, enabled, excludeNodeId }: Optio
                                 file,
                                 status: statuses[file] ?? 'unknown',
                             }));
-                    } catch {
-                        return [] as StackHit[];
+                        return { hits: nodeHits, failure: null };
+                    } catch (err) {
+                        // AbortError is expected when the effect cleans up; don't
+                        // surface it as a node failure to the user.
+                        if ((err as Error)?.name === 'AbortError') {
+                            return { hits: [], failure: null };
+                        }
+                        return {
+                            hits: [],
+                            failure: {
+                                nodeId: node.id,
+                                nodeName: node.name,
+                                reason: (err as Error)?.message ?? 'unreachable',
+                            },
+                        };
                     }
                 }));
                 if (controller.signal.aborted) return;
-                setHits(perNode.flat());
+                setHits(perNode.flatMap(o => o.hits));
+                setFailedNodes(perNode.flatMap(o => (o.failure ? [o.failure] : [])));
             } finally {
                 if (!controller.signal.aborted) setLoading(false);
             }
@@ -94,5 +131,5 @@ export function useCrossNodeStackSearch({ query, enabled, excludeNodeId }: Optio
         };
     }, [enabled, query, excludeNodeId]);
 
-    return { hits, loading };
+    return { hits, failedNodes, loading };
 }

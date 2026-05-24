@@ -94,6 +94,7 @@ export default function EditorLayout() {
     pinned,
     isCollapsed, toggleCollapse,
     remoteSearchLoading,
+    remoteSearchFailedNodes,
   } = stackListState;
 
   const { nodes, activeNode, setActiveNode } = useNodes();
@@ -390,6 +391,7 @@ export default function EditorLayout() {
           buildMenuCtx,
           remoteResults,
           remoteLoading: remoteSearchLoading,
+          remoteFailedNodes: remoteSearchFailedNodes,
           onSelectRemoteFile: (nodeId, file) => {
             const node = nodes.find(n => n.id === nodeId);
             if (node) void stackActions.loadFileOnNode(node, file);
