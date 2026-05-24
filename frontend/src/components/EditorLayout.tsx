@@ -12,7 +12,7 @@ import { useEditorViewState } from './EditorLayout/hooks/useEditorViewState';
 import { useStackListState } from './EditorLayout/hooks/useStackListState';
 import { useViewNavigationState } from './EditorLayout/hooks/useViewNavigationState';
 import { useOverlayState } from './EditorLayout/hooks/useOverlayState';
-import { useStackActions } from './EditorLayout/hooks/useStackActions';
+import { useStackActions, NODE_SWITCH_PENDING_TOKEN } from './EditorLayout/hooks/useStackActions';
 import { useTheme } from './EditorLayout/hooks/useTheme';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
@@ -150,7 +150,10 @@ export default function EditorLayout() {
     onImageUpdatesChange: fetchImageUpdates,
   });
 
-  const containerStats = useContainerStats(containers);
+  const { stats: containerStats, error: containerStatsError } = useContainerStats(
+    containers,
+    activeNode?.id ?? null,
+  );
 
   const stackActions = useStackActions({
     editorState,
@@ -223,10 +226,59 @@ export default function EditorLayout() {
 
   const { theme, setTheme, isDarkMode } = useTheme();
 
+  // Track the last "committed" node id so the node-switch dirty guard can
+  // detect an actual switch (vs the initial mount or an internal revert).
+  const lastSeenNodeIdRef = useRef<number | null>(activeNode?.id ?? null);
+  // Set true when we revert activeNode after stashing a pending switch, so the
+  // re-fire of this effect on the reverted id is a no-op.
+  const revertingNodeSwitchRef = useRef(false);
+
   // Re-fetch stacks whenever the active node changes (or becomes available on mount).
   // Also clears any stale editor/container state that belonged to the previous node.
   useEffect(() => {
+    if (revertingNodeSwitchRef.current) {
+      revertingNodeSwitchRef.current = false;
+      return;
+    }
     if (!activeNode) return;
+
+    const previousId = lastSeenNodeIdRef.current;
+    const isRealSwitch = previousId !== null && previousId !== activeNode.id;
+
+    // A node-switch prompt is already open. Ignore any further activeNode
+    // changes until the user resolves the current dialog; revert silently so
+    // the dialog's pendingUnsavedNode stays anchored to the first attempt.
+    if (isRealSwitch && overlayState.pendingUnsavedLoad === NODE_SWITCH_PENDING_TOKEN) {
+      const previousNode = nodes.find(n => n.id === previousId);
+      if (previousNode) {
+        revertingNodeSwitchRef.current = true;
+        setActiveNode(previousNode);
+      }
+      return;
+    }
+
+    if (isRealSwitch && stackActions.hasUnsavedChanges()) {
+      const previousNode = nodes.find(n => n.id === previousId);
+      if (previousNode) {
+        // Stash the attempted node + open the unsaved-changes dialog via the
+        // existing pendingUnsavedLoad/Node fields. Revert activeNode back to
+        // the previous node; the revertingNodeSwitchRef makes the resulting
+        // effect fire a no-op so dirty content survives.
+        overlayState.setPendingUnsavedNode(activeNode);
+        overlayState.setPendingUnsavedLoad(NODE_SWITCH_PENDING_TOKEN);
+        revertingNodeSwitchRef.current = true;
+        setActiveNode(previousNode);
+        return;
+      }
+      // Previous node is no longer reachable from the nodes list (deleted or
+      // dropped from the registry). We cannot revert, so the unsaved edits
+      // will be lost. Warn the operator before the wipe so the loss is at
+      // least visible.
+      toast.warning('Unsaved changes were discarded: the previous node is no longer available.');
+    }
+
+    lastSeenNodeIdRef.current = activeNode.id;
+
     const pendingStack = pendingStackLoadRef.current;
     pendingStackLoadRef.current = null;
 
@@ -420,6 +472,7 @@ export default function EditorLayout() {
                 isDarkMode={isDarkMode}
                 containers={containers}
                 containerStats={containerStats}
+                containerStatsError={containerStatsError}
                 content={content}
                 envContent={envContent}
                 envExists={envExists}

@@ -25,6 +25,11 @@ import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs } from '../websocket/generic';
 
+// Authenticated users with edit permission can write arbitrarily large compose
+// files. Refuse to YAML.parse anything beyond this bound so a malformed (or
+// adversarial) file cannot exhaust heap during an env or service lookup.
+const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
+
 function notifyActionFailure(action: string, stackName: string, error: unknown): void {
   const message = getErrorMessage(error, `Failed to ${action} stack`);
   NotificationService.getInstance()
@@ -112,6 +117,11 @@ export async function resolveAllEnvFilePaths(nodeId: number, stackName: string):
     }
 
     if (!composeContent) return [defaultEnvPath];
+
+    if (composeContent.length > MAX_COMPOSE_PARSE_BYTES) {
+      console.warn(`[Stacks] Compose for ${sanitizeForLog(stackName)} exceeds ${MAX_COMPOSE_PARSE_BYTES} bytes; skipping env_file resolution`);
+      return [defaultEnvPath];
+    }
 
     const parsed = YAML.parse(composeContent);
     if (!parsed?.services) return [defaultEnvPath];
@@ -284,6 +294,7 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
       console.error('Content is not a string, got:', typeof content);
       return res.status(400).json({ error: 'Content must be a string' });
     }
+    if (isDebugEnabled()) console.debug(`[Stacks:debug] Save starting`, { stackName: sanitizeForLog(stackName), bytes: content.length, nodeId: req.nodeId });
     await FileSystemService.getInstance(req.nodeId).saveStackContent(stackName, content);
     invalidateNodeCaches(req.nodeId);
     console.log(`[Stacks] Compose file saved: ${sanitizeForLog(stackName)}`);
@@ -590,80 +601,113 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:delete', 'stack', stackName)) return;
   const pruneVolumes = req.query.pruneVolumes === 'true';
+  const debug = isDebugEnabled();
+  const sanitizedName = sanitizeForLog(stackName);
+  if (debug) console.debug(`[Stacks:debug] Delete starting`, { stackName: sanitizedName, pruneVolumes, nodeId: req.nodeId });
+
+  // Step 1: compose down. Best-effort: a stack with corrupt compose files or
+  // a temporarily-unreachable daemon should still be removable. Logged so the
+  // operator can investigate orphaned containers separately.
   try {
+    await ComposeService.getInstance(req.nodeId).downStack(stackName);
+    if (debug) console.debug(`[Stacks:debug] Delete: down OK`, { stackName: sanitizedName });
+  } catch (downErr) {
+    console.warn('[Stacks] Compose down failed or no-op for %s:', sanitizeForLog(stackName), downErr);
+  }
+
+  // Step 2: volume prune (only if requested). Best-effort.
+  if (pruneVolumes) {
     try {
-      await ComposeService.getInstance(req.nodeId).downStack(stackName);
-    } catch (downErr) {
-      console.warn(`[Teardown] Docker down failed or nothing to clean up for ${sanitizeForLog(stackName)}`);
+      const result = await DockerController.getInstance().pruneManagedOnly('volumes', [stackName]);
+      console.log(`[Stacks] Pruned volumes for ${sanitizeForLog(stackName)}: ${result.reclaimedBytes} bytes reclaimed`);
+    } catch (pruneErr) {
+      console.warn('[Stacks] Volume prune failed for %s, continuing delete:', sanitizeForLog(stackName), pruneErr);
     }
+  }
 
-    if (pruneVolumes) {
-      try {
-        const result = await DockerController.getInstance().pruneManagedOnly('volumes', [stackName]);
-        console.log(`[Stacks] Pruned volumes for ${sanitizeForLog(stackName)}: ${result.reclaimedBytes} bytes reclaimed`);
-      } catch (pruneErr) {
-        console.warn('[Stacks] Volume prune failed for %s, continuing delete:', sanitizeForLog(stackName), pruneErr);
-      }
-    }
+  // Step 3: filesystem delete. If this fails the on-disk compose files are
+  // still present, so we abort BEFORE touching the database — keeping DB and
+  // FS in sync so the operator can retry. Otherwise a half-deleted stack
+  // (rows gone, files remain) becomes invisible to the UI.
+  try {
+    await FileSystemService.getInstance(req.nodeId).deleteStack(stackName);
+    if (debug) console.debug(`[Stacks:debug] Delete: fs OK`, { stackName: sanitizedName });
+  } catch (fsErr) {
+    console.error('[Stacks] File deletion failed for %s; database state untouched:', sanitizeForLog(stackName), fsErr);
+    const message = getErrorMessage(fsErr, 'Failed to remove stack files');
+    res.status(500).json({
+      error: `${message}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,
+    });
+    return;
+  }
 
-    let fsErr: unknown = null;
-    try {
-      await FileSystemService.getInstance(req.nodeId).deleteStack(stackName);
-    } catch (err) {
-      fsErr = err;
-      console.error('[Stacks] File deletion failed for %s, continuing with DB cleanup:', sanitizeForLog(stackName), err);
-    }
-
+  // Step 4: database cleanup. Per-call idempotent; safe to run sequentially.
+  try {
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     DatabaseService.getInstance().clearStackAutoUpdateSetting(req.nodeId, stackName);
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);
-
-    // Cascade a mesh opt-out so the mesh_stacks row, override file on disk,
-    // and derived aliases do not outlive the stack. optOutStack is idempotent
-    // (no-op when the stack was never opted in). Best-effort: a mesh cleanup
-    // failure must not regress the delete itself.
-    try {
-      await MeshService.getInstance().optOutStack(
-        req.nodeId,
-        stackName,
-        req.user?.username ?? 'system',
-      );
-    } catch (meshErr) {
-      console.warn(
-        '[Stacks] Mesh opt-out cascade failed for %s, continuing delete:',
-        sanitizeForLog(stackName),
-        meshErr,
-      );
-    }
-
-    if (fsErr) throw fsErr;
-
-    invalidateNodeCaches(req.nodeId);
-    console.log(`[Stacks] Stack deleted: ${sanitizeForLog(stackName)}`);
-    res.json({ success: true });
-  } catch (error: unknown) {
-    console.error('[Stacks] Failed to delete stack %s:', sanitizeForLog(stackName), error);
-    const message = getErrorMessage(error, 'Failed to delete stack');
-    res.status(500).json({ error: message });
+    if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
+  } catch (dbErr) {
+    console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);
+    const message = getErrorMessage(dbErr, 'Failed to clear stack database state');
+    res.status(500).json({
+      error: `${message}. Stack files have been removed; some database rows for this stack may remain. Recreating the stack with the same name will reuse those rows.`,
+    });
+    return;
   }
+
+  // Step 5: mesh opt-out cascade. Idempotent; best-effort cleanup of derived
+  // aliases / override files. A mesh failure here must not flip the delete
+  // result, since the stack itself is already gone.
+  try {
+    await MeshService.getInstance().optOutStack(
+      req.nodeId,
+      stackName,
+      req.user?.username ?? 'system',
+    );
+  } catch (meshErr) {
+    console.warn(
+      '[Stacks] Mesh opt-out cascade failed for %s, continuing delete:',
+      sanitizeForLog(stackName),
+      meshErr,
+    );
+  }
+
+  invalidateNodeCaches(req.nodeId);
+  console.log(`[Stacks] Stack deleted: ${sanitizeForLog(stackName)}`);
+  res.json({ success: true });
 });
 
 stacksRouter.get('/:stackName/containers', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
   try {
-    const stackName = req.params.stackName as string;
     const dockerController = DockerController.getInstance(req.nodeId);
     const containers = await dockerController.getContainersByStack(stackName);
     res.json(containers);
   } catch (error) {
+    console.error('[Stacks] Failed to fetch containers for %s:', sanitizeForLog(stackName), error);
     res.status(500).json({ error: 'Failed to fetch containers' });
   }
 });
 
 stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
   try {
-    const stackName = req.params.stackName as string;
     const content = await FileSystemService.getInstance(req.nodeId).getStackContent(stackName);
+    if (content.length > MAX_COMPOSE_PARSE_BYTES) {
+      console.warn(`[Stacks] Compose for ${sanitizeForLog(stackName)} exceeds ${MAX_COMPOSE_PARSE_BYTES} bytes; refusing to parse services`);
+      res.status(413).json({ error: 'Compose file too large to parse' });
+      return;
+    }
     const parsed = YAML.parse(content);
     const services = parsed?.services ? Object.keys(parsed.services) : [];
     res.json(services);
@@ -721,6 +765,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'down')) return;
   try {
+    if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId });
     await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs());
     invalidateNodeCaches(req.nodeId);
     console.log(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
@@ -778,6 +823,7 @@ async function bulkContainerOp(
   if (!tryAcquireStackOpLock(req, res, stackName, action)) return;
   try {
     const titleCase = action.charAt(0).toUpperCase() + action.slice(1);
+    if (isDebugEnabled()) console.debug(`[Stacks:debug] ${titleCase} starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId });
     const outcome = await containerActionForStack(req.nodeId, stackName, action);
 
     if (outcome.kind === 'no-containers') {
