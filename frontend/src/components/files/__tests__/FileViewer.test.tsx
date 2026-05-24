@@ -214,11 +214,11 @@ describe('FileViewer', () => {
     expect(opts).toEqual({ ifMatchMtimeMs: 1_700_000_000_000 });
   });
 
-  it('adopts the server snapshot as the new baseline on FileConflictError', async () => {
+  it('updates baseline on FileConflictError without discarding the user buffer; follow-up save uses new mtime', async () => {
     mockReadFile.mockResolvedValue(textResult('stale local copy'));
-    mockWriteFile.mockRejectedValueOnce(
-      new FileConflictError('changed elsewhere', 'SERVER NOW', 1_700_000_999_000),
-    );
+    mockWriteFile
+      .mockRejectedValueOnce(new FileConflictError('changed elsewhere', 'SERVER NOW', 1_700_000_999_000))
+      .mockResolvedValueOnce({ mtimeMs: 1_700_001_000_000 });
 
     render(<FileViewer {...defaultProps} selectedPath="config.txt" />);
     await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
@@ -228,5 +228,13 @@ describe('FileViewer', () => {
     saveBtn.click();
 
     await waitFor(() => expect(mockWriteFile).toHaveBeenCalledTimes(1));
+
+    // The follow-up save sends the mtime from the conflict response so the
+    // user does not loop on the same stale precondition. The user's typed
+    // content ('edited content' from the mock trigger) is preserved on top.
+    saveBtn.click();
+    await waitFor(() => expect(mockWriteFile).toHaveBeenCalledTimes(2));
+    expect(mockWriteFile.mock.calls[1][2]).toBe('edited content');
+    expect(mockWriteFile.mock.calls[1][3]).toEqual({ ifMatchMtimeMs: 1_700_000_999_000 });
   });
 });

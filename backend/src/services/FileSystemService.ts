@@ -728,7 +728,12 @@ export class FileSystemService {
         }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        // Target doesn't exist yet; treat as a fresh write (no mtime to honour).
+        // The caller expected an existing file but it has been deleted under
+        // the editor. That is itself a conflict (the file is gone, the user
+        // is editing into a void) so surface it the same way as a stale-mtime
+        // mismatch. An empty current snapshot tells the client "the live
+        // version is gone, you are starting from scratch".
+        return { ok: false, currentMtimeMs: 0, currentContent: '' };
       } finally {
         if (fh) await fh.close();
       }

@@ -174,15 +174,15 @@ export function FileViewer({
       onSaved?.();
     } catch (e) {
       if (e instanceof FileConflictError) {
-        // The server-side content has moved on. Adopt the server snapshot as
-        // the new baseline, surface the conflict to the user, and let them
-        // re-edit on top of the fresh content. Their unsaved buffer is
-        // intentionally preserved in `content` so they can copy / diff before
-        // re-saving.
+        // The server-side content has moved on. Update the baseline (so the
+        // next save sends the fresh mtime and stops looping on the same
+        // precondition) but leave the user's typed buffer untouched. Their
+        // edits remain in the editor, Save stays enabled, and a follow-up
+        // click will apply their changes on top of the new server content
+        // without silently destroying what they typed.
         setOriginalContent(e.currentContent);
         setLoadedMtimeMs(e.currentMtimeMs);
-        toast.error('File changed elsewhere. Reload reset the viewer to the current version.');
-        setContent(e.currentContent);
+        toast.error('File changed elsewhere. Review your edits then save again to apply them on top of the current version.');
       } else {
         toast.error(e instanceof Error ? e.message : 'Save failed.');
       }

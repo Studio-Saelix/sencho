@@ -456,6 +456,33 @@ describe('PUT /api/stacks/:stackName/files/content', () => {
     const after = await fs.readFile(target, 'utf-8');
     expect(after).toBe('after');
   });
+
+  it('returns 412 with an empty snapshot when If-Match was set but the target has been deleted', async () => {
+    // No file at this path; the caller's If-Match implies an existing file.
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'vanished.txt' })
+      .set('Cookie', adminCookie)
+      .set('If-Match', '"42"')
+      .send({ content: 'i was editing this' });
+    expect(res.status).toBe(412);
+    expect(res.body.code).toBe('PRECONDITION_FAILED');
+    expect(res.body.currentContent).toBe('');
+    expect(res.body.currentMtimeMs).toBe(0);
+    // Nothing was written.
+    await expect(fs.access(path.join(stacksDir, STACK, 'vanished.txt'))).rejects.toThrow();
+  });
+
+  it('still writes a fresh file when no If-Match is sent (target does not exist)', async () => {
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'brand-new.txt' })
+      .set('Cookie', adminCookie)
+      .send({ content: 'first content' });
+    expect(res.status).toBe(204);
+    const content = await fs.readFile(path.join(stacksDir, STACK, 'brand-new.txt'), 'utf-8');
+    expect(content).toBe('first content');
+  });
 });
 
 // ── PATCH /:stackName/files/rename ───────────────────────────────────────────
