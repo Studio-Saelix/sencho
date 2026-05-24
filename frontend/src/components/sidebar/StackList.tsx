@@ -1,5 +1,5 @@
-import { useMemo } from 'react';
-import { ArrowUpRight, Loader2 } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { ArrowUpRight, Loader2, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react';
 import { useStackKeyboardShortcuts } from '@/hooks/useStackKeyboardShortcuts';
 import { CommandItem, CommandList } from '@/components/ui/command';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -16,6 +16,12 @@ interface RemoteNodeResult {
   nodeId: number;
   nodeName: string;
   files: { file: string; status: StackRowStatus }[];
+}
+
+interface RemoteSearchFailure {
+  nodeId: number;
+  nodeName: string;
+  reason: string;
 }
 
 export interface StackListProps {
@@ -37,6 +43,7 @@ export interface StackListProps {
   buildMenuCtx: (file: string) => StackMenuCtx;
   remoteResults: RemoteNodeResult[];
   remoteLoading: boolean;
+  remoteFailedNodes: RemoteSearchFailure[];
   onSelectRemoteFile: (nodeId: number, file: string) => void;
 }
 
@@ -107,8 +114,10 @@ export function StackList(props: StackListProps & StackListBulkProps) {
     stackUpdates, gitSourcePendingMap, pinnedFiles, isCollapsed, toggleCollapse,
     isBusy, getDisplayName, onSelectFile, buildMenuCtx,
     bulkMode, selectedFiles, onToggleSelect,
-    remoteResults, remoteLoading, onSelectRemoteFile,
+    remoteResults, remoteLoading, remoteFailedNodes, onSelectRemoteFile,
   } = props;
+
+  const [failedNodesExpanded, setFailedNodesExpanded] = useState(false);
 
   const groups = useMemo(
     () => buildGroups(files, pinnedFiles, stackLabelMap),
@@ -171,12 +180,39 @@ export function StackList(props: StackListProps & StackListBulkProps) {
         </StackGroup>
       ))}
 
-      {searchQuery.trim() && (remoteLoading || remoteResults.length > 0) && (
+      {searchQuery.trim() && (remoteLoading || remoteResults.length > 0 || remoteFailedNodes.length > 0) && (
         <div className="mt-3 pt-3 border-t border-glass-border">
           <h3 className="text-[10px] font-medium tracking-[0.08em] uppercase text-stat-subtitle px-4 pb-2 flex items-center gap-2">
             Other nodes
             {remoteLoading && <Loader2 className="w-3 h-3 animate-spin text-stat-icon" strokeWidth={1.5} />}
           </h3>
+          {remoteFailedNodes.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setFailedNodesExpanded(prev => !prev)}
+              className="w-full mx-4 mb-2 flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.06em] text-warning hover:text-warning/80 cursor-pointer"
+              style={{ width: 'calc(100% - 2rem)' }}
+              aria-expanded={failedNodesExpanded}
+              title={remoteFailedNodes.map(f => `${f.nodeName}: ${f.reason}`).join('\n')}
+            >
+              <AlertCircle className="w-3 h-3 shrink-0" strokeWidth={1.5} />
+              <span className="shrink-0">
+                {remoteFailedNodes.length} {remoteFailedNodes.length === 1 ? 'node' : 'nodes'} unreachable
+              </span>
+              {failedNodesExpanded
+                ? <ChevronDown className="w-3 h-3 shrink-0" strokeWidth={1.5} />
+                : <ChevronRight className="w-3 h-3 shrink-0" strokeWidth={1.5} />}
+            </button>
+          )}
+          {failedNodesExpanded && remoteFailedNodes.length > 0 && (
+            <div className="px-4 pb-2 space-y-0.5">
+              {remoteFailedNodes.map(f => (
+                <div key={f.nodeId} className="text-[10px] font-mono text-stat-subtitle truncate">
+                  <span className="text-warning">·</span> {f.nodeName}: {f.reason}
+                </div>
+              ))}
+            </div>
+          )}
           {remoteResults.map(({ nodeId, nodeName, files: remoteFiles }) => (
             <div key={nodeId} className="mb-2">
               <div className="px-4 pb-1 flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.06em] text-stat-subtitle">

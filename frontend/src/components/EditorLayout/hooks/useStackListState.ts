@@ -54,7 +54,7 @@ export function useStackListState() {
   const { isCollapsed, toggle: toggleCollapse } = useSidebarGroupCollapse(activeNode?.id);
   const { runBulk } = useBulkStackActions();
 
-  const { hits: remoteSearchHits, loading: remoteSearchLoading } = useCrossNodeStackSearch({
+  const { hits: remoteSearchHits, failedNodes: remoteSearchFailedNodes, loading: remoteSearchLoading } = useCrossNodeStackSearch({
     query: searchQuery,
     enabled: true,
     excludeNodeId: activeNode?.id,
@@ -359,5 +359,6 @@ export function useStackListState() {
     pinned, pin, unpin, isPinned,
     isCollapsed, toggleCollapse,
     remoteSearchLoading,
+    remoteSearchFailedNodes,
   } as const;
 }
