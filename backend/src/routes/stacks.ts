@@ -148,6 +148,7 @@ stacksRouter.param('stackName', (req, res, next, stackName) => {
 });
 
 stacksRouter.get('/', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const stacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     res.json(stacks);
@@ -157,6 +158,7 @@ stacksRouter.get('/', async (req: Request, res: Response) => {
 });
 
 stacksRouter.get('/statuses', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const result = await CacheService.getInstance().getOrFetch(
       `stack-statuses:${req.nodeId}`,
