@@ -26,7 +26,7 @@ The top card on the left holds the stack's identity and primary controls.
 
 ### Stack action bar
 
-The action bar runs every state transition for the whole stack. It is hidden for roles without the `stack:deploy` permission.
+The action bar runs every state transition for the whole stack. The primary buttons (**Start**, **Restart**, **Stop**, **Update**) require the `stack:deploy` permission; the **Delete** entry in the kebab dropdown requires the `stack:delete` permission. The bar still appears when only **Delete** is authorised so the operator has a way to remove the stack.
 
 | Button | Behavior |
 |--------|----------|
@@ -39,7 +39,7 @@ The kebab dropdown carries:
 
 - **Rollback `<timestamp>`** restores the previous deployment using the stored snapshot. Visible only when a backup exists. Skipper or Admiral.
 - **Scan config** runs Trivy against the compose configuration and surfaces misconfigurations inline. Visible only when Trivy is reachable. Admin role required. Skipper or Admiral.
-- **Delete** stops the stack and removes its compose directory. Always available to the deploy role.
+- **Delete** stops the stack and removes its compose directory. Requires the `stack:delete` permission.
 
 ## Containers list
 
@@ -196,5 +196,14 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   </Accordion>
   <Accordion title="Bash session is unresponsive">
     The WebSocket dropped silently. Close the modal and reopen it to start a fresh session; the bash modal does not reconnect automatically.
+  </Accordion>
+  <Accordion title='"Failed to save file" toast appears when I click Save & Deploy'>
+    The PUT to write the compose file failed (most often a permission or disk-space issue on the node). Save & Deploy stops at the save step in this case, so no deploy is attempted and your editor still holds the unsaved version. Resolve the underlying error on the node, then retry.
+  </Accordion>
+  <Accordion title="Switching nodes prompts me to discard unsaved changes">
+    The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.
+  </Accordion>
+  <Accordion title='"Stats unavailable" chip on the container list'>
+    The stats WebSocket failed to open, or closed unexpectedly. This usually means the Docker daemon on the node is unreachable. Container status, action buttons, and logs continue to work; only live CPU / memory / network rates pause.
   </Accordion>
 </AccordionGroup>
