@@ -5,6 +5,7 @@ import { TogglePill } from '@/components/ui/toggle-pill';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/components/ui/toast-store';
+import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
@@ -42,6 +43,7 @@ interface WebhookExecution {
 }
 
 export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
+    const { isAdmin } = useAuth();
     const { activeNode, nodes } = useNodes();
     const [webhooks, setWebhooks] = useState<WebhookItem[]>([]);
     const [loading, setLoading] = useState(true);
@@ -72,6 +74,7 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
     };
 
     useEffect(() => { fetchWebhooks(); fetchStacks(); }, [activeNode?.id]);
+    useEffect(() => { if (!isAdmin) setShowForm(false); }, [isAdmin]);
 
     const enabledCount = webhooks.filter(w => w.enabled).length;
     useMastheadStats(
@@ -159,13 +162,15 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
 
     return (
         <div className="flex flex-col gap-10">
-            <div className="flex justify-end">
-                <SettingsPrimaryButton size="sm" onClick={() => setShowForm(!showForm)}>
-                    <Plus className="w-4 h-4" /> Create webhook
-                </SettingsPrimaryButton>
-            </div>
+            {isAdmin && (
+                <div className="flex justify-end">
+                    <SettingsPrimaryButton size="sm" onClick={() => setShowForm(!showForm)}>
+                        <Plus className="w-4 h-4" /> Create webhook
+                    </SettingsPrimaryButton>
+                </div>
+            )}
 
-            {showForm && (
+            {isAdmin && showForm && (
                 <SettingsSection title="New webhook">
                     <SettingsField label="Name" helper="Shown in execution history and notifications." htmlFor="webhook-name">
                         <Input id="webhook-name" placeholder="Deploy on push" value={formName} onChange={e => setFormName(e.target.value)} />
@@ -240,7 +245,9 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
                 <SettingsCallout
                     icon={<Webhook className="h-4 w-4" />}
                     title="No webhooks yet"
-                    subtitle="Create one to trigger stack actions from CI/CD."
+                    subtitle={isAdmin
+                        ? 'Create one to trigger stack actions from CI/CD.'
+                        : 'An admin operator can create webhooks for this instance.'}
                 />
             )}
 
@@ -269,10 +276,18 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
                                                 </span>
                                             </div>
                                             <div className="flex items-center gap-2 shrink-0">
-                                                <TogglePill checked={wh.enabled} onChange={(c) => handleToggle(wh.id!, c)} />
-                                                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleDelete(wh.id!)}>
-                                                    <Trash2 className="w-4 h-4 text-stat-subtitle" />
-                                                </Button>
+                                                {isAdmin ? (
+                                                    <>
+                                                        <TogglePill checked={wh.enabled} onChange={(c) => handleToggle(wh.id!, c)} />
+                                                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleDelete(wh.id!)}>
+                                                            <Trash2 className="w-4 h-4 text-stat-subtitle" />
+                                                        </Button>
+                                                    </>
+                                                ) : (
+                                                    <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle border border-card-border rounded px-1.5 py-0.5">
+                                                        {wh.enabled ? 'On' : 'Off'}
+                                                    </span>
+                                                )}
                                             </div>
                                         </div>
 

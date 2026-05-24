@@ -1229,6 +1229,7 @@ export class DatabaseService {
         stmt.run('host_cpu_limit', '90');
         stmt.run('host_ram_limit', '90');
         stmt.run('host_disk_limit', '90');
+        stmt.run('host_alert_suppression_mins', '60');
         stmt.run('global_crash', '1');
         stmt.run('docker_janitor_gb', '5');
         stmt.run('developer_mode', '0');
@@ -1236,6 +1237,7 @@ export class DatabaseService {
         stmt.run('log_retention_days', '30');
         stmt.run('trivy_auto_update', '0');
         stmt.run('trivy_last_notified_version', '');
+        stmt.run('mesh_auto_recreate', '0');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;

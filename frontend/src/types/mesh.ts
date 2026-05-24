@@ -8,7 +8,8 @@ export type MeshDataPlaneReason =
     | 'subnet_mismatch'
     | 'ip_in_use'
     | 'attach_failed'
-    | 'not_in_docker';
+    | 'not_in_docker'
+    | 'not_found';
 
 export interface MeshDataPlaneStatus {
     ok: boolean;

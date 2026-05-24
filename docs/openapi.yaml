@@ -214,13 +214,16 @@ components:
       properties:
         id:
           type: integer
+        node_id:
+          type: integer
+          description: Node the webhook executes against.
         name:
           type: string
         stack_name:
           type: string
         action:
           type: string
-          enum: [deploy, restart, stop, start, pull]
+          enum: [deploy, restart, stop, start, pull, git-pull]
         secret:
           type: string
           description: Masked secret (e.g., `****...****`). Full secret is only returned on creation.
@@ -1447,6 +1450,7 @@ paths:
               properties:
                 name:
                   type: string
+                  maxLength: 100
                   example: GitHub Deploy Hook
                 stack_name:
                   type: string
@@ -1454,14 +1458,17 @@ paths:
                   example: my-app
                 action:
                   type: string
-                  enum: [deploy, restart, stop, start, pull]
-                  description: Action to execute when the webhook is triggered.
+                  enum: [deploy, restart, stop, start, pull, git-pull]
+                  description: Action to execute when the webhook is triggered. `git-pull` requires a Git source attached to the stack.
                 enabled:
                   type: boolean
                   default: true
+                node_id:
+                  type: integer
+                  description: Node the webhook executes against. Defaults to the request's resolved node or the default node.
       responses:
         "201":
-          description: Webhook created. The `secret` field is the HMAC signing key — save it now.
+          description: Webhook created. The `secret` field is the HMAC signing key; save it now.
           content:
             application/json:
               schema:
@@ -1472,7 +1479,7 @@ paths:
                     type: integer
                   secret:
                     type: string
-                    description: HMAC-SHA256 signing secret. Store securely — this is the only time it's returned in full.
+                    description: HMAC-SHA256 signing secret. Store securely; this is the only time it's returned in full.
         "400":
           description: Validation error.
           content:
@@ -1501,13 +1508,17 @@ paths:
               properties:
                 name:
                   type: string
+                  maxLength: 100
                 stack_name:
                   type: string
                 action:
                   type: string
-                  enum: [deploy, restart, stop, start, pull]
+                  enum: [deploy, restart, stop, start, pull, git-pull]
                 enabled:
                   type: boolean
+                node_id:
+                  type: integer
+                  description: Retarget the webhook to a different node.
       responses:
         "200":
           description: Webhook updated.
@@ -1577,15 +1588,20 @@ paths:
       summary: Trigger webhook
       description: |
         Externally triggers a webhook action. This endpoint is public but requires a valid
-        HMAC-SHA256 signature in the `X-Webhook-Signature` header.
+        HMAC-SHA256 signature in the `X-Webhook-Signature` header. Sign the exact raw bytes
+        of the request body; an empty body is rejected.
 
         Compute the signature as: `sha256=` + HMAC-SHA256(raw_request_body, webhook_secret).
+
+        Every unauthenticated rejection (unknown id, disabled webhook, non-paid licence,
+        missing or invalid signature, empty body) returns the same `404` response so callers
+        cannot enumerate webhook ids or fingerprint the instance's licence tier.
       security:
         - webhookSignature: []
       parameters:
         - $ref: "#/components/parameters/idPath"
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
@@ -1593,7 +1609,8 @@ paths:
               properties:
                 action:
                   type: string
-                  description: Override the default webhook action.
+                  enum: [deploy, restart, stop, start, pull, git-pull]
+                  description: Override the default webhook action. Must be one of the allowed actions.
       responses:
         "202":
           description: Webhook accepted and action queued.
@@ -1609,16 +1626,20 @@ paths:
                   action:
                     type: string
                     example: deploy
-        "401":
-          description: Missing or invalid signature.
+        "400":
+          description: Authentication succeeded but the body's `action` override was not in the allowlist.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Webhook not found or disabled.
+          description: Authentication failed. The webhook is unknown, disabled, the licence is not paid, the signature header is missing, the body was empty, or the signature did not match. Sencho returns the same response for every unauthenticated case.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate limit exceeded. The trigger endpoint allows 500 requests per minute per source IP; CI/CD callers behind shared NAT may share that budget.
           content:
             application/json:
               schema:

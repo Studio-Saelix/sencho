@@ -282,7 +282,11 @@ Real-time on the Docker event stream:
 
 ### Host thresholds
 
-`warning`/`monitor_alert` for host CPU, RAM, and disk when the configured threshold is exceeded. 5-minute cooldown per signal. Example: `Host CPU utilization is critically high: 92% (Threshold: 90%)`. Evaluated on the 30-second monitor tick.
+`warning`/`monitor_alert` for host CPU, RAM, and disk when the configured threshold is exceeded. Evaluated on the 30-second monitor tick. Example: `Host CPU utilization is critically high: 92% (Threshold: 90%)`.
+
+Each metric (CPU, RAM, disk) carries its own suppression window. The first time a metric crosses its threshold, one notification fires immediately. While the metric stays over threshold within the window, additional cycles are silently counted but not dispatched. The next dispatch after the window elapses carries a summary suffix: `Suppressed 119 alerts in the last 60m; first over threshold at 14:23 UTC.` When the metric drops below threshold, the counter resets so the next breach fires fresh.
+
+The suppression window defaults to 60 minutes and is configured per node in **Settings → System → Host thresholds → Alert suppression**.
 
 ### Docker janitor
 

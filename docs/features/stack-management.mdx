@@ -13,7 +13,7 @@ A **stack** in Sencho is a Docker Compose project: a directory inside your `COMP
 
 Click **Create Stack** in the left sidebar to open the **New stack** dialog. Pick a source from the tabs at the top:
 
-- **Empty**: start with a blank `compose.yaml` and write it from scratch.
+- **Empty**: start with a minimal `compose.yaml` skeleton. The default service uses `nginx:latest` with the host port binding commented out, so a fresh deploy never collides with an existing service on the host. Uncomment and adjust the `ports:` block when you're ready to expose the container.
 - **From Git**: clone a Git repository so its compose file becomes the stack source. Future webhook pulls keep it in sync. See [Git Sources](/features/git-sources) for the full sync flow.
 - **From Docker Run**: paste a `docker run` command and let Sencho convert it to compose YAML.
 

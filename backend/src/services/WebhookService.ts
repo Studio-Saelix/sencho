@@ -1,12 +1,13 @@
 import crypto from 'crypto';
 import { ComposeService } from './ComposeService';
-import { DatabaseService } from './DatabaseService';
+import { DatabaseService, type Webhook } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { GitSourceService } from './GitSourceService';
 import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
 import { NodeRegistry } from './NodeRegistry';
 import { getErrorMessage } from '../utils/errors';
+import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
@@ -17,6 +18,12 @@ const REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS = 30_000;
 
 export class WebhookService {
     private static instance: WebhookService;
+    // Stable per-process decoy secret used to keep HMAC work non-skippable on
+    // reject paths (unknown webhook id, disabled, non-paid tier, etc.). Never
+    // accepts a signature: the trigger handler decides the final 202 / 404
+    // outcome from independent conditions and only consults the HMAC result
+    // when every other check has already passed.
+    private static decoySecret: string | null = null;
 
     public static getInstance(): WebhookService {
         if (!WebhookService.instance) {
@@ -25,27 +32,39 @@ export class WebhookService {
         return WebhookService.instance;
     }
 
+    public static getDecoySecret(): string {
+        if (!WebhookService.decoySecret) {
+            WebhookService.decoySecret = crypto.randomBytes(32).toString('hex');
+        }
+        return WebhookService.decoySecret;
+    }
+
     public generateSecret(): string {
         return crypto.randomBytes(32).toString('hex');
     }
 
     public validateSignature(payload: string, secret: string, signature: string): boolean {
+        // Always perform HMAC and timingSafeEqual against a fixed-length
+        // buffer so the wall-clock cost of this call is independent of the
+        // shape of the input signature. Without this, the early-return paths
+        // (missing header, wrong prefix, malformed hex) would skip the HMAC
+        // and let an attacker distinguish those cases from a real-shape
+        // wrong-secret case through repeated near-rate-limit probes with a
+        // large attacker-controlled body. Timing now depends only on the
+        // size of `payload`, which the attacker already controls and which
+        // does not reveal anything about the webhook id or licence tier.
+        const expected = crypto.createHmac('sha256', secret).update(payload).digest();
+        const provided = Buffer.alloc(32);
+        let formatOk = false;
+
         const parts = signature.split('=');
-        if (parts.length !== 2 || parts[0] !== 'sha256') return false;
-
-        const expected = crypto
-            .createHmac('sha256', secret)
-            .update(payload)
-            .digest('hex');
-
-        try {
-            return crypto.timingSafeEqual(
-                Buffer.from(expected, 'hex'),
-                Buffer.from(parts[1], 'hex'),
-            );
-        } catch {
-            return false;
+        if (parts.length === 2 && parts[0] === 'sha256' && /^[0-9a-fA-F]{64}$/.test(parts[1])) {
+            provided.write(parts[1], 'hex');
+            formatOk = true;
         }
+
+        const sigEq = crypto.timingSafeEqual(expected, provided);
+        return formatOk && sigEq;
     }
 
     public async gitSourceExists(stackName: string, nodeId: number): Promise<boolean> {
@@ -58,13 +77,15 @@ export class WebhookService {
     }
 
     public async execute(
-        webhookId: number,
+        webhook: Webhook,
         action: string,
         triggerSource: string | null,
         atomic?: boolean,
     ): Promise<ExecutionResult> {
-        const webhook = DatabaseService.getInstance().getWebhook(webhookId);
-        if (!webhook) throw new Error('Webhook not found');
+        if (webhook.id === undefined) {
+            throw new Error('Webhook must be loaded from the database before execution');
+        }
+        const webhookId = webhook.id;
 
         const nodeId = webhook.node_id || NodeRegistry.getInstance().getDefaultNodeId();
         const node = NodeRegistry.getInstance().getNode(nodeId);
@@ -283,14 +304,33 @@ export class WebhookService {
         durationMs: number,
         error: string | null,
     ): void {
-        DatabaseService.getInstance().addWebhookExecution({
-            webhook_id: webhookId,
-            action,
-            status,
-            trigger_source: triggerSource,
-            duration_ms: durationMs,
-            error,
-            executed_at: Date.now(),
-        });
+        // Execution history is readable by any paid user; scrub bearer tokens,
+        // JWTs, URL credentials, and homedir paths before persisting so a
+        // compose / remote-node error surfacing on the dashboard cannot leak
+        // operator secrets or infrastructure details.
+        const safeError = error === null ? null : redactSensitiveText(error);
+        try {
+            DatabaseService.getInstance().addWebhookExecution({
+                webhook_id: webhookId,
+                action,
+                status,
+                trigger_source: triggerSource,
+                duration_ms: durationMs,
+                error: safeError,
+                executed_at: Date.now(),
+            });
+        } catch (err) {
+            // The webhook_executions table has ON DELETE CASCADE on webhook_id,
+            // so a delete that races an in-flight execution removes the parent
+            // row and any insert here fails the FK constraint. Swallow that
+            // race: the trigger already returned 202 and the action either
+            // ran or failed before reaching this point. Other write errors
+            // are still worth logging as warnings so a structural problem
+            // does not go silent.
+            console.warn(
+                `[Webhooks] Could not record execution for webhook ${webhookId} ` +
+                `(parent webhook may have been deleted mid-flight): ${getErrorMessage(err, 'Unknown error')}`,
+            );
+        }
     }
 }

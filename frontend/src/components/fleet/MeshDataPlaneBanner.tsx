@@ -10,6 +10,7 @@ const HEADLINES: Record<ActionableReason, (status: MeshDataPlaneStatus) => strin
     subnet_mismatch: (s) => `sencho_mesh already exists with a different subnet than ${s.subnet}.`,
     ip_in_use: (s) => `Another container is using Sencho's address on ${s.subnet}.`,
     attach_failed: () => 'Sencho could not attach to its own mesh network.',
+    not_found: (s) => `sencho_mesh is not present on this host (last known subnet ${s.subnet}).`,
 };
 
 function isActionable(reason: Reason): reason is ActionableReason {

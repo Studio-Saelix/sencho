@@ -1,12 +1,17 @@
 import { Router, type Request, type Response } from 'express';
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, type WebhookAction } from '../services/DatabaseService';
 import { WebhookService } from '../services/WebhookService';
 import { LicenseService } from '../services/LicenseService';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin } from '../middleware/tierGates';
 import { webhookTriggerLimiter } from '../middleware/rateLimiters';
 
-const VALID_WEBHOOK_ACTIONS = ['deploy', 'restart', 'stop', 'start', 'pull', 'git-pull'];
+const VALID_WEBHOOK_ACTIONS: readonly WebhookAction[] = ['deploy', 'restart', 'stop', 'start', 'pull', 'git-pull'];
+const MAX_WEBHOOK_NAME_LENGTH = 100;
+
+function isWebhookAction(value: unknown): value is WebhookAction {
+  return typeof value === 'string' && (VALID_WEBHOOK_ACTIONS as readonly string[]).includes(value);
+}
 
 export const webhooksRouter = Router();
 
@@ -29,6 +34,10 @@ webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
     const { name, stack_name, action, enabled, node_id } = req.body;
     if (!name || !stack_name || !action) {
       res.status(400).json({ error: 'name, stack_name, and action are required' });
+      return;
+    }
+    if (typeof name !== 'string' || name.length > MAX_WEBHOOK_NAME_LENGTH) {
+      res.status(400).json({ error: `name must be a string of ${MAX_WEBHOOK_NAME_LENGTH} characters or fewer` });
       return;
     }
     if (!VALID_WEBHOOK_ACTIONS.includes(action)) {
@@ -73,6 +82,10 @@ webhooksRouter.put('/:id', authMiddleware, async (req: Request, res: Response): 
     if (!webhook) { res.status(404).json({ error: 'Webhook not found' }); return; }
 
     const { name, stack_name, action, enabled, node_id } = req.body;
+    if (name !== undefined && (typeof name !== 'string' || name.length > MAX_WEBHOOK_NAME_LENGTH)) {
+      res.status(400).json({ error: `name must be a string of ${MAX_WEBHOOK_NAME_LENGTH} characters or fewer` });
+      return;
+    }
     if (node_id !== undefined && !Number.isInteger(node_id)) {
       res.status(400).json({ error: 'node_id must be an integer' });
       return;
@@ -130,45 +143,75 @@ webhooksRouter.get('/:id/history', authMiddleware, async (req: Request, res: Res
 });
 
 // Public: authenticated via HMAC signature, not session cookie.
+//
+// Every unauthenticated rejection returns the same 404 with the same body so
+// callers cannot enumerate webhook ids or fingerprint the instance's licence
+// tier from the response surface. Successful authentication still returns 202.
+//
+// The handler also runs the HMAC computation on every path (using a decoy
+// secret and an empty buffer when the real ones are missing) so the wall-
+// clock cost of a reject path matches the wall-clock cost of a real-shape
+// wrong-secret path. Without this, repeated near-rate-limit probes with a
+// large attacker-controlled body could distinguish a valid-and-enabled
+// webhook id on a paid tier from the other reject cases via response
+// latency. Timing now depends only on the size of the request body, which
+// the attacker already controls and which reveals nothing webhook-specific.
 webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, res: Response): Promise<void> => {
+  const unauthenticated = (): void => {
+    res.status(404).json({ error: 'Webhook not found or signature invalid' });
+  };
   try {
     const id = parseInt(req.params.id as string, 10);
     const db = DatabaseService.getInstance();
     const webhook = db.getWebhook(id);
 
-    if (!webhook || !webhook.enabled) {
-      res.status(404).json({ error: 'Webhook not found or disabled' });
-      return;
-    }
+    const tier = LicenseService.getInstance().getTier();
+    const signature = req.headers['x-webhook-signature'] as string | undefined;
 
-    // Trigger only works with an active Skipper or Admiral license.
-    if (LicenseService.getInstance().getTier() !== 'paid') {
-      res.status(403).json({ error: 'This feature requires a Skipper or Admiral license.', code: 'PAID_REQUIRED' });
-      return;
-    }
-
-    const signature = req.headers['x-webhook-signature'] as string;
-    if (!signature) {
-      res.status(401).json({ error: 'Missing X-Webhook-Signature header' });
-      return;
-    }
-
-    const rawBody = req.rawBody?.toString('utf-8') ?? JSON.stringify(req.body ?? {});
+    // Unconditional HMAC. The decoy secret keeps the work non-skippable when
+    // the webhook does not exist; an empty buffer keeps it non-skippable
+    // when express.json()'s verify callback did not capture a body. The
+    // empty-string signature still flows through validateSignature, which
+    // is constant-time over every shape and will return false against the
+    // all-zero sentinel. Reject conditions are checked after the HMAC has
+    // already run so the timing of every reject path matches the timing of
+    // a real-shape wrong-secret request.
     const svc = WebhookService.getInstance();
-    if (!svc.validateSignature(rawBody, webhook.secret, signature)) {
-      res.status(401).json({ error: 'Invalid signature' });
-      return;
-    }
+    const payload = (req.rawBody ?? Buffer.alloc(0)).toString('utf-8');
+    const secretForHmac = webhook?.secret ?? WebhookService.getDecoySecret();
+    const sigOk = svc.validateSignature(payload, secretForHmac, signature ?? '');
+
+    if (!webhook || !webhook.enabled) return unauthenticated();
+    if (tier !== 'paid') return unauthenticated();
+    if (!signature) return unauthenticated();
+    if (!req.rawBody) return unauthenticated();
+    if (!sigOk) return unauthenticated();
 
     // Use action from body if provided, otherwise use webhook default.
-    const action = req.body?.action || webhook.action;
+    // Validate against the action allowlist before queueing execution so an
+    // attacker-supplied string never reaches recordExecution as a stored
+    // failure label.
+    const overrideAction = (req.body as { action?: unknown } | undefined)?.action;
+    let action: WebhookAction = webhook.action;
+    if (overrideAction !== undefined) {
+      if (!isWebhookAction(overrideAction)) {
+        res.status(400).json({ error: `action must be one of: ${VALID_WEBHOOK_ACTIONS.join(', ')}` });
+        return;
+      }
+      action = overrideAction;
+    }
     const triggerSource = req.headers['user-agent'] || req.ip || null;
 
     // Execute asynchronously; return 202 immediately.
     res.status(202).json({ message: 'Webhook accepted', action });
 
-    const atomic = LicenseService.getInstance().getTier() === 'paid';
-    svc.execute(id, action, triggerSource, atomic).catch(err => {
+    // Pass the already-loaded webhook through so execute() never re-fetches
+    // by id. If an admin deletes the row between this line and the async
+    // dispatch the action still completes and recordExecution swallows the
+    // FK error from the CASCADE. atomic is unconditionally true: the tier
+    // gate above already rejected any caller without a Skipper/Admiral
+    // licence, so the deploy/pull paths always run in atomic mode here.
+    svc.execute(webhook, action, triggerSource, true).catch(err => {
       console.error(`[Webhooks] Execution error for webhook ${id}:`, err);
     });
   } catch (error) {
