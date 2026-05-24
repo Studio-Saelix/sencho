@@ -17,6 +17,12 @@ interface RunResult {
   rolledBack?: boolean;
 }
 
+// Sentinel stored in overlayState.pendingUnsavedLoad to mark that the pending
+// confirmation is a node switch (not a stack load). When the user confirms the
+// discard, discardAndLoadPending calls setActiveNode(targetNode) and skips the
+// stack-load branch.
+export const NODE_SWITCH_PENDING_TOKEN = '__node-switch-pending__';
+
 type StackActionError = Error & { rolledBack?: boolean };
 
 type EditorState = ReturnType<typeof useEditorViewState>;
@@ -80,14 +86,23 @@ export function useStackActions(options: UseStackActionsOptions) {
   const pendingStackLoadRef = useRef<string | null>(null);
   const pendingLogsRef = useRef<{ stackName: string; containerName: string } | null>(null);
   const checkUpdatesIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Aborts the most recent loadFile sequence (compose GET, envs GET, env content
+  // GET, containers GET, backup GET). A node switch, an unmount, or a second
+  // loadFile call before the first finishes all cancel the in-flight fetches so
+  // late responses never overwrite freshly-loaded state.
+  const loadFileAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     return () => {
       if (checkUpdatesIntervalRef.current !== null) {
         clearInterval(checkUpdatesIntervalRef.current);
       }
+      loadFileAbortRef.current?.abort();
     };
   }, []);
+
+  const isAbortError = (err: unknown): boolean =>
+    err instanceof Error && err.name === 'AbortError';
 
   const hasUnsavedChanges = () =>
     editorState.content !== editorState.originalContent ||
@@ -114,6 +129,11 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const resetEditorState = () => {
+    // Cancel any in-flight loadFile chain before wiping state; a late response
+    // arriving after the reset would otherwise repopulate the editor with the
+    // previous node's data.
+    loadFileAbortRef.current?.abort();
+    loadFileAbortRef.current = null;
     stackListState.setSelectedFile(null);
     editorState.setContent('');
     editorState.setOriginalContent('');
@@ -171,14 +191,16 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEnvExists(false);
   };
 
-  const loadEnvState = async (filename: string) => {
+  const loadEnvState = async (filename: string, signal?: AbortSignal) => {
     try {
-      const envsRes = await apiFetch(`/stacks/${filename}/envs`);
+      const envsRes = await apiFetch(`/stacks/${filename}/envs`, { signal });
+      if (signal?.aborted) return;
       if (!envsRes.ok) {
         clearEnvState();
         return;
       }
       const { envFiles } = await envsRes.json();
+      if (signal?.aborted) return;
       if (envFiles && envFiles.length > 0) {
         editorState.setEnvFiles(envFiles);
         const firstFile = envFiles[0];
@@ -186,7 +208,9 @@ export function useStackActions(options: UseStackActionsOptions) {
         editorState.setEnvExists(true);
         const envContentRes = await apiFetch(
           `/stacks/${filename}/env?file=${encodeURIComponent(firstFile)}`,
+          { signal },
         );
+        if (signal?.aborted) return;
         if (envContentRes.ok) {
           const envText = await envContentRes.text();
           editorState.setEnvContent(envText || '');
@@ -198,29 +222,34 @@ export function useStackActions(options: UseStackActionsOptions) {
       } else {
         clearEnvState();
       }
-    } catch {
+    } catch (err) {
+      if (isAbortError(err)) return;
       clearEnvState();
     }
   };
 
-  const loadContainerState = async (filename: string) => {
+  const loadContainerState = async (filename: string, signal?: AbortSignal) => {
     try {
-      const containersRes = await apiFetch(`/stacks/${filename}/containers`);
+      const containersRes = await apiFetch(`/stacks/${filename}/containers`, { signal });
+      if (signal?.aborted) return;
       const conts = await containersRes.json();
       editorState.setContainers(Array.isArray(conts) ? conts : []);
     } catch (error) {
+      if (isAbortError(error)) return;
       console.error('Failed to load containers:', error);
       editorState.setContainers([]);
     }
   };
 
-  const loadBackupState = async (filename: string) => {
+  const loadBackupState = async (filename: string, signal?: AbortSignal) => {
     if (!isPaid) return;
     try {
-      const backupRes = await apiFetch(`/stacks/${filename}/backup`);
+      const backupRes = await apiFetch(`/stacks/${filename}/backup`, { signal });
+      if (signal?.aborted) return;
       if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
       else editorState.setBackupInfo({ exists: false, timestamp: null });
-    } catch {
+    } catch (err) {
+      if (isAbortError(err)) return;
       editorState.setBackupInfo({ exists: false, timestamp: null });
     }
   };
@@ -235,21 +264,31 @@ export function useStackActions(options: UseStackActionsOptions) {
       overlayState.setPendingUnsavedLoad(filename);
       return;
     }
+    // Cancel any in-flight load before starting a new one. A late response
+    // from the previous stack must not overwrite the freshly-loaded one.
+    loadFileAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadFileAbortRef.current = controller;
+    const { signal } = controller;
+
     editorState.setIsFileLoading(true);
     editorState.setIsEditing(false);
     editorState.setEditingCompose(false);
     editorState.setActiveTab('compose');
     try {
-      const res = await apiFetch(`/stacks/${filename}`);
+      const res = await apiFetch(`/stacks/${filename}`, { signal });
+      if (signal.aborted) return;
       const text = await res.text();
+      if (signal.aborted) return;
       stackListState.setSelectedFile(filename);
       navState.setActiveView('editor');
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
-      await loadEnvState(filename);
-      await loadContainerState(filename);
-      await loadBackupState(filename);
+      await loadEnvState(filename, signal);
+      await loadContainerState(filename, signal);
+      await loadBackupState(filename, signal);
     } catch (error) {
+      if (isAbortError(error) || signal.aborted) return;
       console.error('Failed to load file:', error);
       stackListState.setSelectedFile(null);
       editorState.setContent('');
@@ -258,7 +297,9 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setOriginalEnvContent('');
       editorState.setContainers([]);
     } finally {
-      editorState.setIsFileLoading(false);
+      if (!signal.aborted) {
+        editorState.setIsFileLoading(false);
+      }
     }
   };
 
@@ -305,9 +346,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const saveFile = async () => {
-    if (editorState.activeTab === 'files') return;
-    if (!stackListState.selectedFile) return;
+  const saveFile = async (): Promise<boolean> => {
+    if (editorState.activeTab === 'files') return false;
+    if (!stackListState.selectedFile) return false;
     const currentContent =
       editorState.activeTab === 'compose'
         ? editorState.content || ''
@@ -331,9 +372,11 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
       editorState.setIsEditing(false);
       toast.success('File saved successfully!');
+      return true;
     } catch (error) {
       console.error('Failed to save file:', error);
       toast.error(`Failed to save file: ${(error as Error).message}`);
+      return false;
     }
   };
 
@@ -462,7 +505,8 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const handleSaveAndDeploy = async (e: React.MouseEvent) => {
-    await saveFile();
+    const saved = await saveFile();
+    if (!saved) return;
     await deployStack(e);
   };
 
@@ -699,6 +743,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEnvContent(editorState.originalEnvContent);
     overlayState.setPendingUnsavedLoad(null);
     overlayState.setPendingUnsavedNode(null);
+    if (target === NODE_SWITCH_PENDING_TOKEN) {
+      if (targetNode) setActiveNode(targetNode);
+      return;
+    }
     if (target) {
       if (targetNode) void loadFileOnNode(targetNode, target);
       else void loadFile(target);
@@ -814,6 +862,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   return {
     pendingStackLoadRef,
     pendingLogsRef,
+    hasUnsavedChanges,
     getStackMenuVisibility,
     openStackApp,
     resetEditorState,

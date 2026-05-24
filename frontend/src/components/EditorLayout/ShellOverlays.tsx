@@ -148,8 +148,8 @@ export function ShellOverlays({
           setDiffPreviewConfirming(true);
           try {
             if (snapshot?.mode === 'save-and-deploy') {
-              await stackActions.saveFile();
-              await stackActions.deployStack();
+              const saved = await stackActions.saveFile();
+              if (saved) await stackActions.deployStack();
             } else {
               await stackActions.saveFile();
             }
