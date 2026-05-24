@@ -166,4 +166,43 @@ describe('FileTree', () => {
 
     expect(await screen.findByText(/empty folder/i)).toBeInTheDocument();
   });
+
+  it('filters visible entries by name as the user types', async () => {
+    const entries = [makeDir('src'), makeFile('README.md'), makeFile('Notes.txt'), makeFile('config.yaml')];
+    mockLoadDir.mockReturnValue(fakeOk(entries));
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('README.md');
+    expect(screen.getByText('Notes.txt')).toBeInTheDocument();
+    expect(screen.getByText('config.yaml')).toBeInTheDocument();
+
+    const filter = screen.getByLabelText(/filter files/i);
+    await user.type(filter, 'note');
+
+    // Only Notes.txt survives (case-insensitive substring).
+    expect(screen.getByText('Notes.txt')).toBeInTheDocument();
+    expect(screen.queryByText('README.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('config.yaml')).not.toBeInTheDocument();
+
+    // Clear button restores the full listing.
+    await user.click(screen.getByLabelText(/clear filter/i));
+    expect(screen.getByText('README.md')).toBeInTheDocument();
+    expect(screen.getByText('Notes.txt')).toBeInTheDocument();
+    expect(screen.getByText('config.yaml')).toBeInTheDocument();
+  });
+
+  it('shows an empty-match hint when the filter matches nothing', async () => {
+    mockLoadDir.mockReturnValue(fakeOk([makeFile('README.md')]));
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('README.md');
+
+    const filter = screen.getByLabelText(/filter files/i);
+    await user.type(filter, 'xyzzy');
+
+    expect(screen.queryByText('README.md')).not.toBeInTheDocument();
+    expect(screen.getByText(/no entries match/i)).toBeInTheDocument();
+  });
 });

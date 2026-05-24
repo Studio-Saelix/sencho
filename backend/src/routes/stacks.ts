@@ -1368,6 +1368,8 @@ function isSafeUploadFilename(rawName: string): boolean {
   return path.basename(rawName) === rawName;
 }
 
+const DIR_LIST_LIMIT = 1000;
+
 stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   const relPath = getRelPath(req);
@@ -1377,9 +1379,22 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   const startedAt = Date.now();
   logFileDiag('list start', { stackName, relPath, nodeId: req.nodeId });
   try {
-    const entries = await FileSystemService.getInstance(req.nodeId).listStackDirectory(stackName, relPath);
-    logFileDiag('list complete', { stackName, relPath, nodeId: req.nodeId, entries: entries.length, elapsedMs: Date.now() - startedAt });
-    return res.json(entries);
+    const result = await FileSystemService.getInstance(req.nodeId).listStackDirectoryPage(stackName, relPath, { limit: DIR_LIST_LIMIT });
+    // Expose pagination context via headers; the JSON body stays
+    // FileEntry[] for backward compatibility with any direct API caller.
+    res.setHeader('X-Total-Count', String(result.total));
+    res.setHeader('X-Returned-Count', String(result.entries.length));
+    if (result.truncated) res.setHeader('X-Truncated', 'true');
+    logFileDiag('list complete', {
+      stackName,
+      relPath,
+      nodeId: req.nodeId,
+      returned: result.entries.length,
+      total: result.total,
+      truncated: result.truncated,
+      elapsedMs: Date.now() - startedAt,
+    });
+    return res.json(result.entries);
   } catch (err: unknown) {
     logFileOperation('warn', 'list failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
     return sendFsError(res, err, 'Failed to list directory');
