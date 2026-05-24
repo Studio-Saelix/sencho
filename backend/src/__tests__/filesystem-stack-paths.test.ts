@@ -237,6 +237,71 @@ describe('FileSystemService stack methods', () => {
     });
   });
 
+  // ── atomic write semantics ──────────────────────────────────────────────
+
+  describe('atomic write semantics', () => {
+    it('does not leak .sencho-tmp-* files after a successful write', async () => {
+      const service = FileSystemService.getInstance();
+      await service.writeStackFile(STACK, 'clean.txt', 'final');
+      const dirEntries = await fs.readdir(stackDir);
+      const leftovers = dirEntries.filter(name => name.startsWith('clean.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('preserves the original target when the rename step throws', async () => {
+      const target = path.join(stackDir, 'crash.txt');
+      await fs.writeFile(target, 'ORIGINAL');
+
+      const fsModule = await import('fs');
+      const renameSpy = vi
+        .spyOn(fsModule.promises, 'rename')
+        .mockRejectedValueOnce(Object.assign(new Error('disk yanked'), { code: 'EIO' }));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.writeStackFile(STACK, 'crash.txt', 'NEW')).rejects.toThrow(/disk yanked/);
+
+      // Target keeps its original content.
+      const content = await fs.readFile(target, 'utf-8');
+      expect(content).toBe('ORIGINAL');
+
+      // Tmp file is cleaned up.
+      const dirEntries = await fs.readdir(stackDir);
+      const leftovers = dirEntries.filter(name => name.startsWith('crash.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+
+      renameSpy.mockRestore();
+    });
+
+    it('exclusive write to a fresh target succeeds', async () => {
+      const service = FileSystemService.getInstance();
+      await service.writeStackFile(STACK, 'first.txt', 'hello', { exclusive: true });
+      const content = await fs.readFile(path.join(stackDir, 'first.txt'), 'utf-8');
+      expect(content).toBe('hello');
+    });
+
+    it('exclusive write to an existing target throws FILE_EXISTS and preserves the original', async () => {
+      const target = path.join(stackDir, 'taken.txt');
+      await fs.writeFile(target, 'KEEP');
+
+      const service = FileSystemService.getInstance();
+      let caught: unknown = null;
+      try {
+        await service.writeStackFile(STACK, 'taken.txt', 'OVERWRITE', { exclusive: true });
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as { code?: string })?.code).toBe('FILE_EXISTS');
+
+      const content = await fs.readFile(target, 'utf-8');
+      expect(content).toBe('KEEP');
+
+      // Tmp file cleaned up after the link failure.
+      const dirEntries = await fs.readdir(stackDir);
+      const leftovers = dirEntries.filter(name => name.startsWith('taken.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+  });
+
   // ── deleteStackPath ─────────────────────────────────────────────────────
 
   describe('deleteStackPath', () => {
