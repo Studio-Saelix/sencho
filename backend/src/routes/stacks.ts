@@ -15,6 +15,7 @@ import { requirePermission, checkPermission } from '../middleware/permissions';
 import { requirePaid, requireAdmin, effectiveTier } from '../middleware/tierGates';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
+import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
 import { isValidGitSourcePath, isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -930,17 +931,19 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'deploy')) return;
+  const t0 = Date.now();
+  let ok = false;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
-    const t0 = Date.now();
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
+    ok = true;
     res.json({ message: 'Deployed successfully' });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
@@ -968,6 +971,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     }
   } finally {
     releaseStackOpLock(req, stackName);
+    StackOpMetricsService.getInstance().record(req.nodeId, 'deploy', Date.now() - t0, ok);
   }
 });
 
@@ -977,11 +981,14 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'down')) return;
+  const t0 = Date.now();
+  let ok = false;
   try {
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId });
     await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs());
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
+    ok = true;
     res.json({ status: 'Command started' });
   } catch (error: unknown) {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
@@ -995,6 +1002,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     }
   } finally {
     releaseStackOpLock(req, stackName);
+    StackOpMetricsService.getInstance().record(req.nodeId, 'down', Date.now() - t0, ok);
   }
 });
 
@@ -1066,6 +1074,8 @@ async function bulkContainerOp(
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, action)) return;
+  const t0 = Date.now();
+  let ok = false;
   try {
     const titleCase = action.charAt(0).toUpperCase() + action.slice(1);
     if (isDebugEnabled()) console.debug(`[Stacks:debug] ${titleCase} starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId });
@@ -1090,6 +1100,7 @@ async function bulkContainerOp(
 
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] ${titleCase} completed: ${sanitizeForLog(stackName)} (${outcome.count} containers)`);
+    ok = true;
     res.json({ success: true, message: `${titleCase} completed via Engine API.` });
     const { category, pastTense } = CONTAINER_ACTION_META[action];
     notifyActionSuccess(category, `${stackName} ${pastTense}`, stackName, req.user?.username ?? 'system');
@@ -1100,6 +1111,7 @@ async function bulkContainerOp(
     }
   } finally {
     releaseStackOpLock(req, stackName);
+    StackOpMetricsService.getInstance().record(req.nodeId, action as StackMetricAction, Date.now() - t0, ok);
   }
 }
 
@@ -1179,13 +1191,14 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'update')) return;
+  const t0 = Date.now();
+  let ok = false;
   try {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
-    const t0 = Date.now();
     await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     invalidateNodeCaches(req.nodeId);
@@ -1199,6 +1212,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     });
     dlog(`[Stacks] Update completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
+    ok = true;
     res.json({ status: 'Update completed' });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
@@ -1225,6 +1239,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     }
   } finally {
     releaseStackOpLock(req, stackName);
+    StackOpMetricsService.getInstance().record(req.nodeId, 'update', Date.now() - t0, ok);
   }
 });
 
