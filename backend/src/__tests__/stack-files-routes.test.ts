@@ -320,6 +320,47 @@ describe('POST /api/stacks/:stackName/files/upload', () => {
     const content = await fs.readFile(path.join(stacksDir, STACK, 'subdir', 'sub.txt'), 'utf-8');
     expect(content).toBe('subdir content');
   });
+
+  it('returns 409 FILE_EXISTS when the target name already exists and overwrite is not set', async () => {
+    const target = path.join(stacksDir, STACK, 'existing.txt');
+    await fs.writeFile(target, 'original');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('replacement'), 'existing.txt');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('FILE_EXISTS');
+    // Original content must be preserved when the upload is rejected.
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('original');
+    await fs.unlink(target);
+  });
+
+  it('overwrites when ?overwrite=1 is set', async () => {
+    const target = path.join(stacksDir, STACK, 'replaceme.txt');
+    await fs.writeFile(target, 'before');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('after'), 'replaceme.txt');
+    expect(res.status).toBe(204);
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('after');
+    await fs.unlink(target);
+  });
+
+  it('returns 409 FILE_EXISTS when overwriting an entry that is a directory', async () => {
+    const dir = path.join(stacksDir, STACK, 'collide-dir');
+    await fs.mkdir(dir, { recursive: true });
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('whatever'), 'collide-dir');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('FILE_EXISTS');
+    await fs.rm(dir, { recursive: true, force: true });
+  });
 });
 
 // ── PUT /:stackName/files/content ─────────────────────────────────────────────

@@ -1309,7 +1309,8 @@ type FsErrorCode =
   | 'NOT_EMPTY'
   | 'NOT_FOUND'
   | 'TOO_LARGE'
-  | 'ALREADY_EXISTS';
+  | 'ALREADY_EXISTS'
+  | 'FILE_EXISTS';
 
 function sendFsError(
   res: Response,
@@ -1470,11 +1471,21 @@ stacksRouter.post(
       return res.status(400).json({ error: 'Invalid filename' });
     }
     const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
+    const overwrite = req.query.overwrite === '1';
     const startedAt = Date.now();
-    logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size });
+    logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
     try {
+      if (!overwrite) {
+        const exists = await FileSystemService.getInstance(req.nodeId).pathExists(stackName, targetRelPath);
+        if (exists) {
+          return res.status(409).json({
+            error: `${originalName} already exists in this folder. Confirm to replace.`,
+            code: 'FILE_EXISTS',
+          });
+        }
+      }
       await FileSystemService.getInstance(req.nodeId).writeStackFileBuffer(stackName, targetRelPath, req.file.buffer);
-      logFileOperation('info', 'upload complete', { nodeId: req.nodeId, size: req.file.size });
+      logFileOperation('info', 'upload complete', { nodeId: req.nodeId, size: req.file.size, overwrite });
       logFileDiag('upload timing', { stackName, relPath: targetRelPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
       return res.status(204).send();
     } catch (err: unknown) {

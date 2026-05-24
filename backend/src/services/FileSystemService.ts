@@ -684,6 +684,18 @@ export class FileSystemService {
     await fsPromises.writeFile(safePath, buffer);
   }
 
+  async pathExists(stackName: string, relPath: string): Promise<boolean> {
+    try {
+      const safePath = await this.resolveSafeStackPath(stackName, relPath);
+      await fsPromises.access(safePath);
+      return true;
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT' || e.code === 'INVALID_PATH' || e.code === 'SYMLINK_ESCAPE') return false;
+      throw err;
+    }
+  }
+
   async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false): Promise<void> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
 
