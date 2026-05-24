@@ -36,6 +36,10 @@ function AppContent() {
     <NodeProvider>
       <LicenseProvider>
         <EditorLayout />
+        {/* Portal lives inside LicenseProvider so DeployFeedbackModal can
+            call useLicense() (M-3 atomic-deploy notice depends on isPaid).
+            Outer DeployFeedbackProvider is still an ancestor through App. */}
+        <DeployFeedbackPortal />
       </LicenseProvider>
     </NodeProvider>
   );
@@ -46,7 +50,6 @@ function App() {
     <AuthProvider>
       <DeployFeedbackProvider>
         <AppContent />
-        <DeployFeedbackPortal />
       </DeployFeedbackProvider>
       <ToastContainer />
     </AuthProvider>
