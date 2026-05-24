@@ -4,7 +4,7 @@ import { AlertCircle, FileIcon, Download, Loader2, Save } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
-import { readStackFile, writeStackFile, downloadStackFile } from '@/lib/stackFilesApi';
+import { readStackFile, writeStackFile, downloadStackFile, FileConflictError } from '@/lib/stackFilesApi';
 import { extensionToLanguage } from '@/lib/monacoLanguages';
 import { formatBytes } from '@/lib/utils';
 
@@ -100,6 +100,7 @@ export function FileViewer({
   const [isBinary, setIsBinary] = useState(false);
   const [isOversized, setIsOversized] = useState(false);
   const [size, setSize] = useState(0);
+  const [loadedMtimeMs, setLoadedMtimeMs] = useState<number | null>(null);
 
   const readOnly = !canEdit;
 
@@ -135,6 +136,7 @@ export function FileViewer({
       .then((result) => {
         if (cancelled) return;
         setSize(result.size);
+        setLoadedMtimeMs(result.mtimeMs);
         if (result.binary) {
           setIsBinary(true);
         } else if (result.oversized) {
@@ -163,12 +165,27 @@ export function FileViewer({
     setSaving(true);
     const loadingId = toast.loading('Saving...');
     try {
-      await writeStackFile(stackName, selectedPath, content);
+      const result = await writeStackFile(stackName, selectedPath, content, {
+        ifMatchMtimeMs: loadedMtimeMs ?? undefined,
+      });
       setOriginalContent(content);
+      if (result.mtimeMs !== null) setLoadedMtimeMs(result.mtimeMs);
       toast.success('Saved.');
       onSaved?.();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Save failed.');
+      if (e instanceof FileConflictError) {
+        // The server-side content has moved on. Adopt the server snapshot as
+        // the new baseline, surface the conflict to the user, and let them
+        // re-edit on top of the fresh content. Their unsaved buffer is
+        // intentionally preserved in `content` so they can copy / diff before
+        // re-saving.
+        setOriginalContent(e.currentContent);
+        setLoadedMtimeMs(e.currentMtimeMs);
+        toast.error('File changed elsewhere. Reload reset the viewer to the current version.');
+        setContent(e.currentContent);
+      } else {
+        toast.error(e instanceof Error ? e.message : 'Save failed.');
+      }
     } finally {
       toast.dismiss(loadingId);
       setSaving(false);

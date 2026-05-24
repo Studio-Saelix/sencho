@@ -170,6 +170,17 @@ describe('GET /api/stacks/:stackName/files/content', () => {
     expect(res.body.binary).toBe(false);
     expect(res.body.oversized).toBe(false);
     expect(typeof res.body.content).toBe('string');
+    expect(typeof res.body.mtimeMs).toBe('number');
+    expect(res.body.mtimeMs).toBeGreaterThan(0);
+  });
+
+  it('sets a quoted ETag header derived from mtimeMs', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.headers['etag']).toMatch(/^W\/"\d+"$/);
   });
 
   it('returns 404 for a non-existent file', async () => {
@@ -374,6 +385,76 @@ describe('PUT /api/stacks/:stackName/files/content', () => {
 
     const content = await fs.readFile(path.join(stacksDir, STACK, 'written.txt'), 'utf-8');
     expect(content).toBe('written via PUT');
+  });
+
+  it('echoes a fresh ETag header on successful write', async () => {
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'etag-write.txt' })
+      .set('Cookie', adminCookie)
+      .send({ content: 'etag write' });
+    expect(res.status).toBe(204);
+    expect(res.headers['etag']).toMatch(/^W\/"\d+"$/);
+  });
+
+  it('returns 412 when If-Match disagrees with the current mtimeMs and surfaces the live content', async () => {
+    // Seed the target so a known mtime exists.
+    const target = path.join(stacksDir, STACK, 'mtime-target.txt');
+    await fs.writeFile(target, 'ORIGINAL');
+
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'mtime-target.txt' })
+      .set('Cookie', adminCookie)
+      .set('If-Match', '"1"') // deliberately stale
+      .send({ content: 'overwrite attempt' });
+
+    expect(res.status).toBe(412);
+    expect(res.body.code).toBe('PRECONDITION_FAILED');
+    expect(res.body.currentContent).toBe('ORIGINAL');
+    expect(typeof res.body.currentMtimeMs).toBe('number');
+
+    // Disk content is unchanged.
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('ORIGINAL');
+  });
+
+  it('succeeds when If-Match matches the current mtimeMs', async () => {
+    const target = path.join(stacksDir, STACK, 'mtime-match.txt');
+    await fs.writeFile(target, 'first');
+    const getRes = await request(app)
+      .get(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'mtime-match.txt' })
+      .set('Cookie', adminCookie);
+    expect(getRes.status).toBe(200);
+    const etag = getRes.headers['etag'];
+    expect(etag).toBeDefined();
+
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'mtime-match.txt' })
+      .set('Cookie', adminCookie)
+      .set('If-Match', etag)
+      .send({ content: 'second' });
+    expect(putRes.status).toBe(204);
+    expect(putRes.headers['etag']).toBeDefined();
+    expect(putRes.headers['etag']).not.toBe(etag);
+
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('second');
+  });
+
+  it('still writes when no If-Match header is sent (backward compat)', async () => {
+    const target = path.join(stacksDir, STACK, 'no-ifmatch.txt');
+    await fs.writeFile(target, 'before');
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'no-ifmatch.txt' })
+      .set('Cookie', adminCookie)
+      .send({ content: 'after' });
+    expect(res.status).toBe(204);
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('after');
   });
 });
 

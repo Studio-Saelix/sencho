@@ -41,6 +41,24 @@ export interface FileContentResult {
   oversized: boolean;
   size: number;
   mime: string;
+  mtimeMs: number;
+}
+
+/**
+ * Thrown by writeStackFile when the server reports the target file has been
+ * modified since the caller's last read (HTTP 412). The current server-side
+ * content and mtime are attached so callers can prompt the user to reconcile.
+ */
+export class FileConflictError extends Error {
+  readonly code = 'PRECONDITION_FAILED' as const;
+  readonly currentContent: string;
+  readonly currentMtimeMs: number;
+  constructor(message: string, currentContent: string, currentMtimeMs: number) {
+    super(message);
+    this.name = 'FileConflictError';
+    this.currentContent = currentContent;
+    this.currentMtimeMs = currentMtimeMs;
+  }
 }
 
 export async function parseApiError(res: Response): Promise<string> {
@@ -132,14 +150,36 @@ export async function uploadStackFile(
 export async function writeStackFile(
   stackName: string,
   relPath: string,
-  content: string
-): Promise<void> {
+  content: string,
+  options?: { ifMatchMtimeMs?: number }
+): Promise<{ mtimeMs: number | null }> {
   assertSafeRelPath(relPath);
+  const headers: Record<string, string> = {};
+  if (options?.ifMatchMtimeMs !== undefined) {
+    headers['If-Match'] = `"${Math.floor(options.ifMatchMtimeMs)}"`;
+  }
   const res = await apiFetch(
     stackFilesUrl(stackName, `/content?path=${encodeURIComponent(relPath)}`),
-    { method: 'PUT', body: JSON.stringify({ content }) }
+    { method: 'PUT', headers, body: JSON.stringify({ content }) }
   );
+  if (res.status === 412) {
+    let body: { currentContent?: string; currentMtimeMs?: number; error?: string } = {};
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    throw new FileConflictError(
+      body.error ?? 'File has been modified since you last read it.',
+      typeof body.currentContent === 'string' ? body.currentContent : '',
+      typeof body.currentMtimeMs === 'number' ? body.currentMtimeMs : 0,
+    );
+  }
   if (!res.ok) throw new Error(await parseApiError(res));
+  // Parse the ETag the server set so callers can update their local mtime.
+  const etag = res.headers.get('ETag');
+  if (etag) {
+    const stripped = etag.replace(/^W\//i, '').trim().replace(/^"(.*)"$/, '$1');
+    const parsed = Number(stripped);
+    if (Number.isFinite(parsed)) return { mtimeMs: parsed };
+  }
+  return { mtimeMs: null };
 }
 
 export async function deleteStackPath(
