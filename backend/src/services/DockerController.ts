@@ -1438,7 +1438,7 @@ class DockerController {
       }
 
       if (isDebugEnabled()) console.debug('[Exec:diag] Creating exec', { containerId, shell: shellType });
-      console.log('[Exec] Shell session started', { containerId, shell: shellType });
+      if (isDebugEnabled()) console.log('[Exec] Shell session started', { containerId, shell: shellType });
 
       // --- Downstream: container output → client ---
       stream.on('data', (chunk: Buffer) => {
@@ -1452,7 +1452,7 @@ class DockerController {
       });
 
       stream.on('end', () => {
-        console.log('[Exec] Shell session ended', { containerId, reason: 'stream-end' });
+        if (isDebugEnabled()) console.log('[Exec] Shell session ended', { containerId, reason: 'stream-end' });
         if (ws.readyState === WebSocket.OPEN) {
           ws.close();
         }
@@ -1492,7 +1492,7 @@ class DockerController {
 
       // --- Cleanup: prevent zombie processes ---
       ws.on('close', () => {
-        console.log('[Exec] Shell session ended', { containerId, reason: 'ws-close' });
+        if (isDebugEnabled()) console.log('[Exec] Shell session ended', { containerId, reason: 'ws-close' });
         try {
           stream.destroy();
         } catch (e) {
