@@ -85,6 +85,10 @@ test.describe('Stack deploy journeys (L-2 audit coverage)', () => {
   });
 
   test('deploy success: real Docker stack reports running via the status API', async ({ page }) => {
+    // The status-poll budget below is 30s on its own; the rest of the test
+    // (create + deploy + teardown) needs to fit in whatever's left of the
+    // per-test timeout. Bump to 60s so a slow alpine pull does not flake.
+    test.setTimeout(60_000);
     const stack = 'e2e-deploy-success';
     await teardownStack(page, stack);
     await createStackWithCompose(page, stack, longRunningCompose(stack));
@@ -165,6 +169,10 @@ test.describe('Stack deploy journeys (L-2 audit coverage)', () => {
   });
 
   test('bulk lifecycle: restart two stacks in sequence, both succeed', async ({ page }) => {
+    // Two serial deploys on a cold CI runner can blow past the default 30s
+    // per-test timeout (alpine pull on the first deploy is the long tail).
+    // Give this one test enough headroom to amortize image cache warm-up.
+    test.setTimeout(90_000);
     const stackA = 'e2e-bulk-a';
     const stackB = 'e2e-bulk-b';
     await teardownStack(page, stackA);
@@ -173,16 +181,17 @@ test.describe('Stack deploy journeys (L-2 audit coverage)', () => {
     await createStackWithCompose(page, stackB, longRunningCompose(stackB));
 
     try {
-      // Deploy both so restart has containers to act on
+      // Deploy both in parallel so the image pull (once) is shared and the
+      // second container start does not add latency on top of the first.
       await page.evaluate(async (names) => {
-        for (const name of names) {
-          await fetch(`/api/stacks/${name}/deploy`, {
+        await Promise.all(names.map((name) =>
+          fetch(`/api/stacks/${name}/deploy`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ skip_scan: true }),
-          });
-        }
+          }),
+        ));
       }, [stackA, stackB]);
 
       // Drive the current bulk UI path (per-stack fan-out) by issuing the
