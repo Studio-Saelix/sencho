@@ -11,17 +11,43 @@ import type { FileContentResult } from '@/lib/stackFilesApi';
 
 // FileViewer now imports `Editor` from the lazy loader, not directly from
 // @monaco-editor/react. Mock the loader so tests skip Monaco's setup path
-// and the editor renders synchronously.
+// and the editor renders synchronously. The mock exposes a hidden button
+// that calls onChange so tests can drive a dirty buffer without instantiating
+// the real editor.
 vi.mock('@/lib/monacoLoader', () => ({
-  Editor: () => <div data-testid="monaco-editor" />,
+  Editor: ({ onChange }: { onChange?: (value: string | undefined) => void }) => (
+    <div data-testid="monaco-editor">
+      <button
+        type="button"
+        data-testid="monaco-edit-trigger"
+        onClick={() => onChange?.('edited content')}
+      >
+        edit
+      </button>
+    </div>
+  ),
   DiffEditor: () => <div data-testid="monaco-diff-editor" />,
 }));
 
-vi.mock('@/lib/stackFilesApi', () => ({
-  readStackFile: vi.fn(),
-  writeStackFile: vi.fn(),
-  downloadStackFile: vi.fn(),
-}));
+vi.mock('@/lib/stackFilesApi', () => {
+  class MockFileConflictError extends Error {
+    readonly code = 'PRECONDITION_FAILED' as const;
+    readonly currentContent: string;
+    readonly currentMtimeMs: number;
+    constructor(message: string, currentContent: string, currentMtimeMs: number) {
+      super(message);
+      this.name = 'FileConflictError';
+      this.currentContent = currentContent;
+      this.currentMtimeMs = currentMtimeMs;
+    }
+  }
+  return {
+    readStackFile: vi.fn(),
+    writeStackFile: vi.fn(),
+    downloadStackFile: vi.fn(),
+    FileConflictError: MockFileConflictError,
+  };
+});
 
 vi.mock('@/components/ui/toast-store', () => ({
   toast: {
@@ -63,21 +89,22 @@ vi.mock('@/lib/monacoLanguages', () => ({
   extensionToLanguage: () => 'plaintext',
 }));
 
-import { readStackFile } from '@/lib/stackFilesApi';
+import { readStackFile, writeStackFile, FileConflictError } from '@/lib/stackFilesApi';
 import { FileViewer } from '../FileViewer';
 
 const mockReadFile = readStackFile as unknown as ReturnType<typeof vi.fn>;
+const mockWriteFile = writeStackFile as unknown as ReturnType<typeof vi.fn>;
 
 function textResult(content = 'hello world'): FileContentResult {
-  return { content, binary: false, oversized: false, size: content.length, mime: 'text/plain' };
+  return { content, binary: false, oversized: false, size: content.length, mime: 'text/plain', mtimeMs: 1_700_000_000_000 };
 }
 
 function binaryResult(): FileContentResult {
-  return { binary: true, oversized: false, size: 1024, mime: 'application/octet-stream' };
+  return { binary: true, oversized: false, size: 1024, mime: 'application/octet-stream', mtimeMs: 1_700_000_000_000 };
 }
 
 function oversizedResult(): FileContentResult {
-  return { binary: false, oversized: true, size: 5_000_000, mime: 'text/plain' };
+  return { binary: false, oversized: true, size: 5_000_000, mime: 'text/plain', mtimeMs: 1_700_000_000_000 };
 }
 
 const defaultProps = {
@@ -88,6 +115,7 @@ const defaultProps = {
 
 beforeEach(() => {
   mockReadFile.mockReset();
+  mockWriteFile.mockReset();
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -163,5 +191,74 @@ describe('FileViewer', () => {
     rerender(<FileViewer {...defaultProps} selectedPath="b.txt" />);
     await waitFor(() => expect(mockReadFile).toHaveBeenCalledTimes(2));
     expect(mockReadFile).toHaveBeenNthCalledWith(2, 'my-stack', 'b.txt');
+  });
+
+  it('reports clean dirty state on initial load of a text file', async () => {
+    mockReadFile.mockResolvedValue(textResult());
+    const onDirtyChange = vi.fn();
+
+    render(<FileViewer {...defaultProps} selectedPath="config/app.txt" onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+    // content === originalContent immediately after load → dirty=false
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('resets dirty signal on unmount', async () => {
+    mockReadFile.mockResolvedValue(textResult());
+    const onDirtyChange = vi.fn();
+
+    const { unmount } = render(<FileViewer {...defaultProps} selectedPath="a.txt" onDirtyChange={onDirtyChange} />);
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+
+    onDirtyChange.mockClear();
+    unmount();
+
+    expect(onDirtyChange).toHaveBeenCalledWith(false);
+  });
+
+  it('sends If-Match with the loaded mtime on save and updates the local mtime from the response', async () => {
+    mockReadFile.mockResolvedValue(textResult('hello'));
+    mockWriteFile.mockResolvedValue({ mtimeMs: 1_700_000_000_999 });
+
+    render(<FileViewer {...defaultProps} selectedPath="config.txt" />);
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+
+    // Drive a dirty buffer via the mock editor's edit trigger so Save activates.
+    screen.getByTestId('monaco-edit-trigger').click();
+    const saveBtn = screen.getByRole('button', { name: /save/i });
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    saveBtn.click();
+
+    await waitFor(() => expect(mockWriteFile).toHaveBeenCalledTimes(1));
+    const [s, p, c, opts] = mockWriteFile.mock.calls[0];
+    expect(s).toBe('my-stack');
+    expect(p).toBe('config.txt');
+    expect(c).toBe('edited content');
+    expect(opts).toEqual({ ifMatchMtimeMs: 1_700_000_000_000 });
+  });
+
+  it('updates baseline on FileConflictError without discarding the user buffer; follow-up save uses new mtime', async () => {
+    mockReadFile.mockResolvedValue(textResult('stale local copy'));
+    mockWriteFile
+      .mockRejectedValueOnce(new FileConflictError('changed elsewhere', 'SERVER NOW', 1_700_000_999_000))
+      .mockResolvedValueOnce({ mtimeMs: 1_700_001_000_000 });
+
+    render(<FileViewer {...defaultProps} selectedPath="config.txt" />);
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+    screen.getByTestId('monaco-edit-trigger').click();
+    const saveBtn = screen.getByRole('button', { name: /save/i });
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    saveBtn.click();
+
+    await waitFor(() => expect(mockWriteFile).toHaveBeenCalledTimes(1));
+
+    // The follow-up save sends the mtime from the conflict response so the
+    // user does not loop on the same stale precondition. The user's typed
+    // content ('edited content' from the mock trigger) is preserved on top.
+    saveBtn.click();
+    await waitFor(() => expect(mockWriteFile).toHaveBeenCalledTimes(2));
+    expect(mockWriteFile.mock.calls[1][2]).toBe('edited content');
+    expect(mockWriteFile.mock.calls[1][3]).toEqual({ ifMatchMtimeMs: 1_700_000_999_000 });
   });
 });

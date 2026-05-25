@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Trash2, FolderPlus, Download, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { downloadStackFile, listStackDirectory } from '@/lib/stackFilesApi';
 import { FileTree } from './FileTree';
@@ -60,21 +61,36 @@ export function StackFileExplorer({
   const [permissionsRelPath, setPermissionsRelPath] = useState('');
   const [permissionsEntryName, setPermissionsEntryName] = useState('');
 
+  // ── unsaved-changes guard on file switch ──
+  const [isViewerDirty, setIsViewerDirty] = useState(false);
+  const [pendingSelection, setPendingSelection] = useState<{ relPath: string; entry: FileEntry } | null>(null);
+
   useEffect(() => {
     setSelectedPath(null);
     setSelectedEntry(null);
     setCurrentDir('');
+    setIsViewerDirty(false);
+    setPendingSelection(null);
   }, [stackName]);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  const handleSelectFile = useCallback((relPath: string, entry: FileEntry) => {
+  const applySelection = useCallback((relPath: string, entry: FileEntry) => {
     setSelectedPath(relPath);
     setSelectedEntry(entry);
     const parts = relPath.split('/');
     parts.pop();
     setCurrentDir(parts.join('/'));
   }, []);
+
+  const handleSelectFile = useCallback((relPath: string, entry: FileEntry) => {
+    if (relPath === selectedPath) return;
+    if (isViewerDirty) {
+      setPendingSelection({ relPath, entry });
+      return;
+    }
+    applySelection(relPath, entry);
+  }, [selectedPath, isViewerDirty, applySelection]);
 
   const handleDeleted = useCallback(() => {
     setSelectedPath(null);
@@ -226,6 +242,7 @@ export function StackFileExplorer({
             canEdit={canEdit}
             isDarkMode={isDarkMode}
             onSaved={refresh}
+            onDirtyChange={setIsViewerDirty}
           />
         </div>
       </div>
@@ -298,6 +315,27 @@ export function StackFileExplorer({
         entryName={permissionsEntryName}
         canEdit={canEdit}
       />
+
+      {/* Unsaved-changes guard on file switch */}
+      <ConfirmModal
+        open={pendingSelection !== null}
+        onOpenChange={(next) => { if (!next) setPendingSelection(null); }}
+        onCancel={() => setPendingSelection(null)}
+        kicker="FILES · UNSAVED CHANGES"
+        title="Discard unsaved changes?"
+        description="Switching files will discard the edits in the current viewer."
+        confirmLabel="Discard and switch"
+        onConfirm={() => {
+          if (pendingSelection) {
+            applySelection(pendingSelection.relPath, pendingSelection.entry);
+            setPendingSelection(null);
+          }
+        }}
+      >
+        <p className="text-sm text-muted-foreground">
+          You have unsaved changes in the current file. Switching to another file will discard them.
+        </p>
+      </ConfirmModal>
     </div>
   );
 }

@@ -1,9 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
-vi.mock('@/lib/stackFilesApi', () => ({
-  uploadStackFile: vi.fn(),
-}));
+// Mock the API module FIRST so the real class export is replaced before
+// FileUploadDropzone imports it.
+vi.mock('@/lib/stackFilesApi', () => {
+  class MockUploadConflictError extends Error {
+    readonly code = 'FILE_EXISTS' as const;
+    constructor(message: string) {
+      super(message);
+      this.name = 'UploadConflictError';
+    }
+  }
+  return {
+    uploadStackFile: vi.fn(),
+    UploadConflictError: MockUploadConflictError,
+  };
+});
 
 vi.mock('@/components/ui/toast-store', () => ({
   toast: {
@@ -15,7 +28,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { FileUploadDropzone } from '../FileUploadDropzone';
-import { uploadStackFile } from '@/lib/stackFilesApi';
+import { uploadStackFile, UploadConflictError } from '@/lib/stackFilesApi';
 import { toast } from '@/components/ui/toast-store';
 
 const mockUpload = uploadStackFile as unknown as ReturnType<typeof vi.fn>;
@@ -55,7 +68,8 @@ describe('FileUploadDropzone', () => {
 
     fireEvent.drop(zone, { dataTransfer });
     await waitFor(() => expect(mockUpload).toHaveBeenCalledTimes(1));
-    expect(mockUpload).toHaveBeenCalledWith('app', 'config', file);
+    // Drop path reuses runUpload with overwrite=false (matching the click-pick path).
+    expect(mockUpload).toHaveBeenCalledWith('app', 'config', file, { overwrite: false });
     await waitFor(() => expect(onUploaded).toHaveBeenCalledTimes(1));
   });
 
@@ -89,5 +103,51 @@ describe('FileUploadDropzone', () => {
     fireEvent.dragOver(zone, { dataTransfer });
     // Zone never enters the active "Drop to upload" state.
     expect(screen.queryByText(/drop to upload/i)).not.toBeInTheDocument();
+  });
+
+  it('opens the replace dialog on FILE_EXISTS and retries with overwrite on confirm', async () => {
+    const user = userEvent.setup();
+    const onUploaded = vi.fn();
+    mockUpload
+      .mockRejectedValueOnce(new UploadConflictError('foo.txt already exists.'))
+      .mockResolvedValueOnce(undefined);
+
+    render(
+      <FileUploadDropzone stackName="app" currentDir="" canEdit onUploaded={onUploaded} />,
+    );
+
+    const input = screen.getByLabelText(/upload file/i) as HTMLInputElement;
+    const file = new File(['payload'], 'foo.txt', { type: 'text/plain' });
+    await user.upload(input, file);
+
+    expect(await screen.findByText(/replace existing file/i)).toBeInTheDocument();
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    expect(mockUpload).toHaveBeenNthCalledWith(1, 'app', '', file, { overwrite: false });
+
+    await user.click(screen.getByRole('button', { name: /^replace$/i }));
+
+    expect(mockUpload).toHaveBeenCalledTimes(2);
+    expect(mockUpload).toHaveBeenNthCalledWith(2, 'app', '', file, { overwrite: true });
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the original file untouched when the user cancels the replace dialog', async () => {
+    const user = userEvent.setup();
+    const onUploaded = vi.fn();
+    mockUpload.mockRejectedValueOnce(new UploadConflictError('foo.txt already exists.'));
+
+    render(
+      <FileUploadDropzone stackName="app" currentDir="" canEdit onUploaded={onUploaded} />,
+    );
+
+    const input = screen.getByLabelText(/upload file/i) as HTMLInputElement;
+    const file = new File(['payload'], 'foo.txt', { type: 'text/plain' });
+    await user.upload(input, file);
+
+    expect(await screen.findByText(/replace existing file/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    expect(onUploaded).not.toHaveBeenCalled();
   });
 });

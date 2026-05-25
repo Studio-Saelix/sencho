@@ -1,0 +1,76 @@
+/**
+ * Unit tests for apiFetch's request shape, specifically the header merge.
+ *
+ * Regression guard: callers that pass a `headers` field must not lose the
+ * default Content-Type and x-node-id that apiFetch builds. An earlier shape
+ * spread fetchOptions over defaultOptions at the outer level after merging
+ * headers into defaultOptions.headers, which silently clobbered the merge
+ * when the caller supplied any `headers` value.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { apiFetch } from '../api';
+
+const originalFetch = globalThis.fetch;
+
+beforeEach(() => {
+  globalThis.fetch = vi.fn().mockResolvedValue(new Response('{}', {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as unknown as typeof fetch;
+  try { localStorage.removeItem('sencho-active-node'); } catch { /* jsdom */ }
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
+});
+
+function lastFetchInit(): RequestInit {
+  const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+  return calls[calls.length - 1][1] as RequestInit;
+}
+
+describe('apiFetch header merge', () => {
+  it('always sets Content-Type: application/json on the outgoing request', async () => {
+    await apiFetch('/health');
+    const init = lastFetchInit();
+    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+  });
+
+  it('preserves Content-Type even when the caller supplies a custom header', async () => {
+    await apiFetch('/stacks/foo/files/content?path=app.txt', {
+      method: 'PUT',
+      headers: { 'If-Match': '"1700000000000"' },
+      body: JSON.stringify({ content: 'hi' }),
+    });
+    const init = lastFetchInit();
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers['If-Match']).toBe('"1700000000000"');
+  });
+
+  it('merges x-node-id when an active node is set even when caller supplies headers', async () => {
+    localStorage.setItem('sencho-active-node', '7');
+    await apiFetch('/stacks/foo/files', {
+      method: 'GET',
+      headers: { 'X-Trace-Id': 'abc' },
+    });
+    const init = lastFetchInit();
+    const headers = init.headers as Record<string, string>;
+    expect(headers['x-node-id']).toBe('7');
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers['X-Trace-Id']).toBe('abc');
+    localStorage.removeItem('sencho-active-node');
+  });
+
+  it('honours localOnly to skip x-node-id', async () => {
+    localStorage.setItem('sencho-active-node', '7');
+    await apiFetch('/stacks/foo/files', { localOnly: true, headers: { 'If-Match': '"1"' } });
+    const init = lastFetchInit();
+    const headers = init.headers as Record<string, string>;
+    expect(headers['x-node-id']).toBeUndefined();
+    expect(headers['If-Match']).toBe('"1"');
+    expect(headers['Content-Type']).toBe('application/json');
+    localStorage.removeItem('sencho-active-node');
+  });
+});

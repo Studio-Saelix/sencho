@@ -41,6 +41,24 @@ export interface FileContentResult {
   oversized: boolean;
   size: number;
   mime: string;
+  mtimeMs: number;
+}
+
+/**
+ * Thrown by writeStackFile when the server reports the target file has been
+ * modified since the caller's last read (HTTP 412). The current server-side
+ * content and mtime are attached so callers can prompt the user to reconcile.
+ */
+export class FileConflictError extends Error {
+  readonly code = 'PRECONDITION_FAILED' as const;
+  readonly currentContent: string;
+  readonly currentMtimeMs: number;
+  constructor(message: string, currentContent: string, currentMtimeMs: number) {
+    super(message);
+    this.name = 'FileConflictError';
+    this.currentContent = currentContent;
+    this.currentMtimeMs = currentMtimeMs;
+  }
 }
 
 export async function parseApiError(res: Response): Promise<string> {
@@ -84,11 +102,24 @@ export async function downloadStackFile(
   return apiFetch(stackFilesUrl(stackName, `/download?path=${encodeURIComponent(relPath)}`));
 }
 
+/**
+ * Thrown by uploadStackFile when the target filename already exists in the
+ * directory and the caller did not opt into overwrite. The FileUploadDropzone
+ * surfaces a confirm dialog on this signal and retries with overwrite=true.
+ */
+export class UploadConflictError extends Error {
+  readonly code = 'FILE_EXISTS' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'UploadConflictError';
+  }
+}
+
 export async function uploadStackFile(
   stackName: string,
   targetDir: string,
   file: File,
-  options?: { localOnly?: boolean }
+  options?: { localOnly?: boolean; overwrite?: boolean }
 ): Promise<void> {
   assertSafeRelPath(targetDir, 'target directory');
   const fd = new FormData();
@@ -100,11 +131,12 @@ export async function uploadStackFile(
     headers['x-node-id'] = activeNodeId;
   }
 
+  const overwriteSuffix = options?.overwrite ? '&overwrite=1' : '';
   // Use fetch directly: apiFetch always sets Content-Type: application/json,
   // which breaks multipart boundary negotiation. The 401 side-effects are
   // replicated manually below.
   const res = await fetch(
-    `/api${stackFilesUrl(stackName, `/upload?path=${encodeURIComponent(targetDir)}`)}`,
+    `/api${stackFilesUrl(stackName, `/upload?path=${encodeURIComponent(targetDir)}${overwriteSuffix}`)}`,
     { method: 'POST', credentials: 'include', headers, body: fd }
   );
 
@@ -113,6 +145,17 @@ export async function uploadStackFile(
       window.dispatchEvent(new Event('sencho-unauthorized'));
     }
     throw new Error('Unauthorized');
+  }
+
+  if (res.status === 409) {
+    let body: { code?: string; error?: string } = {};
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    if (body.code === 'FILE_EXISTS') {
+      throw new UploadConflictError(body.error ?? `${file.name} already exists.`);
+    }
+    // DIR_EXISTS and any other 409 fall through to the generic Error path so the
+    // dropzone surfaces the server message as a toast and does NOT offer a Replace
+    // confirmation (a directory cannot be replaced by a file upload).
   }
 
   if (!res.ok) {
@@ -132,14 +175,36 @@ export async function uploadStackFile(
 export async function writeStackFile(
   stackName: string,
   relPath: string,
-  content: string
-): Promise<void> {
+  content: string,
+  options?: { ifMatchMtimeMs?: number }
+): Promise<{ mtimeMs: number | null }> {
   assertSafeRelPath(relPath);
+  const headers: Record<string, string> = {};
+  if (options?.ifMatchMtimeMs !== undefined) {
+    headers['If-Match'] = `"${Math.floor(options.ifMatchMtimeMs)}"`;
+  }
   const res = await apiFetch(
     stackFilesUrl(stackName, `/content?path=${encodeURIComponent(relPath)}`),
-    { method: 'PUT', body: JSON.stringify({ content }) }
+    { method: 'PUT', headers, body: JSON.stringify({ content }) }
   );
+  if (res.status === 412) {
+    let body: { currentContent?: string; currentMtimeMs?: number; error?: string } = {};
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    throw new FileConflictError(
+      body.error ?? 'File has been modified since you last read it.',
+      typeof body.currentContent === 'string' ? body.currentContent : '',
+      typeof body.currentMtimeMs === 'number' ? body.currentMtimeMs : 0,
+    );
+  }
   if (!res.ok) throw new Error(await parseApiError(res));
+  // Parse the ETag the server set so callers can update their local mtime.
+  const etag = res.headers.get('ETag');
+  if (etag) {
+    const stripped = etag.replace(/^W\//i, '').trim().replace(/^"(.*)"$/, '$1');
+    const parsed = Number(stripped);
+    if (Number.isFinite(parsed)) return { mtimeMs: parsed };
+  }
+  return { mtimeMs: null };
 }
 
 export async function deleteStackPath(
