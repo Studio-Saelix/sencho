@@ -15,6 +15,8 @@ interface HealthStatusBarProps {
   activeNodeName: string;
   nodeCount: number;
   lastSyncAt: number | null;
+  /** True after several consecutive metrics polls have failed (Docker socket or metrics path down). */
+  metricsStale?: boolean;
 }
 
 interface HealthResult {
@@ -100,6 +102,7 @@ export function HealthStatusBar({
   activeNodeName,
   nodeCount,
   lastSyncAt,
+  metricsStale = false,
 }: HealthStatusBarProps) {
   const { level, reasons } = useMemo(
     () => deriveHealth(stats, systemStats, notifications),
@@ -134,6 +137,11 @@ export function HealthStatusBar({
             </span>
             <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
               {metaLine}
+              {metricsStale ? (
+                <span className="ml-2 inline-flex items-center rounded-sm border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-[10px] font-mono tracking-wide uppercase text-warning">
+                  metrics stale
+                </span>
+              ) : null}
             </span>
             {reasonsLine ? (
               <span className="font-mono text-[11px] text-stat-subtitle/90">
