@@ -1405,6 +1405,10 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
   logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId });
   try {
     const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath);
+    // ETag is the integer mtimeMs the file was stat'd with, so the matching
+    // PUT can compare millisecond-equal even though some filesystems return
+    // float mtimeMs.
+    res.setHeader('ETag', stackFileEtag(result.mtimeMs));
     logFileDiag('read complete', {
       stackName,
       relPath,
@@ -1521,10 +1525,28 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
   if (typeof content !== 'string') {
     return res.status(400).json({ error: '"content" must be a string' });
   }
+  const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
   const startedAt = Date.now();
-  logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8') });
+  logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8'), hasIfMatch: expectedMtimeMs !== null });
   try {
-    await FileSystemService.getInstance(req.nodeId).writeStackFile(stackName, relPath, content);
+    const result = await FileSystemService.getInstance(req.nodeId).writeStackFileIfUnchanged(
+      stackName,
+      relPath,
+      content,
+      expectedMtimeMs,
+    );
+    if (!result.ok) {
+      // Stale ETag: surface the current content + mtime so the client can
+      // show a "file changed elsewhere" diff and let the user reconcile.
+      res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      return res.status(412).json({
+        error: 'File has been modified since you last read it. Reload to see the current version.',
+        code: 'PRECONDITION_FAILED',
+        currentMtimeMs: result.currentMtimeMs,
+        currentContent: result.currentContent,
+      });
+    }
+    res.setHeader('ETag', stackFileEtag(result.mtimeMs));
     logFileOperation('info', 'write complete', { nodeId: req.nodeId });
     logFileDiag('write timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     return res.status(204).send();

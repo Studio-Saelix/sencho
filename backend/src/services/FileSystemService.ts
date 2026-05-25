@@ -654,31 +654,39 @@ export class FileSystemService {
     stackName: string,
     relPath: string,
     maxBytes: number = 2 * 1024 * 1024
-  ): Promise<{ content?: string; binary: boolean; oversized: boolean; size: number; mime: string }> {
+  ): Promise<{ content?: string; binary: boolean; oversized: boolean; size: number; mime: string; mtimeMs: number }> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
-    const stat = await fsPromises.stat(safePath);
     const mime = this.guessMime(safePath);
 
-    if (stat.isDirectory()) {
-      throw Object.assign(new Error('Target is a directory'), { code: 'IS_DIRECTORY' });
+    // Open once and stat+read through the same handle so the mtime returned to
+    // the client matches the bytes it received, even if the file is replaced
+    // (atomic rename) between the two operations.
+    const fh = await fsPromises.open(safePath, 'r');
+    try {
+      const stat = await fh.stat();
+      const mtimeMs = stat.mtimeMs;
+
+      if (stat.isDirectory()) {
+        throw Object.assign(new Error('Target is a directory'), { code: 'IS_DIRECTORY' });
+      }
+
+      if (stat.size > maxBytes) {
+        const probe = Buffer.allocUnsafe(8192);
+        const { bytesRead } = await fh.read(probe, 0, 8192, 0);
+        const binary = isBinaryBuffer(probe.subarray(0, bytesRead));
+        return { binary, oversized: true, size: stat.size, mime, mtimeMs };
+      }
+
+      const buf = await fh.readFile();
+
+      if (isBinaryBuffer(buf)) {
+        return { binary: true, oversized: false, size: stat.size, mime, mtimeMs };
+      }
+
+      return { binary: false, oversized: false, size: stat.size, mime, mtimeMs, content: buf.toString('utf-8') };
+    } finally {
+      await fh.close();
     }
-
-    if (stat.size > maxBytes) {
-      const fd = await fsPromises.open(safePath, 'r');
-      const probe = Buffer.allocUnsafe(8192);
-      const { bytesRead } = await fd.read(probe, 0, 8192, 0);
-      await fd.close();
-      const binary = isBinaryBuffer(probe.subarray(0, bytesRead));
-      return { binary, oversized: true, size: stat.size, mime };
-    }
-
-    const buf = await fsPromises.readFile(safePath);
-
-    if (isBinaryBuffer(buf)) {
-      return { binary: true, oversized: false, size: stat.size, mime };
-    }
-
-    return { binary: false, oversized: false, size: stat.size, mime, content: buf.toString('utf-8') };
   }
 
   async streamStackFile(
@@ -793,6 +801,58 @@ export class FileSystemService {
       if (e.code === 'ENOENT') return null;
       throw err;
     }
+  }
+
+  /**
+   * Optimistic-concurrency write for arbitrary stack files (file-explorer
+   * editor save path). If `expectedMtimeMs` is provided, opens the target,
+   * stats it, and refuses the write (returning current content + mtime) when
+   * the stat does not match the caller's expectation. Mirrors the
+   * compose-file pattern in saveStackContentIfUnchanged.
+   *
+   * Mtime comparison uses Math.floor so sub-millisecond jitter between
+   * different filesystems and Node versions does not produce false 412s.
+   *
+   * If the file does not exist yet, the write proceeds (no mtime to compare).
+   * Returns the new mtimeMs so the route can emit a fresh ETag.
+   */
+  async writeStackFileIfUnchanged(
+    stackName: string,
+    relPath: string,
+    content: string,
+    expectedMtimeMs: number | null,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
+    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
+
+    if (expectedMtimeMs !== null) {
+      let fh: import('fs/promises').FileHandle | null = null;
+      try {
+        fh = await fsPromises.open(safePath, 'r');
+        const stat = await fh.stat();
+        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+          const currentContent = await fh.readFile('utf-8');
+          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        // The caller expected an existing file but it has been deleted under
+        // the editor. That is itself a conflict (the file is gone, the user
+        // is editing into a void) so surface it the same way as a stale-mtime
+        // mismatch. An empty current snapshot tells the client "the live
+        // version is gone, you are starting from scratch".
+        return { ok: false, currentMtimeMs: 0, currentContent: '' };
+      } finally {
+        if (fh) await fh.close();
+      }
+    }
+
+    await fsPromises.writeFile(safePath, content, 'utf-8');
+    const newStat = await fsPromises.stat(safePath);
+    return { ok: true, mtimeMs: newStat.mtimeMs };
   }
 
   async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false): Promise<void> {
