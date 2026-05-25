@@ -126,6 +126,81 @@ describe('GET /api/stacks/:stackName/files', () => {
     DatabaseService.getInstance().updateGlobalSetting('developer_mode', '0');
   });
 
+  it('emits a structured INFO line on a successful mutation (op/stack/path/bytes)', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('observability payload'), 'observability-info.txt');
+
+    const mutateCall = logSpy.mock.calls.find(
+      ([prefix, details]) =>
+        typeof prefix === 'string' &&
+        prefix.includes('[Files] mutate') &&
+        details &&
+        typeof details === 'object' &&
+        (details as { op?: unknown }).op === 'upload',
+    );
+    expect(mutateCall).toBeDefined();
+    const details = mutateCall![1] as Record<string, unknown>;
+    // sanitizeForLog coerces every value to a string before it lands in the log
+    // payload, so bytes/mode/etc. arrive as their string representation. Operators
+    // and log scrapers still see the right number; the test reflects that shape.
+    expect(details.stack).toBe(STACK);
+    expect(details.path).toBe('observability-info.txt');
+    expect(typeof details.bytes).toBe('string');
+    expect(Number(details.bytes)).toBeGreaterThan(0);
+
+    logSpy.mockRestore();
+  });
+
+  it('records an error metric when an upload is rejected with FILE_EXISTS (overwrite confirm path)', async () => {
+    const { FileExplorerMetricsService } = await import('../services/FileExplorerMetricsService');
+    FileExplorerMetricsService.resetForTests();
+
+    // Seed an existing file so the second upload hits the FILE_EXISTS branch.
+    await fs.writeFile(path.join(stacksDir, STACK, 'observability-conflict.txt'), 'pre-existing');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('replacement'), 'observability-conflict.txt');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('FILE_EXISTS');
+
+    const metricsRes = await request(app)
+      .get('/api/file-explorer-metrics')
+      .set('Cookie', adminCookie);
+    const uploadEntry = (metricsRes.body.entries as Array<{ op: string; errorCount: number }>).find(
+      e => e.op === 'upload',
+    );
+    expect(uploadEntry).toBeDefined();
+    expect(uploadEntry!.errorCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('records a metric on the upload route that surfaces in /api/file-explorer-metrics', async () => {
+    const { FileExplorerMetricsService } = await import('../services/FileExplorerMetricsService');
+    FileExplorerMetricsService.resetForTests();
+
+    await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('metrics payload'), 'observability-metrics.txt');
+
+    const metricsRes = await request(app)
+      .get('/api/file-explorer-metrics')
+      .set('Cookie', adminCookie);
+    expect(metricsRes.status).toBe(200);
+    const uploadEntry = (metricsRes.body.entries as Array<{ op: string; successCount: number }>).find(
+      e => e.op === 'upload',
+    );
+    expect(uploadEntry).toBeDefined();
+    expect(uploadEntry!.successCount).toBeGreaterThanOrEqual(1);
+    const bytesEntry = (metricsRes.body.uploadBytesByNode as Array<{ totalBytes: number }>)[0];
+    expect(bytesEntry).toBeDefined();
+    expect(bytesEntry.totalBytes).toBeGreaterThan(0);
+  });
+
   it('returns 400 for an invalid stack name containing path traversal', async () => {
     const res = await request(app)
       .get('/api/stacks/../evil/files')

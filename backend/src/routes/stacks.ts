@@ -16,6 +16,7 @@ import { requirePaid, requireAdmin, effectiveTier } from '../middleware/tierGate
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
 import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
+import { FileExplorerMetricsService, type FileExplorerOp } from '../services/FileExplorerMetricsService';
 import { isValidGitSourcePath, isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -1367,6 +1368,46 @@ function logFileDiag(message: string, details: Record<string, unknown>): void {
   console.debug(`[Files:diag] ${message}`, cleaned);
 }
 
+/**
+ * Records one file-explorer op into the in-process metrics service. Always
+ * called once per request from the route layer, regardless of success or
+ * failure, so the counts in the `/api/file-explorer-metrics` snapshot stay
+ * in step with the INFO log line emitted in the same handler.
+ */
+function recordFileOp(nodeId: number, op: FileExplorerOp, startedAt: number, ok: boolean): void {
+  FileExplorerMetricsService.getInstance().record(nodeId, op, Date.now() - startedAt, ok);
+}
+
+/**
+ * Emits the warn log, records the metric, and sends the JSON response for a
+ * mutation rejected with a known error code (e.g. DIR_EXISTS, FILE_EXISTS,
+ * PRECONDITION_FAILED). Centralizes the three-step shape so a future rejection
+ * site cannot skip the metric and drift from the log.
+ */
+function rejectFileMutation(
+  req: Request,
+  res: Response,
+  args: {
+    op: FileExplorerOp;
+    stack: string;
+    path: string;
+    startedAt: number;
+    status: number;
+    code: string;
+    body: Record<string, unknown>;
+  },
+): Response {
+  logFileOperation('warn', 'mutate rejected', {
+    nodeId: req.nodeId,
+    op: args.op,
+    stack: args.stack,
+    path: args.path,
+    errorCode: args.code,
+  });
+  recordFileOp(req.nodeId, args.op, args.startedAt, false);
+  return res.status(args.status).json({ ...args.body, code: args.code });
+}
+
 function isSafeUploadFilename(rawName: string): boolean {
   if (!rawName || rawName === '.' || rawName === '..') return false;
   if (rawName.includes('\0') || rawName.includes('/') || rawName.includes('\\')) return false;
@@ -1401,9 +1442,11 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
       truncated: result.truncated,
       elapsedMs: Date.now() - startedAt,
     });
+    recordFileOp(req.nodeId, 'list', startedAt, true);
     return res.json(result.entries);
   } catch (err: unknown) {
     logFileOperation('warn', 'list failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+    recordFileOp(req.nodeId, 'list', startedAt, false);
     return sendFsError(res, err, 'Failed to list directory');
   }
 });
@@ -1433,9 +1476,11 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
       size: result.size,
       elapsedMs: Date.now() - startedAt,
     });
+    recordFileOp(req.nodeId, 'read', startedAt, true);
     return res.json(result);
   } catch (err: unknown) {
     logFileOperation('warn', 'read failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+    recordFileOp(req.nodeId, 'read', startedAt, false);
     return sendFsError(res, err, 'Failed to read file');
   }
 });
@@ -1464,10 +1509,12 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     });
     req.on('close', () => result.stream.destroy());
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'download', startedAt, true);
     result.stream.pipe(res);
     return;
   } catch (err: unknown) {
     logFileOperation('warn', 'download failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+    recordFileOp(req.nodeId, 'download', startedAt, false);
     return sendFsError(res, err, 'Failed to download file');
   }
 });
@@ -1475,11 +1522,33 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
 stacksRouter.post(
   '/:stackName/files/upload',
   (req: Request, res: Response, next: NextFunction) => {
+    // Capture the time the upload entered the route so the multer error
+    // branches below can record an `upload` metric. The multipart body was
+    // already streamed and buffered to this point, so an oversize rejection
+    // represents real work the operator should be able to see on the
+    // /api/file-explorer-metrics dashboard.
+    const startedAt = Date.now();
     upload.single('file')(req, res, (err) => {
       if (err && (err as multer.MulterError).code === 'LIMIT_FILE_SIZE') {
+        logFileOperation('warn', 'mutate rejected', {
+          nodeId: req.nodeId,
+          op: 'upload',
+          stack: req.params.stackName,
+          errorCode: 'TOO_LARGE',
+        });
+        recordFileOp(req.nodeId, 'upload', startedAt, false);
         return res.status(413).json({ error: 'File exceeds 25 MB limit', code: 'TOO_LARGE' });
       }
-      if (err) return res.status(500).json({ error: 'Upload failed' });
+      if (err) {
+        logFileOperation('warn', 'upload failed', {
+          nodeId: req.nodeId,
+          op: 'upload',
+          stack: req.params.stackName,
+          errorCode: 'MULTER_ERROR',
+        });
+        recordFileOp(req.nodeId, 'upload', startedAt, false);
+        return res.status(500).json({ error: 'Upload failed' });
+      }
       next();
     });
   },
@@ -1506,23 +1575,56 @@ stacksRouter.post(
       if (existing === 'directory') {
         // A directory can never be replaced by an upload; surface a distinct code
         // so the UI does not offer a useless "Replace" button.
-        return res.status(409).json({
-          error: `A folder named ${originalName} already exists in this folder. Rename the upload or remove the folder first.`,
+        return rejectFileMutation(req, res, {
+          op: 'upload',
+          stack: stackName,
+          path: targetRelPath,
+          startedAt,
+          status: 409,
           code: 'DIR_EXISTS',
+          body: {
+            error: `A folder named ${originalName} already exists in this folder. Rename the upload or remove the folder first.`,
+          },
         });
       }
       if (existing === 'file' && !overwrite) {
-        return res.status(409).json({
-          error: `${originalName} already exists in this folder. Confirm to replace.`,
+        // Real FS work ran (pathKind) and the operator was rejected; surface
+        // the conflict in metrics so a node with a hot overwrite-confirm
+        // pattern shows up in the snapshot rather than disappearing.
+        return rejectFileMutation(req, res, {
+          op: 'upload',
+          stack: stackName,
+          path: targetRelPath,
+          startedAt,
+          status: 409,
           code: 'FILE_EXISTS',
+          body: {
+            error: `${originalName} already exists in this folder. Confirm to replace.`,
+          },
         });
       }
       await FileSystemService.getInstance(req.nodeId).writeStackFileBuffer(stackName, targetRelPath, req.file.buffer);
-      logFileOperation('info', 'upload complete', { nodeId: req.nodeId, size: req.file.size, overwrite });
+      logFileOperation('info', 'mutate', {
+        nodeId: req.nodeId,
+        op: 'upload',
+        stack: stackName,
+        path: targetRelPath,
+        bytes: req.file.size,
+        overwrite,
+      });
       logFileDiag('upload timing', { stackName, relPath: targetRelPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
+      recordFileOp(req.nodeId, 'upload', startedAt, true);
+      FileExplorerMetricsService.getInstance().recordUploadBytes(req.nodeId, req.file.size);
       return res.status(204).send();
     } catch (err: unknown) {
-      logFileOperation('warn', 'upload failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+      logFileOperation('warn', 'upload failed', {
+        nodeId: req.nodeId,
+        op: 'upload',
+        stack: stackName,
+        path: targetRelPath,
+        errorCode: fsErrorCode(err),
+      });
+      recordFileOp(req.nodeId, 'upload', startedAt, false);
       return sendFsError(res, err, 'Failed to upload file', { notFoundMessage: 'Target directory not found' });
     }
   },
@@ -1553,20 +1655,44 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
     if (!result.ok) {
       // Stale ETag: surface the current content + mtime so the client can
       // show a "file changed elsewhere" diff and let the user reconcile.
+      // Real FS work ran (the if-unchanged stat compare); record the
+      // attempted-and-rejected write so operators chasing concurrent-edit
+      // patterns can see them in the snapshot.
       res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
-      return res.status(412).json({
-        error: 'File has been modified since you last read it. Reload to see the current version.',
+      return rejectFileMutation(req, res, {
+        op: 'write',
+        stack: stackName,
+        path: relPath,
+        startedAt,
+        status: 412,
         code: 'PRECONDITION_FAILED',
-        currentMtimeMs: result.currentMtimeMs,
-        currentContent: result.currentContent,
+        body: {
+          error: 'File has been modified since you last read it. Reload to see the current version.',
+          currentMtimeMs: result.currentMtimeMs,
+          currentContent: result.currentContent,
+        },
       });
     }
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
-    logFileOperation('info', 'write complete', { nodeId: req.nodeId });
+    logFileOperation('info', 'mutate', {
+      nodeId: req.nodeId,
+      op: 'write',
+      stack: stackName,
+      path: relPath,
+      bytes: Buffer.byteLength(content, 'utf-8'),
+    });
     logFileDiag('write timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'write', startedAt, true);
     return res.status(204).send();
   } catch (err: unknown) {
-    logFileOperation('warn', 'write failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+    logFileOperation('warn', 'write failed', {
+      nodeId: req.nodeId,
+      op: 'write',
+      stack: stackName,
+      path: relPath,
+      errorCode: fsErrorCode(err),
+    });
+    recordFileOp(req.nodeId, 'write', startedAt, false);
     return sendFsError(res, err, 'Failed to write file');
   }
 });
@@ -1584,11 +1710,26 @@ stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => 
   logFileDiag('delete start', { stackName, relPath, recursive, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).deleteStackPath(stackName, relPath, recursive);
-    logFileOperation('info', 'delete complete', { nodeId: req.nodeId, recursive });
+    logFileOperation('info', 'mutate', {
+      nodeId: req.nodeId,
+      op: 'delete',
+      stack: stackName,
+      path: relPath,
+      recursive,
+    });
     logFileDiag('delete timing', { stackName, relPath, recursive, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'delete', startedAt, true);
     return res.status(204).send();
   } catch (err: unknown) {
-    logFileOperation('warn', 'delete failed', { nodeId: req.nodeId, recursive, errorCode: fsErrorCode(err) });
+    logFileOperation('warn', 'delete failed', {
+      nodeId: req.nodeId,
+      op: 'delete',
+      stack: stackName,
+      path: relPath,
+      recursive,
+      errorCode: fsErrorCode(err),
+    });
+    recordFileOp(req.nodeId, 'delete', startedAt, false);
     return sendFsError(res, err, 'Failed to delete path');
   }
 });
@@ -1605,11 +1746,24 @@ stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response
   logFileDiag('mkdir start', { stackName, relPath, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).mkdirStackPath(stackName, relPath);
-    logFileOperation('info', 'mkdir complete', { nodeId: req.nodeId });
+    logFileOperation('info', 'mutate', {
+      nodeId: req.nodeId,
+      op: 'mkdir',
+      stack: stackName,
+      path: relPath,
+    });
     logFileDiag('mkdir timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'mkdir', startedAt, true);
     return res.status(204).send();
   } catch (err: unknown) {
-    logFileOperation('warn', 'mkdir failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+    logFileOperation('warn', 'mkdir failed', {
+      nodeId: req.nodeId,
+      op: 'mkdir',
+      stack: stackName,
+      path: relPath,
+      errorCode: fsErrorCode(err),
+    });
+    recordFileOp(req.nodeId, 'mkdir', startedAt, false);
     return sendFsError(res, err, 'Failed to create folder');
   }
 });
@@ -1634,11 +1788,26 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
   logFileDiag('rename start', { stackName, from, to, nodeId: req.nodeId });
   try {
     await FileSystemService.getInstance(req.nodeId).renameStackPath(stackName, from, to);
-    logFileOperation('info', 'rename complete', { nodeId: req.nodeId });
+    logFileOperation('info', 'mutate', {
+      nodeId: req.nodeId,
+      op: 'rename',
+      stack: stackName,
+      path: from,
+      toPath: to,
+    });
     logFileDiag('rename timing', { stackName, from, to, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'rename', startedAt, true);
     return res.status(204).send();
   } catch (err: unknown) {
-    logFileOperation('warn', 'rename failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+    logFileOperation('warn', 'rename failed', {
+      nodeId: req.nodeId,
+      op: 'rename',
+      stack: stackName,
+      path: from,
+      toPath: to,
+      errorCode: fsErrorCode(err),
+    });
+    recordFileOp(req.nodeId, 'rename', startedAt, false);
     return sendFsError(res, err, 'Failed to rename');
   }
 });
@@ -1656,9 +1825,11 @@ stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Resp
   try {
     const result = await FileSystemService.getInstance(req.nodeId).getStackEntryMode(stackName, relPath);
     logFileDiag('permissions read complete', { stackName, relPath, nodeId: req.nodeId, mode: result.octal, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'permissionsRead', startedAt, true);
     return res.json(result);
   } catch (err: unknown) {
     logFileOperation('warn', 'permissions read failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+    recordFileOp(req.nodeId, 'permissionsRead', startedAt, false);
     return sendFsError(res, err, 'Failed to read permissions');
   }
 });
@@ -1679,11 +1850,26 @@ stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Resp
   logFileDiag('chmod start', { stackName, relPath, nodeId: req.nodeId, mode });
   try {
     await FileSystemService.getInstance(req.nodeId).chmodStackPath(stackName, relPath, mode);
-    logFileOperation('info', 'chmod complete', { nodeId: req.nodeId, mode });
+    logFileOperation('info', 'mutate', {
+      nodeId: req.nodeId,
+      op: 'chmod',
+      stack: stackName,
+      path: relPath,
+      mode: mode.toString(8).padStart(3, '0'),
+    });
     logFileDiag('chmod timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'chmod', startedAt, true);
     return res.status(204).send();
   } catch (err: unknown) {
-    logFileOperation('warn', 'chmod failed', { nodeId: req.nodeId, errorCode: fsErrorCode(err) });
+    logFileOperation('warn', 'chmod failed', {
+      nodeId: req.nodeId,
+      op: 'chmod',
+      stack: stackName,
+      path: relPath,
+      mode: mode.toString(8).padStart(3, '0'),
+      errorCode: fsErrorCode(err),
+    });
+    recordFileOp(req.nodeId, 'chmod', startedAt, false);
     return sendFsError(res, err, 'Failed to set permissions');
   }
 });
