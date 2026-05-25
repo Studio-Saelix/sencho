@@ -51,7 +51,7 @@ Sencho is a Docker Compose control plane focused on homelab and small-fleet oper
 - A monitoring stack. Sencho surfaces container and host metrics in the dashboard but does not replace Prometheus, Grafana, or your existing alerting pipeline.
 - A CI / CD pipeline. Use webhooks, the API, or Git-sourced stacks to connect Sencho to your build system.
 
-See [the known limitations](KNOWN_LIMITATIONS.md) for the current limitation list.
+See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list.
 
 ---
 
@@ -82,24 +82,24 @@ See [the known limitations](KNOWN_LIMITATIONS.md) for the current limitation lis
 - Node compatibility checks before deploying
 
 ### Automation
-- [Auto-heal policies](https://docs.sencho.io/features/auto-heal-policies) for failed containers
-- [Auto-update policies](https://docs.sencho.io/features/auto-update-policies) for image rollouts
-- [Scheduled operations](https://docs.sencho.io/features/scheduled-operations) on cron 
-- [Blueprints](https://docs.sencho.io/features/blueprint-model): declarative fleet templates with drift detection
-- [Webhooks](https://docs.sencho.io/features/webhooks) on stack lifecycle events
-- Encrypted [Fleet Secrets](https://docs.sencho.io/features/fleet-secrets) pushed to labeled nodes
+- [Auto-heal policies](https://docs.sencho.io/features/auto-heal-policies) for failed containers **(Skipper)**
+- [Auto-update policies](https://docs.sencho.io/features/auto-update-policies) for image rollouts **(Skipper)**
+- [Scheduled operations](https://docs.sencho.io/features/scheduled-operations) on cron **(Skipper)**
+- [Blueprints](https://docs.sencho.io/features/blueprint-model): declarative fleet templates with drift detection **(Skipper)**
+- [Webhooks](https://docs.sencho.io/features/webhooks) on stack lifecycle events **(Skipper)**
+- Encrypted [Fleet Secrets](https://docs.sencho.io/features/fleet-secrets) pushed to labeled nodes **(Skipper)**
 
 ### Security
 - [SSO](https://docs.sencho.io/features/sso): custom OIDC, presets for Google, GitHub, and Okta, plus LDAP and Active Directory
 - [Two-factor authentication](https://docs.sencho.io/features/two-factor-authentication) with TOTP and backup codes
 - [RBAC](https://docs.sencho.io/features/rbac) with five roles: admin (full control), viewer (read-only), deployer (deploy and restart, no edits), node-admin (admin scoped to specific nodes), and auditor (read-only with audit-log access)
-- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy on every tier with VEX-based suppression; SARIF export and SBOM upload
-- [Private registries](https://docs.sencho.io/features/private-registries) and [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) for non-compliant images
+- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy on every tier with VEX-based suppression; SARIF export and SBOM upload **(Skipper)**
+- [Private registries](https://docs.sencho.io/features/private-registries) **(Admiral)** and [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) **(Skipper)** for non-compliant images
 - [API tokens](https://docs.sencho.io/features/api-tokens) for automation
 
 ### Operations
-- [Host console](https://docs.sencho.io/features/host-console) in the browser
-- Off-site stack archives via custom S3 (every tier) or [Sencho Cloud Backup](https://docs.sencho.io/operations/backup) for managed storage
+- [Host console](https://docs.sencho.io/features/host-console) in the browser **(Admiral)**
+- Off-site stack archives via custom S3 (every tier) or [Sencho Cloud Backup](https://docs.sencho.io/operations/backup) **(Admiral)** for managed storage
 - [Notification routing](https://docs.sencho.io/features/alerts-notifications#notification-routing) to Slack, Discord, email, and webhooks
 - [Global search](https://docs.sencho.io/features/global-search) across stacks, containers, and services
 - [Resources view](https://docs.sencho.io/features/resources) for images, volumes, and networks with scoped prune actions
