@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { UploadCloud } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { uploadStackFile, UploadConflictError } from '@/lib/stackFilesApi';
@@ -20,6 +21,7 @@ export function FileUploadDropzone({
   onUploaded,
 }: FileUploadDropzoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [isOver, setIsOver] = useState(false);
   const [conflict, setConflict] = useState<File | null>(null);
 
   if (!canEdit) return null;
@@ -55,6 +57,34 @@ export function FileUploadDropzone({
     ev.target.value = '';
   };
 
+  const handleDragOver = (ev: React.DragEvent<HTMLDivElement>) => {
+    if (!ev.dataTransfer.types.includes('Files')) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'copy';
+    if (!isOver) setIsOver(true);
+  };
+
+  const handleDragLeave = (ev: React.DragEvent<HTMLDivElement>) => {
+    // Ignore leave events that bubble from child elements still within the
+    // dropzone (relatedTarget is contained by currentTarget); only react when
+    // the cursor truly leaves the zone.
+    const next = ev.relatedTarget;
+    if (next instanceof Node && ev.currentTarget.contains(next)) return;
+    setIsOver(false);
+  };
+
+  const handleDrop = (ev: React.DragEvent<HTMLDivElement>) => {
+    ev.preventDefault();
+    setIsOver(false);
+    const files = ev.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    if (files.length > 1) {
+      toast.error('Drop one file at a time.');
+      return;
+    }
+    void handleFile(files[0]);
+  };
+
   return (
     <>
       <input
@@ -67,7 +97,12 @@ export function FileUploadDropzone({
       <div
         role="button"
         tabIndex={0}
-        className="border border-dashed border-border rounded-md p-2 text-xs text-muted-foreground flex items-center gap-2 cursor-pointer hover:border-brand/50 transition-colors"
+        className={cn(
+          'border border-dashed rounded-md p-2 text-xs flex items-center gap-2 cursor-pointer transition-colors',
+          isOver
+            ? 'border-brand bg-brand/10 text-brand'
+            : 'border-border text-muted-foreground hover:border-brand/50',
+        )}
         onClick={() => inputRef.current?.click()}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
@@ -75,9 +110,12 @@ export function FileUploadDropzone({
             inputRef.current?.click();
           }
         }}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
       >
         <UploadCloud className="w-3.5 h-3.5 shrink-0" strokeWidth={1.5} />
-        Upload file
+        {isOver ? 'Drop to upload' : 'Upload or drop file'}
       </div>
 
       <ConfirmModal
