@@ -35,7 +35,7 @@ The Files tab splits into two panes. The left pane holds the upload affordance, 
 
 Folders sort before files, and entries within each group sort alphabetically.
 
-Click a folder to expand or collapse it. Click a file to open it in the viewer on the right. Symlinks render with a chain icon and behave like files when clicked.
+Click a folder to expand or collapse it. Click a file to open it in the viewer on the right. Symlinks render with a chain icon and behave like files when clicked. Deleting a symlink removes only the link entry; the file it points to is untouched.
 
 **Display cap.** Each directory render is capped at 500 entries. A folder with more than 500 children shows the first 500 alphabetically and appends `Showing 500 of N - refine in shell` at the bottom of the list. For directories with more entries, work from a host shell.
 
@@ -127,7 +127,7 @@ Right-click any file and choose **Permissions** to inspect or edit its Unix mode
 When your account has stack edit permission, the toggles are interactive and the footer adds **Save**. For viewer accounts the dialog opens read-only: the toggles render the current state and the footer shows only **Close**.
 
 <Note>
-  Permissions are applied with `chmod`. Symlinks may not honour the change depending on the host kernel.
+  Permissions are applied with `chmod`. Permission changes on symlinks are not supported; edit the target file's permissions directly.
 </Note>
 
 ## Deleting

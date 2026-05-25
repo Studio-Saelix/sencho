@@ -441,4 +441,117 @@ describe('FileSystemService stack methods', () => {
       await expect(service.readStackFile(STACK, 'escape-link')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
     });
   });
+
+  // ── symlink semantics ────────────────────────────────────────────────────
+  // Symlink creation requires admin/developer-mode on Windows; skip the
+  // whole block there to avoid spurious EPERM failures unrelated to the
+  // behaviour being tested.
+
+  describe.skipIf(isWindows)('symlink semantics (Linux/macOS only)', () => {
+    it('delete on a symlink removes the link entry and leaves the target intact', async () => {
+      const targetPath = path.join(stackDir, 'target.txt');
+      const linkPath = path.join(stackDir, 'link.txt');
+      await fs.writeFile(targetPath, 'payload');
+      await fs.symlink(targetPath, linkPath);
+
+      const service = FileSystemService.getInstance();
+      await service.deleteStackPath(STACK, 'link.txt');
+
+      await expect(fs.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const targetContent = await fs.readFile(targetPath, 'utf-8');
+      expect(targetContent).toBe('payload');
+    });
+
+    it('delete on a symlink that points outside the stack removes only the link entry', async () => {
+      const externalFile = path.join(tmpBase, 'outside.txt');
+      await fs.writeFile(externalFile, 'external');
+      const linkPath = path.join(stackDir, 'escape-link');
+      await fs.symlink(externalFile, linkPath);
+
+      const service = FileSystemService.getInstance();
+      await service.deleteStackPath(STACK, 'escape-link');
+
+      await expect(fs.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const externalContent = await fs.readFile(externalFile, 'utf-8');
+      expect(externalContent).toBe('external');
+    });
+
+    it('chmod on a symlink rejects with LINK_CHMOD_UNSUPPORTED and leaves the target mode unchanged', async () => {
+      const targetPath = path.join(stackDir, 'target.txt');
+      await fs.writeFile(targetPath, 'payload');
+      await fs.chmod(targetPath, 0o644);
+      await fs.symlink(targetPath, path.join(stackDir, 'link.txt'));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.chmodStackPath(STACK, 'link.txt', 0o600)).rejects.toMatchObject({
+        code: 'LINK_CHMOD_UNSUPPORTED',
+      });
+
+      const stat = await fs.stat(targetPath);
+      expect(stat.mode & 0o777).toBe(0o644);
+    });
+
+    it('chmod on a regular file still succeeds (symlink branch does not regress non-symlink paths)', async () => {
+      const filePath = path.join(stackDir, 'plain.txt');
+      await fs.writeFile(filePath, 'data');
+      await fs.chmod(filePath, 0o644);
+
+      const service = FileSystemService.getInstance();
+      await service.chmodStackPath(STACK, 'plain.txt', 0o600);
+
+      const stat = await fs.stat(filePath);
+      expect(stat.mode & 0o777).toBe(0o600);
+    });
+
+    it('delete on a regular file still succeeds (symlink branch does not regress non-symlink paths)', async () => {
+      const filePath = path.join(stackDir, 'plain.txt');
+      await fs.writeFile(filePath, 'data');
+
+      const service = FileSystemService.getInstance();
+      await service.deleteStackPath(STACK, 'plain.txt');
+
+      await expect(fs.access(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('delete on a broken symlink (target already removed) removes the dangling link entry', async () => {
+      const targetPath = path.join(stackDir, 'gone.txt');
+      const linkPath = path.join(stackDir, 'broken-link.txt');
+      await fs.writeFile(targetPath, '');
+      await fs.symlink(targetPath, linkPath);
+      await fs.unlink(targetPath);
+
+      const service = FileSystemService.getInstance();
+      await service.deleteStackPath(STACK, 'broken-link.txt');
+
+      await expect(fs.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('chmod on a broken symlink rejects with LINK_CHMOD_UNSUPPORTED rather than ENOENT', async () => {
+      const targetPath = path.join(stackDir, 'gone-chmod.txt');
+      const linkPath = path.join(stackDir, 'broken-link-chmod.txt');
+      await fs.writeFile(targetPath, '');
+      await fs.symlink(targetPath, linkPath);
+      await fs.unlink(targetPath);
+
+      const service = FileSystemService.getInstance();
+      await expect(service.chmodStackPath(STACK, 'broken-link-chmod.txt', 0o600)).rejects.toMatchObject({
+        code: 'LINK_CHMOD_UNSUPPORTED',
+      });
+    });
+
+    it('delete on a symlink to a directory removes only the link entry, not the target directory', async () => {
+      const targetDir = path.join(stackDir, 'real-dir');
+      const linkPath = path.join(stackDir, 'link-to-dir');
+      await fs.mkdir(targetDir);
+      await fs.writeFile(path.join(targetDir, 'kept.txt'), 'preserve');
+      await fs.symlink(targetDir, linkPath);
+
+      const service = FileSystemService.getInstance();
+      await service.deleteStackPath(STACK, 'link-to-dir');
+
+      await expect(fs.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const kept = await fs.readFile(path.join(targetDir, 'kept.txt'), 'utf-8');
+      expect(kept).toBe('preserve');
+    });
+  });
 });
