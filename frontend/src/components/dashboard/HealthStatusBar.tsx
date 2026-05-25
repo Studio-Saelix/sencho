@@ -88,6 +88,11 @@ function useTicker(intervalMs: number): number {
   return now;
 }
 
+// The "last sync Xs" label only shifts visibly every few seconds, so a 5 s
+// re-render cadence keeps the freshness signal accurate without forcing the
+// dashboard tree through the reconciler once per second.
+const SYNC_LABEL_TICK_MS = 5000;
+
 export function HealthStatusBar({
   stats,
   systemStats,
@@ -101,7 +106,7 @@ export function HealthStatusBar({
     [stats, systemStats, notifications],
   );
   const config = healthConfig[level];
-  const now = useTicker(1000);
+  const now = useTicker(SYNC_LABEL_TICK_MS);
   const unreadAlerts = notifications.filter(n => !n.is_read).length;
   const running = `${stats.active}/${stats.total}`;
   const cpuLabel = systemStats ? `${parseFloat(systemStats.cpu.usage).toFixed(0)}%` : '--';
