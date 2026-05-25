@@ -237,6 +237,118 @@ describe('FileSystemService stack methods', () => {
     });
   });
 
+  // ── atomic write semantics ──────────────────────────────────────────────
+
+  describe('atomic write semantics', () => {
+    it('does not leak .sencho-tmp-* files after a successful write', async () => {
+      const service = FileSystemService.getInstance();
+      await service.writeStackFile(STACK, 'clean.txt', 'final');
+      const dirEntries = await fs.readdir(stackDir);
+      const leftovers = dirEntries.filter(name => name.startsWith('clean.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('preserves the original target when the rename step throws', async () => {
+      const target = path.join(stackDir, 'crash.txt');
+      await fs.writeFile(target, 'ORIGINAL');
+
+      const fsModule = await import('fs');
+      const renameSpy = vi
+        .spyOn(fsModule.promises, 'rename')
+        .mockRejectedValueOnce(Object.assign(new Error('disk yanked'), { code: 'EIO' }));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.writeStackFile(STACK, 'crash.txt', 'NEW')).rejects.toThrow(/disk yanked/);
+
+      // Target keeps its original content.
+      const content = await fs.readFile(target, 'utf-8');
+      expect(content).toBe('ORIGINAL');
+
+      // Tmp file is cleaned up.
+      const dirEntries = await fs.readdir(stackDir);
+      const leftovers = dirEntries.filter(name => name.startsWith('crash.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+
+      renameSpy.mockRestore();
+    });
+
+    it('exclusive write to a fresh target succeeds', async () => {
+      const service = FileSystemService.getInstance();
+      await service.writeStackFile(STACK, 'first.txt', 'hello', { exclusive: true });
+      const content = await fs.readFile(path.join(stackDir, 'first.txt'), 'utf-8');
+      expect(content).toBe('hello');
+    });
+
+    it('exclusive write to an existing target throws FILE_EXISTS and preserves the original', async () => {
+      const target = path.join(stackDir, 'taken.txt');
+      await fs.writeFile(target, 'KEEP');
+
+      const service = FileSystemService.getInstance();
+      let caught: unknown = null;
+      try {
+        await service.writeStackFile(STACK, 'taken.txt', 'OVERWRITE', { exclusive: true });
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as { code?: string })?.code).toBe('FILE_EXISTS');
+
+      const content = await fs.readFile(target, 'utf-8');
+      expect(content).toBe('KEEP');
+
+      // Tmp file cleaned up after the link failure.
+      const dirEntries = await fs.readdir(stackDir);
+      const leftovers = dirEntries.filter(name => name.startsWith('taken.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('cleans up the tmp file when the write step throws', async () => {
+      const fsModule = await import('fs');
+      const originalOpen = fsModule.promises.open;
+      const openSpy = vi
+        .spyOn(fsModule.promises, 'open')
+        .mockImplementationOnce(async (...args) => {
+          const fh = await originalOpen.apply(fsModule.promises, args as Parameters<typeof originalOpen>);
+          // Patch writeFile to throw, the close still runs via the inner finally.
+          (fh as unknown as { writeFile: () => Promise<void> }).writeFile = () =>
+            Promise.reject(Object.assign(new Error('write blew up'), { code: 'EIO' }));
+          return fh;
+        });
+
+      const service = FileSystemService.getInstance();
+      await expect(service.writeStackFile(STACK, 'wfail.txt', 'NEW')).rejects.toThrow(/write blew up/);
+
+      // Target was never created and the tmp was cleaned.
+      const dirEntries = await fs.readdir(stackDir);
+      expect(dirEntries).not.toContain('wfail.txt');
+      const leftovers = dirEntries.filter(name => name.startsWith('wfail.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+
+      openSpy.mockRestore();
+    });
+
+    it('concurrent non-exclusive writers to the same path leave one winning content and no tmp leaks', async () => {
+      const service = FileSystemService.getInstance();
+      const inputs = ['A', 'B', 'C', 'D', 'E'].map(l => l.repeat(32));
+      // POSIX rename is atomic and silently overwrites: every writer succeeds and
+      // the last-to-rename wins. Windows rename throws EPERM if the destination
+      // is open or being renamed by another process. Both are acceptable: the
+      // contract is "the final file is always exactly one of the inputs, never
+      // torn, and no tmp files leak". Settle individually and require at least
+      // one writer to have succeeded.
+      const results = await Promise.allSettled(
+        inputs.map(content => service.writeStackFile(STACK, 'race.txt', content)),
+      );
+      expect(results.some(r => r.status === 'fulfilled')).toBe(true);
+
+      const finalContent = await fs.readFile(path.join(stackDir, 'race.txt'), 'utf-8');
+      expect(inputs).toContain(finalContent);
+
+      const dirEntries = await fs.readdir(stackDir);
+      const leftovers = dirEntries.filter(name => name.startsWith('race.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+  });
+
   // ── deleteStackPath ─────────────────────────────────────────────────────
 
   describe('deleteStackPath', () => {

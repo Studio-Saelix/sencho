@@ -193,6 +193,30 @@ describe('FileViewer', () => {
     expect(mockReadFile).toHaveBeenNthCalledWith(2, 'my-stack', 'b.txt');
   });
 
+  it('reports clean dirty state on initial load of a text file', async () => {
+    mockReadFile.mockResolvedValue(textResult());
+    const onDirtyChange = vi.fn();
+
+    render(<FileViewer {...defaultProps} selectedPath="config/app.txt" onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+    // content === originalContent immediately after load → dirty=false
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('resets dirty signal on unmount', async () => {
+    mockReadFile.mockResolvedValue(textResult());
+    const onDirtyChange = vi.fn();
+
+    const { unmount } = render(<FileViewer {...defaultProps} selectedPath="a.txt" onDirtyChange={onDirtyChange} />);
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+
+    onDirtyChange.mockClear();
+    unmount();
+
+    expect(onDirtyChange).toHaveBeenCalledWith(false);
+  });
+
   it('sends If-Match with the loaded mtime on save and updates the local mtime from the response', async () => {
     mockReadFile.mockResolvedValue(textResult('hello'));
     mockWriteFile.mockResolvedValue({ mtimeMs: 1_700_000_000_999 });

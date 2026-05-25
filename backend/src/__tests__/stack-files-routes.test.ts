@@ -331,6 +331,63 @@ describe('POST /api/stacks/:stackName/files/upload', () => {
     const content = await fs.readFile(path.join(stacksDir, STACK, 'subdir', 'sub.txt'), 'utf-8');
     expect(content).toBe('subdir content');
   });
+
+  it('returns 409 FILE_EXISTS when the target name already exists and overwrite is not set', async () => {
+    const target = path.join(stacksDir, STACK, 'existing.txt');
+    await fs.writeFile(target, 'original');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('replacement'), 'existing.txt');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('FILE_EXISTS');
+    // Original content must be preserved when the upload is rejected.
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('original');
+    await fs.unlink(target);
+  });
+
+  it('overwrites when ?overwrite=1 is set', async () => {
+    const target = path.join(stacksDir, STACK, 'replaceme.txt');
+    await fs.writeFile(target, 'before');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('after'), 'replaceme.txt');
+    expect(res.status).toBe(204);
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('after');
+    await fs.unlink(target);
+  });
+
+  it('returns 409 DIR_EXISTS when a directory occupies the upload target name', async () => {
+    const dir = path.join(stacksDir, STACK, 'collide-dir');
+    await fs.mkdir(dir, { recursive: true });
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('whatever'), 'collide-dir');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DIR_EXISTS');
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('still returns 409 DIR_EXISTS even when ?overwrite=1 is set (directories are never replaced)', async () => {
+    const dir = path.join(stacksDir, STACK, 'collide-dir-2');
+    await fs.mkdir(dir, { recursive: true });
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('whatever'), 'collide-dir-2');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DIR_EXISTS');
+    // The directory must still exist after the rejected upload.
+    const stat = await fs.stat(dir);
+    expect(stat.isDirectory()).toBe(true);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
 });
 
 // ── PUT /:stackName/files/content ─────────────────────────────────────────────
@@ -702,5 +759,151 @@ describe('permission gating', () => {
       .set('Cookie', viewerCookie)
       .send({ mode: 0o644 });
     expect(res.status).toBe(403);
+  });
+
+  it('viewer with global stack:read can GET /files', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files`)
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('viewer with global stack:read can GET /files/content', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(typeof res.body.content).toBe('string');
+  });
+
+  it('viewer with global stack:read can GET /files/download', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toMatch(/attachment/);
+  });
+
+  it('viewer with global stack:read can GET /files/permissions', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/permissions`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(typeof res.body.octal).toBe('string');
+  });
+});
+
+// ── protected stack files (compose.yaml, .env) ────────────────────────────────
+
+describe('protected stack files', () => {
+  it('DELETE /files refuses compose.yaml with 409 PROTECTED_FILE', async () => {
+    const res = await request(app)
+      .delete(`/api/stacks/${STACK}/files`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROTECTED_FILE');
+  });
+
+  it('DELETE /files refuses .env with 409 PROTECTED_FILE', async () => {
+    const res = await request(app)
+      .delete(`/api/stacks/${STACK}/files`)
+      .query({ path: '.env' })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROTECTED_FILE');
+  });
+
+  it('PATCH /files/rename refuses compose.yaml as source with 409 PROTECTED_FILE', async () => {
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'compose.yaml', to: 'renamed-compose.yaml' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROTECTED_FILE');
+  });
+
+  it('PATCH /files/rename refuses compose.yaml as destination with 409 PROTECTED_FILE', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'pretend.yaml'), 'services: {}\n');
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'pretend.yaml', to: 'compose.yaml' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROTECTED_FILE');
+    await fs.unlink(path.join(stacksDir, STACK, 'pretend.yaml'));
+  });
+
+  it('PUT /files/permissions refuses .env with 409 PROTECTED_FILE', async () => {
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/permissions`)
+      .query({ path: '.env' })
+      .set('Cookie', adminCookie)
+      .send({ mode: 0o644 });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROTECTED_FILE');
+  });
+
+  it('DELETE /files still succeeds on a non-protected file', async () => {
+    const target = path.join(stacksDir, STACK, 'disposable.txt');
+    await fs.writeFile(target, 'temporary');
+    const res = await request(app)
+      .delete(`/api/stacks/${STACK}/files`)
+      .query({ path: 'disposable.txt' })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(204);
+  });
+
+  it('PUT /files/content still succeeds on compose.yaml (compose editor path)', async () => {
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie)
+      .send({ content: 'services:\n  echo:\n    image: busybox\n' });
+    expect(res.status).toBe(204);
+  });
+
+  it('POST /files/upload still succeeds when overwriting compose.yaml with overwrite=1 (legitimate replace)', async () => {
+    // Combined semantics: same-name uploads need ?overwrite=1 to pass the
+    // upload-confirm gate. The protected-file enforcement deliberately does
+    // NOT block this path because replacing compose.yaml via upload is a
+    // legitimate user-driven action.
+    const replacement = 'services:\n  uploaded:\n    image: busybox\n';
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from(replacement), 'compose.yaml');
+    expect(res.status).toBe(204);
+    const written = await fs.readFile(path.join(stacksDir, STACK, 'compose.yaml'), 'utf-8');
+    expect(written).toContain('uploaded');
+  });
+
+  it('DELETE /files succeeds on a subdirectory file named compose.yaml (not the active compose file)', async () => {
+    const subdir = path.join(stacksDir, STACK, 'backups');
+    await fs.mkdir(subdir, { recursive: true });
+    await fs.writeFile(path.join(subdir, 'compose.yaml'), 'services: {}\n');
+    const res = await request(app)
+      .delete(`/api/stacks/${STACK}/files`)
+      .query({ path: 'backups/compose.yaml' })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(204);
+    await fs.rm(subdir, { recursive: true, force: true });
+  });
+
+  it('DELETE /files refuses compose.yaml even with a trailing slash', async () => {
+    const res = await request(app)
+      .delete(`/api/stacks/${STACK}/files`)
+      .query({ path: 'compose.yaml/' })
+      .set('Cookie', adminCookie);
+    // Either the validator rejects the trailing slash (400) or the protected-file
+    // guard catches the normalized basename (409). Both are acceptable; what is NOT
+    // acceptable is a 204 success that silently deletes the protected file.
+    expect([400, 409]).toContain(res.status);
+    if (res.status === 409) expect(res.body.code).toBe('PROTECTED_FILE');
   });
 });

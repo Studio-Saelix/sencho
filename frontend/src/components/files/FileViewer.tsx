@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Suspense } from 'react';
+import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import { AlertCircle, FileIcon, Download, Loader2, Save } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -14,6 +14,7 @@ interface FileViewerProps {
   canEdit: boolean;
   isDarkMode: boolean;
   onSaved?: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 function getFilename(path: string): string {
@@ -91,6 +92,7 @@ export function FileViewer({
   canEdit,
   isDarkMode,
   onSaved,
+  onDirtyChange,
 }: FileViewerProps) {
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
@@ -103,6 +105,23 @@ export function FileViewer({
   const [loadedMtimeMs, setLoadedMtimeMs] = useState<number | null>(null);
 
   const readOnly = !canEdit;
+  const hasChanges = content !== originalContent;
+
+  // Stash the latest callback in a ref so the unmount-cleanup effect can be
+  // truly unmount-scoped without re-running every time a parent passes a fresh
+  // function identity.
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  useEffect(() => {
+    onDirtyChangeRef.current = onDirtyChange;
+  }, [onDirtyChange]);
+
+  useEffect(() => {
+    onDirtyChangeRef.current?.(hasChanges);
+  }, [hasChanges]);
+
+  useEffect(() => {
+    return () => onDirtyChangeRef.current?.(false);
+  }, []);
 
   const editorOptions = useMemo(
     () => ({
@@ -244,8 +263,6 @@ export function FileViewer({
       />
     );
   }
-
-  const hasChanges = content !== originalContent;
 
   return (
     <div className="flex flex-col h-full">
