@@ -239,9 +239,11 @@ test.describe('File explorer - admin (full CRUD)', () => {
   });
 
   test('upload a text file and verify it appears in the tree', async ({ page }) => {
-    // Admins with stack:edit see the upload dropzone on every tier.
+    // Admins with stack:edit see the upload dropzone on every tier. The
+    // dropzone label includes "upload" (e.g. "Upload or drop file"); match
+    // on the word alone so future copy edits don't break this assertion.
     await expect(
-      page.locator('[role="button"]').filter({ hasText: /upload file/i }).first()
+      page.locator('[role="button"]').filter({ hasText: /upload/i }).first()
     ).toBeVisible({ timeout: 5_000 });
 
     // Set a file on the hidden input
