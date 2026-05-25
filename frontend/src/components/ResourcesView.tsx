@@ -1343,7 +1343,7 @@ export default function ResourcesView() {
             <VulnerabilityScanSheet
                 scanId={inspectScanId}
                 onClose={() => setInspectScanId(null)}
-                onRescan={(imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); }}
+                onRescan={isAdmin ? (imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); } : undefined}
                 canGenerateSbom={isPaid && isAdmin}
                 canCompare
                 canManageSuppressions={isAdmin}
