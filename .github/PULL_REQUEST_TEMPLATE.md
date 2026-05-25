@@ -12,4 +12,4 @@
 - [ ] Documentation updated (if applicable)
 - [ ] ESLint passes (`npm run lint` in backend/ and frontend/)
 - [ ] Commit messages follow Conventional Commits
-- [ ] CHANGELOG.md updated under `## [Unreleased]` (for user-facing changes)
+- [ ] Commit message follows Conventional Commits (the CHANGELOG entry is generated from the commit subject by release-please; do not edit `CHANGELOG.md` directly).
