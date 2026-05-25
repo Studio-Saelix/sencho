@@ -99,7 +99,7 @@ Mount the host's Trivy binary into the Sencho container. This is the simplest op
 ```yaml
 services:
   sencho:
-    image: sencho/sencho:latest
+    image: saelix/sencho:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./sencho-data:/app/data
@@ -123,7 +123,7 @@ Adjust the first path if `which trivy` on the host prints something other than `
 If the host's Trivy binary is not ABI-compatible with the Sencho container (for example because you are running macOS host binaries or a different glibc version), install Trivy inside the image instead:
 
 ```dockerfile
-FROM sencho/sencho:latest
+FROM saelix/sencho:latest
 
 RUN apk add --no-cache curl ca-certificates \
  && curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \

@@ -29,7 +29,7 @@ body:
     id: version
     attributes:
       label: Sencho version
-      placeholder: "0.2.2"
+      placeholder: "0.86.6 (find this in Settings → About)"
     validations:
       required: true
   - type: dropdown
@@ -54,3 +54,34 @@ body:
       label: Relevant logs
       description: Paste any relevant container or browser console logs
       render: shell
+  - type: textarea
+    id: compose
+    attributes:
+      label: Compose snippet (if a stack is involved)
+      description: Paste the relevant `services:` block. Redact secrets first.
+      render: yaml
+  - type: textarea
+    id: container_logs
+    attributes:
+      label: Container logs
+      description: Output of `docker logs sencho` from the time of the issue.
+      render: shell
+  - type: textarea
+    id: browser_console
+    attributes:
+      label: Browser console output (if a UI issue)
+      description: Open DevTools, reproduce, copy any errors or warnings.
+      render: shell
+  - type: checkboxes
+    id: subsystems
+    attributes:
+      label: Subsystems involved
+      description: Tick any that apply.
+      options:
+        - label: Trivy / vulnerability scanning
+        - label: Pilot Agent (NAT tunnel)
+        - label: Sencho Mesh (cross-node networking)
+        - label: Fleet Actions / Secrets / Snapshots
+        - label: Cloud Backup
+        - label: SSO / LDAP
+        - label: None of the above

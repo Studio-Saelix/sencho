@@ -5,7 +5,7 @@ Thank you for your interest in contributing to Sencho!
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/Sencho.git`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/sencho.git`
 3. Create a branch: `git checkout -b feature/your-feature`
 4. Install dependencies:
    ```bash
@@ -35,7 +35,7 @@ frontend/
     lib/          # apiFetch wrapper and other utilities
 ```
 
-Read [CLAUDE.md](CLAUDE.md) for full coding standards, architecture rules, and the pre-commit checklist.
+See the rest of this file for the most important contributor-facing standards (TypeScript, tier gates, PR process, code style). Architecture and module layout deep-dives live in the project documentation at [docs.sencho.io](https://docs.sencho.io).
 
 ## Development
 
