@@ -64,6 +64,12 @@ export function useConfigurationStatus() {
     }
   }, []);
 
+  // Configuration data is derived from settings/policy tables (agents,
+  // alert rules, auto-heal policies, scheduled tasks, scan policies, cloud
+  // backup config). It does not depend on live container state, so the
+  // dashboard does not subscribe to `sencho:state-invalidate`. The 60 s
+  // poll catches settings drift; a settings page that mutates the response
+  // is the rare event where a one-minute lag is acceptable.
   useEffect(() => {
     setStatus(null);
     setLoading(true);
@@ -72,12 +78,6 @@ export function useConfigurationStatus() {
     guard();
     return visibilityInterval(guard, 60_000);
   }, [nodeId, fetchStatus]);
-
-  useEffect(() => {
-    const handler = () => void fetchStatus();
-    window.addEventListener('sencho:state-invalidate', handler);
-    return () => window.removeEventListener('sencho:state-invalidate', handler);
-  }, [fetchStatus]);
 
   return { status, loading };
 }

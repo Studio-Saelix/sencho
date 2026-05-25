@@ -14,6 +14,10 @@ import type {
 const DEFAULT_STATS: Stats = { active: 0, managed: 0, unmanaged: 0, exited: 0, total: 0 };
 const SPARK_BUCKETS = 20;
 const SPARK_WINDOW_MS = 10 * 60 * 1000;
+// Trailing-edge debounce window for live state-invalidate refetches. Matches
+// useNextAutoUpdateRun so dashboard surfaces feel "live" without amplifying a
+// container-event burst into one HTTP request per event.
+const INVALIDATE_DEBOUNCE_MS = 250;
 
 function bucketCpu(points: MetricPoint[], windowMs: number, buckets: number): number[] {
   if (points.length === 0) return Array(buckets).fill(0);
@@ -166,13 +170,16 @@ export function useDashboardData(): DashboardData {
   // React to live `state-invalidate` signals from /ws/notifications: when a
   // Docker container event fires (start/stop/die/restart/health), the layout
   // re-broadcasts the envelope as a window CustomEvent. Refetch the cheap
-  // data (stats, system, statuses) immediately so the dashboard header and
-  // sidebar status update in well under a second instead of waiting for the
-  // next polling tick. Historical metrics are intentionally skipped — they
-  // are a 10-minute trend, not a live indicator.
+  // data (stats, system, statuses) so the dashboard header and sidebar status
+  // update in well under a second instead of waiting for the next polling
+  // tick. Historical metrics are skipped — they are a 10-minute trend, not a
+  // live indicator. The refetch is trailing-edge debounced so an event storm
+  // (e.g. a 50-container stack restart) collapses to a single coalesced
+  // refresh instead of one HTTP request per event.
   useEffect(() => {
     const currentNodeId = nodeId;
-    const onInvalidate = async () => {
+    let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
+    const refresh = async () => {
       if (nodeIdRef.current !== currentNodeId) return;
       const [statsData, sysData, statusesData] = await Promise.all([
         fetchJson<Stats>('/stats'),
@@ -187,8 +194,19 @@ export function useDashboardData(): DashboardData {
       if (sysData) setSystemStats(sysData);
       if (statusesData) setStackStatuses(statusesData);
     };
+    const onInvalidate = () => {
+      if (nodeIdRef.current !== currentNodeId) return;
+      if (invalidateTimer) clearTimeout(invalidateTimer);
+      invalidateTimer = setTimeout(() => {
+        invalidateTimer = null;
+        void refresh();
+      }, INVALIDATE_DEBOUNCE_MS);
+    };
     window.addEventListener('sencho:state-invalidate', onInvalidate);
-    return () => window.removeEventListener('sencho:state-invalidate', onInvalidate);
+    return () => {
+      window.removeEventListener('sencho:state-invalidate', onInvalidate);
+      if (invalidateTimer) clearTimeout(invalidateTimer);
+    };
   }, [nodeId, fetchJson]);
 
   const stackCpuSeries = useMemo<Record<string, StackCpuSeries>>(() => {
