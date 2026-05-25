@@ -35,6 +35,33 @@ const PROTECTED_STACK_FILES = new Set([
   '.env',
 ]);
 
+// Strips at most one trailing slash. The upstream validator
+// (isValidRelativeStackPath) rejects any '//' sequence, so a string reaching
+// this helper can carry at most one trailing slash, and a single slice is
+// sufficient. Avoids the polynomial regex /\/+$/ that CodeQL would flag for
+// callers without the upstream length guarantee.
+function stripTrailingSlash(s: string): string {
+  return s.endsWith('/') ? s.slice(0, -1) : s;
+}
+
+function isProtectedRelPath(relPath: string): boolean {
+  if (!relPath) return false;
+  const normalized = stripTrailingSlash(relPath);
+  // Only files at the stack root are protected; compose CLI reads compose.yaml from
+  // the stack directory itself, so a subdirectory entry named compose.yaml is just
+  // an arbitrary file and the user may want to delete it.
+  if (normalized.includes('/')) return false;
+  return PROTECTED_STACK_FILES.has(normalized);
+}
+
+function protectedFileError(relPath: string): Error & { code: string } {
+  const basename = stripTrailingSlash(relPath).split('/').pop() ?? relPath;
+  return Object.assign(
+    new Error(`${basename} is a protected stack file. Delete the stack itself via Stack Actions instead.`),
+    { code: 'PROTECTED_FILE' as const },
+  );
+}
+
 const MIME_MAP: Record<string, string> = {
   '.yaml': 'text/yaml',
   '.yml': 'text/yaml',
@@ -684,7 +711,27 @@ export class FileSystemService {
     await fsPromises.writeFile(safePath, buffer);
   }
 
+  /**
+   * Returns 'file' or 'directory' if the resolved path exists, null if it
+   * does not. Path-resolution errors (INVALID_PATH, SYMLINK_ESCAPE) propagate
+   * so callers do not silently treat a malformed path as 'available for write'.
+   * Callers should validate inputs upstream before invoking this helper.
+   */
+  async pathKind(stackName: string, relPath: string): Promise<'file' | 'directory' | null> {
+    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    try {
+      const stat = await fsPromises.lstat(safePath);
+      if (stat.isDirectory()) return 'directory';
+      return 'file';
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
   async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false): Promise<void> {
+    if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
 
     if (recursive) {
@@ -717,6 +764,8 @@ export class FileSystemService {
   }
 
   async renameStackPath(stackName: string, fromRel: string, toRel: string): Promise<void> {
+    if (isProtectedRelPath(fromRel)) throw protectedFileError(fromRel);
+    if (isProtectedRelPath(toRel)) throw protectedFileError(toRel);
     const fromPath = await this.resolveSafeStackPath(stackName, fromRel);
     // toRel must resolve to the same parent directory (rename only, no cross-dir move).
     const toPath = await this.resolveSafeStackPath(stackName, toRel);
@@ -749,6 +798,7 @@ export class FileSystemService {
     if (!Number.isInteger(mode) || mode < 0 || mode > 0o777) {
       throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
     }
+    if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     await fsPromises.chmod(safePath, mode);
   }

@@ -135,9 +135,15 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 
 # Stage 4b: Build Docker Compose from source against Go 1.26.3
 #
-# Compose v5.1.3 removed the direct dependency on github.com/docker/docker
-# (replaced by moby/moby/api + moby/moby/client), eliminating CVE-2026-34040
-# and CVE-2026-33997 at the dependency level. Rebuilding with the patched Go
+# Compose v5.1.3 moved github.com/docker/docker from a direct require to an
+# indirect dep (the direct surface is now moby/moby/api + moby/moby/client),
+# but the docker/docker module is still pulled into the binary via buildkit
+# and other transitive paths. Several daemon-side CVEs against docker/docker
+# v28.5.2 (CVE-2026-34040, CVE-2026-33997, CVE-2026-41567, CVE-2026-41568,
+# CVE-2026-42306) therefore still appear in scans of the compose binary;
+# they are tracked as not_affected in security/vex/sencho.openvex.json
+# because compose is the client and the vulnerable code paths are reached
+# only by Docker Engine the daemon. Rebuilding with the patched Go
 # toolchain eliminates Go stdlib CVEs from the binary's SBOM.
 #
 # Compose v5.1.3 still bundles otel/sdk v1.42.0 transitively via buildkit
