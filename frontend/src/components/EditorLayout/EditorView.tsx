@@ -319,6 +319,13 @@ export function EditorView({
     const safeContent = content || '';
     const safeEnvContent = envContent || '';
     const isRunning = safeContainers.some(c => c.State === 'running');
+    const canRead = can('stack:read', 'stack', stackName);
+
+    useEffect(() => {
+        if (activeTab === 'files' && !canRead) {
+            setActiveTab('compose');
+        }
+    }, [activeTab, canRead, setActiveTab]);
 
     return (
         <ErrorBoundary>
@@ -712,12 +719,14 @@ export function EditorView({
                                             <TabsHighlightItem value="env">
                                                 <TabsTrigger value="env" disabled={!envExists}>.env</TabsTrigger>
                                             </TabsHighlightItem>
-                                            <TabsHighlightItem value="files">
-                                                <TabsTrigger value="files">
-                                                    <FolderOpen className="w-3.5 h-3.5 mr-1" strokeWidth={1.5} />
-                                                    Files
-                                                </TabsTrigger>
-                                            </TabsHighlightItem>
+                                            {canRead && (
+                                                <TabsHighlightItem value="files">
+                                                    <TabsTrigger value="files">
+                                                        <FolderOpen className="w-3.5 h-3.5 mr-1" strokeWidth={1.5} />
+                                                        Files
+                                                    </TabsTrigger>
+                                                </TabsHighlightItem>
+                                            )}
                                         </TabsHighlight>
                                     </TabsList>
                                 </Tabs>
@@ -801,7 +810,7 @@ export function EditorView({
                             </div>
                         </div>
                         <div className="flex-1 min-h-0 flex flex-col">
-                            {activeTab === 'files' ? (
+                            {activeTab === 'files' && canRead ? (
                                 <StackFileExplorer
                                     stackName={stackName}
                                     canEdit={can('stack:edit', 'stack', stackName)}
@@ -864,7 +873,7 @@ export function EditorView({
                         selectedEnvFile={selectedEnvFile}
                         gitSourcePending={Boolean(gitSourcePendingMap[stackName])}
                         onEditCompose={() => { setEditingCompose(true); setActiveTab('compose'); }}
-                        onOpenFiles={() => { setEditingCompose(true); setActiveTab('files'); }}
+                        onOpenFiles={canRead ? () => { setEditingCompose(true); setActiveTab('files'); } : undefined}
                         onOpenGitSource={() => setGitSourceOpen(true)}
                         onApplyUpdate={() => { void updateStack(); }}
                         canEdit={can('stack:edit', 'stack', stackName)}

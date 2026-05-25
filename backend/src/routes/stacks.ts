@@ -1370,6 +1370,7 @@ function isSafeUploadFilename(rawName: string): boolean {
 
 stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
   if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
@@ -1388,6 +1389,7 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
 
 stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
   if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
   if (!isValidRelativeStackPath(relPath)) {
@@ -1415,6 +1417,7 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
 
 stacksRouter.get('/:stackName/files/download', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
   if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
   if (!isValidRelativeStackPath(relPath)) {
@@ -1583,6 +1586,7 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
 
 stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
   if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
   if (!isValidRelativeStackPath(relPath)) {

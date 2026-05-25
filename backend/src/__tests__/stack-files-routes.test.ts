@@ -595,4 +595,39 @@ describe('permission gating', () => {
       .send({ mode: 0o644 });
     expect(res.status).toBe(403);
   });
+
+  it('viewer with global stack:read can GET /files', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files`)
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('viewer with global stack:read can GET /files/content', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/content`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(typeof res.body.content).toBe('string');
+  });
+
+  it('viewer with global stack:read can GET /files/download', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toMatch(/attachment/);
+  });
+
+  it('viewer with global stack:read can GET /files/permissions', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/permissions`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(200);
+    expect(typeof res.body.octal).toBe('string');
+  });
 });
