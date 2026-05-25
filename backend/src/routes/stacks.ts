@@ -1521,37 +1521,18 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
       downloadRecorded = true;
       recordFileOp(req.nodeId, 'download', startedAt, ok);
     };
-    // TEMP DIAG: capture the actual event order and response state at each
-    // step so we can identify the supertest in-process race on Linux CI.
-    // Remove after the metric race is resolved.
-    const diagId = `${stackName}/${relPath}/${startedAt}`;
-    const diag = (event: string): void => {
-      console.log(
-        `[download-diag] id=${diagId} event=${event}` +
-          ` writable=${res.writable} writableEnded=${res.writableEnded}` +
-          ` writableFinished=${res.writableFinished} headersSent=${res.headersSent}` +
-          ` reqDestroyed=${req.destroyed} recorded=${downloadRecorded}`,
-      );
-    };
-    diag('handler-setup');
     result.stream.on('error', (streamErr) => {
-      diag('stream-error');
       console.error('[files] stream error:', sanitizeForLog(getErrorMessage(streamErr, 'unknown')));
       if (!res.headersSent) res.status(500).end();
       else res.destroy();
       recordDownloadOnce(false);
     });
-    result.stream.on('end', () => {
-      diag('stream-end');
-      recordDownloadOnce(true);
-    });
+    result.stream.on('end', () => recordDownloadOnce(true));
     result.stream.on('close', () => {
-      diag('stream-close');
       if (res.writableEnded) recordDownloadOnce(true);
       else recordDownloadOnce(false);
     });
     req.on('close', () => {
-      diag('req-close');
       if (!res.writableEnded) result.stream.destroy();
     });
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
