@@ -1507,11 +1507,14 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     const encodedFilename = encodeURIComponent(result.filename);
     const safeFilename = result.filename.replace(/[\\"]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
-    // Stream-success and stream-failure both have to flow through a single
-    // recorder so a mid-stream read error or a client disconnect doesn't get
-    // counted as a successful download. The flag protects against
-    // double-firing when both `finish` and `close` fire after a normal
-    // completion.
+    // Track download completion off the file stream's lifecycle, not the
+    // response's. Node's `res.on('finish')` and `res.on('close')` fire in
+    // platform-dependent order under the in-process supertest transport
+    // (close occasionally precedes finish, which made the success-vs-error
+    // recorder racy in CI). The file stream's `end`, `error`, and `close`
+    // events ARE deterministic: a clean read emits `end` then `close`; a
+    // destroy emits `close` without `end`; a disk error emits `error` then
+    // `close`. Hanging the recorder off these signals removes the race.
     let downloadRecorded = false;
     const recordDownloadOnce = (ok: boolean): void => {
       if (downloadRecorded) return;
@@ -1524,8 +1527,15 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
       else res.destroy();
       recordDownloadOnce(false);
     });
-    res.on('finish', () => recordDownloadOnce(true));
-    res.on('close', () => recordDownloadOnce(false));
+    // `end` fires after all bytes are read off disk and pushed into the pipe;
+    // at that point the response has the payload it needs to ship and the
+    // download has succeeded from the server's perspective.
+    result.stream.on('end', () => recordDownloadOnce(true));
+    // `close` is the fallback for a destroyed-mid-stream path (the req-close
+    // handler below tears the stream down on client disconnect). The flag
+    // bails when close fires post-end so a clean completion still records
+    // as success.
+    result.stream.on('close', () => recordDownloadOnce(false));
     req.on('close', () => result.stream.destroy());
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
     result.stream.pipe(res);
