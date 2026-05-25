@@ -178,15 +178,19 @@ export function useDashboardData(): DashboardData {
   // refresh instead of one HTTP request per event.
   useEffect(() => {
     const currentNodeId = nodeId;
+    let active = true;
     let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
     const refresh = async () => {
-      if (nodeIdRef.current !== currentNodeId) return;
+      if (!active || nodeIdRef.current !== currentNodeId) return;
       const [statsData, sysData, statusesData] = await Promise.all([
         fetchJson<Stats>('/stats'),
         fetchJson<SystemStats>('/system/stats'),
         fetchJson<Record<string, StackStatusEntry>>('/stacks/statuses'),
       ]);
-      if (nodeIdRef.current !== currentNodeId) return;
+      // Re-check after the await: an unmount or node switch may have
+      // happened while the fetches were in flight, in which case the
+      // resulting setState calls would land on a stale render tree.
+      if (!active || nodeIdRef.current !== currentNodeId) return;
       if (statsData) {
         setStats(statsData);
         setLastSyncAt(Date.now());
@@ -195,7 +199,7 @@ export function useDashboardData(): DashboardData {
       if (statusesData) setStackStatuses(statusesData);
     };
     const onInvalidate = () => {
-      if (nodeIdRef.current !== currentNodeId) return;
+      if (!active || nodeIdRef.current !== currentNodeId) return;
       if (invalidateTimer) clearTimeout(invalidateTimer);
       invalidateTimer = setTimeout(() => {
         invalidateTimer = null;
@@ -204,6 +208,7 @@ export function useDashboardData(): DashboardData {
     };
     window.addEventListener('sencho:state-invalidate', onInvalidate);
     return () => {
+      active = false;
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
       if (invalidateTimer) clearTimeout(invalidateTimer);
     };

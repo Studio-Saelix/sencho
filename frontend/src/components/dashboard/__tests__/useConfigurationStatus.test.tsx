@@ -67,18 +67,38 @@ afterEach(() => {
 });
 
 describe('useConfigurationStatus state-invalidate handling', () => {
-  it('does not refetch on container state-invalidate events', async () => {
+  it('does not refetch on container or image-update state-invalidate events', async () => {
     renderHook(() => useConfigurationStatus());
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const baseline = apiFetchMock.mock.calls.length;
 
     act(() => {
-      for (let i = 0; i < 5; i += 1) fireInvalidate({ scope: 'container' });
+      for (let i = 0; i < 5; i += 1) fireInvalidate({ scope: 'stack' });
+      for (let i = 0; i < 5; i += 1) fireInvalidate({ scope: 'image-updates' });
     });
     await act(async () => { vi.advanceTimersByTime(2_000); });
 
-    // Container events do not invalidate the configuration response, which is
-    // derived from settings/policy tables. The 60s poll catches settings drift.
+    // Neither container churn nor image-update bursts mutate the
+    // configuration payload; the filtered listener must ignore them.
     expect(apiFetchMock.mock.calls.length).toBe(baseline);
+  });
+
+  it('refetches once on a settings-affecting auto-update-settings-changed event', async () => {
+    renderHook(() => useConfigurationStatus());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const baseline = apiFetchMock.mock.calls.length;
+
+    act(() => {
+      // Burst three settings-change events; the debounce should collapse
+      // them into a single refetch.
+      fireInvalidate({ action: 'auto-update-settings-changed' });
+      fireInvalidate({ action: 'auto-update-settings-changed' });
+      fireInvalidate({ action: 'auto-update-settings-changed' });
+    });
+    // Before debounce window elapses, no new fetch.
+    expect(apiFetchMock.mock.calls.length).toBe(baseline);
+
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(apiFetchMock.mock.calls.length).toBe(baseline + 1);
   });
 });

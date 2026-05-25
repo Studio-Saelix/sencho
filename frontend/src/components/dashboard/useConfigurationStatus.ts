@@ -3,6 +3,10 @@ import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { visibilityInterval } from '@/lib/utils';
 
+// Trailing-edge debounce window for filtered settings-event refetches,
+// matching the precedent in useNextAutoUpdateRun.
+const INVALIDATE_DEBOUNCE_MS = 250;
+
 interface AgentStatus {
   configured: boolean;
   enabled: boolean;
@@ -66,10 +70,7 @@ export function useConfigurationStatus() {
 
   // Configuration data is derived from settings/policy tables (agents,
   // alert rules, auto-heal policies, scheduled tasks, scan policies, cloud
-  // backup config). It does not depend on live container state, so the
-  // dashboard does not subscribe to `sencho:state-invalidate`. The 60 s
-  // poll catches settings drift; a settings page that mutates the response
-  // is the rare event where a one-minute lag is acceptable.
+  // backup config). The 60 s poll catches settings drift on its own.
   useEffect(() => {
     setStatus(null);
     setLoading(true);
@@ -78,6 +79,32 @@ export function useConfigurationStatus() {
     guard();
     return visibilityInterval(guard, 60_000);
   }, [nodeId, fetchStatus]);
+
+  // Filter `sencho:state-invalidate` so only settings-affecting events
+  // refetch the configuration; the high-frequency `scope: 'stack'` and
+  // `scope: 'image-updates'` container/image bursts are ignored. Today the
+  // only such settings event is `auto-update-settings-changed` (emitted by
+  // the stack auto-update toggle). The filter is debounced and the
+  // configuration response includes the toggled state, so a user editing
+  // the setting sees the row update under a second instead of waiting up
+  // to a minute.
+  useEffect(() => {
+    let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
+    const onInvalidate = (e: Event) => {
+      const detail = (e as CustomEvent<{ action?: string; scope?: string }>).detail;
+      if (detail?.action !== 'auto-update-settings-changed') return;
+      if (invalidateTimer) clearTimeout(invalidateTimer);
+      invalidateTimer = setTimeout(() => {
+        invalidateTimer = null;
+        void fetchStatus();
+      }, INVALIDATE_DEBOUNCE_MS);
+    };
+    window.addEventListener('sencho:state-invalidate', onInvalidate);
+    return () => {
+      window.removeEventListener('sencho:state-invalidate', onInvalidate);
+      if (invalidateTimer) clearTimeout(invalidateTimer);
+    };
+  }, [fetchStatus]);
 
   return { status, loading };
 }
