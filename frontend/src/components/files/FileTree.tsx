@@ -147,9 +147,38 @@ export function FileTree({
     onSelectFile(relPath, entry);
   }
 
+  const matchesFilter = (name: string): boolean =>
+    name.toLowerCase().includes(filter.toLowerCase());
+
+  // True when any already-loaded descendant of `dirPath` matches the filter.
+  // Walks dirContents only, so unexpanded subtrees are not falsely shown as
+  // "has match" until the user expands them. Bounded by what the user has
+  // already loaded; no extra fetch.
+  function hasMatchingDescendant(dirPath: string): boolean {
+    const children = dirContents.get(dirPath);
+    if (!children) return false;
+    for (const child of children) {
+      if (matchesFilter(child.name)) return true;
+      if (child.type === 'directory') {
+        const childPath = dirPath ? `${dirPath}/${child.name}` : child.name;
+        if (hasMatchingDescendant(childPath)) return true;
+      }
+    }
+    return false;
+  }
+
   function renderEntries(entries: FileEntry[], parentRelPath: string, depth: number): ReactNode {
+    // When the filter is active, keep entries that either match by name OR
+    // are directories with a matching loaded descendant. Without the
+    // ancestor-keep rule, the parent directory of a match would be filtered
+    // out at this level and its loaded children would never render.
     const filtered = filter
-      ? entries.filter(e => e.name.toLowerCase().includes(filter.toLowerCase()))
+      ? entries.filter(e => {
+          if (matchesFilter(e.name)) return true;
+          if (e.type !== 'directory') return false;
+          const path = parentRelPath ? `${parentRelPath}/${e.name}` : e.name;
+          return hasMatchingDescendant(path);
+        })
       : entries;
     const capped = filtered.length > MAX_ENTRIES;
     const visible = capped ? filtered.slice(0, MAX_ENTRIES) : filtered;
@@ -159,7 +188,11 @@ export function FileTree({
         {visible.map((entry) => {
           const entryRelPath = parentRelPath ? `${parentRelPath}/${entry.name}` : entry.name;
           const isDir = entry.type === 'directory';
-          const isExpanded = expandedDirs.has(entryRelPath);
+          // While a filter is active, auto-expand any directory that is being
+          // kept solely because it has a matching descendant. The user gets
+          // the match in view without manually expanding every ancestor.
+          const isExpanded = expandedDirs.has(entryRelPath)
+            || (filter !== '' && isDir && hasMatchingDescendant(entryRelPath));
           const isLoading = loadingDirs.has(entryRelPath);
           const children = dirContents.get(entryRelPath);
 
