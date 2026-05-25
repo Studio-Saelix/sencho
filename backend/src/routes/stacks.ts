@@ -1309,7 +1309,10 @@ type FsErrorCode =
   | 'NOT_EMPTY'
   | 'NOT_FOUND'
   | 'TOO_LARGE'
-  | 'ALREADY_EXISTS';
+  | 'ALREADY_EXISTS'
+  | 'FILE_EXISTS'
+  | 'DIR_EXISTS'
+  | 'PROTECTED_FILE';
 
 function sendFsError(
   res: Response,
@@ -1326,6 +1329,9 @@ function sendFsError(
   }
   if (e.code === 'NOT_EMPTY') {
     return res.status(409).json({ error: e.message, code: e.code as FsErrorCode });
+  }
+  if (e.code === 'PROTECTED_FILE') {
+    return res.status(409).json({ error: e.message, code: 'PROTECTED_FILE' satisfies FsErrorCode });
   }
   if (e.code === 'EEXIST') {
     return res.status(409).json({ error: e.message, code: 'ALREADY_EXISTS' satisfies FsErrorCode });
@@ -1370,6 +1376,7 @@ function isSafeUploadFilename(rawName: string): boolean {
 
 stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
   if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
@@ -1388,6 +1395,7 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
 
 stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
   if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
   if (!isValidRelativeStackPath(relPath)) {
@@ -1415,6 +1423,7 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
 
 stacksRouter.get('/:stackName/files/download', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
   if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
   if (!isValidRelativeStackPath(relPath)) {
@@ -1470,11 +1479,27 @@ stacksRouter.post(
       return res.status(400).json({ error: 'Invalid filename' });
     }
     const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
+    const overwrite = String(req.query.overwrite) === '1';
     const startedAt = Date.now();
-    logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size });
+    logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
     try {
+      const existing = await FileSystemService.getInstance(req.nodeId).pathKind(stackName, targetRelPath);
+      if (existing === 'directory') {
+        // A directory can never be replaced by an upload; surface a distinct code
+        // so the UI does not offer a useless "Replace" button.
+        return res.status(409).json({
+          error: `A folder named ${originalName} already exists in this folder. Rename the upload or remove the folder first.`,
+          code: 'DIR_EXISTS',
+        });
+      }
+      if (existing === 'file' && !overwrite) {
+        return res.status(409).json({
+          error: `${originalName} already exists in this folder. Confirm to replace.`,
+          code: 'FILE_EXISTS',
+        });
+      }
       await FileSystemService.getInstance(req.nodeId).writeStackFileBuffer(stackName, targetRelPath, req.file.buffer);
-      logFileOperation('info', 'upload complete', { nodeId: req.nodeId, size: req.file.size });
+      logFileOperation('info', 'upload complete', { nodeId: req.nodeId, size: req.file.size, overwrite });
       logFileDiag('upload timing', { stackName, relPath: targetRelPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
       return res.status(204).send();
     } catch (err: unknown) {
@@ -1583,6 +1608,7 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
 
 stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const relPath = getRelPath(req);
   if (!relPath) return res.status(400).json({ error: 'path query parameter is required', code: 'INVALID_PATH' });
   if (!isValidRelativeStackPath(relPath)) {

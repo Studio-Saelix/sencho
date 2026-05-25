@@ -164,4 +164,28 @@ describe('FileViewer', () => {
     await waitFor(() => expect(mockReadFile).toHaveBeenCalledTimes(2));
     expect(mockReadFile).toHaveBeenNthCalledWith(2, 'my-stack', 'b.txt');
   });
+
+  it('reports clean dirty state on initial load of a text file', async () => {
+    mockReadFile.mockResolvedValue(textResult());
+    const onDirtyChange = vi.fn();
+
+    render(<FileViewer {...defaultProps} selectedPath="config/app.txt" onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+    // content === originalContent immediately after load → dirty=false
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('resets dirty signal on unmount', async () => {
+    mockReadFile.mockResolvedValue(textResult());
+    const onDirtyChange = vi.fn();
+
+    const { unmount } = render(<FileViewer {...defaultProps} selectedPath="a.txt" onDirtyChange={onDirtyChange} />);
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+
+    onDirtyChange.mockClear();
+    unmount();
+
+    expect(onDirtyChange).toHaveBeenCalledWith(false);
+  });
 });

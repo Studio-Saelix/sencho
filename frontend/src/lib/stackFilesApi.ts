@@ -84,11 +84,24 @@ export async function downloadStackFile(
   return apiFetch(stackFilesUrl(stackName, `/download?path=${encodeURIComponent(relPath)}`));
 }
 
+/**
+ * Thrown by uploadStackFile when the target filename already exists in the
+ * directory and the caller did not opt into overwrite. The FileUploadDropzone
+ * surfaces a confirm dialog on this signal and retries with overwrite=true.
+ */
+export class UploadConflictError extends Error {
+  readonly code = 'FILE_EXISTS' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'UploadConflictError';
+  }
+}
+
 export async function uploadStackFile(
   stackName: string,
   targetDir: string,
   file: File,
-  options?: { localOnly?: boolean }
+  options?: { localOnly?: boolean; overwrite?: boolean }
 ): Promise<void> {
   assertSafeRelPath(targetDir, 'target directory');
   const fd = new FormData();
@@ -100,11 +113,12 @@ export async function uploadStackFile(
     headers['x-node-id'] = activeNodeId;
   }
 
+  const overwriteSuffix = options?.overwrite ? '&overwrite=1' : '';
   // Use fetch directly: apiFetch always sets Content-Type: application/json,
   // which breaks multipart boundary negotiation. The 401 side-effects are
   // replicated manually below.
   const res = await fetch(
-    `/api${stackFilesUrl(stackName, `/upload?path=${encodeURIComponent(targetDir)}`)}`,
+    `/api${stackFilesUrl(stackName, `/upload?path=${encodeURIComponent(targetDir)}${overwriteSuffix}`)}`,
     { method: 'POST', credentials: 'include', headers, body: fd }
   );
 
@@ -113,6 +127,17 @@ export async function uploadStackFile(
       window.dispatchEvent(new Event('sencho-unauthorized'));
     }
     throw new Error('Unauthorized');
+  }
+
+  if (res.status === 409) {
+    let body: { code?: string; error?: string } = {};
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    if (body.code === 'FILE_EXISTS') {
+      throw new UploadConflictError(body.error ?? `${file.name} already exists.`);
+    }
+    // DIR_EXISTS and any other 409 fall through to the generic Error path so the
+    // dropzone surfaces the server message as a toast and does NOT offer a Replace
+    // confirmation (a directory cannot be replaced by a file upload).
   }
 
   if (!res.ok) {
