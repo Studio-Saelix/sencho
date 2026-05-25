@@ -1531,12 +1531,27 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     // at that point the response has the payload it needs to ship and the
     // download has succeeded from the server's perspective.
     result.stream.on('end', () => recordDownloadOnce(true));
-    // `close` is the fallback for a destroyed-mid-stream path (the req-close
-    // handler below tears the stream down on client disconnect). The flag
-    // bails when close fires post-end so a clean completion still records
-    // as success.
-    result.stream.on('close', () => recordDownloadOnce(false));
-    req.on('close', () => result.stream.destroy());
+    // `close` is the fallback for a destroyed-mid-stream path. On a real
+    // client disconnect the response was not finished, so `res.writableEnded`
+    // stays false and we book a failure. If `close` chases a prior `end` on
+    // a clean read, the flag bails. The `writableEnded` check defends against
+    // a transport that hands us `close` without `end` after the pipe already
+    // called `res.end()`.
+    result.stream.on('close', () => {
+      if (res.writableEnded) recordDownloadOnce(true);
+      else recordDownloadOnce(false);
+    });
+    // Destroy the file stream on a real client disconnect, but NOT after the
+    // pipe has already finished writing the response. Under the in-process
+    // supertest transport, `req.close` can fire as soon as the test consumes
+    // the response, which races ahead of the readable's own `end`/`close`
+    // pair. Calling `destroy()` there short-circuits the readable into a
+    // `close`-without-`end` state and the recorder booked the request as a
+    // failure even though the pipe had delivered every byte. The guard makes
+    // the cleanup conditional on the response still being in flight.
+    req.on('close', () => {
+      if (!res.writableEnded) result.stream.destroy();
+    });
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
     result.stream.pipe(res);
     return;
