@@ -11,7 +11,7 @@ const TRUNCATION_SUFFIX = '… [truncated]';
 // keys.
 const SENSITIVE_KEY_PATTERN = /\b([A-Za-z0-9_]*(?:TOKEN|KEY|PASSWORD|SECRET|CREDENTIALS?|AUTH))\s*=\s*("[^"]*"|'[^']*'|\S+)/gi;
 
-const URL_BASIC_AUTH = /\b([a-zA-Z][a-zA-Z0-9+.\-]*:\/\/)([^/\s:@]+):([^/\s:@]+)@/g;
+const URL_BASIC_AUTH = /\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/\s:@]+):([^/\s:@]+)@/g;
 const BEARER_TOKEN = /\b(Bearer)\s+([A-Za-z0-9._\-+/=]{8,})/g;
 
 export function sanitizeNotificationMessage(raw: string, opts: { composeDir?: string } = {}): string {
