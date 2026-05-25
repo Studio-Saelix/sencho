@@ -1527,16 +1527,14 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
       else res.destroy();
       recordDownloadOnce(false);
     });
-    // `end` fires after all bytes are read off disk and pushed into the pipe;
-    // at that point the response has the payload it needs to ship and the
-    // download has succeeded from the server's perspective.
     result.stream.on('end', () => recordDownloadOnce(true));
-    // `close` is the fallback for a destroyed-mid-stream path (the req-close
-    // handler below tears the stream down on client disconnect). The flag
-    // bails when close fires post-end so a clean completion still records
-    // as success.
-    result.stream.on('close', () => recordDownloadOnce(false));
-    req.on('close', () => result.stream.destroy());
+    result.stream.on('close', () => {
+      if (res.writableEnded) recordDownloadOnce(true);
+      else recordDownloadOnce(false);
+    });
+    req.on('close', () => {
+      if (!res.writableEnded) result.stream.destroy();
+    });
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
     result.stream.pipe(res);
     return;
