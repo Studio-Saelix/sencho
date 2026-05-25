@@ -97,6 +97,8 @@ export interface DashboardData {
   stackCpuSeries: Record<string, StackCpuSeries>;
   cpuHistory: number[];
   netHistory: number[];
-  /** Anchor timestamp (ms) for the sparkline 10-minute window — the newest metric sample. */
+  /** Anchor timestamp (ms) for the sparkline 10-minute window: the newest metric sample. */
   historyEndAt: number | null;
+  /** True after several consecutive `/stats` or `/system/stats` polls have failed; surfaces a "metrics paused" indicator. */
+  metricsStale: boolean;
 }

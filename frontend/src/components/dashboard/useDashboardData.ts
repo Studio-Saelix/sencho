@@ -41,6 +41,13 @@ function bucketCpu(points: MetricPoint[], windowMs: number, buckets: number): nu
   return out;
 }
 
+// After three consecutive failures of the live metrics endpoints, surface a
+// "metrics paused" indicator so the operator knows the gauges are stale by
+// design (the Docker socket or the metrics service is unreachable) rather
+// than just slow. The threshold is chosen so a single transient hiccup does
+// not trip the indicator.
+const METRICS_STALE_THRESHOLD = 3;
+
 export function useDashboardData(): DashboardData {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
@@ -50,11 +57,18 @@ export function useDashboardData(): DashboardData {
   const [metrics, setMetrics] = useState<MetricPoint[]>([]);
   const [stackStatuses, setStackStatuses] = useState<Record<string, StackStatusEntry>>({});
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+  const [metricsStale, setMetricsStale] = useState(false);
 
   // Keep a ref to the latest nodeId so async callbacks don't write stale data
   // after a node switch has already triggered a new effect cycle.
   const nodeIdRef = useRef(nodeId);
   useEffect(() => { nodeIdRef.current = nodeId; }, [nodeId]);
+
+  // Consecutive failure counters per live-metrics endpoint. Either reaching
+  // METRICS_STALE_THRESHOLD trips the metricsStale indicator; the first
+  // successful response on the failing endpoint clears its own counter and,
+  // when both are within the threshold, clears the indicator.
+  const failureCountsRef = useRef({ stats: 0, sys: 0 });
 
   const fetchJson = useCallback(async <T>(endpoint: string, options?: { localOnly?: boolean }): Promise<T | null> => {
     try {
@@ -66,39 +80,59 @@ export function useDashboardData(): DashboardData {
     }
   }, []);
 
+  const recordOutcome = useCallback((endpoint: 'stats' | 'sys', success: boolean) => {
+    const counts = failureCountsRef.current;
+    if (success) counts[endpoint] = 0;
+    else counts[endpoint] += 1;
+    const stale = counts.stats >= METRICS_STALE_THRESHOLD || counts.sys >= METRICS_STALE_THRESHOLD;
+    setMetricsStale(stale);
+  }, []);
+
   // Container stats: 5s polling, resets on node change
   useEffect(() => {
     setStats(DEFAULT_STATS); // eslint-disable-line react-hooks/set-state-in-effect
     setLastSyncAt(null);
+    failureCountsRef.current.stats = 0;
+    setMetricsStale(failureCountsRef.current.sys >= METRICS_STALE_THRESHOLD);
     const currentNodeId = nodeId;
     const fetchStats = async () => {
       if (nodeIdRef.current !== currentNodeId) return; // Stale effect
       const data = await fetchJson<Stats>('/stats');
-      if (data && nodeIdRef.current === currentNodeId) {
+      if (nodeIdRef.current !== currentNodeId) return;
+      if (data) {
         setStats(data);
         setLastSyncAt(Date.now());
+        recordOutcome('stats', true);
+      } else {
+        recordOutcome('stats', false);
       }
     };
     fetchStats();
     const cleanup = visibilityInterval(fetchStats, 5000);
     return cleanup;
-  }, [nodeId, fetchJson]);
+  }, [nodeId, fetchJson, recordOutcome]);
 
   // System stats: 5s polling, resets on node change
   useEffect(() => {
     setSystemStats(null); // eslint-disable-line react-hooks/set-state-in-effect
+    failureCountsRef.current.sys = 0;
+    setMetricsStale(failureCountsRef.current.stats >= METRICS_STALE_THRESHOLD);
     const currentNodeId = nodeId;
     const fetchSys = async () => {
       if (nodeIdRef.current !== currentNodeId) return;
       const data = await fetchJson<SystemStats>('/system/stats');
-      if (nodeIdRef.current === currentNodeId) {
+      if (nodeIdRef.current !== currentNodeId) return;
+      if (data) {
         setSystemStats(data);
+        recordOutcome('sys', true);
+      } else {
+        recordOutcome('sys', false);
       }
     };
     fetchSys();
     const cleanup = visibilityInterval(fetchSys, 5000);
     return cleanup;
-  }, [nodeId, fetchJson]);
+  }, [nodeId, fetchJson, recordOutcome]);
 
   // Historical metrics: 60s polling, resets on node change
   useEffect(() => {
@@ -274,5 +308,6 @@ export function useDashboardData(): DashboardData {
     cpuHistory,
     netHistory,
     historyEndAt,
+    metricsStale,
   };
 }

@@ -34,6 +34,7 @@ export default function HomeDashboard({ onNavigateToStack, onOpenSettingsSection
         activeNodeName={activeNodeName}
         nodeCount={data.nodeCount}
         lastSyncAt={data.lastSyncAt}
+        metricsStale={data.metricsStale}
       />
 
       <ResourceGauges
