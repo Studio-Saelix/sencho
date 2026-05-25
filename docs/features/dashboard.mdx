@@ -220,12 +220,18 @@ When you switch the active node from the node switcher, the dashboard resets eve
     Pilot-agent nodes connect outbound to the primary over a reverse tunnel, so there is no synchronous request-response loop to measure. The Heartbeat card uses the tunnel's last heartbeat to set the dot color, and intentionally renders `n/a` in the latency column. If the dot is red, check the agent container's logs for the first `[Pilot]` line and confirm the agent can reach the primary URL it is dialing. See [Pilot agent](/features/pilot-agent).
   </Accordion>
   <Accordion title="Configuration Status still shows the old value after I changed a setting">
-    The card refreshes every 60 seconds on its own schedule. Most settings changes also dispatch a live invalidation event that triggers an immediate refetch, but some flows (cloud backup provider switch, SSO provider change) only update on the next polling tick. If the row remains stale after a minute, hard-reload the dashboard tab to force a fresh fetch.
+    The card refreshes every 60 seconds on its own schedule. Toggling a stack's **Auto-update** setting also dispatches a live invalidation that the card picks up within a second. Other settings changes (cloud backup provider switch, SSO provider change, alert rule edit, agent toggle) update on the next 60-second tick. If the row stays stale after a minute, hard-reload the dashboard tab to force a fresh fetch.
+  </Accordion>
+  <Accordion title="The masthead shows a 'metrics stale' chip next to the node name">
+    The chip appears after three consecutive failures of the live metrics endpoints (`/api/stats` or `/api/system/stats`), which usually means the Docker socket is unreachable from this Sencho instance or the metrics service has stopped. The dashboard keeps polling on every cycle; the chip describes the freshness of the visible numbers, not the polling cadence. The chip clears on the first successful response once both endpoints are within the threshold. Check the Docker daemon status on the active node first, then the Sencho container logs for `[Dashboard]` lines if the chip persists.
   </Accordion>
   <Accordion title="Recent Alerts shows '1 / 12' but I want to scrub through history">
     The card paginates at eight rows. Use the chevrons in the header to flip pages. The full alert history (with filters and search) lives in the bell menu in the top bar; the dashboard card is a tape view of the latest entries on the active node. **Clear All Notifications** deletes the whole feed in one call, fanned out across every node that contributed an entry.
   </Accordion>
   <Accordion title="The masthead reads 'Critical' but my CPU is low">
     Critical can fire on RAM, disk, or the combination of any exited container with an unread error alert, not only on CPU. Read the reasons line right under the meta line; it lists every signal pushing the state up. Common cases: RAM at or above 90% from an oversized service, disk at or above 90% from runaway log retention, or a crashed container that no one has acknowledged in the alerts panel.
+  </Accordion>
+  <Accordion title="The dashboard feels sluggish on a large deployment">
+    Toggle **Developer mode** under **Settings · System**. Both dashboard endpoints then emit a `[Dashboard:debug]` line in the Sencho container logs for every request, reporting elapsed milliseconds and the contextual fields (`nodeId`, row count, `days` window). Use the timings to identify whether the Configuration Status payload or the stack-restarts query is the bottleneck. Disable developer mode when you are done to keep the log volume manageable.
   </Accordion>
 </AccordionGroup>
