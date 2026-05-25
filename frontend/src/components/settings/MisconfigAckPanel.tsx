@@ -10,6 +10,7 @@ import { ChevronLeft, ChevronRight, Plus, ShieldCheck, Trash2 } from 'lucide-rea
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import type { MisconfigAcknowledgement } from '@/types/security';
+import { useAuth } from '@/context/AuthContext';
 
 const RULE_RE = /^[A-Z0-9][A-Z0-9_-]{0,199}$/i;
 const PAGE_SIZE = 8;
@@ -33,6 +34,7 @@ interface MisconfigAckPanelProps {
 }
 
 export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
+  const { isAdmin } = useAuth();
   const [rows, setRows] = useState<MisconfigAcknowledgement[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -179,7 +181,7 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
               </Button>
             </>
           )}
-          {!isReplica && (
+          {isAdmin && !isReplica && (
             <Button size="sm" onClick={openCreate}>
               <Plus className="w-4 h-4 mr-1.5" />
               Add Acknowledgement
@@ -231,7 +233,7 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
                     by {row.created_by} · expires {formatExpiry(row)}
                   </div>
                 </div>
-                {!isReplica && row.replicated_from_control === 0 && (
+                {isAdmin && !isReplica && row.replicated_from_control === 0 && (
                   <Button
                     variant="ghost"
                     size="icon"

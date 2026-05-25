@@ -18,6 +18,7 @@ import { useNodes } from '@/context/NodeContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { SuppressionsPanel } from './SuppressionsPanel';
 import { MisconfigAckPanel } from './MisconfigAckPanel';
+import { useAuth } from '@/context/AuthContext';
 
 const SEVERITY_OPTIONS: Array<{ value: VulnSeverity; label: string }> = [
   { value: 'CRITICAL', label: 'Critical' },
@@ -61,6 +62,7 @@ const TRIVY_OP_LABELS: Record<'install' | 'update' | 'uninstall', { loading: str
 };
 
 export function SecuritySection({ isPaid }: { isPaid: boolean }) {
+  const { isAdmin } = useAuth();
   const [policies, setPolicies] = useState<ScanPolicy[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -291,7 +293,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
 
   return (
     <div className="space-y-6">
-      {isPaid && !isRemote && !isReplica && (
+      {isPaid && isAdmin && !isRemote && !isReplica && (
         <div className="flex justify-end">
           <SettingsPrimaryButton size="sm" onClick={openCreate}>
             <Plus className="w-4 h-4" />
@@ -358,7 +360,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {trivy.source === 'none' && (
+            {isAdmin && trivy.source === 'none' && (
               <SettingsPrimaryButton size="sm" onClick={handleInstallTrivy} disabled={trivyBusy !== null}>
                 {trivyBusy === 'install' ? (
                   <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} />
@@ -368,7 +370,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
                 Install Trivy
               </SettingsPrimaryButton>
             )}
-            {trivy.source === 'managed' && updateCheck?.updateAvailable && (
+            {isAdmin && trivy.source === 'managed' && updateCheck?.updateAvailable && (
               <Button size="sm" variant="outline" onClick={handleUpdateTrivy} disabled={trivyBusy !== null}>
                 {trivyBusy === 'update' ? (
                   <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} />
@@ -378,7 +380,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
                 Update
               </Button>
             )}
-            {trivy.source === 'managed' && (
+            {isAdmin && trivy.source === 'managed' && (
               <Button
                 size="sm"
                 variant="ghost"
@@ -399,7 +401,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
           <div className="text-xs text-stat-subtitle">{TRIVY_SOURCE_DESCRIPTIONS[trivy.source]}</div>
         )}
 
-        {trivy.source === 'managed' && isPaid && (
+        {trivy.source === 'managed' && isPaid && isAdmin && (
           <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
             <div>
               <Label className="text-sm">Auto-update Trivy</Label>
@@ -468,7 +470,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
                   </Badge>
                 )}
               </div>
-              {!isReplica && (
+              {isAdmin && !isReplica && (
                 <div className="flex items-center gap-1 shrink-0">
                   <Button
                     variant="ghost"

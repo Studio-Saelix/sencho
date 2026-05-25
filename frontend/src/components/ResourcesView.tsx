@@ -1344,7 +1344,7 @@ export default function ResourcesView() {
                 scanId={inspectScanId}
                 onClose={() => setInspectScanId(null)}
                 onRescan={(imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); }}
-                canGenerateSbom={isPaid}
+                canGenerateSbom={isPaid && isAdmin}
                 canCompare
                 canManageSuppressions={isAdmin}
             />

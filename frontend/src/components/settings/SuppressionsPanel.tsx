@@ -10,6 +10,7 @@ import { ChevronLeft, ChevronRight, Plus, ShieldOff, Trash2 } from 'lucide-react
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import type { CveSuppression } from '@/types/security';
+import { useAuth } from '@/context/AuthContext';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 const PAGE_SIZE = 8;
@@ -35,6 +36,7 @@ interface SuppressionsPanelProps {
 }
 
 export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
+  const { isAdmin } = useAuth();
   const [rows, setRows] = useState<CveSuppression[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -182,7 +184,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
               </Button>
             </>
           )}
-          {!isReplica && (
+          {isAdmin && !isReplica && (
             <Button size="sm" onClick={openCreate}>
               <Plus className="w-4 h-4 mr-1.5" />
               Add Suppression
@@ -239,7 +241,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
                     by {row.created_by} - expires {formatExpiry(row)}
                   </div>
                 </div>
-                {!isReplica && row.replicated_from_control === 0 && (
+                {isAdmin && !isReplica && row.replicated_from_control === 0 && (
                   <Button
                     variant="ghost"
                     size="icon"
