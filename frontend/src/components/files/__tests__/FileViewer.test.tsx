@@ -254,6 +254,50 @@ describe('FileViewer', () => {
     expect(mockReadFile).toHaveBeenNthCalledWith(2, 'my-stack', 'quirky-utf8.txt', { forceText: true });
   });
 
+  it('renders the oversized panel (not the binary panel) when both flags are set', async () => {
+    // The backend can return `binary: true, oversized: true` when a >2 MB
+    // file's first 8 KB probe also looks binary. Surfacing the binary panel
+    // there would hide the size signal and offer an override that resolves
+    // to an empty editor, so the oversized panel must win.
+    mockReadFile.mockResolvedValue({
+      binary: true,
+      oversized: true,
+      size: 5_000_000,
+      mime: 'application/octet-stream',
+      mtimeMs: 1_700_000_000_000,
+    });
+
+    render(<FileViewer {...defaultProps} selectedPath="huge-binary.bin" />);
+
+    expect(await screen.findByText(/too large to preview/i)).toBeInTheDocument();
+    expect(screen.queryByText(/binary file/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /open as text anyway/i })).not.toBeInTheDocument();
+  });
+
+  it('override on an oversized response falls back to the Download panel, never Monaco', async () => {
+    // Defence-in-depth: even if a future regression let the override button
+    // surface on an oversized file, the handler must not open Monaco against
+    // an empty content buffer. Save would then wipe the file on disk.
+    mockReadFile
+      .mockResolvedValueOnce(binaryResult())
+      .mockResolvedValueOnce({
+        binary: false,
+        oversized: true,
+        size: 5_000_000,
+        mime: 'text/plain',
+        mtimeMs: 1_700_000_000_000,
+      });
+
+    render(<FileViewer {...defaultProps} selectedPath="huge-misclassified.txt" />);
+    await screen.findByText(/binary file/i);
+
+    const overrideBtn = screen.getByRole('button', { name: /open as text anyway/i });
+    overrideBtn.click();
+
+    expect(await screen.findByText(/too large to preview/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('monaco-editor')).not.toBeInTheDocument();
+  });
+
   it('updates baseline on FileConflictError without discarding the user buffer; follow-up save uses new mtime', async () => {
     mockReadFile.mockResolvedValue(textResult('stale local copy'));
     mockWriteFile
