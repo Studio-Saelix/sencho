@@ -51,7 +51,7 @@ Sencho is a Docker Compose control plane focused on homelab and small-fleet oper
 - A monitoring stack. Sencho surfaces container and host metrics in the dashboard but does not replace Prometheus, Grafana, or your existing alerting pipeline.
 - A CI / CD pipeline. Use webhooks, the API, or Git-sourced stacks to connect Sencho to your build system.
 
-See [The Known_Limitations](KNOWN_LIMITATIONS.md) for the current limitation list.
+See [the known limitations](KNOWN_LIMITATIONS.md) for the current limitation list.
 
 ---
 
