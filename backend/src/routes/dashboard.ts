@@ -43,7 +43,6 @@ export interface ConfigurationStatus {
     provider: 'disabled' | 'sencho' | 'custom';
     autoUpload: boolean;
     locked: boolean;
-    requiredTier: 'admiral';
   };
 }
 
@@ -147,10 +146,13 @@ export function buildLocalConfigurationStatus(
       globalCrash,
     },
     backup: {
+      // Cloud Backup has a per-provider tier: Custom S3 is open to every
+      // tier; Sencho Cloud Backup requires Admiral. The row is rendered for
+      // every tier because Custom S3 is universally configurable, so no
+      // dashboard-level lock is meaningful.
       provider: cloudProvider,
       autoUpload: cloudAutoUpload,
       locked: false,
-      requiredTier: 'admiral',
     },
   };
 }
