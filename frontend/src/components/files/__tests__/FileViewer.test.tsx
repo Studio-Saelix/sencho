@@ -238,6 +238,22 @@ describe('FileViewer', () => {
     expect(opts).toEqual({ ifMatchMtimeMs: 1_700_000_000_000 });
   });
 
+  it('binary panel offers "Open as text anyway"; click refetches with forceText and renders Monaco', async () => {
+    mockReadFile
+      .mockResolvedValueOnce(binaryResult())
+      .mockResolvedValueOnce(textResult('rescued as text'));
+
+    render(<FileViewer {...defaultProps} selectedPath="quirky-utf8.txt" />);
+    await screen.findByText(/binary file/i);
+
+    const overrideBtn = screen.getByRole('button', { name: /open as text anyway/i });
+    overrideBtn.click();
+
+    await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
+    expect(mockReadFile).toHaveBeenCalledTimes(2);
+    expect(mockReadFile).toHaveBeenNthCalledWith(2, 'my-stack', 'quirky-utf8.txt', { forceText: true });
+  });
+
   it('updates baseline on FileConflictError without discarding the user buffer; follow-up save uses new mtime', async () => {
     mockReadFile.mockResolvedValue(textResult('stale local copy'));
     mockWriteFile

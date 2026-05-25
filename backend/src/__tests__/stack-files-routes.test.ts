@@ -241,6 +241,40 @@ describe('GET /api/stacks/:stackName/files/content', () => {
 
     await fs.unlink(bigPath);
   }, 15000);
+
+  it('returns binary:true by default for a file with a NUL byte in the probe window', async () => {
+    const oddPath = path.join(stacksDir, STACK, 'force-text-default.txt');
+    await fs.writeFile(oddPath, Buffer.from('hello\0world rest is utf8 text', 'utf-8'));
+    try {
+      const res = await request(app)
+        .get(`/api/stacks/${STACK}/files/content`)
+        .query({ path: 'force-text-default.txt' })
+        .set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.binary).toBe(true);
+      expect(res.body.content).toBeUndefined();
+    } finally {
+      await fs.unlink(oddPath);
+    }
+  });
+
+  it('returns the content as UTF-8 when ?force=text is set, even for files the binary heuristic rejects', async () => {
+    const oddPath = path.join(stacksDir, STACK, 'force-text-on.txt');
+    const raw = Buffer.from('hello\0world rest is utf8 text', 'utf-8');
+    await fs.writeFile(oddPath, raw);
+    try {
+      const res = await request(app)
+        .get(`/api/stacks/${STACK}/files/content`)
+        .query({ path: 'force-text-on.txt', force: 'text' })
+        .set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.binary).toBe(false);
+      expect(typeof res.body.content).toBe('string');
+      expect(res.body.content).toBe(raw.toString('utf-8'));
+    } finally {
+      await fs.unlink(oddPath);
+    }
+  });
 });
 
 // ── GET /:stackName/files/download ────────────────────────────────────────────

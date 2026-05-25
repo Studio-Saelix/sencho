@@ -27,6 +27,7 @@ interface SpecialFilePanelProps {
   label: string;
   stackName: string;
   relPath: string;
+  extraAction?: { label: string; onClick: () => void; disabled?: boolean };
 }
 
 function SpecialFilePanel({
@@ -35,6 +36,7 @@ function SpecialFilePanel({
   label,
   stackName,
   relPath,
+  extraAction,
 }: SpecialFilePanelProps) {
   const [downloading, setDownloading] = useState(false);
 
@@ -69,19 +71,31 @@ function SpecialFilePanel({
         <p className="font-mono text-sm text-stat-title">{filename}</p>
         <p className="text-xs text-stat-subtitle">{label} &middot; {formatBytes(size)}</p>
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={() => void handleDownload()}
-        disabled={downloading}
-      >
-        {downloading ? (
-          <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
-        ) : (
-          <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void handleDownload()}
+          disabled={downloading}
+        >
+          {downloading ? (
+            <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
+          ) : (
+            <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+          )}
+          Download
+        </Button>
+        {extraAction && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={extraAction.onClick}
+            disabled={extraAction.disabled}
+          >
+            {extraAction.label}
+          </Button>
         )}
-        Download
-      </Button>
+      </div>
     </div>
   );
 }
@@ -241,6 +255,25 @@ export function FileViewer({
   const language = extensionToLanguage(filename);
 
   if (isBinary) {
+    const handleForceText = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await readStackFile(stackName, selectedPath, { forceText: true });
+        setSize(result.size);
+        setLoadedMtimeMs(result.mtimeMs);
+        const text = result.content ?? '';
+        setContent(text);
+        setOriginalContent(text);
+        setIsBinary(false);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : 'Failed to load file as text.';
+        setError(message);
+        toast.error(message);
+      } finally {
+        setLoading(false);
+      }
+    };
     return (
       <SpecialFilePanel
         filename={filename}
@@ -248,6 +281,10 @@ export function FileViewer({
         label="Binary file"
         stackName={stackName}
         relPath={selectedPath}
+        extraAction={{
+          label: 'Open as text anyway',
+          onClick: () => void handleForceText(),
+        }}
       />
     );
   }

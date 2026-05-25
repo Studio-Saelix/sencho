@@ -86,10 +86,14 @@ export async function listStackDirectory(
 
 export async function readStackFile(
   stackName: string,
-  relPath: string
+  relPath: string,
+  options?: { forceText?: boolean }
 ): Promise<FileContentResult> {
   assertSafeRelPath(relPath);
-  const res = await apiFetch(stackFilesUrl(stackName, `/content?path=${encodeURIComponent(relPath)}`));
+  const forceSuffix = options?.forceText ? '&force=text' : '';
+  const res = await apiFetch(
+    stackFilesUrl(stackName, `/content?path=${encodeURIComponent(relPath)}${forceSuffix}`)
+  );
   if (!res.ok) throw new Error(await parseApiError(res));
   return res.json() as Promise<FileContentResult>;
 }
