@@ -942,3 +942,54 @@ describe('protected stack files', () => {
     if (res.status === 409) expect(res.body.code).toBe('PROTECTED_FILE');
   });
 });
+
+// ── symlink semantics ────────────────────────────────────────────────────────
+// Symlink creation requires admin/developer-mode on Windows; skip on that
+// platform so the suite stays green where the OS denies the setup itself.
+
+describe.skipIf(isWindows)('symlink semantics (Linux/macOS only)', () => {
+  it('PUT /files/permissions returns 409 LINK_CHMOD_UNSUPPORTED on a symlink', async () => {
+    const targetPath = path.join(stacksDir, STACK, 'symlink-target.txt');
+    const linkPath = path.join(stacksDir, STACK, 'symlink-link.txt');
+    await fs.writeFile(targetPath, 'payload');
+    await fs.chmod(targetPath, 0o644);
+    await fs.symlink(targetPath, linkPath);
+
+    try {
+      const res = await request(app)
+        .put(`/api/stacks/${STACK}/files/permissions`)
+        .query({ path: 'symlink-link.txt' })
+        .set('Cookie', adminCookie)
+        .send({ mode: 0o600 });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('LINK_CHMOD_UNSUPPORTED');
+
+      const stat = await fs.stat(targetPath);
+      expect(stat.mode & 0o777).toBe(0o644);
+    } finally {
+      await fs.unlink(linkPath).catch(() => {});
+      await fs.unlink(targetPath).catch(() => {});
+    }
+  });
+
+  it('DELETE /files removes a symlink and leaves the target intact', async () => {
+    const targetPath = path.join(stacksDir, STACK, 'sym-delete-target.txt');
+    const linkPath = path.join(stacksDir, STACK, 'sym-delete-link.txt');
+    await fs.writeFile(targetPath, 'survives');
+    await fs.symlink(targetPath, linkPath);
+
+    try {
+      const res = await request(app)
+        .delete(`/api/stacks/${STACK}/files`)
+        .query({ path: 'sym-delete-link.txt' })
+        .set('Cookie', adminCookie);
+      expect(res.status).toBe(204);
+
+      await expect(fs.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const targetContent = await fs.readFile(targetPath, 'utf-8');
+      expect(targetContent).toBe('survives');
+    } finally {
+      await fs.unlink(targetPath).catch(() => {});
+    }
+  });
+});
