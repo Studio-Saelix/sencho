@@ -4,9 +4,12 @@ const TRUNCATION_SUFFIX = '… [truncated]';
 
 // KEY=VALUE pairs whose KEY ends in a sensitive suffix. Values are stripped
 // because compose-parse errors and docker run failures surface them verbatim.
-// PASSWORD covers the bare-PASS case; standalone PASS would over-redact
-// BYPASS, COMPASS, and similar non-secret keys.
-const SENSITIVE_KEY_PATTERN = /\b([A-Z][A-Z0-9_]*(?:TOKEN|KEY|PASSWORD|SECRET|CREDENTIALS?|AUTH))\s*=\s*("[^"]*"|'[^']*'|\S+)/g;
+// Case-insensitive: compose env names are conventionally uppercase but
+// lowercase forms (db_password, jwt_secret, github_token) are valid and do
+// leak through the same error paths. PASSWORD covers the bare-PASS case;
+// standalone PASS would over-redact BYPASS, COMPASS, and similar non-secret
+// keys.
+const SENSITIVE_KEY_PATTERN = /\b([A-Za-z0-9_]*(?:TOKEN|KEY|PASSWORD|SECRET|CREDENTIALS?|AUTH))\s*=\s*("[^"]*"|'[^']*'|\S+)/gi;
 
 const URL_BASIC_AUTH = /\b([a-zA-Z][a-zA-Z0-9+.\-]*:\/\/)([^/\s:@]+):([^/\s:@]+)@/g;
 const BEARER_TOKEN = /\b(Bearer)\s+([A-Za-z0-9._\-+/=]{8,})/g;

@@ -317,12 +317,13 @@ export class ImageUpdateService {
                     // Key on the local default: the iterated `nodeId` may be a remote's id in the
                     // control plane's DB, and the UI never queries that row (it proxies instead).
                     try {
-                        db.addNotificationHistory(NodeRegistry.getInstance().getDefaultNodeId(), {
+                        const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+                        db.addNotificationHistory(localNodeId, {
                             level: 'error',
                             category: 'system',
                             message: sanitizeNotificationMessage(
                                 `[Node: ${nodeName}] Failed to notify about image updates for stack "${stackName}": ${getErrorMessage(e, String(e))}`,
-                                { composeDir: process.env.COMPOSE_DIR },
+                                { composeDir: NodeRegistry.getInstance().getComposeDir(localNodeId) },
                             ),
                             timestamp: Date.now(),
                             actor_username: 'system:image-update',

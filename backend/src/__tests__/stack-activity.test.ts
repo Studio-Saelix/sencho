@@ -54,8 +54,15 @@ describe('sanitizeNotificationMessage', () => {
     expect(sanitizeNotificationMessage('PORT=1852')).toBe('PORT=1852');
   });
 
-  it('does not redact lowercase keys (regex is uppercase-only by design)', () => {
-    expect(sanitizeNotificationMessage('db_password=foo')).toBe('db_password=foo');
+  it('redacts lowercase sensitive keys (compose env vars are commonly lowercase)', () => {
+    expect(sanitizeNotificationMessage('db_password=foo')).toBe('db_password=<redacted>');
+    expect(sanitizeNotificationMessage('jwt_secret=abc')).toBe('jwt_secret=<redacted>');
+    expect(sanitizeNotificationMessage('github_token=ghp_xyz')).toBe('github_token=<redacted>');
+  });
+
+  it('still leaves bare PASS-suffix lowercase keys unredacted', () => {
+    expect(sanitizeNotificationMessage('bypass=true')).toBe('bypass=true');
+    expect(sanitizeNotificationMessage('compass_url=https://example.com')).toBe('compass_url=https://example.com');
   });
 
   it('redacts HTTP basic auth in URLs', () => {

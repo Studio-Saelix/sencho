@@ -116,11 +116,15 @@ export class NotificationService {
         options?: { stackName?: string; containerName?: string; actor?: string },
     ) {
         const { stackName, containerName, actor } = options ?? {};
-        const sanitized = sanitizeNotificationMessage(message, { composeDir: process.env.COMPOSE_DIR });
         // Internal writes use the middleware default so they share a row key
         // with user-initiated requests; otherwise the UI and monitors split
         // between different node_id buckets.
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        // Use the full resolution chain (node.compose_dir → env → default)
+        // so messages mentioning a per-node compose override get collapsed.
+        const sanitized = sanitizeNotificationMessage(message, {
+            composeDir: NodeRegistry.getInstance().getComposeDir(localNodeId),
+        });
         const notification = this.dbService.addNotificationHistory(localNodeId, {
             level,
             category,
