@@ -675,7 +675,8 @@ export class FileSystemService {
   async readStackFile(
     stackName: string,
     relPath: string,
-    maxBytes: number = 2 * 1024 * 1024
+    maxBytes: number = 2 * 1024 * 1024,
+    opts: { forceText?: boolean } = {},
   ): Promise<{ content?: string; binary: boolean; oversized: boolean; size: number; mime: string; mtimeMs: number }> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     const mime = this.guessMime(safePath);
@@ -701,7 +702,12 @@ export class FileSystemService {
 
       const buf = await fh.readFile();
 
-      if (isBinaryBuffer(buf)) {
+      // forceText bypasses the binary-detection heuristic so callers can
+      // recover from false positives (a UTF-8 file that happens to carry a
+      // NUL or a high non-printable ratio in its first 8 KB). The oversized
+      // branch above still applies because returning a multi-megabyte file
+      // as JSON-encoded text is wasteful regardless of the heuristic.
+      if (!opts.forceText && isBinaryBuffer(buf)) {
         return { binary: true, oversized: false, size: stat.size, mime, mtimeMs };
       }
 
@@ -877,21 +883,53 @@ export class FileSystemService {
     return { ok: true, mtimeMs: newStat.mtimeMs };
   }
 
+  /**
+   * Like resolveSafeStackPath but does NOT follow a symlink at the leaf.
+   * Path-component symlinks are still resolved and validated (so a symlinked
+   * parent that escapes the stack dir still throws SYMLINK_ESCAPE), but the
+   * final entry stays as the link path the user sees in the tree. Callers
+   * use this to act on the link entry itself (unlink the link, not the
+   * target) for operations where following would mutate a file other than
+   * the one the user clicked on.
+   */
+  private async resolveSafeStackLeafPath(stackName: string, relPath: string): Promise<string> {
+    if (relPath === '' || relPath === '.') {
+      return this.resolveSafeStackPath(stackName, '');
+    }
+    const parentRel = path.dirname(relPath);
+    const baseName = path.basename(relPath);
+    if (!baseName || baseName === '.' || baseName === '..') {
+      throw Object.assign(new Error('Invalid path'), { code: 'INVALID_PATH' });
+    }
+    const safeParent = await this.resolveSafeStackPath(stackName, parentRel === '.' ? '' : parentRel);
+    return path.join(safeParent, baseName);
+  }
+
   async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false): Promise<void> {
     if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    const leafPath = await this.resolveSafeStackLeafPath(stackName, relPath);
+
+    // Branch on whether the leaf is a symlink BEFORE following it. Deleting
+    // a symlink should remove the link entry the user clicked on; following
+    // through to the target would silently delete a file with a different
+    // name and leave the link entry dangling.
+    const leafStat = await fsPromises.lstat(leafPath);
+    if (leafStat.isSymbolicLink()) {
+      await fsPromises.unlink(leafPath);
+      return;
+    }
 
     if (recursive) {
-      await fsPromises.rm(safePath, { recursive: true, force: true });
+      await fsPromises.rm(leafPath, { recursive: true, force: true });
       return;
     }
     try {
-      await fsPromises.unlink(safePath);
+      await fsPromises.unlink(leafPath);
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === 'EISDIR') {
         try {
-          await fsPromises.rmdir(safePath);
+          await fsPromises.rmdir(leafPath);
         } catch (inner: unknown) {
           const ie = inner as NodeJS.ErrnoException;
           if (ie.code === 'ENOTEMPTY' || ie.code === 'EEXIST') {
@@ -946,8 +984,21 @@ export class FileSystemService {
       throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
     }
     if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
-    await fsPromises.chmod(safePath, mode);
+    const leafPath = await this.resolveSafeStackLeafPath(stackName, relPath);
+
+    // chmod on a symlink is rejected. Following the link would silently
+    // mutate permissions on a file with a different name than the entry the
+    // user clicked on. Node's fsPromises.lchmod is macOS-only, so for the
+    // common Linux/Windows case there is no safe in-place alternative; we
+    // surface a clear error so the user edits the target file directly.
+    const leafStat = await fsPromises.lstat(leafPath);
+    if (leafStat.isSymbolicLink()) {
+      throw Object.assign(
+        new Error('Cannot change permissions of a symlink. Edit the target file directly.'),
+        { code: 'LINK_CHMOD_UNSUPPORTED' as const },
+      );
+    }
+    await fsPromises.chmod(leafPath, mode);
   }
 
   async statStackEntry(stackName: string, relPath: string): Promise<FileEntry> {

@@ -1313,7 +1313,8 @@ type FsErrorCode =
   | 'ALREADY_EXISTS'
   | 'FILE_EXISTS'
   | 'DIR_EXISTS'
-  | 'PROTECTED_FILE';
+  | 'PROTECTED_FILE'
+  | 'LINK_CHMOD_UNSUPPORTED';
 
 function sendFsError(
   res: Response,
@@ -1333,6 +1334,9 @@ function sendFsError(
   }
   if (e.code === 'PROTECTED_FILE') {
     return res.status(409).json({ error: e.message, code: 'PROTECTED_FILE' satisfies FsErrorCode });
+  }
+  if (e.code === 'LINK_CHMOD_UNSUPPORTED') {
+    return res.status(409).json({ error: e.message, code: 'LINK_CHMOD_UNSUPPORTED' satisfies FsErrorCode });
   }
   if (e.code === 'EEXIST') {
     return res.status(409).json({ error: e.message, code: 'ALREADY_EXISTS' satisfies FsErrorCode });
@@ -1459,10 +1463,11 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const forceText = req.query.force === 'text';
   const startedAt = Date.now();
-  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId, forceText });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath);
+    const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath, undefined, { forceText });
     // ETag is the integer mtimeMs the file was stat'd with, so the matching
     // PUT can compare millisecond-equal even though some filesystems return
     // float mtimeMs.

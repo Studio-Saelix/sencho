@@ -35,7 +35,7 @@ The Files tab splits into two panes. The left pane holds the upload affordance, 
 
 Folders sort before files, and entries within each group sort alphabetically.
 
-Click a folder to expand or collapse it. Click a file to open it in the viewer on the right. Symlinks render with a chain icon and behave like files when clicked.
+Click a folder to expand or collapse it. Click a file to open it in the viewer on the right. Symlinks render with a chain icon and behave like files when clicked. Deleting a symlink removes only the link entry; the file it points to is untouched.
 
 **Display cap.** Each directory render is capped at 500 entries. A folder with more than 500 children shows the first 500 alphabetically and appends `Showing 500 of N - refine in shell` at the bottom of the list. For directories with more entries, work from a host shell.
 
@@ -127,7 +127,7 @@ Right-click any file and choose **Permissions** to inspect or edit its Unix mode
 When your account has stack edit permission, the toggles are interactive and the footer adds **Save**. For viewer accounts the dialog opens read-only: the toggles render the current state and the footer shows only **Close**.
 
 <Note>
-  Permissions are applied with `chmod`. Symlinks may not honour the change depending on the host kernel.
+  Permissions are applied with `chmod`. Permission changes on symlinks are not supported; edit the target file's permissions directly.
 </Note>
 
 ## Deleting
@@ -169,7 +169,7 @@ The Permissions dialog opens for everyone; only users with stack edit permission
 
 <AccordionGroup>
   <Accordion title="File shows as 'Binary file detected' but it is a text file">
-    The binary detection heuristic flagged null bytes or a high proportion of non-printable characters in the file's first kilobytes. This can happen with certain encodings, non-UTF-8 byte sequences, or unusual line-ending mixes. Download the file, edit it locally or via a host terminal, then re-upload.
+    The binary detection heuristic flagged null bytes or a high proportion of non-printable characters in the file's first kilobytes. This can happen with certain encodings, non-UTF-8 byte sequences, or unusual line-ending mixes. Click **Open as text anyway** on the binary panel to re-fetch the file as UTF-8 text and edit it in the inline viewer. Files above the 2 MB preview limit still need a Download.
   </Accordion>
   <Accordion title="Upload fails with a 413 error">
     The file exceeds the 25 MB per-file upload limit. Compress or split the file before uploading, or transfer it via `scp` or `rsync` directly to the stack directory on the host.
