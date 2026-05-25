@@ -320,6 +320,63 @@ describe('POST /api/stacks/:stackName/files/upload', () => {
     const content = await fs.readFile(path.join(stacksDir, STACK, 'subdir', 'sub.txt'), 'utf-8');
     expect(content).toBe('subdir content');
   });
+
+  it('returns 409 FILE_EXISTS when the target name already exists and overwrite is not set', async () => {
+    const target = path.join(stacksDir, STACK, 'existing.txt');
+    await fs.writeFile(target, 'original');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('replacement'), 'existing.txt');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('FILE_EXISTS');
+    // Original content must be preserved when the upload is rejected.
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('original');
+    await fs.unlink(target);
+  });
+
+  it('overwrites when ?overwrite=1 is set', async () => {
+    const target = path.join(stacksDir, STACK, 'replaceme.txt');
+    await fs.writeFile(target, 'before');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('after'), 'replaceme.txt');
+    expect(res.status).toBe(204);
+    const after = await fs.readFile(target, 'utf-8');
+    expect(after).toBe('after');
+    await fs.unlink(target);
+  });
+
+  it('returns 409 DIR_EXISTS when a directory occupies the upload target name', async () => {
+    const dir = path.join(stacksDir, STACK, 'collide-dir');
+    await fs.mkdir(dir, { recursive: true });
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('whatever'), 'collide-dir');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DIR_EXISTS');
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('still returns 409 DIR_EXISTS even when ?overwrite=1 is set (directories are never replaced)', async () => {
+    const dir = path.join(stacksDir, STACK, 'collide-dir-2');
+    await fs.mkdir(dir, { recursive: true });
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('whatever'), 'collide-dir-2');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DIR_EXISTS');
+    // The directory must still exist after the rejected upload.
+    const stat = await fs.stat(dir);
+    expect(stat.isDirectory()).toBe(true);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
 });
 
 // ── PUT /:stackName/files/content ─────────────────────────────────────────────
@@ -702,10 +759,15 @@ describe('protected stack files', () => {
     expect(res.status).toBe(204);
   });
 
-  it('POST /files/upload still succeeds when overwriting compose.yaml (legitimate replace)', async () => {
+  it('POST /files/upload still succeeds when overwriting compose.yaml with overwrite=1 (legitimate replace)', async () => {
+    // Combined semantics: same-name uploads need ?overwrite=1 to pass the
+    // upload-confirm gate. The protected-file enforcement deliberately does
+    // NOT block this path because replacing compose.yaml via upload is a
+    // legitimate user-driven action.
     const replacement = 'services:\n  uploaded:\n    image: busybox\n';
     const res = await request(app)
       .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
       .set('Cookie', adminCookie)
       .attach('file', Buffer.from(replacement), 'compose.yaml');
     expect(res.status).toBe(204);
