@@ -1,5 +1,6 @@
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { promises as fsPromises, createReadStream } from 'fs';
 import type { Readable } from 'stream';
 import { NodeRegistry } from './NodeRegistry';
@@ -34,6 +35,33 @@ const PROTECTED_STACK_FILES = new Set([
   'docker-compose.yml',
   '.env',
 ]);
+
+// Strips at most one trailing slash. The upstream validator
+// (isValidRelativeStackPath) rejects any '//' sequence, so a string reaching
+// this helper can carry at most one trailing slash, and a single slice is
+// sufficient. Avoids the polynomial regex /\/+$/ that CodeQL would flag for
+// callers without the upstream length guarantee.
+function stripTrailingSlash(s: string): string {
+  return s.endsWith('/') ? s.slice(0, -1) : s;
+}
+
+function isProtectedRelPath(relPath: string): boolean {
+  if (!relPath) return false;
+  const normalized = stripTrailingSlash(relPath);
+  // Only files at the stack root are protected; compose CLI reads compose.yaml from
+  // the stack directory itself, so a subdirectory entry named compose.yaml is just
+  // an arbitrary file and the user may want to delete it.
+  if (normalized.includes('/')) return false;
+  return PROTECTED_STACK_FILES.has(normalized);
+}
+
+function protectedFileError(relPath: string): Error & { code: string } {
+  const basename = stripTrailingSlash(relPath).split('/').pop() ?? relPath;
+  return Object.assign(
+    new Error(`${basename} is a protected stack file. Delete the stack itself via Stack Actions instead.`),
+    { code: 'PROTECTED_FILE' as const },
+  );
+}
 
 const MIME_MAP: Record<string, string> = {
   '.yaml': 'text/yaml',
@@ -648,31 +676,39 @@ export class FileSystemService {
     stackName: string,
     relPath: string,
     maxBytes: number = 2 * 1024 * 1024
-  ): Promise<{ content?: string; binary: boolean; oversized: boolean; size: number; mime: string }> {
+  ): Promise<{ content?: string; binary: boolean; oversized: boolean; size: number; mime: string; mtimeMs: number }> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
-    const stat = await fsPromises.stat(safePath);
     const mime = this.guessMime(safePath);
 
-    if (stat.isDirectory()) {
-      throw Object.assign(new Error('Target is a directory'), { code: 'IS_DIRECTORY' });
+    // Open once and stat+read through the same handle so the mtime returned to
+    // the client matches the bytes it received, even if the file is replaced
+    // (atomic rename) between the two operations.
+    const fh = await fsPromises.open(safePath, 'r');
+    try {
+      const stat = await fh.stat();
+      const mtimeMs = stat.mtimeMs;
+
+      if (stat.isDirectory()) {
+        throw Object.assign(new Error('Target is a directory'), { code: 'IS_DIRECTORY' });
+      }
+
+      if (stat.size > maxBytes) {
+        const probe = Buffer.allocUnsafe(8192);
+        const { bytesRead } = await fh.read(probe, 0, 8192, 0);
+        const binary = isBinaryBuffer(probe.subarray(0, bytesRead));
+        return { binary, oversized: true, size: stat.size, mime, mtimeMs };
+      }
+
+      const buf = await fh.readFile();
+
+      if (isBinaryBuffer(buf)) {
+        return { binary: true, oversized: false, size: stat.size, mime, mtimeMs };
+      }
+
+      return { binary: false, oversized: false, size: stat.size, mime, mtimeMs, content: buf.toString('utf-8') };
+    } finally {
+      await fh.close();
     }
-
-    if (stat.size > maxBytes) {
-      const fd = await fsPromises.open(safePath, 'r');
-      const probe = Buffer.allocUnsafe(8192);
-      const { bytesRead } = await fd.read(probe, 0, 8192, 0);
-      await fd.close();
-      const binary = isBinaryBuffer(probe.subarray(0, bytesRead));
-      return { binary, oversized: true, size: stat.size, mime };
-    }
-
-    const buf = await fsPromises.readFile(safePath);
-
-    if (isBinaryBuffer(buf)) {
-      return { binary: true, oversized: false, size: stat.size, mime };
-    }
-
-    return { binary: false, oversized: false, size: stat.size, mime, content: buf.toString('utf-8') };
   }
 
   async streamStackFile(
@@ -694,19 +730,155 @@ export class FileSystemService {
     };
   }
 
-  async writeStackFile(stackName: string, relPath: string, content: string): Promise<void> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+  /**
+   * Atomic write: stages the content in a sibling .tmp file in the same
+   * directory, fsyncs, then promotes it to the final path. A crash between
+   * the open and the rename leaves either the original target intact or a
+   * leftover .tmp file (cleaned up on next failure path), never a truncated
+   * target.
+   *
+   * `exclusive: true` uses link+unlink instead of rename so the create is
+   * race-free atomic: link fails with EEXIST if the target already exists,
+   * giving the caller a definitive "did not exist when we wrote it" signal.
+   * The non-exclusive default uses rename, which is atomic against partial
+   * reads but clobbers any existing target.
+   */
+  private async writeStackFileAtomic(
+    safePath: string,
+    data: string | Buffer,
+    opts: { exclusive?: boolean } = {},
+  ): Promise<void> {
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
-    await fsPromises.writeFile(safePath, content, 'utf-8');
+    // crypto.randomBytes gives a guaranteed-length high-entropy suffix; Math.random
+    // can drop leading zeros which narrows entropy unpredictably.
+    const suffix = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+    const tmpPath = `${safePath}.sencho-tmp-${suffix}`;
+    let stagedTmp = false;
+    try {
+      const fh = await fsPromises.open(tmpPath, 'wx');
+      stagedTmp = true;
+      try {
+        await fh.writeFile(data);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      if (opts.exclusive) {
+        // link() is atomic against EEXIST. Tmp and target are guaranteed to live
+        // in the same directory (same filesystem); link works on NTFS and any
+        // POSIX FS without elevated privileges.
+        try {
+          await fsPromises.link(tmpPath, safePath);
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+            throw Object.assign(new Error('File already exists'), { code: 'FILE_EXISTS' as const });
+          }
+          throw err;
+        }
+      } else {
+        await fsPromises.rename(tmpPath, safePath);
+        stagedTmp = false;
+      }
+    } finally {
+      if (stagedTmp) {
+        await fsPromises.unlink(tmpPath).catch(() => {});
+      }
+    }
   }
 
-  async writeStackFileBuffer(stackName: string, relPath: string, buffer: Buffer): Promise<void> {
+  async writeStackFile(
+    stackName: string,
+    relPath: string,
+    content: string,
+    opts?: { exclusive?: boolean },
+  ): Promise<void> {
+    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    await this.writeStackFileAtomic(safePath, content, opts);
+  }
+
+  async writeStackFileBuffer(
+    stackName: string,
+    relPath: string,
+    buffer: Buffer,
+    opts?: { exclusive?: boolean },
+  ): Promise<void> {
+    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    await this.writeStackFileAtomic(safePath, buffer, opts);
+  }
+
+  /**
+   * Returns 'file' or 'directory' if the resolved path exists, null if it
+   * does not. Path-resolution errors (INVALID_PATH, SYMLINK_ESCAPE) propagate
+   * so callers do not silently treat a malformed path as 'available for write'.
+   * Callers should validate inputs upstream before invoking this helper.
+   */
+  async pathKind(stackName: string, relPath: string): Promise<'file' | 'directory' | null> {
+    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    try {
+      const stat = await fsPromises.lstat(safePath);
+      if (stat.isDirectory()) return 'directory';
+      return 'file';
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Optimistic-concurrency write for arbitrary stack files (file-explorer
+   * editor save path). If `expectedMtimeMs` is provided, opens the target,
+   * stats it, and refuses the write (returning current content + mtime) when
+   * the stat does not match the caller's expectation. Mirrors the
+   * compose-file pattern in saveStackContentIfUnchanged.
+   *
+   * Mtime comparison uses Math.floor so sub-millisecond jitter between
+   * different filesystems and Node versions does not produce false 412s.
+   *
+   * If the file does not exist yet, the write proceeds (no mtime to compare).
+   * Returns the new mtimeMs so the route can emit a fresh ETag.
+   */
+  async writeStackFileIfUnchanged(
+    stackName: string,
+    relPath: string,
+    content: string,
+    expectedMtimeMs: number | null,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
-    await fsPromises.writeFile(safePath, buffer);
+
+    if (expectedMtimeMs !== null) {
+      let fh: import('fs/promises').FileHandle | null = null;
+      try {
+        fh = await fsPromises.open(safePath, 'r');
+        const stat = await fh.stat();
+        if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
+          const currentContent = await fh.readFile('utf-8');
+          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        // The caller expected an existing file but it has been deleted under
+        // the editor. That is itself a conflict (the file is gone, the user
+        // is editing into a void) so surface it the same way as a stale-mtime
+        // mismatch. An empty current snapshot tells the client "the live
+        // version is gone, you are starting from scratch".
+        return { ok: false, currentMtimeMs: 0, currentContent: '' };
+      } finally {
+        if (fh) await fh.close();
+      }
+    }
+
+    await fsPromises.writeFile(safePath, content, 'utf-8');
+    const newStat = await fsPromises.stat(safePath);
+    return { ok: true, mtimeMs: newStat.mtimeMs };
   }
 
   async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false): Promise<void> {
+    if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
 
     if (recursive) {
@@ -739,6 +911,8 @@ export class FileSystemService {
   }
 
   async renameStackPath(stackName: string, fromRel: string, toRel: string): Promise<void> {
+    if (isProtectedRelPath(fromRel)) throw protectedFileError(fromRel);
+    if (isProtectedRelPath(toRel)) throw protectedFileError(toRel);
     const fromPath = await this.resolveSafeStackPath(stackName, fromRel);
     // toRel must resolve to the same parent directory (rename only, no cross-dir move).
     const toPath = await this.resolveSafeStackPath(stackName, toRel);
@@ -771,6 +945,7 @@ export class FileSystemService {
     if (!Number.isInteger(mode) || mode < 0 || mode > 0o777) {
       throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
     }
+    if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     await fsPromises.chmod(safePath, mode);
   }

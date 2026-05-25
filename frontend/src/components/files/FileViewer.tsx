@@ -1,10 +1,10 @@
-import { useState, useEffect, useMemo, Suspense } from 'react';
+import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import { AlertCircle, FileIcon, Download, Loader2, Save } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
-import { readStackFile, writeStackFile, downloadStackFile } from '@/lib/stackFilesApi';
+import { readStackFile, writeStackFile, downloadStackFile, FileConflictError } from '@/lib/stackFilesApi';
 import { extensionToLanguage } from '@/lib/monacoLanguages';
 import { formatBytes } from '@/lib/utils';
 
@@ -14,6 +14,7 @@ interface FileViewerProps {
   canEdit: boolean;
   isDarkMode: boolean;
   onSaved?: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 function getFilename(path: string): string {
@@ -91,6 +92,7 @@ export function FileViewer({
   canEdit,
   isDarkMode,
   onSaved,
+  onDirtyChange,
 }: FileViewerProps) {
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
@@ -100,8 +102,26 @@ export function FileViewer({
   const [isBinary, setIsBinary] = useState(false);
   const [isOversized, setIsOversized] = useState(false);
   const [size, setSize] = useState(0);
+  const [loadedMtimeMs, setLoadedMtimeMs] = useState<number | null>(null);
 
   const readOnly = !canEdit;
+  const hasChanges = content !== originalContent;
+
+  // Stash the latest callback in a ref so the unmount-cleanup effect can be
+  // truly unmount-scoped without re-running every time a parent passes a fresh
+  // function identity.
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  useEffect(() => {
+    onDirtyChangeRef.current = onDirtyChange;
+  }, [onDirtyChange]);
+
+  useEffect(() => {
+    onDirtyChangeRef.current?.(hasChanges);
+  }, [hasChanges]);
+
+  useEffect(() => {
+    return () => onDirtyChangeRef.current?.(false);
+  }, []);
 
   const editorOptions = useMemo(
     () => ({
@@ -135,6 +155,7 @@ export function FileViewer({
       .then((result) => {
         if (cancelled) return;
         setSize(result.size);
+        setLoadedMtimeMs(result.mtimeMs);
         if (result.binary) {
           setIsBinary(true);
         } else if (result.oversized) {
@@ -163,12 +184,27 @@ export function FileViewer({
     setSaving(true);
     const loadingId = toast.loading('Saving...');
     try {
-      await writeStackFile(stackName, selectedPath, content);
+      const result = await writeStackFile(stackName, selectedPath, content, {
+        ifMatchMtimeMs: loadedMtimeMs ?? undefined,
+      });
       setOriginalContent(content);
+      if (result.mtimeMs !== null) setLoadedMtimeMs(result.mtimeMs);
       toast.success('Saved.');
       onSaved?.();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Save failed.');
+      if (e instanceof FileConflictError) {
+        // The server-side content has moved on. Update the baseline (so the
+        // next save sends the fresh mtime and stops looping on the same
+        // precondition) but leave the user's typed buffer untouched. Their
+        // edits remain in the editor, Save stays enabled, and a follow-up
+        // click will apply their changes on top of the new server content
+        // without silently destroying what they typed.
+        setOriginalContent(e.currentContent);
+        setLoadedMtimeMs(e.currentMtimeMs);
+        toast.error('File changed elsewhere. Review your edits then save again to apply them on top of the current version.');
+      } else {
+        toast.error(e instanceof Error ? e.message : 'Save failed.');
+      }
     } finally {
       toast.dismiss(loadingId);
       setSaving(false);
@@ -227,8 +263,6 @@ export function FileViewer({
       />
     );
   }
-
-  const hasChanges = content !== originalContent;
 
   return (
     <div className="flex flex-col h-full">

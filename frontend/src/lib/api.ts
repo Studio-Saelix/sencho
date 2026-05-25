@@ -23,7 +23,12 @@ export async function apiFetch(
     },
   };
 
-  const response = await fetch(url, { ...defaultOptions, ...fetchOptions });
+  // Drop headers from fetchOptions before the outer spread so the merged
+  // defaultOptions.headers (with Content-Type and x-node-id) survives. Without
+  // this, any caller that passes a `headers` field clobbers the defaults.
+  const { headers: _callerHeaders, ...fetchOptionsWithoutHeaders } = fetchOptions;
+  void _callerHeaders;
+  const response = await fetch(url, { ...defaultOptions, ...fetchOptionsWithoutHeaders });
 
   if (response.status === 401) {
     // Only fire the global logout event for local auth failures.
