@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { DatabaseService, type StackRestartSummary } from '../services/DatabaseService';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { effectiveTier, effectiveVariant } from '../middleware/tierGates';
+import { isDebugEnabled } from '../utils/debug';
 import type { LicenseTier, LicenseVariant } from '../services/license-types';
 
 export const dashboardRouter = Router();
@@ -157,12 +158,20 @@ export function buildLocalConfigurationStatus(
 // All routes below are protected by the global authGate mounted at app.use('/api', authGate)
 dashboardRouter.get('/configuration', (req: Request, res: Response): void => {
   try {
+    const debug = isDebugEnabled();
+    const startedAt = debug ? Date.now() : 0;
     const nodeId = req.nodeId ?? 0;
     const userId = req.user?.userId ?? 0;
     const tier = effectiveTier(req);
     const variant = effectiveVariant(req);
 
-    res.json(buildLocalConfigurationStatus(nodeId, userId, tier, variant));
+    const payload = buildLocalConfigurationStatus(nodeId, userId, tier, variant);
+    if (debug) {
+      console.debug(
+        `[Dashboard:debug] /configuration built in ${Date.now() - startedAt} ms (nodeId=${nodeId})`,
+      );
+    }
+    res.json(payload);
   } catch (error) {
     console.error('[Dashboard] Failed to build configuration status:', error);
     res.status(500).json({ error: 'Failed to fetch configuration status' });
@@ -171,12 +180,19 @@ dashboardRouter.get('/configuration', (req: Request, res: Response): void => {
 
 dashboardRouter.get('/stack-restarts', (req: Request, res: Response): void => {
   try {
+    const debug = isDebugEnabled();
+    const startedAt = debug ? Date.now() : 0;
     const db = DatabaseService.getInstance();
     const nodeId = req.nodeId ?? 0;
     const rawDays = parseInt(String(req.query['days'] ?? '7'), 10);
     const days = isNaN(rawDays) || rawDays < 1 ? 7 : Math.min(rawDays, 30);
 
     const result: StackRestartSummary[] = db.getStackRestartSummary(nodeId, days);
+    if (debug) {
+      console.debug(
+        `[Dashboard:debug] /stack-restarts returned ${result.length} rows for nodeId=${nodeId} over ${days}d in ${Date.now() - startedAt} ms`,
+      );
+    }
     res.json(result);
   } catch (error) {
     console.error('[Dashboard] Failed to fetch stack restarts:', error);
