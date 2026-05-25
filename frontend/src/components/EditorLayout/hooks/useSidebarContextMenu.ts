@@ -43,6 +43,7 @@ export function useSidebarContextMenu({
       isPaid,
       isAdmiral,
       canDelete: can('stack:delete', 'stack', sName),
+      canEditLabels: can('stack:edit', 'stack', sName),
       isPinned: stackListState.isPinned(file),
       labels: stackListState.labels,
       assignedLabelIds: (stackListState.stackLabelMap[file] ?? []).map(l => l.id),

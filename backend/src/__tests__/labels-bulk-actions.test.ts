@@ -65,6 +65,10 @@ afterAll(() => cleanupTestDb(tmpDir));
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // restoreAllMocks only resets spies; bare vi.fn() mocks keep their call
+  // history across tests. Clear them all so each test sees a fresh slate
+  // before its `.not.toHaveBeenCalled()` assertions run.
+  vi.clearAllMocks();
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
   mockFsStacks = ['alpha', 'beta'];
   deployStack.mockResolvedValue(undefined);
@@ -72,7 +76,6 @@ beforeEach(() => {
   stopContainer.mockResolvedValue(undefined);
   restartContainer.mockResolvedValue(undefined);
   enforcePolicyPreDeploy.mockResolvedValue({ ok: true });
-  invalidateNodeCaches.mockClear();
   activeBulkActions.clear();
   db.getDb().prepare('DELETE FROM stack_label_assignments').run();
   db.getDb().prepare('DELETE FROM stack_labels').run();
@@ -145,5 +148,63 @@ describe('Stack Labels bulk actions', () => {
     expect(res.status).toBe(429);
     expect(res.body.error).toContain('already running');
     expect(restartContainer).not.toHaveBeenCalled();
+  });
+
+  it('dry-run deploy runs the policy gate and reports blocked stacks honestly', async () => {
+    const label = await createAssignedLabel(['alpha']);
+    enforcePolicyPreDeploy.mockResolvedValue({
+      ok: false,
+      policy: { name: 'block-criticals', max_severity: 'high' },
+      violations: [{ image: 'nginx:latest', severity: 'critical' }],
+    });
+
+    const res = await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'deploy', dryRun: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toEqual([
+      expect.objectContaining({ stackName: 'alpha', success: false, dryRun: true }),
+    ]);
+    expect(res.body.results[0].error).toContain('Policy "block-criticals" blocked deploy');
+    expect(deployStack).not.toHaveBeenCalled();
+    expect(invalidateNodeCaches).not.toHaveBeenCalled();
+  });
+
+  it('dry-run deploy reports success when the policy gate passes, without touching Docker', async () => {
+    const label = await createAssignedLabel(['alpha']);
+    enforcePolicyPreDeploy.mockResolvedValue({ ok: true });
+
+    const res = await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'deploy', dryRun: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toEqual([
+      { stackName: 'alpha', success: true, dryRun: true },
+    ]);
+    expect(enforcePolicyPreDeploy).toHaveBeenCalledWith('alpha', label.node_id, expect.any(Object));
+    expect(deployStack).not.toHaveBeenCalled();
+    expect(invalidateNodeCaches).not.toHaveBeenCalled();
+  });
+
+  it('dry-run stop reports per-stack success without dispatching real stops', async () => {
+    const label = await createAssignedLabel(['alpha', 'beta']);
+
+    const res = await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'stop', dryRun: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toEqual([
+      { stackName: 'alpha', success: true, dryRun: true },
+      { stackName: 'beta', success: true, dryRun: true },
+    ]);
+    expect(getContainersByStack).not.toHaveBeenCalled();
+    expect(stopContainer).not.toHaveBeenCalled();
+    expect(invalidateNodeCaches).not.toHaveBeenCalled();
   });
 });

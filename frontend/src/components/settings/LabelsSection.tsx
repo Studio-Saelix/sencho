@@ -6,6 +6,7 @@ import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/comp
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SENCHO_LABELS_CHANGED } from '@/lib/events';
+import { useAuth } from '@/context/AuthContext';
 import { CapabilityGate } from '../CapabilityGate';
 import { LabelDot } from '../LabelPill';
 import { LABEL_COLORS, MAX_LABELS_PER_NODE, type Label, type LabelColor } from '../label-types';
@@ -18,6 +19,11 @@ interface LabelsSectionProps {
 }
 
 export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
+    const { can } = useAuth();
+    // Mirrors the backend `requirePermission('stack:edit')` guard on
+    // POST/PUT/DELETE /api/labels, keeping a viewer/deployer/auditor from
+    // clicking through to a guaranteed 403.
+    const canMutate = can('stack:edit');
     const [labels, setLabels] = useState<Label[]>([]);
     const [loading, setLoading] = useState(true);
     const [assignmentCounts, setAssignmentCounts] = useState<Record<number, number>>({});
@@ -128,12 +134,14 @@ export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
     return (
         <CapabilityGate capability="labels" featureName="Stack Labels">
             <div className="space-y-4">
-                <div className="flex justify-end">
-                    <SettingsPrimaryButton size="sm" onClick={openCreate} disabled={labels.length >= MAX_LABELS_PER_NODE}>
-                        <Plus className="w-4 h-4" strokeWidth={1.5} />
-                        {labels.length >= MAX_LABELS_PER_NODE ? 'Limit reached' : 'New label'}
-                    </SettingsPrimaryButton>
-                </div>
+                {canMutate && (
+                    <div className="flex justify-end">
+                        <SettingsPrimaryButton size="sm" onClick={openCreate} disabled={labels.length >= MAX_LABELS_PER_NODE}>
+                            <Plus className="w-4 h-4" strokeWidth={1.5} />
+                            {labels.length >= MAX_LABELS_PER_NODE ? 'Limit reached' : 'New label'}
+                        </SettingsPrimaryButton>
+                    </div>
+                )}
 
                 <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
                     {loading ? (
@@ -153,22 +161,26 @@ export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
                                     <span className="text-xs text-muted-foreground tabular-nums">
                                         {assignmentCounts[label.id] || 0} stack{(assignmentCounts[label.id] || 0) !== 1 ? 's' : ''}
                                     </span>
-                                    <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
-                                        onClick={() => openEdit(label)}
-                                    >
-                                        <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                    </Button>
-                                    <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground opacity-0 group-hover:opacity-100 transition-opacity"
-                                        onClick={() => setDeleteTarget(label)}
-                                    >
-                                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                    </Button>
+                                    {canMutate && (
+                                        <>
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                onClick={() => openEdit(label)}
+                                            >
+                                                <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                            </Button>
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                                                onClick={() => setDeleteTarget(label)}
+                                            >
+                                                <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                            </Button>
+                                        </>
+                                    )}
                                 </div>
                             ))}
                         </div>

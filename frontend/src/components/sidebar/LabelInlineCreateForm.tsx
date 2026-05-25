@@ -19,7 +19,9 @@ export function LabelInlineCreateForm({ onSubmit, onCancel }: LabelInlineCreateF
     setSaving(true);
     try {
       await onSubmit(trimmed, color);
-    } catch {
+    } finally {
+      // Reset even on success so the form stays interactive if the parent
+      // keeps it mounted (e.g. when reused outside the kebab/context menu).
       setSaving(false);
     }
   };
