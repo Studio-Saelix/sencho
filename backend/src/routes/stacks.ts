@@ -1502,14 +1502,27 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     const encodedFilename = encodeURIComponent(result.filename);
     const safeFilename = result.filename.replace(/[\\"]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
+    // Stream-success and stream-failure both have to flow through a single
+    // recorder so a mid-stream read error or a client disconnect doesn't get
+    // counted as a successful download. The flag protects against
+    // double-firing when both `finish` and `close` fire after a normal
+    // completion.
+    let downloadRecorded = false;
+    const recordDownloadOnce = (ok: boolean): void => {
+      if (downloadRecorded) return;
+      downloadRecorded = true;
+      recordFileOp(req.nodeId, 'download', startedAt, ok);
+    };
     result.stream.on('error', (streamErr) => {
       console.error('[files] stream error:', sanitizeForLog(getErrorMessage(streamErr, 'unknown')));
       if (!res.headersSent) res.status(500).end();
       else res.destroy();
+      recordDownloadOnce(false);
     });
+    res.on('finish', () => recordDownloadOnce(true));
+    res.on('close', () => recordDownloadOnce(false));
     req.on('close', () => result.stream.destroy());
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
-    recordFileOp(req.nodeId, 'download', startedAt, true);
     result.stream.pipe(res);
     return;
   } catch (err: unknown) {
@@ -1519,15 +1532,18 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
   }
 });
 
+type UploadStartedReq = Request & { _fileUploadStartedAt?: number };
+
 stacksRouter.post(
   '/:stackName/files/upload',
   (req: Request, res: Response, next: NextFunction) => {
-    // Capture the time the upload entered the route so the multer error
-    // branches below can record an `upload` metric. The multipart body was
-    // already streamed and buffered to this point, so an oversize rejection
-    // represents real work the operator should be able to see on the
-    // /api/file-explorer-metrics dashboard.
+    // Capture the time the upload entered the route so every downstream
+    // metric reports the same latency window: the body-transfer +
+    // parser-buffer time on success, plus the multer rejection branches
+    // below. Reading a fresh Date.now() after multer would hide the
+    // multipart upload's network and buffering cost from the histogram.
     const startedAt = Date.now();
+    (req as UploadStartedReq)._fileUploadStartedAt = startedAt;
     upload.single('file')(req, res, (err) => {
       if (err && (err as multer.MulterError).code === 'LIMIT_FILE_SIZE') {
         logFileOperation('warn', 'mutate rejected', {
@@ -1568,7 +1584,10 @@ stacksRouter.post(
     }
     const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
     const overwrite = String(req.query.overwrite) === '1';
-    const startedAt = Date.now();
+    // The multer wrapper stashed the route-entry timestamp on the request so
+    // the success path and the rejection paths share one window. Fall back to
+    // Date.now() defensively in case the wrapper was bypassed in a test.
+    const startedAt = (req as UploadStartedReq)._fileUploadStartedAt ?? Date.now();
     logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
     try {
       const existing = await FileSystemService.getInstance(req.nodeId).pathKind(stackName, targetRelPath);

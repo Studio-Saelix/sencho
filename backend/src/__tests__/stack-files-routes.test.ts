@@ -355,6 +355,35 @@ describe('GET /api/stacks/:stackName/files/download', () => {
     expect(res.headers['content-disposition']).toMatch(/attachment/);
     expect(res.text).toContain('services');
   });
+
+  it('records the download metric exactly once per successful response', async () => {
+    // The metric recorder is wired to both res.on("finish") and
+    // res.on("close"), guarded by a flag so a single completion does not
+    // double-fire. A regression that drops the flag would push successCount
+    // to 2 for one download.
+    const { FileExplorerMetricsService } = await import('../services/FileExplorerMetricsService');
+    FileExplorerMetricsService.resetForTests();
+
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+
+    // Allow the res.on('close') tail event to fire after the test's await.
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    const metricsRes = await request(app)
+      .get('/api/file-explorer-metrics')
+      .set('Cookie', adminCookie);
+    const downloadEntry = (metricsRes.body.entries as Array<{ op: string; count: number; successCount: number; errorCount: number }>).find(
+      e => e.op === 'download',
+    );
+    expect(downloadEntry).toBeDefined();
+    expect(downloadEntry!.count).toBe(1);
+    expect(downloadEntry!.successCount).toBe(1);
+    expect(downloadEntry!.errorCount).toBe(0);
+  });
 });
 
 // ── POST /:stackName/files/upload ─────────────────────────────────────────────
