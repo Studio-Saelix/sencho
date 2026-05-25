@@ -6,7 +6,7 @@ import type { LicenseTier, LicenseVariant } from '../services/license-types';
 
 export const dashboardRouter = Router();
 
-export interface AgentStatus {
+interface AgentStatus {
   configured: boolean;
   enabled: boolean;
 }

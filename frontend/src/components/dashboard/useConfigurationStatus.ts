@@ -3,7 +3,7 @@ import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { visibilityInterval } from '@/lib/utils';
 
-export interface AgentStatus {
+interface AgentStatus {
   configured: boolean;
   enabled: boolean;
 }
