@@ -1244,6 +1244,7 @@ export class DatabaseService {
         stmt.run('developer_mode', '0');
         stmt.run('metrics_retention_hours', '24');
         stmt.run('log_retention_days', '30');
+        stmt.run('scan_history_per_image_limit', '50');
         stmt.run('trivy_auto_update', '0');
         stmt.run('trivy_last_notified_version', '');
         stmt.run('mesh_auto_recreate', '0');
@@ -3402,7 +3403,7 @@ export class DatabaseService {
     public getVulnerabilityScans(
         nodeId: number,
         opts: { imageRef?: string; imageRefLike?: string; status?: VulnScanStatus; limit?: number; offset?: number } = {},
-    ): { items: VulnerabilityScan[]; total: number } {
+    ): { items: VulnerabilityScan[]; total: number; cappedImageRefs: string[]; perImageLimit: number } {
         const limit = Math.max(1, Math.min(opts.limit ?? 50, 500));
         const offset = Math.max(0, opts.offset ?? 0);
         const where = ['node_id = ?'];
@@ -3420,17 +3421,100 @@ export class DatabaseService {
             params.push(opts.status);
         }
         const whereSql = where.join(' AND ');
+
+        // Grouped (history) view caps rows per image_ref so a hot image
+        // cannot drown out the others. Single-image deep-dive (imageRef set)
+        // bypasses the cap so users can drill past it.
+        const applyPerImageCap = !opts.imageRef;
+        const parsedLimit = parseInt(this.getGlobalSettings()['scan_history_per_image_limit'] ?? '50', 10);
+        const perImageLimit = parsedLimit > 0 ? parsedLimit : 50;
+
+        if (!applyPerImageCap) {
+            const total = (
+                this.db
+                    .prepare(`SELECT COUNT(*) as cnt FROM vulnerability_scans WHERE ${whereSql}`)
+                    .get(...(params as never[])) as { cnt: number }
+            ).cnt;
+            const items = this.db
+                .prepare(
+                    `SELECT * FROM vulnerability_scans WHERE ${whereSql} ORDER BY scanned_at DESC LIMIT ? OFFSET ?`,
+                )
+                .all(...(params as never[]), limit, offset) as VulnerabilityScan[];
+            return { items, total, cappedImageRefs: [], perImageLimit };
+        }
+
+        const rankedCte = `WITH ranked AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY image_ref ORDER BY scanned_at DESC) AS rn
+            FROM vulnerability_scans
+            WHERE ${whereSql}
+        )`;
         const total = (
             this.db
-                .prepare(`SELECT COUNT(*) as cnt FROM vulnerability_scans WHERE ${whereSql}`)
-                .get(...(params as never[])) as { cnt: number }
+                .prepare(`${rankedCte} SELECT COUNT(*) as cnt FROM ranked WHERE rn <= ?`)
+                .get(...(params as never[]), perImageLimit) as { cnt: number }
         ).cnt;
         const items = this.db
             .prepare(
-                `SELECT * FROM vulnerability_scans WHERE ${whereSql} ORDER BY scanned_at DESC LIMIT ? OFFSET ?`,
+                `${rankedCte} SELECT id, node_id, image_ref, image_digest, scanned_at,
+                    total_vulnerabilities, critical_count, high_count, medium_count, low_count,
+                    unknown_count, fixable_count, secret_count, misconfig_count, scanners_used,
+                    highest_severity, os_info, trivy_version, scan_duration_ms, triggered_by,
+                    status, error, stack_context, policy_evaluation
+                 FROM ranked WHERE rn <= ?
+                 ORDER BY scanned_at DESC LIMIT ? OFFSET ?`,
             )
-            .all(...(params as never[]), limit, offset) as VulnerabilityScan[];
-        return { items, total };
+            .all(...(params as never[]), perImageLimit, limit, offset) as VulnerabilityScan[];
+
+        // Identify which image_refs sit at or above the cap so the UI can
+        // flag them. `>=` (not `>`) is intentional: the daily prune keeps
+        // each image at exactly perImageLimit rows, so by the time a user
+        // opens the history sheet the underlying count rarely exceeds the
+        // cap. Flagging at-cap groups still tells the truth (older scans
+        // have been or will be pruned at this image's next scan).
+        const cappedRows = this.db
+            .prepare(
+                `SELECT image_ref FROM vulnerability_scans
+                 WHERE ${whereSql}
+                 GROUP BY image_ref HAVING COUNT(*) >= ?`,
+            )
+            .all(...(params as never[]), perImageLimit) as Array<{ image_ref: string }>;
+        const cappedImageRefs = cappedRows.map((r) => r.image_ref);
+
+        return { items, total, cappedImageRefs, perImageLimit };
+    }
+
+    /**
+     * Per-image scan history pruner. For each (node_id, image_ref), keep the
+     * newest N scans (ordered by scanned_at DESC) and delete older rows along
+     * with their child findings. SQLite foreign-key cascade is not enabled
+     * at the connection level here, so children are deleted explicitly. The
+     * subquery is self-contained so we don't bind one parameter per ID. A
+     * first-run backlog of thousands of stale scans would otherwise blow
+     * past SQLITE_MAX_VARIABLE_NUMBER.
+     */
+    public pruneScanHistoryPerImage(perImageLimit: number): number {
+        const limit = Math.max(1, Math.floor(perImageLimit));
+        const overflowSubquery = `SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (
+              PARTITION BY node_id, image_ref ORDER BY scanned_at DESC
+            ) AS rn
+            FROM vulnerability_scans
+          ) WHERE rn > ?`;
+        const deleteChild = (table: string) =>
+            this.db
+                .prepare(`DELETE FROM ${table} WHERE scan_id IN (${overflowSubquery})`)
+                .run(limit);
+        const deleteParent = this.db.prepare(
+            `DELETE FROM vulnerability_scans WHERE id IN (${overflowSubquery})`,
+        );
+
+        const txn = this.db.transaction(() => {
+            deleteChild('vulnerability_details');
+            deleteChild('secret_findings');
+            deleteChild('misconfig_findings');
+            return deleteParent.run(limit).changes;
+        });
+        return txn();
     }
 
     public getLatestScanForImage(

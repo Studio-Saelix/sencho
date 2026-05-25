@@ -65,6 +65,7 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
   const { activeNode } = useNodes();
   const [scans, setScans] = useState<VulnerabilityScan[]>([]);
   const [total, setTotal] = useState(0);
+  const [capInfo, setCapInfo] = useState<{ perImageLimit: number; refs: Set<string> } | null>(null);
   const [loading, setLoading] = useState(false);
   const [searchDraft, setSearchDraft] = useState('');
   const [search, setSearch] = useState('');
@@ -88,6 +89,9 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
       const items: VulnerabilityScan[] = Array.isArray(body?.items) ? body.items : [];
       setScans(items);
       setTotal(typeof body?.total === 'number' ? body.total : items.length);
+      const limit = typeof body?.perImageLimit === 'number' ? body.perImageLimit : 0;
+      const refs: string[] = Array.isArray(body?.cappedImageRefs) ? body.cappedImageRefs : [];
+      setCapInfo(limit > 0 ? { perImageLimit: limit, refs: new Set(refs) } : null);
     } catch (err) {
       toast.error((err as Error)?.message || 'Could not load scan history');
     } finally {
@@ -227,79 +231,89 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
         ) : (
           <ScrollArea block className="max-h-[60vh]">
             <div className="space-y-5">
-              {groups.map((group) => (
-                <div key={group.image_ref}>
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <span className="font-mono text-sm truncate" title={group.image_ref}>
-                      {group.image_ref}
-                    </span>
-                    <span className="text-xs text-stat-subtitle">
-                      {group.scans.length} scan{group.scans.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-[40px]" />
-                        <TableHead className="w-[180px]">Scanned</TableHead>
-                        <TableHead className="w-[120px]">Trigger</TableHead>
-                        <TableHead className="w-[120px]">Highest</TableHead>
-                        <TableHead className="w-[90px] text-right">Total</TableHead>
-                        <TableHead className="w-[90px] text-right">Fixable</TableHead>
-                        <TableHead />
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {group.scans.map((scan) => {
-                        const isSelected = selected.includes(scan.id);
-                        return (
-                          <TableRow
-                            key={scan.id}
-                            className={cn(isSelected && 'bg-accent/30')}
-                          >
-                            <TableCell>
-                              <Checkbox
-                                checked={isSelected}
-                                onCheckedChange={() => toggleSelect(scan.id)}
-                                aria-label={`Select scan ${scan.id}`}
-                              />
-                            </TableCell>
-                            <TableCell className="font-mono text-xs">
-                              {new Date(scan.scanned_at).toLocaleString()}
-                            </TableCell>
-                            <TableCell className="font-mono text-xs capitalize">
-                              {scan.triggered_by}
-                            </TableCell>
-                            <TableCell>
-                              {scan.highest_severity ? (
-                                <SeverityChip severity={scan.highest_severity} />
-                              ) : (
-                                <span className="text-xs text-success font-mono">none</span>
-                              )}
-                            </TableCell>
-                            <TableCell className="text-right font-mono text-xs tabular-nums">
-                              {scan.total_vulnerabilities}
-                            </TableCell>
-                            <TableCell className="text-right font-mono text-xs tabular-nums text-success">
-                              {scan.fixable_count}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-7 text-xs"
-                                onClick={() => setInspectScanId(scan.id)}
-                              >
-                                Open
-                              </Button>
-                            </TableCell>
+              {groups.map((group) => {
+                const isCapped = capInfo?.refs.has(group.image_ref) ?? false;
+                return (
+                  <div key={group.image_ref}>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="font-mono text-sm truncate" title={group.image_ref}>
+                        {group.image_ref}
+                      </span>
+                      <span className="text-xs text-stat-subtitle">
+                        {group.scans.length} scan{group.scans.length === 1 ? '' : 's'}
+                      </span>
+                      {isCapped && capInfo && (
+                        <span className="text-xs text-stat-subtitle italic">
+                          Capped at {capInfo.perImageLimit} · older scans pruned
+                        </span>
+                      )}
+                    </div>
+                    <ScrollArea block className="max-h-64 border border-border/40 rounded-sm">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="w-[40px]" />
+                            <TableHead className="w-[180px]">Scanned</TableHead>
+                            <TableHead className="w-[120px]">Trigger</TableHead>
+                            <TableHead className="w-[120px]">Highest</TableHead>
+                            <TableHead className="w-[90px] text-right">Total</TableHead>
+                            <TableHead className="w-[90px] text-right">Fixable</TableHead>
+                            <TableHead />
                           </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                </div>
-              ))}
+                        </TableHeader>
+                        <TableBody>
+                          {group.scans.map((scan) => {
+                            const isSelected = selected.includes(scan.id);
+                            return (
+                              <TableRow
+                                key={scan.id}
+                                className={cn(isSelected && 'bg-accent/30')}
+                              >
+                                <TableCell>
+                                  <Checkbox
+                                    checked={isSelected}
+                                    onCheckedChange={() => toggleSelect(scan.id)}
+                                    aria-label={`Select scan ${scan.id}`}
+                                  />
+                                </TableCell>
+                                <TableCell className="font-mono text-xs">
+                                  {new Date(scan.scanned_at).toLocaleString()}
+                                </TableCell>
+                                <TableCell className="font-mono text-xs capitalize">
+                                  {scan.triggered_by}
+                                </TableCell>
+                                <TableCell>
+                                  {scan.highest_severity ? (
+                                    <SeverityChip severity={scan.highest_severity} />
+                                  ) : (
+                                    <span className="text-xs text-success font-mono">none</span>
+                                  )}
+                                </TableCell>
+                                <TableCell className="text-right font-mono text-xs tabular-nums">
+                                  {scan.total_vulnerabilities}
+                                </TableCell>
+                                <TableCell className="text-right font-mono text-xs tabular-nums text-success">
+                                  {scan.fixable_count}
+                                </TableCell>
+                                <TableCell className="text-right">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 text-xs"
+                                    onClick={() => setInspectScanId(scan.id)}
+                                  >
+                                    Open
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </ScrollArea>
+                  </div>
+                );
+              })}
             </div>
           </ScrollArea>
         )}
