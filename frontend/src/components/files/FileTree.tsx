@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, Fragment } from 'react';
 import type { ReactNode } from 'react';
+import { Search, X } from 'lucide-react';
+import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
@@ -27,7 +29,10 @@ interface FileTreeProps {
 
 const COMPOSE_NAMES = new Set(['compose.yaml', 'compose.yml']);
 const ENV_NAMES = new Set(['.env']);
-const MAX_ENTRIES = 500;
+// The server caps the response at 1000 entries and exposes the unfiltered
+// total via X-Total-Count; matching the client guard means a perfectly-sized
+// directory never shows the truncation hint.
+const MAX_ENTRIES = 1000;
 
 export function FileTree({
   loadDir,
@@ -50,6 +55,7 @@ export function FileTree({
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [dirContents, setDirContents] = useState<Map<string, FileEntry[]>>(new Map());
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState('');
   const sourceKeyRef = useRef(sourceKey);
   const loadDirRef = useRef(loadDir);
 
@@ -141,16 +147,52 @@ export function FileTree({
     onSelectFile(relPath, entry);
   }
 
+  const matchesFilter = (name: string): boolean =>
+    name.toLowerCase().includes(filter.toLowerCase());
+
+  // True when any already-loaded descendant of `dirPath` matches the filter.
+  // Walks dirContents only, so unexpanded subtrees are not falsely shown as
+  // "has match" until the user expands them. Bounded by what the user has
+  // already loaded; no extra fetch.
+  function hasMatchingDescendant(dirPath: string): boolean {
+    const children = dirContents.get(dirPath);
+    if (!children) return false;
+    for (const child of children) {
+      if (matchesFilter(child.name)) return true;
+      if (child.type === 'directory') {
+        const childPath = dirPath ? `${dirPath}/${child.name}` : child.name;
+        if (hasMatchingDescendant(childPath)) return true;
+      }
+    }
+    return false;
+  }
+
   function renderEntries(entries: FileEntry[], parentRelPath: string, depth: number): ReactNode {
-    const capped = entries.length > MAX_ENTRIES;
-    const visible = capped ? entries.slice(0, MAX_ENTRIES) : entries;
+    // When the filter is active, keep entries that either match by name OR
+    // are directories with a matching loaded descendant. Without the
+    // ancestor-keep rule, the parent directory of a match would be filtered
+    // out at this level and its loaded children would never render.
+    const filtered = filter
+      ? entries.filter(e => {
+          if (matchesFilter(e.name)) return true;
+          if (e.type !== 'directory') return false;
+          const path = parentRelPath ? `${parentRelPath}/${e.name}` : e.name;
+          return hasMatchingDescendant(path);
+        })
+      : entries;
+    const capped = filtered.length > MAX_ENTRIES;
+    const visible = capped ? filtered.slice(0, MAX_ENTRIES) : filtered;
 
     return (
       <>
         {visible.map((entry) => {
           const entryRelPath = parentRelPath ? `${parentRelPath}/${entry.name}` : entry.name;
           const isDir = entry.type === 'directory';
-          const isExpanded = expandedDirs.has(entryRelPath);
+          // While a filter is active, auto-expand any directory that is being
+          // kept solely because it has a matching descendant. The user gets
+          // the match in view without manually expanding every ancestor.
+          const isExpanded = expandedDirs.has(entryRelPath)
+            || (filter !== '' && isDir && hasMatchingDescendant(entryRelPath));
           const isLoading = loadingDirs.has(entryRelPath);
           const children = dirContents.get(entryRelPath);
 
@@ -191,7 +233,12 @@ export function FileTree({
         })}
         {capped && (
           <div className="text-xs text-muted-foreground pl-4 py-0.5">
-            Showing {MAX_ENTRIES} of {entries.length} - refine in shell
+            Showing {MAX_ENTRIES} of {filtered.length} - refine the filter or use a shell
+          </div>
+        )}
+        {filter && filtered.length === 0 && depth === 0 && (
+          <div className="text-xs text-muted-foreground pl-4 py-0.5 italic">
+            No entries match &ldquo;{filter}&rdquo;
           </div>
         )}
       </>
@@ -225,10 +272,33 @@ export function FileTree({
   }
 
   return (
-    <ScrollArea type="hover" className="h-full">
-      <div className="py-1">
-        {renderEntries(rootEntries, '', 0)}
+    <div className="flex flex-col h-full min-h-0">
+      <div className="relative px-2 py-1.5 border-b border-glass-border shrink-0">
+        <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground" strokeWidth={1.5} />
+        <Input
+          type="text"
+          placeholder="Filter files..."
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          className="h-6 text-xs pl-6 pr-6"
+          aria-label="Filter files"
+        />
+        {filter && (
+          <button
+            type="button"
+            onClick={() => setFilter('')}
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            aria-label="Clear filter"
+          >
+            <X className="w-3 h-3" strokeWidth={1.5} />
+          </button>
+        )}
       </div>
-    </ScrollArea>
+      <ScrollArea type="hover" className="flex-1 min-h-0">
+        <div className="py-1">
+          {renderEntries(rootEntries, '', 0)}
+        </div>
+      </ScrollArea>
+    </div>
   );
 }

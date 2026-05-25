@@ -166,4 +166,87 @@ describe('FileTree', () => {
 
     expect(await screen.findByText(/empty folder/i)).toBeInTheDocument();
   });
+
+  it('filters visible entries by name as the user types', async () => {
+    const entries = [makeDir('src'), makeFile('README.md'), makeFile('Notes.txt'), makeFile('config.yaml')];
+    mockLoadDir.mockReturnValue(fakeOk(entries));
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('README.md');
+    expect(screen.getByText('Notes.txt')).toBeInTheDocument();
+    expect(screen.getByText('config.yaml')).toBeInTheDocument();
+
+    const filter = screen.getByLabelText(/filter files/i);
+    await user.type(filter, 'note');
+
+    // Only Notes.txt survives (case-insensitive substring).
+    expect(screen.getByText('Notes.txt')).toBeInTheDocument();
+    expect(screen.queryByText('README.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('config.yaml')).not.toBeInTheDocument();
+
+    // Clear button restores the full listing.
+    await user.click(screen.getByLabelText(/clear filter/i));
+    expect(screen.getByText('README.md')).toBeInTheDocument();
+    expect(screen.getByText('Notes.txt')).toBeInTheDocument();
+    expect(screen.getByText('config.yaml')).toBeInTheDocument();
+  });
+
+  it('shows an empty-match hint when the filter matches nothing', async () => {
+    mockLoadDir.mockReturnValue(fakeOk([makeFile('README.md')]));
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('README.md');
+
+    const filter = screen.getByLabelText(/filter files/i);
+    await user.type(filter, 'xyzzy');
+
+    expect(screen.queryByText('README.md')).not.toBeInTheDocument();
+    expect(screen.getByText(/no entries match/i)).toBeInTheDocument();
+  });
+
+  it('keeps a parent directory visible when a loaded descendant matches and auto-expands it', async () => {
+    // Root has `src` (dir) and `README.md`. The user expands `src` so its
+    // contents are loaded. Then they filter on a child of `src` whose name
+    // does not match the parent.
+    mockLoadDir
+      .mockReturnValueOnce(fakeOk([makeDir('src'), makeFile('README.md')]))
+      .mockReturnValueOnce(fakeOk([makeFile('app.ts'), makeFile('lib.ts')]));
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('app.ts');
+
+    const filter = screen.getByLabelText(/filter files/i);
+    await user.type(filter, 'app');
+
+    // `src` survives because it has a matching loaded descendant.
+    expect(screen.getByText('src')).toBeInTheDocument();
+    // The match itself is visible (src auto-expands while filter is active).
+    expect(screen.getByText('app.ts')).toBeInTheDocument();
+    // Non-matching siblings at root and inside `src` are filtered out.
+    expect(screen.queryByText('README.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('lib.ts')).not.toBeInTheDocument();
+  });
+
+  it('does not keep an unexpanded parent visible (filter only sees loaded entries)', async () => {
+    // Root has `src` (never expanded) and `README.md`. The filter can only
+    // judge directories by their loaded contents; an un-fetched subtree
+    // contributes nothing to the ancestor-keep rule.
+    mockLoadDir.mockReturnValue(fakeOk([makeDir('src'), makeFile('README.md')]));
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+
+    const filter = screen.getByLabelText(/filter files/i);
+    await user.type(filter, 'app');
+
+    expect(screen.queryByText('src')).not.toBeInTheDocument();
+    expect(screen.queryByText('README.md')).not.toBeInTheDocument();
+    expect(screen.getByText(/no entries match/i)).toBeInTheDocument();
+  });
 });

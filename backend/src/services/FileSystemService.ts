@@ -613,8 +613,25 @@ export class FileSystemService {
   }
 
   async listStackDirectory(stackName: string, relPath: string): Promise<FileEntry[]> {
+    const page = await this.listStackDirectoryPage(stackName, relPath, {});
+    return page.entries;
+  }
+
+  /**
+   * Pagination-aware variant. Returns the sorted entries (optionally truncated
+   * to `limit`) along with the unfiltered `total` so the route can advertise
+   * how much was elided. Callers that just want the unbounded array should
+   * keep using listStackDirectory; the route uses this variant to cap the
+   * payload for unusually large directories without losing the count.
+   */
+  async listStackDirectoryPage(
+    stackName: string,
+    relPath: string,
+    opts: { limit?: number },
+  ): Promise<{ entries: FileEntry[]; total: number; truncated: boolean }> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     const dirents = await fsPromises.readdir(safePath, { withFileTypes: true });
+    const total = dirents.length;
 
     const entries = await Promise.all(
       dirents.map(async (dirent): Promise<FileEntry> => {
@@ -643,11 +660,16 @@ export class FileSystemService {
       })
     );
 
-    return entries.sort((a, b) => {
+    const sorted = entries.sort((a, b) => {
       if (a.type === 'directory' && b.type !== 'directory') return -1;
       if (a.type !== 'directory' && b.type === 'directory') return 1;
       return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
     });
+
+    if (opts.limit !== undefined && sorted.length > opts.limit) {
+      return { entries: sorted.slice(0, opts.limit), total, truncated: true };
+    }
+    return { entries: sorted, total, truncated: false };
   }
 
   async readStackFile(

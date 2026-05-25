@@ -141,6 +141,41 @@ describe('GET /api/stacks/:stackName/files', () => {
       .set('Cookie', adminCookie);
     expect(res.status).toBe(400);
   });
+
+  it('truncates a directory with more than 1000 entries and advertises totals in headers', async () => {
+    const subdir = path.join(stacksDir, STACK, 'huge');
+    await fs.mkdir(subdir, { recursive: true });
+    // Seed 1100 small files. Names sort lexicographically so we can pin the
+    // truncation boundary by inspecting the last returned entry.
+    const targetCount = 1100;
+    for (let i = 0; i < targetCount; i++) {
+      const name = `f${String(i).padStart(5, '0')}.txt`;
+      await fs.writeFile(path.join(subdir, name), '');
+    }
+
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files`)
+      .query({ path: 'huge' })
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.length).toBe(1000);
+    expect(res.headers['x-total-count']).toBe(String(targetCount));
+    expect(res.headers['x-returned-count']).toBe('1000');
+    expect(res.headers['x-truncated']).toBe('true');
+
+    await fs.rm(subdir, { recursive: true, force: true });
+  }, 30000);
+
+  it('does not set X-Truncated when the directory fits under the limit', async () => {
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-truncated']).toBeUndefined();
+    expect(res.headers['x-total-count']).toBe(String(res.body.length));
+  });
 });
 
 // ── GET /:stackName/files/content ─────────────────────────────────────────────
