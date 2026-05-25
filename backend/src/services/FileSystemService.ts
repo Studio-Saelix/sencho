@@ -1,5 +1,6 @@
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { promises as fsPromises, createReadStream } from 'fs';
 import type { Readable } from 'stream';
 import { NodeRegistry } from './NodeRegistry';
@@ -699,16 +700,80 @@ export class FileSystemService {
     };
   }
 
-  async writeStackFile(stackName: string, relPath: string, content: string): Promise<void> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+  /**
+   * Atomic write: stages the content in a sibling .tmp file in the same
+   * directory, fsyncs, then promotes it to the final path. A crash between
+   * the open and the rename leaves either the original target intact or a
+   * leftover .tmp file (cleaned up on next failure path), never a truncated
+   * target.
+   *
+   * `exclusive: true` uses link+unlink instead of rename so the create is
+   * race-free atomic: link fails with EEXIST if the target already exists,
+   * giving the caller a definitive "did not exist when we wrote it" signal.
+   * The non-exclusive default uses rename, which is atomic against partial
+   * reads but clobbers any existing target.
+   */
+  private async writeStackFileAtomic(
+    safePath: string,
+    data: string | Buffer,
+    opts: { exclusive?: boolean } = {},
+  ): Promise<void> {
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
-    await fsPromises.writeFile(safePath, content, 'utf-8');
+    // crypto.randomBytes gives a guaranteed-length high-entropy suffix; Math.random
+    // can drop leading zeros which narrows entropy unpredictably.
+    const suffix = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+    const tmpPath = `${safePath}.sencho-tmp-${suffix}`;
+    let stagedTmp = false;
+    try {
+      const fh = await fsPromises.open(tmpPath, 'wx');
+      stagedTmp = true;
+      try {
+        await fh.writeFile(data);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      if (opts.exclusive) {
+        // link() is atomic against EEXIST. Tmp and target are guaranteed to live
+        // in the same directory (same filesystem); link works on NTFS and any
+        // POSIX FS without elevated privileges.
+        try {
+          await fsPromises.link(tmpPath, safePath);
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+            throw Object.assign(new Error('File already exists'), { code: 'FILE_EXISTS' as const });
+          }
+          throw err;
+        }
+      } else {
+        await fsPromises.rename(tmpPath, safePath);
+        stagedTmp = false;
+      }
+    } finally {
+      if (stagedTmp) {
+        await fsPromises.unlink(tmpPath).catch(() => {});
+      }
+    }
   }
 
-  async writeStackFileBuffer(stackName: string, relPath: string, buffer: Buffer): Promise<void> {
+  async writeStackFile(
+    stackName: string,
+    relPath: string,
+    content: string,
+    opts?: { exclusive?: boolean },
+  ): Promise<void> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
-    await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
-    await fsPromises.writeFile(safePath, buffer);
+    await this.writeStackFileAtomic(safePath, content, opts);
+  }
+
+  async writeStackFileBuffer(
+    stackName: string,
+    relPath: string,
+    buffer: Buffer,
+    opts?: { exclusive?: boolean },
+  ): Promise<void> {
+    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    await this.writeStackFileAtomic(safePath, buffer, opts);
   }
 
   /**
