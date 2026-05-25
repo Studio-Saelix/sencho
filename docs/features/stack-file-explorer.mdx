@@ -21,7 +21,7 @@ The file explorer gives you direct access to everything inside a stack's directo
 
 The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files tab in one click.
 
-The file explorer is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) are available to every authenticated account. Write actions (upload, edit, create, rename, change permissions, delete) require **stack edit** permission on your account.
+The file explorer is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) require **stack read** permission, which every signed-in role has by default. Write actions (upload, edit, create, rename, change permissions, delete) require **stack edit** permission on your account.
 
 ## Layout
 
@@ -37,7 +37,7 @@ Folders sort before files, and entries within each group sort alphabetically.
 
 Click a folder to expand or collapse it. Click a file to open it in the viewer on the right. Symlinks render with a chain icon and behave like files when clicked. Deleting a symlink removes only the link entry; the file it points to is untouched.
 
-**Display cap.** Each directory render is capped at 500 entries. A folder with more than 500 children shows the first 500 alphabetically and appends `Showing 500 of N - refine in shell` at the bottom of the list. For directories with more entries, work from a host shell.
+**Display cap.** Each directory render is capped at 1000 entries. A folder with more than 1000 children shows the first 1000 alphabetically with a footer noting how many entries the directory holds in total. The tree also has a filter input at the top of the list so you can narrow a large directory to the entries you care about without dropping to a shell.
 
 ## Protected files
 
@@ -72,7 +72,11 @@ When you do not, the toolbar shows a `Read-only` chip and the editor refuses inp
   <img src="/images/stack-file-explorer/viewer-edit-mode.png" alt="Viewer toolbar showing the filename label and the Save button next to a YAML buffer" />
 </Frame>
 
-Click **Save** to write the file to disk. Navigating away from the file before saving discards the unsaved edits.
+Click **Save** to write the file to disk. If you have unsaved edits and click a different file in the tree, a confirmation dialog asks whether to discard them; cancelling keeps you on the current file.
+
+Saves use optimistic concurrency: the editor remembers when the file was last loaded, and a save that targets a stale version returns a "file changed elsewhere" notice with the current server-side content. Your typed buffer is preserved so you can review the new version and reapply your edits before saving again.
+
+Writes are atomic at the filesystem level. Sencho stages the new content into a sibling temporary file, fsyncs, and promotes it via rename, so a crash or power loss never leaves a half-written target on disk.
 
 <Warning>
   Editing a file does not restart any containers. If your stack reads the file at runtime (for example, a config file mounted as a volume), restart the relevant service after saving so the container picks up the new content.
@@ -92,13 +96,13 @@ Filenames cannot be empty, cannot contain `/` or `\`, and cannot be `.` or `..`.
 
 ## Uploading files
 
-The dashed **Upload file** affordance at the top of the tree opens a file picker. Uploads are one file at a time.
+The dashed **Upload file** affordance at the top of the tree opens a file picker. You can also drag and drop a file onto the dashed zone; the border lights up in the brand colour when a file is hovered over a valid drop target. Uploads are one file at a time.
 
 | Limit | Value |
 |-------|-------|
 | Maximum file size | 25 MB. Uploads above the limit return a 413 error with `TOO_LARGE`. |
 | Target directory | The currently selected directory, or the stack root if no file is open. |
-| Same-name files | Overwritten without prompt. |
+| Same-name files | A confirmation dialog asks whether to replace the existing file. Cancelling keeps the original. |
 
 The upload affordance is hidden for users without stack edit permission.
 
@@ -168,6 +172,18 @@ The Permissions dialog opens for everyone; only users with stack edit permission
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="Files tab is empty or returns a 403">
+    The signed-in role lacks **stack read** permission for this stack. Ask an admin to grant the permission on your account, or sign in with a role that already has it.
+  </Accordion>
+  <Accordion title="Cannot delete compose.yaml or .env">
+    The five canonical stack files (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, `.env`) are protected because removing them mid-life breaks the stack. To delete a stack entirely, use **Delete stack** in the stack toolbar's overflow menu rather than removing these files individually.
+  </Accordion>
+  <Accordion title="Save returns 'file changed elsewhere'">
+    Another writer (a teammate, a deploy hook, or an out-of-band edit on the host) saved the file after you loaded it. Use the diff to compare your edits against the current version, then save again. Your typed buffer is kept so you do not have to retype your changes.
+  </Accordion>
+  <Accordion title="Upload returns DISK_FULL">
+    The disk hosting the stack's compose directory has no free space. Check the volume mounted as `COMPOSE_DIR` (defaults to `/app/compose` inside the Sencho container) and free up space, or move the volume to a larger disk.
+  </Accordion>
   <Accordion title="File shows as 'Binary file detected' but it is a text file">
     The binary detection heuristic flagged null bytes or a high proportion of non-printable characters in the file's first kilobytes. This can happen with certain encodings, non-UTF-8 byte sequences, or unusual line-ending mixes. Click **Open as text anyway** on the binary panel to re-fetch the file as UTF-8 text and edit it in the inline viewer. Files above the 2 MB preview limit still need a Download.
   </Accordion>
@@ -183,8 +199,8 @@ The Permissions dialog opens for everyone; only users with stack edit permission
   <Accordion title="Download button is missing">
     The Download button appears in the right-pane action bar only when a file is selected in the tree. Click any text or binary file to open it, and the button activates.
   </Accordion>
-  <Accordion title="The tree shows 'Showing 500 of N - refine in shell'">
-    Each directory render is capped at 500 entries to keep the tree responsive. The first 500 entries alphabetically are shown. To work with the entries past the cap, drop into a host shell with `cd` into the stack directory.
+  <Accordion title="A large directory shows a 'N total entries' footer">
+    Each directory render is capped at 1000 entries to keep the tree responsive. Use the filter input above the tree to narrow the list, or drop into a host shell with `cd` into the stack directory if you need to work with entries past the cap.
   </Accordion>
   <Accordion title="Write controls are missing">
     Upload, create, rename, chmod save, and delete require **stack edit** permission. Viewer accounts can browse, preview text files, and inspect permissions in read-only mode.
