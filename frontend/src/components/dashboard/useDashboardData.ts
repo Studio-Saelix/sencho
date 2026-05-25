@@ -42,10 +42,11 @@ function bucketCpu(points: MetricPoint[], windowMs: number, buckets: number): nu
 }
 
 // After three consecutive failures of the live metrics endpoints, surface a
-// "metrics paused" indicator so the operator knows the gauges are stale by
-// design (the Docker socket or the metrics service is unreachable) rather
-// than just slow. The threshold is chosen so a single transient hiccup does
-// not trip the indicator.
+// "metrics stale" indicator so the operator knows the gauges are no longer
+// being refreshed (the Docker socket or the metrics service is unreachable)
+// rather than just slow. Polling continues; the indicator describes the
+// freshness of the visible numbers, not the polling cadence. The threshold
+// is chosen so a single transient hiccup does not trip the indicator.
 const METRICS_STALE_THRESHOLD = 3;
 
 export function useDashboardData(): DashboardData {

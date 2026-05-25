@@ -134,7 +134,7 @@ export function HealthStatusBar({
               {metaLine}
               {metricsStale ? (
                 <span className="ml-2 inline-flex items-center rounded-sm border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-[10px] font-mono tracking-wide uppercase text-warning">
-                  metrics paused
+                  metrics stale
                 </span>
               ) : null}
             </span>
