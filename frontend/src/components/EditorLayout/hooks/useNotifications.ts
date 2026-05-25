@@ -82,6 +82,7 @@ export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange,
         if (!isMounted) { ws?.close(); return; }
         setTickerConnected(true);
         retryCount = 0;
+        window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected: true } }));
       };
 
       ws.onmessage = (event) => {
@@ -113,6 +114,7 @@ export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange,
 
       ws.onclose = (event) => {
         setTickerConnected(false);
+        window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected: false } }));
         if (!isMounted) return;
         const delay = Math.min(1000 * Math.pow(2, retryCount), MAX_RETRY_DELAY_MS);
         retryCount++;

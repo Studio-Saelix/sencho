@@ -93,6 +93,7 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
   const [error, setError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [now, setNow] = useState(() => Date.now());
+  const [liveDisconnected, setLiveDisconnected] = useState(false);
   const seenIdsRef = useRef(new Set<number>());
 
   const mergeEvents = useCallback((incoming: ActivityEvent[]) => {
@@ -150,8 +151,25 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
   }, [liveEvents, mergeEvents]);
 
   useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), DAY_BUCKET_REFRESH_MS);
+    // Skip the day-bucket refresh while the tab is hidden so a backgrounded
+    // panel does not re-render every minute for no visible effect.
+    const id = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      setNow(Date.now());
+    }, DAY_BUCKET_REFRESH_MS);
     return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    // Upstream useNotifications dispatches this event when its WebSocket
+    // flips. A single layout-level listener keeps the timeline honest about
+    // whether new events would actually arrive.
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ connected: boolean }>).detail;
+      setLiveDisconnected(detail?.connected === false);
+    };
+    window.addEventListener('sencho:notifications-connection', handler);
+    return () => window.removeEventListener('sencho:notifications-connection', handler);
   }, []);
 
   const loadMore = useCallback(async () => {
@@ -223,14 +241,26 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
 
   return (
     <div className="flex flex-col gap-3 py-3">
+      {liveDisconnected && (
+        <div
+          role="status"
+          className="font-mono text-[10px] text-stat-subtitle italic px-1"
+        >
+          Live updates offline; reconnecting…
+        </div>
+      )}
       {groups.map(g => (
-        <div key={g.label}>
+        <div key={g.label} role="list" aria-label={`Stack activity, ${g.label}`}>
           <div className="font-mono text-[9px] uppercase tracking-[0.18em] text-stat-subtitle mb-1.5 px-1">{g.label}</div>
           {g.events.map(e => {
             const Icon = CATEGORY_ICON[e.category ?? ''] ?? Activity;
             const actor = e.actor_username ? formatActor(e.actor_username) : null;
             return (
-              <div key={e.id} className="flex items-start gap-2 py-1.5 px-1 rounded-md hover:bg-glass-highlight/30 transition-colors">
+              <div
+                key={e.id}
+                role="listitem"
+                className="flex items-start gap-2 py-1.5 px-1 rounded-md hover:bg-glass-highlight/30 transition-colors"
+              >
                 <Icon className="w-3 h-3 mt-0.5 shrink-0 text-brand/70" strokeWidth={1.5} />
                 <div className="flex-1 min-w-0">
                   <span className="font-mono text-[11px] text-foreground/90">{e.message}</span>
