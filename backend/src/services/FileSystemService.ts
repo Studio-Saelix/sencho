@@ -35,10 +35,18 @@ const PROTECTED_STACK_FILES = new Set([
   '.env',
 ]);
 
+// Strips at most one trailing slash. The upstream validator
+// (isValidRelativeStackPath) rejects any '//' sequence, so a string reaching
+// this helper can carry at most one trailing slash, and a single slice is
+// sufficient. Avoids the polynomial regex /\/+$/ that CodeQL would flag for
+// callers without the upstream length guarantee.
+function stripTrailingSlash(s: string): string {
+  return s.endsWith('/') ? s.slice(0, -1) : s;
+}
+
 function isProtectedRelPath(relPath: string): boolean {
   if (!relPath) return false;
-  // Strip trailing slashes so 'compose.yaml/' cannot bypass via split('/').pop() === ''.
-  const normalized = relPath.replace(/\/+$/, '');
+  const normalized = stripTrailingSlash(relPath);
   // Only files at the stack root are protected; compose CLI reads compose.yaml from
   // the stack directory itself, so a subdirectory entry named compose.yaml is just
   // an arbitrary file and the user may want to delete it.
@@ -47,7 +55,7 @@ function isProtectedRelPath(relPath: string): boolean {
 }
 
 function protectedFileError(relPath: string): Error & { code: string } {
-  const basename = relPath.replace(/\/+$/, '').split('/').pop() ?? relPath;
+  const basename = stripTrailingSlash(relPath).split('/').pop() ?? relPath;
   return Object.assign(
     new Error(`${basename} is a protected stack file. Delete the stack itself via Stack Actions instead.`),
     { code: 'PROTECTED_FILE' as const },
