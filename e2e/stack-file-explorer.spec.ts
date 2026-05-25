@@ -87,13 +87,25 @@ async function cookieHeader(page: Page): Promise<string> {
 const stackDir = (): string => nodePath.join(COMPOSE_DIR, STACK);
 
 // ---------------------------------------------------------------------------
+// File-scope seed / teardown (single login pair shared across every describe)
+// ---------------------------------------------------------------------------
+
+// One file-scope beforeAll/afterAll replaces seven per-describe pairs. The
+// per-describe pairs each did a fresh loginAs + stack create + stack delete;
+// stacking that up made the post-spec sidebar load slow enough that
+// downstream specs in the single-worker queue (stacks.spec.ts) timed out on
+// their own loginAs dashboard wait. The test stack is idempotent across
+// beforeAll calls anyway (the API returns 409 on a duplicate create), so
+// collapsing the hooks costs nothing.
+test.beforeAll(async ({ browser }) => { await seedSuite(browser); });
+test.afterAll(async ({ browser }) => { await teardownSuite(browser); });
+test.setTimeout(60_000);
+
+// ---------------------------------------------------------------------------
 // Path traversal corpus
 // ---------------------------------------------------------------------------
 
 test.describe('Stack file explorer: path traversal protection', () => {
-  test.setTimeout(60_000);
-  test.beforeAll(async ({ browser }) => { await seedSuite(browser); });
-  test.afterAll(async ({ browser }) => { await teardownSuite(browser); });
   test.beforeEach(async ({ page }) => { await loginAs(page); });
 
   // Every entry must produce a 400 with code INVALID_PATH on the file-listing
@@ -130,9 +142,6 @@ test.describe('Stack file explorer: path traversal protection', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Stack file explorer: protected files', () => {
-  test.setTimeout(60_000);
-  test.beforeAll(async ({ browser }) => { await seedSuite(browser); });
-  test.afterAll(async ({ browser }) => { await teardownSuite(browser); });
   test.beforeEach(async ({ page }) => { await loginAs(page); });
 
   test('DELETE compose.yaml via API returns 409 PROTECTED_FILE and does not remove it', async ({ page, request }) => {
@@ -186,9 +195,6 @@ test.describe('Stack file explorer: protected files', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Stack file explorer: optimistic concurrency on edits', () => {
-  test.setTimeout(60_000);
-  test.beforeAll(async ({ browser }) => { await seedSuite(browser); });
-  test.afterAll(async ({ browser }) => { await teardownSuite(browser); });
   test.beforeEach(async ({ page }) => { await loginAs(page); });
 
   test('second concurrent save returns 412 with currentContent + currentMtimeMs', async ({ page, request }) => {
@@ -241,9 +247,6 @@ test.describe('Stack file explorer: optimistic concurrency on edits', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Stack file explorer: binary detection and force=text override', () => {
-  test.setTimeout(60_000);
-  test.beforeAll(async ({ browser }) => { await seedSuite(browser); });
-  test.afterAll(async ({ browser }) => { await teardownSuite(browser); });
   test.beforeEach(async ({ page }) => { await loginAs(page); });
 
   test('default GET returns binary:true for a UTF-8 file carrying a NUL byte', async ({ page, request }) => {
@@ -300,9 +303,6 @@ test.describe('Stack file explorer: binary detection and force=text override', (
 // ---------------------------------------------------------------------------
 
 test.describe('Stack file explorer: symlink semantics', () => {
-  test.setTimeout(60_000);
-  test.beforeAll(async ({ browser }) => { await seedSuite(browser); });
-  test.afterAll(async ({ browser }) => { await teardownSuite(browser); });
   test.beforeEach(async ({ page }) => { await loginAs(page); });
 
   // Symlink creation on Windows requires admin or developer mode; this block
@@ -365,8 +365,6 @@ test.describe('Stack file explorer: symlink semantics', () => {
 
 test.describe('Stack file explorer: UI lifecycle', () => {
   test.setTimeout(90_000);
-  test.beforeAll(async ({ browser }) => { await seedSuite(browser); });
-  test.afterAll(async ({ browser }) => { await teardownSuite(browser); });
 
   /** Open the Files tab on the seeded stack. Mirrors openFilesTab in stack-files.spec.ts. */
   async function openFilesTab(page: Page): Promise<void> {
