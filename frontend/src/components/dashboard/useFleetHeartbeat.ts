@@ -1,5 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNodes } from '@/context/NodeContext';
+import { useState, useEffect, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { visibilityInterval } from '@/lib/utils';
 
@@ -28,11 +27,6 @@ export interface FleetHeartbeatResult {
 }
 
 export function useFleetHeartbeat(): FleetHeartbeatResult {
-  const { activeNode } = useNodes();
-  const nodeId = activeNode?.id;
-  const nodeIdRef = useRef(nodeId);
-  useEffect(() => { nodeIdRef.current = nodeId; }, [nodeId]);
-
   const [nodes, setNodes] = useState<FleetNodeOverview[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,19 +49,14 @@ export function useFleetHeartbeat(): FleetHeartbeatResult {
     }
   }, []);
 
+  // /fleet/overview is fleet-wide: the response is the same regardless of
+  // which local node is active. Re-keying on activeNode would clear the
+  // card to its skeleton state on every node switch and issue an extra
+  // unnecessary fetch.
   useEffect(() => {
-    setNodes([]); // eslint-disable-line react-hooks/set-state-in-effect
-    setLoading(true);
-    setError(null);
-    const currentNodeId = nodeId;
-    const guard = () => {
-      if (nodeIdRef.current === currentNodeId) {
-        void fetchOverview();
-      }
-    };
-    guard();
-    return visibilityInterval(guard, 30_000);
-  }, [nodeId, fetchOverview]);
+    void fetchOverview();
+    return visibilityInterval(() => { void fetchOverview(); }, 30_000);
+  }, [fetchOverview]);
 
   return { nodes, loading, error };
 }
