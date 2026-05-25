@@ -1521,35 +1521,37 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
       downloadRecorded = true;
       recordFileOp(req.nodeId, 'download', startedAt, ok);
     };
+    // TEMP DIAG: capture the actual event order and response state at each
+    // step so we can identify the supertest in-process race on Linux CI.
+    // Remove after the metric race is resolved.
+    const diagId = `${stackName}/${relPath}/${startedAt}`;
+    const diag = (event: string): void => {
+      console.log(
+        `[download-diag] id=${diagId} event=${event}` +
+          ` writable=${res.writable} writableEnded=${res.writableEnded}` +
+          ` writableFinished=${res.writableFinished} headersSent=${res.headersSent}` +
+          ` reqDestroyed=${req.destroyed} recorded=${downloadRecorded}`,
+      );
+    };
+    diag('handler-setup');
     result.stream.on('error', (streamErr) => {
+      diag('stream-error');
       console.error('[files] stream error:', sanitizeForLog(getErrorMessage(streamErr, 'unknown')));
       if (!res.headersSent) res.status(500).end();
       else res.destroy();
       recordDownloadOnce(false);
     });
-    // `end` fires after all bytes are read off disk and pushed into the pipe;
-    // at that point the response has the payload it needs to ship and the
-    // download has succeeded from the server's perspective.
-    result.stream.on('end', () => recordDownloadOnce(true));
-    // `close` is the fallback for a destroyed-mid-stream path. On a real
-    // client disconnect the response was not finished, so `res.writableEnded`
-    // stays false and we book a failure. If `close` chases a prior `end` on
-    // a clean read, the flag bails. The `writableEnded` check defends against
-    // a transport that hands us `close` without `end` after the pipe already
-    // called `res.end()`.
+    result.stream.on('end', () => {
+      diag('stream-end');
+      recordDownloadOnce(true);
+    });
     result.stream.on('close', () => {
+      diag('stream-close');
       if (res.writableEnded) recordDownloadOnce(true);
       else recordDownloadOnce(false);
     });
-    // Destroy the file stream on a real client disconnect, but NOT after the
-    // pipe has already finished writing the response. Under the in-process
-    // supertest transport, `req.close` can fire as soon as the test consumes
-    // the response, which races ahead of the readable's own `end`/`close`
-    // pair. Calling `destroy()` there short-circuits the readable into a
-    // `close`-without-`end` state and the recorder booked the request as a
-    // failure even though the pipe had delivered every byte. The guard makes
-    // the cleanup conditional on the response still being in flight.
     req.on('close', () => {
+      diag('req-close');
       if (!res.writableEnded) result.stream.destroy();
     });
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
