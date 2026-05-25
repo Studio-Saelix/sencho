@@ -1420,10 +1420,11 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const forceText = req.query.force === 'text';
   const startedAt = Date.now();
-  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId, forceText });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath);
+    const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath, undefined, { forceText });
     // ETag is the integer mtimeMs the file was stat'd with, so the matching
     // PUT can compare millisecond-equal even though some filesystems return
     // float mtimeMs.

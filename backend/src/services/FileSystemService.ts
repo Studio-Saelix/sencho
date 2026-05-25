@@ -675,7 +675,8 @@ export class FileSystemService {
   async readStackFile(
     stackName: string,
     relPath: string,
-    maxBytes: number = 2 * 1024 * 1024
+    maxBytes: number = 2 * 1024 * 1024,
+    opts: { forceText?: boolean } = {},
   ): Promise<{ content?: string; binary: boolean; oversized: boolean; size: number; mime: string; mtimeMs: number }> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     const mime = this.guessMime(safePath);
@@ -701,7 +702,12 @@ export class FileSystemService {
 
       const buf = await fh.readFile();
 
-      if (isBinaryBuffer(buf)) {
+      // forceText bypasses the binary-detection heuristic so callers can
+      // recover from false positives (a UTF-8 file that happens to carry a
+      // NUL or a high non-printable ratio in its first 8 KB). The oversized
+      // branch above still applies because returning a multi-megabyte file
+      // as JSON-encoded text is wasteful regardless of the heuristic.
+      if (!opts.forceText && isBinaryBuffer(buf)) {
         return { binary: true, oversized: false, size: stat.size, mime, mtimeMs };
       }
 

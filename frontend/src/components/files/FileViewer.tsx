@@ -27,6 +27,7 @@ interface SpecialFilePanelProps {
   label: string;
   stackName: string;
   relPath: string;
+  extraAction?: { label: string; onClick: () => void; disabled?: boolean };
 }
 
 function SpecialFilePanel({
@@ -35,6 +36,7 @@ function SpecialFilePanel({
   label,
   stackName,
   relPath,
+  extraAction,
 }: SpecialFilePanelProps) {
   const [downloading, setDownloading] = useState(false);
 
@@ -69,19 +71,31 @@ function SpecialFilePanel({
         <p className="font-mono text-sm text-stat-title">{filename}</p>
         <p className="text-xs text-stat-subtitle">{label} &middot; {formatBytes(size)}</p>
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={() => void handleDownload()}
-        disabled={downloading}
-      >
-        {downloading ? (
-          <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
-        ) : (
-          <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void handleDownload()}
+          disabled={downloading}
+        >
+          {downloading ? (
+            <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
+          ) : (
+            <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+          )}
+          Download
+        </Button>
+        {extraAction && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={extraAction.onClick}
+            disabled={extraAction.disabled}
+          >
+            {extraAction.label}
+          </Button>
         )}
-        Download
-      </Button>
+      </div>
     </div>
   );
 }
@@ -114,6 +128,15 @@ export function FileViewer({
   useEffect(() => {
     onDirtyChangeRef.current = onDirtyChange;
   }, [onDirtyChange]);
+
+  // Mirror selectedPath into a ref so async handlers fired from button clicks
+  // (handleForceText) can detect a stale response after the user has already
+  // navigated to a different file. A slow override for file A must not stomp
+  // on file B's state.
+  const selectedPathRef = useRef(selectedPath);
+  useEffect(() => {
+    selectedPathRef.current = selectedPath;
+  }, [selectedPath]);
 
   useEffect(() => {
     onDirtyChangeRef.current?.(hasChanges);
@@ -156,10 +179,17 @@ export function FileViewer({
         if (cancelled) return;
         setSize(result.size);
         setLoadedMtimeMs(result.mtimeMs);
-        if (result.binary) {
-          setIsBinary(true);
-        } else if (result.oversized) {
+        // Check oversized BEFORE binary: the backend returns oversized:true
+        // for files past the 2 MB inline-preview cap regardless of the binary
+        // probe, and the body intentionally carries no content for those
+        // files. Showing the binary panel for an oversized file would hide
+        // the size signal and offer an override that resolves to an empty
+        // editor (the backend keeps the oversized-no-content contract even
+        // when force=text is set).
+        if (result.oversized) {
           setIsOversized(true);
+        } else if (result.binary) {
+          setIsBinary(true);
         } else {
           const text = result.content ?? '';
           setContent(text);
@@ -241,6 +271,40 @@ export function FileViewer({
   const language = extensionToLanguage(filename);
 
   if (isBinary) {
+    const handleForceText = async () => {
+      const requestedPath = selectedPath;
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await readStackFile(stackName, requestedPath, { forceText: true });
+        // Stale-request guard: the user may have navigated to a different
+        // file while the override request was in flight. Drop the response
+        // rather than stomp on the new file's state.
+        if (selectedPathRef.current !== requestedPath) return;
+        setSize(result.size);
+        setLoadedMtimeMs(result.mtimeMs);
+        if (result.oversized) {
+          // Backend keeps oversized files out of the inline editor even with
+          // force=text set; the body has no content. Surface the Download
+          // panel so the user does not get an empty Monaco buffer that they
+          // could accidentally save back over the file.
+          setIsBinary(false);
+          setIsOversized(true);
+        } else {
+          const text = result.content ?? '';
+          setContent(text);
+          setOriginalContent(text);
+          setIsBinary(false);
+        }
+      } catch (e) {
+        if (selectedPathRef.current !== requestedPath) return;
+        const message = e instanceof Error ? e.message : 'Failed to load file as text.';
+        setError(message);
+        toast.error(message);
+      } finally {
+        if (selectedPathRef.current === requestedPath) setLoading(false);
+      }
+    };
     return (
       <SpecialFilePanel
         filename={filename}
@@ -248,6 +312,10 @@ export function FileViewer({
         label="Binary file"
         stackName={stackName}
         relPath={selectedPath}
+        extraAction={{
+          label: 'Open as text anyway',
+          onClick: () => void handleForceText(),
+        }}
       />
     );
   }

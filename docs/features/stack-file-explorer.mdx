@@ -169,7 +169,7 @@ The Permissions dialog opens for everyone; only users with stack edit permission
 
 <AccordionGroup>
   <Accordion title="File shows as 'Binary file detected' but it is a text file">
-    The binary detection heuristic flagged null bytes or a high proportion of non-printable characters in the file's first kilobytes. This can happen with certain encodings, non-UTF-8 byte sequences, or unusual line-ending mixes. Download the file, edit it locally or via a host terminal, then re-upload.
+    The binary detection heuristic flagged null bytes or a high proportion of non-printable characters in the file's first kilobytes. This can happen with certain encodings, non-UTF-8 byte sequences, or unusual line-ending mixes. Click **Open as text anyway** on the binary panel to re-fetch the file as UTF-8 text and edit it in the inline viewer. Files above the 2 MB preview limit still need a Download.
   </Accordion>
   <Accordion title="Upload fails with a 413 error">
     The file exceeds the 25 MB per-file upload limit. Compress or split the file before uploading, or transfer it via `scp` or `rsync` directly to the stack directory on the host.
