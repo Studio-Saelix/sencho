@@ -39,7 +39,6 @@ export interface ConfigurationStatus {
     provider: 'disabled' | 'sencho' | 'custom';
     autoUpload: boolean;
     locked: boolean;
-    requiredTier: 'admiral';
   };
 }
 
