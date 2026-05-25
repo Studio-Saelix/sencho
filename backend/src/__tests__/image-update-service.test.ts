@@ -389,7 +389,7 @@ services:
       'info',
       'image_update_available',
       expect.stringContaining('stackA'),
-      { stackName: 'stackA' },
+      { stackName: 'stackA', actor: 'system:image-update' },
     );
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number));
   });

@@ -673,15 +673,15 @@ export class DockerEventService {
     // ========================================================================
 
     private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('error', category, this.prefix(message), { stackName, containerName });
+        return this.notifier.dispatchAlert('error', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
     }
 
     private async emitWarning(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('warning', category, this.prefix(message), { stackName, containerName });
+        return this.notifier.dispatchAlert('warning', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
     }
 
     private async emitInfo(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('info', category, this.prefix(message), { stackName, containerName });
+        return this.notifier.dispatchAlert('info', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
     }
 
     private prefix(message: string): string {

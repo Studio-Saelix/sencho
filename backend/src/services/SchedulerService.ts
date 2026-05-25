@@ -167,7 +167,7 @@ export class SchedulerService {
      */
     private safeDispatch(level: 'info' | 'warning' | 'error', category: import('./NotificationService').NotificationCategory, message: string, stackName?: string): void {
         NotificationService.getInstance()
-            .dispatchAlert(level, category, message, { stackName })
+            .dispatchAlert(level, category, message, { stackName, actor: 'system:scheduler' })
             .catch(err => console.error('[SchedulerService] Notification dispatch failed:', getErrorMessage(err, 'unknown error')));
     }
 
@@ -778,6 +778,7 @@ export class SchedulerService {
                 'warning',
                 'scan_finding',
                 `Policy "${v.policyName}" violated by ${v.imageRef}: ${v.severity} exceeds ${v.maxSeverity}`,
+                { actor: 'system:scheduler' },
             );
         }
 

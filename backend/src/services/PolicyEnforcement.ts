@@ -66,7 +66,7 @@ function notifyTrivyMissingOnce(nodeId: number, stackName: string): void {
         'warning',
         'scan_finding',
         `Pre-deploy scan for "${stackName}" skipped: Trivy not installed on this node`,
-        { stackName },
+        { stackName, actor: 'system:policy' },
     );
 }
 

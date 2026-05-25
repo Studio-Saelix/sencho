@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Rocket, RefreshCcw, CircleStop, Play, ArrowUp, Activity, Loader2,
+  Rocket, RefreshCcw, CircleStop, Play, ArrowUp, Activity, Loader2, AlertCircle,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -9,9 +9,12 @@ import { apiFetch } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { NotificationItem } from '@/components/dashboard/types';
 
+type ActivityLevel = 'info' | 'warning' | 'error';
+const ACTIVITY_LEVELS: readonly string[] = ['info', 'warning', 'error'];
+
 interface ActivityEvent {
   id: number;
-  level: string;
+  level: ActivityLevel;
   category?: string;
   message: string;
   timestamp: number;
@@ -33,9 +36,37 @@ const CATEGORY_ICON: Record<string, LucideIcon> = {
 };
 
 const DAY_MS = 86_400_000;
+const PAGE_SIZE = 50;
+const DAY_BUCKET_REFRESH_MS = 60_000;
 
-function dayLabel(ts: number): 'Today' | 'Yesterday' | 'Earlier' {
-  const todayStart = new Date();
+const SYSTEM_ACTOR_LABEL: Record<string, string> = {
+  'system': 'System',
+  'system:autoheal': 'Auto-Heal',
+  'system:scheduler': 'Scheduler',
+  'system:image-update': 'Image Update',
+  'system:docker-events': 'Docker',
+  'system:blueprint': 'Blueprint',
+  'system:monitor': 'Monitor',
+  'system:policy': 'Policy',
+};
+
+function formatActor(actor: string): { label: string; isSystem: boolean } {
+  const isSystem = actor === 'system' || actor.startsWith('system:');
+  return { label: SYSTEM_ACTOR_LABEL[actor] ?? actor, isSystem };
+}
+
+function isActivityEvent(value: unknown): value is ActivityEvent {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.id === 'number'
+    && typeof v.timestamp === 'number'
+    && typeof v.message === 'string'
+    && typeof v.level === 'string'
+    && ACTIVITY_LEVELS.includes(v.level);
+}
+
+function dayLabel(ts: number, now: number): 'Today' | 'Yesterday' | 'Earlier' {
+  const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);
   const todayMs = todayStart.getTime();
   if (ts >= todayMs) return 'Today';
@@ -43,11 +74,11 @@ function dayLabel(ts: number): 'Today' | 'Yesterday' | 'Earlier' {
   return 'Earlier';
 }
 
-function groupEvents(events: ActivityEvent[]): { label: string; events: ActivityEvent[] }[] {
+function groupEvents(events: ActivityEvent[], now: number): { label: string; events: ActivityEvent[] }[] {
   const groups: Record<string, ActivityEvent[]> = {};
   const order: string[] = [];
   for (const e of events) {
-    const label = dayLabel(e.timestamp);
+    const label = dayLabel(e.timestamp, now);
     if (!groups[label]) { groups[label] = []; order.push(label); }
     groups[label].push(e);
   }
@@ -59,6 +90,9 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [error, setError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const seenIdsRef = useRef(new Set<number>());
 
   const mergeEvents = useCallback((incoming: ActivityEvent[]) => {
@@ -72,7 +106,7 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
         added = true;
       }
       if (!added) return prev;
-      next.sort((a, b) => b.timestamp - a.timestamp);
+      next.sort((a, b) => b.timestamp - a.timestamp || b.id - a.id);
       return next;
     });
   }, []);
@@ -80,53 +114,100 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setError(false);
     seenIdsRef.current = new Set();
     setEvents([]);
     setHasMore(true);
 
-    apiFetch(`/stacks/${stackName}/activity?limit=50`)
-      .then(r => (r.ok ? r.json() : Promise.reject()))
-      .then((data: { events: ActivityEvent[] }) => {
-        if (cancelled) return;
-        setHasMore(data.events.length === 50);
-        data.events.forEach(e => seenIdsRef.current.add(e.id));
-        setEvents(data.events);
+    apiFetch(`/stacks/${stackName}/activity?limit=${PAGE_SIZE + 1}`)
+      .then(async r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<{ events: ActivityEvent[] }>;
       })
-      .catch(() => { if (!cancelled) setEvents([]); })
+      .then(data => {
+        if (cancelled) return;
+        const more = data.events.length > PAGE_SIZE;
+        const trimmed = more ? data.events.slice(0, PAGE_SIZE) : data.events;
+        setHasMore(more);
+        trimmed.forEach(e => seenIdsRef.current.add(e.id));
+        setEvents(trimmed);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setError(true);
+        setHasMore(false);
+      })
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => { cancelled = true; };
-  }, [stackName]);
+  }, [stackName, reloadKey]);
 
-  // liveEvents is pre-filtered by stack_name in the parent
   useEffect(() => {
     if (!liveEvents || liveEvents.length === 0) return;
-    mergeEvents(liveEvents as ActivityEvent[]);
+    const safe = liveEvents.filter(isActivityEvent);
+    if (safe.length === 0) return;
+    mergeEvents(safe);
   }, [liveEvents, mergeEvents]);
 
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), DAY_BUCKET_REFRESH_MS);
+    return () => window.clearInterval(id);
+  }, []);
+
   const loadMore = useCallback(async () => {
-    const oldest = events[events.length - 1]?.timestamp;
-    if (!oldest) return;
+    const oldestEvent = events[events.length - 1];
+    if (!oldestEvent) return;
     setLoadingMore(true);
     try {
-      const r = await apiFetch(`/stacks/${stackName}/activity?limit=50&before=${oldest}`);
-      if (!r.ok) return;
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE + 1),
+        before: String(oldestEvent.timestamp),
+        beforeId: String(oldestEvent.id),
+      });
+      const r = await apiFetch(`/stacks/${stackName}/activity?${params.toString()}`);
+      if (!r.ok) {
+        toast.error('Failed to load more activity');
+        // 5xx is likely server-side; stop offering a button that keeps failing.
+        if (r.status >= 500) setHasMore(false);
+        return;
+      }
       const data: { events: ActivityEvent[] } = await r.json();
-      setHasMore(data.events.length === 50);
-      mergeEvents(data.events);
-    } catch {
+      const more = data.events.length > PAGE_SIZE;
+      const trimmed = more ? data.events.slice(0, PAGE_SIZE) : data.events;
+      setHasMore(more);
+      mergeEvents(trimmed);
+    } catch (err) {
+      console.error('[StackActivity] loadMore failed:', err);
       toast.error('Failed to load more activity');
+      setHasMore(false);
     } finally {
       setLoadingMore(false);
     }
   }, [events, stackName, mergeEvents]);
 
-  const groups = useMemo(() => groupEvents(events), [events]);
+  const groups = useMemo(() => groupEvents(events, now), [events, now]);
 
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
         <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (error && events.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 gap-2">
+        <AlertCircle className="w-5 h-5 text-destructive/60" />
+        <span className="font-mono text-[11px] text-muted-foreground">Activity unavailable</span>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 font-mono text-[10px]"
+          onClick={() => setReloadKey(k => k + 1)}
+        >
+          Retry
+        </Button>
       </div>
     );
   }
@@ -147,13 +228,16 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
           <div className="font-mono text-[9px] uppercase tracking-[0.18em] text-stat-subtitle mb-1.5 px-1">{g.label}</div>
           {g.events.map(e => {
             const Icon = CATEGORY_ICON[e.category ?? ''] ?? Activity;
+            const actor = e.actor_username ? formatActor(e.actor_username) : null;
             return (
               <div key={e.id} className="flex items-start gap-2 py-1.5 px-1 rounded-md hover:bg-glass-highlight/30 transition-colors">
                 <Icon className="w-3 h-3 mt-0.5 shrink-0 text-brand/70" strokeWidth={1.5} />
                 <div className="flex-1 min-w-0">
                   <span className="font-mono text-[11px] text-foreground/90">{e.message}</span>
-                  {e.actor_username && e.actor_username !== 'system' && (
-                    <span className="ml-1.5 font-mono text-[10px] text-stat-subtitle">by {e.actor_username}</span>
+                  {actor && (
+                    <span className={`ml-1.5 font-mono text-[10px] text-stat-subtitle${actor.isSystem ? ' italic' : ''}`}>
+                      {actor.isSystem ? `via ${actor.label}` : `by ${actor.label}`}
+                    </span>
                   )}
                 </div>
                 <span className="font-mono text-[10px] text-stat-subtitle shrink-0">{formatTimeAgo(e.timestamp)}</span>

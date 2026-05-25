@@ -6,6 +6,7 @@ import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
+import { sanitizeNotificationMessage } from '../utils/notificationMessage';
 import { parseImageRef, getRemoteDigest } from './registry-api';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -308,7 +309,7 @@ export class ImageUpdateService {
                         'info',
                         'image_update_available',
                         `[Node: ${nodeName}] Stack "${stackName}" has image updates available.`,
-                        { stackName },
+                        { stackName, actor: 'system:image-update' },
                     );
                 } catch (e) {
                     console.error(`[ImageUpdateService] Failed to dispatch update notification for "${stackName}":`, e);
@@ -319,8 +320,12 @@ export class ImageUpdateService {
                         db.addNotificationHistory(NodeRegistry.getInstance().getDefaultNodeId(), {
                             level: 'error',
                             category: 'system',
-                            message: `[Node: ${nodeName}] Failed to notify about image updates for stack "${stackName}": ${getErrorMessage(e, String(e))}`,
+                            message: sanitizeNotificationMessage(
+                                `[Node: ${nodeName}] Failed to notify about image updates for stack "${stackName}": ${getErrorMessage(e, String(e))}`,
+                                { composeDir: process.env.COMPOSE_DIR },
+                            ),
                             timestamp: Date.now(),
+                            actor_username: 'system:image-update',
                         });
                     } catch (dbErr) {
                         console.error('[ImageUpdateService] Failed to record dispatch error:', dbErr);

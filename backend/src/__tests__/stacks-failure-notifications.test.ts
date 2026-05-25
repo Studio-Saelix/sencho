@@ -166,7 +166,7 @@ describe('deploy_failure notification on /deploy error', () => {
       'error',
       'deploy_failure',
       expect.stringContaining('image pull failed'),
-      { stackName: 'myapp' },
+      { stackName: 'myapp', actor: 'testadmin' },
     );
   });
 
@@ -183,7 +183,7 @@ describe('deploy_failure notification on /deploy error', () => {
     expect(call[0]).toBe('error');
     expect(call[1]).toBe('deploy_failure');
     expect(call[2]).toContain('network timeout');
-    expect(call[3]).toEqual({ stackName: 'webapp' });
+    expect(call[3]).toEqual({ stackName: 'webapp', actor: 'testadmin' });
   });
 
   it('returns rolledBack=true only when compose rollback completed', async () => {
@@ -260,7 +260,7 @@ describe('deploy_failure notification on /down error', () => {
       'error',
       'deploy_failure',
       expect.any(String),
-      { stackName: 'myapp' },
+      { stackName: 'myapp', actor: 'testadmin' },
     );
   });
 });
@@ -282,7 +282,7 @@ describe('deploy_failure notification on /restart error', () => {
       'error',
       'deploy_failure',
       expect.stringContaining('restart daemon error'),
-      { stackName: 'myapp' },
+      { stackName: 'myapp', actor: 'testadmin' },
     );
   });
 });
@@ -304,7 +304,7 @@ describe('deploy_failure notification on /stop error', () => {
       'error',
       'deploy_failure',
       expect.stringContaining('stop daemon error'),
-      { stackName: 'myapp' },
+      { stackName: 'myapp', actor: 'testadmin' },
     );
   });
 });
@@ -325,7 +325,7 @@ describe('deploy_failure notification on /update error', () => {
       'error',
       'deploy_failure',
       expect.stringContaining('image not found'),
-      { stackName: 'myapp' },
+      { stackName: 'myapp', actor: 'testadmin' },
     );
   });
 

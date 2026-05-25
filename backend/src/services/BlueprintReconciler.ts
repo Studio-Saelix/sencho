@@ -288,7 +288,7 @@ export class BlueprintReconciler {
                     'warning',
                     'blueprint_drift_detected',
                     `Blueprint "${blueprint.name}" drifted on node "${node.name}": ${reason}`,
-                    { stackName: blueprint.name },
+                    { stackName: blueprint.name, actor: 'system:blueprint' },
                 );
                 return;
 
@@ -302,7 +302,7 @@ export class BlueprintReconciler {
                             'warning',
                             'blueprint_drift_detected',
                             `Blueprint "${blueprint.name}" lost its marker on node "${node.name}"; auto-fix declined to avoid stomping unowned data. Reason: ${reason}`,
-                            { stackName: blueprint.name },
+                            { stackName: blueprint.name, actor: 'system:blueprint' },
                         );
                         return;
                     }
@@ -319,7 +319,7 @@ export class BlueprintReconciler {
                         'error',
                         'blueprint_drift_correction_failed',
                         `Auto-fix for "${blueprint.name}" on node "${node.name}" failed: ${result.error ?? 'unknown error'}`,
-                        { stackName: blueprint.name },
+                        { stackName: blueprint.name, actor: 'system:blueprint' },
                     );
                 }
                 return;

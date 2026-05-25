@@ -548,10 +548,10 @@ export class MonitorService {
             const retentionHours = parseInt(settings['metrics_retention_hours'] || '24', 10);
             db.cleanupOldMetrics(isNaN(retentionHours) ? 24 : retentionHours);
             const retentionDays = parseInt(settings['log_retention_days'] || '30', 10);
-            db.cleanupOldNotifications(isNaN(retentionDays) ? 30 : retentionDays);
+            const notifSummary = db.cleanupOldNotifications(isNaN(retentionDays) ? 30 : retentionDays);
             const auditRetentionDays = parseInt(settings['audit_retention_days'] || '90', 10);
             db.cleanupOldAuditLogs(isNaN(auditRetentionDays) ? 90 : auditRetentionDays);
-            if (isDebugEnabled()) console.log(`[Monitor:diag] Cleanup: metrics ${isNaN(retentionHours) ? 24 : retentionHours}h, notifications ${isNaN(retentionDays) ? 30 : retentionDays}d, audit ${isNaN(auditRetentionDays) ? 90 : auditRetentionDays}d`);
+            if (isDebugEnabled()) console.log(`[Monitor:diag] Cleanup: metrics ${isNaN(retentionHours) ? 24 : retentionHours}h, notifications ${isNaN(retentionDays) ? 30 : retentionDays}d (ttl=${notifSummary.ttl} perStack=${notifSummary.perStack} perNode=${notifSummary.perNode}), audit ${isNaN(auditRetentionDays) ? 90 : auditRetentionDays}d`);
         } catch (e) {
             console.error('MonitorService: failed to cleanup old data', e);
         }
@@ -670,7 +670,7 @@ export class MonitorService {
                                     'warning',
                                     'monitor_alert',
                                     message,
-                                    { stackName: rule.stack_name },
+                                    { stackName: rule.stack_name, actor: 'system:monitor' },
                                 );
 
                                 db.updateStackAlertLastFired(ruleId, Date.now());
@@ -723,7 +723,7 @@ export class MonitorService {
         const db = DatabaseService.getInstance();
         const last = parseInt(db.getSystemState(stateKey) || '0', 10);
         if (Date.now() - last > cooldownMs) {
-            await NotificationService.getInstance().dispatchAlert(severity, category, message, { stackName: stack });
+            await NotificationService.getInstance().dispatchAlert(severity, category, message, { stackName: stack, actor: 'system:monitor' });
             db.setSystemState(stateKey, Date.now().toString());
         }
     }

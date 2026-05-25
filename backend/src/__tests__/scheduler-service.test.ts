@@ -919,7 +919,7 @@ describe('SchedulerService - error handling', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(91);
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('error', 'system', expect.stringContaining('failed'), { stackName: undefined });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('error', 'system', expect.stringContaining('failed'), { stackName: undefined, actor: 'system:scheduler' });
   });
 
   it('dispatches recovery notification when previous status was failure', async () => {
@@ -939,7 +939,7 @@ describe('SchedulerService - error handling', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(92);
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('recovered'), { stackName: 'my-stack' });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('recovered'), { stackName: 'my-stack', actor: 'system:scheduler' });
   });
 });
 
@@ -1005,13 +1005,13 @@ describe('SchedulerService - scheduled scan notifications', () => {
       'info',
       'scan_finding',
       expect.stringContaining('nightly-scan'),
-      { stackName: undefined },
+      { stackName: undefined, actor: 'system:scheduler' },
     );
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'info',
       'scan_finding',
       expect.stringContaining('Scanned 3 image(s)'),
-      { stackName: undefined },
+      { stackName: undefined, actor: 'system:scheduler' },
     );
   });
 
@@ -1026,7 +1026,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
       'warning',
       'scan_finding',
       expect.stringContaining('2 failed'),
-      { stackName: undefined },
+      { stackName: undefined, actor: 'system:scheduler' },
     );
   });
 
@@ -1041,7 +1041,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
       'info',
       'scan_finding',
       expect.stringContaining('completed'),
-      { stackName: 'web-stack' },
+      { stackName: 'web-stack', actor: 'system:scheduler' },
     );
   });
 
@@ -1061,7 +1061,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
       'info',
       'scan_finding',
       expect.stringContaining('recovered-scan'),
-      { stackName: undefined },
+      { stackName: undefined, actor: 'system:scheduler' },
     );
   });
 
@@ -1096,7 +1096,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
       'error',
       'system',
       expect.stringMatching(/failed.*Trivy/i),
-      { stackName: 'payment-stack' },
+      { stackName: 'payment-stack', actor: 'system:scheduler' },
     );
   });
 
@@ -1145,7 +1145,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
       'info',
       'scan_finding',
       expect.stringContaining('No images to scan'),
-      { stackName: undefined },
+      { stackName: undefined, actor: 'system:scheduler' },
     );
   });
 
@@ -1160,7 +1160,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
       'info',
       'scan_finding',
       expect.stringContaining('All 12 image(s) already scanned recently'),
-      { stackName: undefined },
+      { stackName: undefined, actor: 'system:scheduler' },
     );
   });
 
@@ -1300,7 +1300,7 @@ describe('SchedulerService - invalid cron at execution time', () => {
       'error',
       'system',
       expect.stringContaining('failed'),
-      { stackName: undefined },
+      { stackName: undefined, actor: 'system:scheduler' },
     );
   });
 });

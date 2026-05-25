@@ -122,7 +122,7 @@ export async function triggerPostDeployScan(
             scan.critical_count > 0 ? 'error' : 'warning',
             'scan_finding',
             `Vulnerability scan for ${imageRef}: ${scan.critical_count} critical, ${scan.high_count} high`,
-            { stackName },
+            { stackName, actor: 'system:policy' },
           );
         }
       } catch (err) {
@@ -133,7 +133,7 @@ export async function triggerPostDeployScan(
           'warning',
           'scan_finding',
           `Post-deploy scan failed for ${imageRef} (${stackName}): ${message}`,
-          { stackName },
+          { stackName, actor: 'system:policy' },
         );
       }
     }
