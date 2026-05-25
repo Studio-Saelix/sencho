@@ -40,7 +40,7 @@ function makePayload(overrides: Partial<ConfigurationStatusPayload> = {}): Confi
       scanPolicies: { total: 0, enabled: 0, locked: true, requiredTier: 'skipper' },
     },
     thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false },
-    backup: { provider: 'disabled', autoUpload: false, locked: false, requiredTier: 'admiral' },
+    backup: { provider: 'disabled', autoUpload: false, locked: false },
     ...overrides,
   };
 }
