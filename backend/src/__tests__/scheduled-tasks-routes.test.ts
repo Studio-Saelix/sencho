@@ -562,3 +562,80 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
     expect(res.body.error).toMatch(/Invalid action/);
   });
 });
+
+describe('scheduled-tasks state-invalidate broadcast', () => {
+  // Two frontend hooks (useConfigurationStatus, useNextAutoUpdateRun) refetch
+  // when this scope fires; locking it down prevents a silent UX regression
+  // where a successful mutation no longer triggers their fast-refresh path.
+  it('fires scope=scheduled-tasks on create, update, toggle, and delete', async () => {
+    const { NotificationService } = await import('../services/NotificationService');
+    const broadcastSpy = vi.spyOn(NotificationService.getInstance(), 'broadcastEvent').mockImplementation(() => undefined);
+    try {
+      const expectScheduledTasksBroadcast = () => {
+        expect(broadcastSpy).toHaveBeenCalledWith(expect.objectContaining({
+          type: 'state-invalidate',
+          scope: 'scheduled-tasks',
+          ts: expect.any(Number),
+        }));
+      };
+
+      const createRes = await request(app)
+        .post('/api/scheduled-tasks')
+        .set('Cookie', adminCookie)
+        .send({
+          name: 'broadcast-test',
+          target_type: 'system',
+          node_id: 1,
+          action: 'prune',
+          cron_expression: '0 4 * * *',
+          enabled: true,
+          prune_targets: ['images'],
+        });
+      expect(createRes.status).toBe(201);
+      const taskId = createRes.body.id as number;
+      expectScheduledTasksBroadcast();
+
+      broadcastSpy.mockClear();
+      const updateRes = await request(app)
+        .put(`/api/scheduled-tasks/${taskId}`)
+        .set('Cookie', adminCookie)
+        .send({ cron_expression: '0 5 * * *' });
+      expect(updateRes.status).toBe(200);
+      expectScheduledTasksBroadcast();
+
+      broadcastSpy.mockClear();
+      const toggleRes = await request(app)
+        .patch(`/api/scheduled-tasks/${taskId}/toggle`)
+        .set('Cookie', adminCookie);
+      expect(toggleRes.status).toBe(200);
+      expectScheduledTasksBroadcast();
+
+      broadcastSpy.mockClear();
+      const deleteRes = await request(app)
+        .delete(`/api/scheduled-tasks/${taskId}`)
+        .set('Cookie', adminCookie);
+      expect(deleteRes.status).toBe(200);
+      expectScheduledTasksBroadcast();
+    } finally {
+      broadcastSpy.mockRestore();
+    }
+  });
+
+  it('does not broadcast when validation rejects the request', async () => {
+    const { NotificationService } = await import('../services/NotificationService');
+    const broadcastSpy = vi.spyOn(NotificationService.getInstance(), 'broadcastEvent').mockImplementation(() => undefined);
+    try {
+      const res = await request(app)
+        .post('/api/scheduled-tasks')
+        .set('Cookie', adminCookie)
+        .send({ name: '', target_type: 'system', action: 'prune', cron_expression: '0 4 * * *' });
+      expect(res.status).toBe(400);
+      const scheduledBroadcasts = broadcastSpy.mock.calls.filter(
+        ([event]) => (event as { scope?: string }).scope === 'scheduled-tasks',
+      );
+      expect(scheduledBroadcasts).toHaveLength(0);
+    } finally {
+      broadcastSpy.mockRestore();
+    }
+  });
+});

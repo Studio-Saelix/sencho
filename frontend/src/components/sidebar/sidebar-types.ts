@@ -34,7 +34,6 @@ export interface StackMenuCtx {
   labels: Label[];
   assignedLabelIds: number[];
   menuVisibility: { showDeploy: boolean; showStop: boolean; showRestart: boolean; showUpdate: boolean };
-  autoUpdateEnabled: boolean;
   openAlertSheet: () => void;
   openAutoHeal: () => void;
   checkUpdates: () => void;
@@ -49,7 +48,6 @@ export interface StackMenuCtx {
   toggleLabel: (labelId: number) => void;
   createAndAssignLabel: (name: string, color: LabelColor) => Promise<void>;
   openLabelManager: () => void;
-  setAutoUpdateEnabled: (enabled: boolean) => void;
   openScheduleTask: () => void;
 }
 

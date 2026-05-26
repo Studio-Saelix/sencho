@@ -7,11 +7,10 @@ import type { NotificationItem } from '../../dashboard/types';
 interface UseNotificationsOptions {
   nodes: Node[];
   onStateInvalidate: () => void;
-  onAutoUpdateChange: () => void;
   onImageUpdatesChange: () => void;
 }
 
-export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange, onImageUpdatesChange }: UseNotificationsOptions) {
+export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange }: UseNotificationsOptions) {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [tickerConnected, setTickerConnected] = useState(false);
 
@@ -22,8 +21,6 @@ export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange,
   const remoteNotifWsRef = useRef<Map<number, () => void>>(new Map());
   const onStateInvalidateRef = useRef(onStateInvalidate);
   onStateInvalidateRef.current = onStateInvalidate;
-  const onAutoUpdateChangeRef = useRef(onAutoUpdateChange);
-  onAutoUpdateChangeRef.current = onAutoUpdateChange;
   const onImageUpdatesChangeRef = useRef(onImageUpdatesChange);
   onImageUpdatesChangeRef.current = onImageUpdatesChange;
 
@@ -98,13 +95,9 @@ export function useNotifications({ nodes, onStateInvalidate, onAutoUpdateChange,
             setNotifications(prev => [tagged, ...prev].sort((a, b) => b.timestamp - a.timestamp));
           } else if (msg.type === 'state-invalidate') {
             window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: msg }));
-            if (msg.action === 'auto-update-settings-changed') {
-              onAutoUpdateChangeRef.current();
-            } else {
-              onStateInvalidateRef.current();
-              if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
-                onImageUpdatesChangeRef.current();
-              }
+            onStateInvalidateRef.current();
+            if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
+              onImageUpdatesChangeRef.current();
             }
           }
         } catch (e) {

@@ -229,11 +229,6 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
 
     for (const stackName of stackNames) {
       try {
-        if (!db.getStackAutoUpdateEnabled(req.nodeId, stackName)) {
-          results.push(`Stack "${stackName}": auto-updates disabled; skipped.`);
-          continue;
-        }
-
         const containers = await docker.getContainersByStack(stackName);
         if (!containers || containers.length === 0) {
           results.push(`Stack "${stackName}": no containers found; skipped.`);

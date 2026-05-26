@@ -736,7 +736,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   onValueChange={setFormNodeId}
                   placeholder="Select node..."
                 />
-                <p className="text-xs text-muted-foreground">Only stacks with auto-updates enabled on this node will be updated.</p>
+                <p className="text-xs text-muted-foreground">Every stack on the selected node will be checked and updated when new images are available.</p>
               </div>
             )}
 

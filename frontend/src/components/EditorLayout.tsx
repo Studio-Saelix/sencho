@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Button } from './ui/button';
 import { Plus } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
@@ -32,7 +32,7 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { StackSidebar } from '@/components/sidebar/StackSidebar';
 import type { StackRowStatus } from '@/components/sidebar/stack-status-utils';
-import { useSidebarActivitySummary, countEnabledAutoUpdates } from '@/components/sidebar/useSidebarActivitySummary';
+import { useSidebarActivitySummary } from '@/components/sidebar/useSidebarActivitySummary';
 import { useNextAutoUpdateRun } from '@/components/sidebar/useNextAutoUpdateRun';
 import { usePanelSessionStartedAt } from '@/components/sidebar/usePanelSessionStartedAt';
 import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivityTicker';
@@ -68,7 +68,6 @@ export default function EditorLayout() {
 
   const stackListState = useStackListState();
   const {
-    files,
     selectedFile,
     isLoading,
     stackActions: stackActionMap,
@@ -76,7 +75,6 @@ export default function EditorLayout() {
     searchQuery, setSearchQuery,
     stackStatuses,
     stackLabelMap,
-    autoUpdateSettings,
     filterChip, setFilterChip,
     bulkMode,
     selectedFiles,
@@ -85,7 +83,6 @@ export default function EditorLayout() {
     remoteResults,
     isStackBusy,
     refreshStacks,
-    fetchAutoUpdateSettings,
     handleScanStacks,
     scheduleStateInvalidateRefresh,
     toggleBulkMode, toggleSelect, clearSelection, handleBulkAction,
@@ -147,7 +144,6 @@ export default function EditorLayout() {
   } = useNotifications({
     nodes,
     onStateInvalidate: scheduleStateInvalidateRefresh,
-    onAutoUpdateChange: fetchAutoUpdateSettings,
     onImageUpdatesChange: fetchImageUpdates,
   });
 
@@ -190,19 +186,12 @@ export default function EditorLayout() {
 
   const panelStartedAt = usePanelSessionStartedAt(panelState);
 
-  const autoUpdateEnabledCount = useMemo(
-    () => countEnabledAutoUpdates(files, autoUpdateSettings),
-    [files, autoUpdateSettings],
-  );
-
   const nextAutoUpdateRunAt = useNextAutoUpdateRun();
   const activitySummary = useSidebarActivitySummary({
     notifications,
     tickerConnected,
     panelState,
     panelStartedAt,
-    autoUpdateEnabledCount,
-    totalStackCount: files.length,
     nextAutoUpdateRunAt,
   });
 
@@ -292,7 +281,6 @@ export default function EditorLayout() {
     }
 
     refreshStacks();
-    fetchAutoUpdateSettings();
     void stackActions.refreshGitSourcePending();
   }, [activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 

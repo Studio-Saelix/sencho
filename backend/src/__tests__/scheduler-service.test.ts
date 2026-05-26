@@ -21,7 +21,6 @@ const {
   mockGetProxyTarget,
   mockIsTrivyAvailable,
   mockScanAllNodeImages,
-  mockGetStackAutoUpdateSettingsForNode,
   mockDeleteScheduledTask,
   mockGetMatchingPolicy,
   mockRunCommand,
@@ -62,7 +61,6 @@ const {
     severity: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 },
     violations: [],
   }),
-  mockGetStackAutoUpdateSettingsForNode: vi.fn().mockReturnValue({}),
   mockDeleteScheduledTask: vi.fn(),
   mockGetMatchingPolicy: vi.fn().mockReturnValue(null),
   mockRunCommand: vi.fn().mockResolvedValue(undefined),
@@ -86,7 +84,6 @@ vi.mock('../services/DatabaseService', () => ({
       clearStackUpdateStatus: mockClearStackUpdateStatus,
       markStaleRunsAsFailed: mockMarkStaleRunsAsFailed,
       deleteOldScans: mockDeleteOldScans,
-      getStackAutoUpdateSettingsForNode: mockGetStackAutoUpdateSettingsForNode,
       deleteScheduledTask: mockDeleteScheduledTask,
       getMatchingPolicy: mockGetMatchingPolicy,
     }),
@@ -790,7 +787,7 @@ describe('SchedulerService - executeUpdate', () => {
     expect(svc.isTaskRunning(999)).toBe(false);
   });
 
-  it('fleet target updates all stacks whose policy allows it', async () => {
+  it('fleet target updates every stack discovered on the node', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 87,
       name: 'fleet-update',
@@ -804,45 +801,13 @@ describe('SchedulerService - executeUpdate', () => {
       last_status: null,
     });
     mockGetStacks.mockResolvedValue(['app1', 'app2', 'app3']);
-    // app2 explicitly disabled; app1 and app3 default to enabled
-    mockGetStackAutoUpdateSettingsForNode.mockReturnValue({ app2: false });
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
     mockCheckImage.mockResolvedValue({ hasUpdate: true });
 
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(87);
 
-    // Only app1 and app3 should be updated
-    expect(mockUpdateStack).toHaveBeenCalledTimes(2);
-    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
-      1,
-      expect.objectContaining({
-        status: 'success',
-        output: expect.stringContaining('auto-updates disabled; skipped'),
-      })
-    );
-  });
-
-  it('fleet target with zero eligible stacks records success', async () => {
-    mockGetScheduledTask.mockReturnValue({
-      id: 88,
-      name: 'fleet-update-all-off',
-      action: 'update',
-      target_type: 'fleet',
-      cron_expression: '0 4 * * *',
-      enabled: true,
-      target_id: null,
-      node_id: 1,
-      created_by: 'admin',
-      last_status: null,
-    });
-    mockGetStacks.mockResolvedValue(['app1', 'app2']);
-    mockGetStackAutoUpdateSettingsForNode.mockReturnValue({ app1: false, app2: false });
-
-    const svc = SchedulerService.getInstance();
-    await svc.triggerTask(88);
-
-    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockUpdateStack).toHaveBeenCalledTimes(3);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
       expect.objectContaining({ status: 'success' })

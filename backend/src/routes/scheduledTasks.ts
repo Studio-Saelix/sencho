@@ -2,12 +2,27 @@ import { Router, type Request, type Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService, type ScheduledTask } from '../services/DatabaseService';
 import { SchedulerService } from '../services/SchedulerService';
+import { NotificationService } from '../services/NotificationService';
 import { requirePaid, requireAdmin } from '../middleware/tierGates';
 import { escapeCsvField } from '../utils/csv';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
+
+// Frontend listeners filter on scope === 'scheduled-tasks'. Wrapped so a
+// broken subscriber socket cannot turn a successful mutation into a 500.
+function broadcastScheduledTasksChanged(): void {
+  try {
+    NotificationService.getInstance().broadcastEvent({
+      type: 'state-invalidate',
+      scope: 'scheduled-tasks',
+      ts: Date.now(),
+    });
+  } catch (err) {
+    console.error('[ScheduledTasks] broadcast failed:', getErrorMessage(err, String(err)));
+  }
+}
 
 const VALID_TARGET_TYPES = ['stack', 'fleet', 'system'] as const;
 const VALID_ACTIONS = ['restart', 'snapshot', 'prune', 'update', 'scan', 'auto_backup', 'auto_stop', 'auto_down', 'auto_start'] as const;
@@ -201,6 +216,7 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
 
     console.log(`[ScheduledTasks] Created task id=${id} action=${sanitizeForLog(action)} target=${sanitizeForLog(target_id || 'none')}`);
     const task = DatabaseService.getInstance().getScheduledTask(id);
+    broadcastScheduledTasksChanged();
     res.status(201).json(task);
   } catch (error) {
     console.error('[ScheduledTasks] Create error:', error);
@@ -297,6 +313,7 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     db.updateScheduledTask(id, updates as Partial<Omit<ScheduledTask, 'id'>>);
     console.log(`[ScheduledTasks] Updated task id=${id}`);
     const task = db.getScheduledTask(id);
+    broadcastScheduledTasksChanged();
     res.json(task);
   } catch (error) {
     console.error('[ScheduledTasks] Update error:', error);
@@ -317,6 +334,7 @@ scheduledTasksRouter.delete('/:id', (req: Request, res: Response): void => {
 
     db.deleteScheduledTask(id);
     console.log(`[ScheduledTasks] Deleted task id=${id}`);
+    broadcastScheduledTasksChanged();
     res.json({ success: true });
   } catch (error) {
     console.error('[ScheduledTasks] Delete error:', error);
@@ -346,6 +364,7 @@ scheduledTasksRouter.patch('/:id/toggle', (req: Request, res: Response): void =>
 
     console.log(`[ScheduledTasks] Toggled task id=${id} enabled=${newEnabled}`);
     const task = db.getScheduledTask(id);
+    broadcastScheduledTasksChanged();
     res.json(task);
   } catch (error) {
     console.error('[ScheduledTasks] Toggle error:', error);

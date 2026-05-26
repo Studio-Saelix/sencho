@@ -54,11 +54,11 @@ describe('SidebarActivityTicker', () => {
     });
   });
 
-  it('renders automation state with counts, next-run time, and routes click to open-auto-updates', () => {
+  it('renders automation state with next-run time, and routes click to open-auto-updates', () => {
     const nextRun = Math.floor(Date.now() / 1000) + 600;
-    const { onAction } = renderWith({ kind: 'automation', enabledCount: 3, totalCount: 8, nextRunAt: nextRun });
+    const { onAction } = renderWith({ kind: 'automation', nextRunAt: nextRun });
     expect(screen.getByText(/Auto-update/)).toBeInTheDocument();
-    expect(screen.getByText('3/8')).toBeInTheDocument();
+    expect(screen.getByText(/next run/)).toBeInTheDocument();
     expect(screen.getByTestId('ticker-dot')).toHaveClass('bg-warning');
     fireEvent.click(screen.getByRole('button'));
     expect(onAction).toHaveBeenCalledWith({ kind: 'open-auto-updates' });

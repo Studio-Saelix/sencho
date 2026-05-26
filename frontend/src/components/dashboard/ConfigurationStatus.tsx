@@ -165,8 +165,8 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
                 onClick={open('system')}
               />
               <Row
-                label="Auto-update stacks"
-                value={automation.autoUpdate.total === 0 ? 'None' : `${automation.autoUpdate.enabled} / ${automation.autoUpdate.total}`}
+                label="Auto-update schedules"
+                value={automation.autoUpdate.total === 0 ? 'None' : `${automation.autoUpdate.enabled} / ${automation.autoUpdate.total} active`}
                 onClick={open('system')}
               />
               {!automation.webhooks.locked && (

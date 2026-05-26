@@ -253,16 +253,6 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
   }
 });
 
-stacksRouter.get('/auto-update-settings', (req: Request, res: Response): void => {
-  try {
-    const settings = DatabaseService.getInstance().getStackAutoUpdateSettingsForNode(req.nodeId);
-    res.json(settings);
-  } catch (error) {
-    console.error('[Stacks] Failed to fetch auto-update settings:', error);
-    res.status(500).json({ error: 'Failed to fetch auto-update settings' });
-  }
-});
-
 type BulkLifecycleAction = 'start' | 'stop' | 'restart' | 'update';
 const VALID_BULK_ACTIONS: ReadonlySet<BulkLifecycleAction> = new Set(['start', 'stop', 'restart', 'update']);
 const BULK_PARALLELISM = 4;
@@ -418,43 +408,6 @@ stacksRouter.post('/bulk', async (req: Request, res: Response) => {
   );
 
   res.json({ action: typedAction, results });
-});
-
-stacksRouter.get('/:stackName/auto-update', (req: Request, res: Response): void => {
-  try {
-    const stackName = req.params.stackName as string;
-    const enabled = DatabaseService.getInstance().getStackAutoUpdateEnabled(req.nodeId, stackName);
-    res.json({ enabled });
-  } catch (error) {
-    console.error('[Stacks] Failed to fetch auto-update setting:', error);
-    res.status(500).json({ error: 'Failed to fetch auto-update setting' });
-  }
-});
-
-stacksRouter.put('/:stackName/auto-update', (req: Request, res: Response): void => {
-  if (!requirePaid(req, res)) return;
-  if (!requireAdmin(req, res)) return;
-  try {
-    const stackName = req.params.stackName as string;
-    const { enabled } = req.body as { enabled?: unknown };
-    if (typeof enabled !== 'boolean') {
-      res.status(400).json({ error: '"enabled" must be a boolean' });
-      return;
-    }
-    DatabaseService.getInstance().upsertStackAutoUpdateEnabled(req.nodeId, stackName, enabled);
-    NotificationService.getInstance().broadcastEvent({
-      type: 'state-invalidate',
-      scope: 'stack',
-      nodeId: req.nodeId,
-      stackName,
-      action: 'auto-update-settings-changed',
-      ts: Date.now(),
-    });
-    res.json({ enabled });
-  } catch (error) {
-    console.error('[Stacks] Failed to update auto-update setting:', error);
-    res.status(500).json({ error: 'Failed to update auto-update setting' });
-  }
 });
 
 stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
@@ -852,7 +805,6 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   // Step 4: database cleanup. Per-call idempotent; safe to run sequentially.
   try {
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
-    DatabaseService.getInstance().clearStackAutoUpdateSetting(req.nodeId, stackName);
     DatabaseService.getInstance().clearStackScanAttempts(req.nodeId, stackName);
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);

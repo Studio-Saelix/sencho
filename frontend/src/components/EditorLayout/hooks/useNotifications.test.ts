@@ -60,7 +60,7 @@ describe('useNotifications', () => {
 
   it('starts with empty notifications and disconnected state', () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onAutoUpdateChange: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
     );
     expect(result.current.notifications).toEqual([]);
     expect(result.current.tickerConnected).toBe(false);
@@ -68,7 +68,7 @@ describe('useNotifications', () => {
 
   it('opens a local notification WebSocket on mount', () => {
     renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onAutoUpdateChange: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
     );
     expect(MockWS.instances.length).toBeGreaterThanOrEqual(1);
     expect(MockWS.instances[0]).toBeDefined();
@@ -76,7 +76,7 @@ describe('useNotifications', () => {
 
   it('sets tickerConnected true when local WS opens', () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onAutoUpdateChange: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     expect(result.current.tickerConnected).toBe(true);
@@ -84,7 +84,7 @@ describe('useNotifications', () => {
 
   it('adds notification when local WS receives notification message', () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onAutoUpdateChange: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -98,7 +98,7 @@ describe('useNotifications', () => {
 
   it('clearAllNotifications empties the local state', async () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onAutoUpdateChange: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -114,9 +114,8 @@ describe('useNotifications', () => {
   it('fires onImageUpdatesChange on state-invalidate with action="stack-updated"', () => {
     const onStateInvalidate = vi.fn();
     const onImageUpdatesChange = vi.fn();
-    const onAutoUpdateChange = vi.fn();
     renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate, onAutoUpdateChange, onImageUpdatesChange }),
+      useNotifications({ nodes: [localNode], onStateInvalidate, onImageUpdatesChange }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -129,14 +128,13 @@ describe('useNotifications', () => {
     });
     expect(onImageUpdatesChange).toHaveBeenCalledTimes(1);
     expect(onStateInvalidate).toHaveBeenCalledTimes(1);
-    expect(onAutoUpdateChange).not.toHaveBeenCalled();
   });
 
   it('does not fire onImageUpdatesChange on a generic state-invalidate', () => {
     const onStateInvalidate = vi.fn();
     const onImageUpdatesChange = vi.fn();
     renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate, onAutoUpdateChange: vi.fn(), onImageUpdatesChange }),
+      useNotifications({ nodes: [localNode], onStateInvalidate, onImageUpdatesChange }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -151,29 +149,9 @@ describe('useNotifications', () => {
     expect(onImageUpdatesChange).not.toHaveBeenCalled();
   });
 
-  it('does not fire onImageUpdatesChange on auto-update-settings-changed', () => {
-    const onAutoUpdateChange = vi.fn();
-    const onImageUpdatesChange = vi.fn();
-    const onStateInvalidate = vi.fn();
-    renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate, onAutoUpdateChange, onImageUpdatesChange }),
-    );
-    act(() => { MockWS.instances[0]?.onopen?.(); });
-    act(() => {
-      MockWS.instances[0]?.onmessage?.({
-        data: JSON.stringify({
-          type: 'state-invalidate', nodeId: 1, action: 'auto-update-settings-changed', ts: 1000,
-        }),
-      });
-    });
-    expect(onAutoUpdateChange).toHaveBeenCalledTimes(1);
-    expect(onImageUpdatesChange).not.toHaveBeenCalled();
-    expect(onStateInvalidate).not.toHaveBeenCalled();
-  });
-
   it('deleteNotification removes the matching item', async () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onAutoUpdateChange: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     const notif = makeNotif({ id: 5, nodeId: localNode.id });

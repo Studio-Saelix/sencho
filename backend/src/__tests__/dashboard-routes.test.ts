@@ -112,6 +112,77 @@ describe('GET /api/dashboard/configuration', () => {
     expect(res.body.security.scanPolicies.locked).toBe(false);
   });
 
+  it('counts autoUpdate as enabled action=update scheduled tasks targeting this node, not other actions', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const nodeId = 1;
+    const baseTask = {
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: now + 3600_000,
+      last_status: null,
+      last_error: null,
+      prune_targets: null,
+      target_services: null,
+      prune_label_filter: null,
+    };
+    const idA = db.createScheduledTask({
+      ...baseTask,
+      name: 'au-on',
+      target_type: 'stack',
+      target_id: 'app1',
+      node_id: nodeId,
+      action: 'update',
+      cron_expression: '0 3 * * *',
+      enabled: 1,
+    });
+    const idB = db.createScheduledTask({
+      ...baseTask,
+      name: 'au-off',
+      target_type: 'stack',
+      target_id: 'app2',
+      node_id: nodeId,
+      action: 'update',
+      cron_expression: '0 3 * * *',
+      enabled: 0,
+    });
+    const idC = db.createScheduledTask({
+      ...baseTask,
+      name: 'scan-row',
+      target_type: 'system',
+      target_id: null,
+      node_id: nodeId,
+      action: 'scan',
+      cron_expression: '0 3 * * *',
+      enabled: 1,
+    });
+    const idD = db.createScheduledTask({
+      ...baseTask,
+      name: 'au-other-node',
+      target_type: 'stack',
+      target_id: 'app3',
+      node_id: 999,
+      action: 'update',
+      cron_expression: '0 3 * * *',
+      enabled: 1,
+    });
+    try {
+      const res = await request(app).get('/api/dashboard/configuration').set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      // Two update rows on node 1 (one enabled, one disabled); the scan row
+      // and the update row on node 999 must not leak into the count.
+      expect(res.body.automation.autoUpdate.total).toBe(2);
+      expect(res.body.automation.autoUpdate.enabled).toBe(1);
+    } finally {
+      db.deleteScheduledTask(idA);
+      db.deleteScheduledTask(idB);
+      db.deleteScheduledTask(idC);
+      db.deleteScheduledTask(idD);
+    }
+  });
+
   it('does not leak agent URLs, tokens, or other secret material in the response', async () => {
     // Seed a node-1 agent with a Discord URL so the configuration path
     // exercises the `configured` truthy branch. The URL must never appear

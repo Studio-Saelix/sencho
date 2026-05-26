@@ -41,8 +41,8 @@ export function useNextAutoUpdateRun(): number | null {
     run();
 
     const onInvalidate = (e: Event) => {
-      const detail = (e as CustomEvent<{ action?: string; scope?: string }>).detail;
-      if (detail?.action !== 'auto-update-settings-changed' && detail?.scope !== 'scheduled-tasks') return;
+      const detail = (e as CustomEvent<{ scope?: string }>).detail;
+      if (detail?.scope !== 'scheduled-tasks') return;
       if (invalidateTimer) clearTimeout(invalidateTimer);
       invalidateTimer = setTimeout(() => { invalidateTimer = null; run(); }, INVALIDATE_DEBOUNCE_MS);
     };

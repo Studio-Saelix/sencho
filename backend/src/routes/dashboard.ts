@@ -66,10 +66,10 @@ export function buildLocalConfigurationStatus(
   const notifRoutes = db.getNotificationRoutes();
 
   const healPolicies = db.getAutoHealPolicies(undefined, nodeId);
-  const autoUpdateMap = db.getStackAutoUpdateSettingsForNode(nodeId);
-  const autoUpdateEnabled = Object.values(autoUpdateMap).filter(Boolean).length;
-  const autoUpdateTotal = Object.keys(autoUpdateMap).length;
   const scheduledTasks = db.getScheduledTasks();
+  const nodeUpdateTasks = scheduledTasks.filter(t => t.action === 'update' && t.node_id === nodeId);
+  const autoUpdateTotal = nodeUpdateTasks.length;
+  const autoUpdateEnabled = nodeUpdateTasks.filter(t => t.enabled === 1).length;
   const webhooks = db.getWebhooks();
 
   const mfaRow = userId ? db.getUserMfa(userId) : undefined;

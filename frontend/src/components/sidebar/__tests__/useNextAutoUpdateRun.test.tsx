@@ -56,14 +56,14 @@ describe('useNextAutoUpdateRun', () => {
     expect(result.current).toBe(1_700);
   });
 
-  it('debounces rapid invalidations into a single refetch', async () => {
+  it('debounces rapid scheduled-tasks invalidations into a single refetch', async () => {
     renderHook(() => useNextAutoUpdateRun());
     expect(apiFetchMock).toHaveBeenCalledTimes(1);
 
     act(() => {
-      fireInvalidate({ action: 'auto-update-settings-changed' });
-      fireInvalidate({ action: 'auto-update-settings-changed' });
-      fireInvalidate({ action: 'auto-update-settings-changed' });
+      fireInvalidate({ scope: 'scheduled-tasks' });
+      fireInvalidate({ scope: 'scheduled-tasks' });
+      fireInvalidate({ scope: 'scheduled-tasks' });
     });
     // Debounce window not yet elapsed: still only the mount call.
     expect(apiFetchMock).toHaveBeenCalledTimes(1);
@@ -76,8 +76,8 @@ describe('useNextAutoUpdateRun', () => {
     renderHook(() => useNextAutoUpdateRun());
     apiFetchMock.mockClear();
     act(() => {
-      fireInvalidate({ action: 'something-else' });
       fireInvalidate({ scope: 'unrelated' });
+      fireInvalidate({ scope: 'stack' });
     });
     vi.advanceTimersByTime(500);
     expect(apiFetchMock).toHaveBeenCalledTimes(0);
@@ -98,7 +98,7 @@ describe('useNextAutoUpdateRun', () => {
     apiFetchMock.mockClear();
     unmount();
     await act(async () => {
-      fireInvalidate({ action: 'auto-update-settings-changed' });
+      fireInvalidate({ scope: 'scheduled-tasks' });
       vi.advanceTimersByTime(120_000);
     });
     expect(apiFetchMock).toHaveBeenCalledTimes(0);

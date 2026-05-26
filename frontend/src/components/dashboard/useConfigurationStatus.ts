@@ -80,19 +80,15 @@ export function useConfigurationStatus() {
     return visibilityInterval(guard, 60_000);
   }, [nodeId, fetchStatus]);
 
-  // Filter `sencho:state-invalidate` so only settings-affecting events
-  // refetch the configuration; the high-frequency `scope: 'stack'` and
-  // `scope: 'image-updates'` container/image bursts are ignored. Today the
-  // only such settings event is `auto-update-settings-changed` (emitted by
-  // the stack auto-update toggle). The filter is debounced and the
-  // configuration response includes the toggled state, so a user editing
-  // the setting sees the row update under a second instead of waiting up
-  // to a minute.
+  // Refetch the configuration card when a scheduled-tasks mutation fires
+  // an invalidate. High-frequency `scope: 'stack'` and `scope: 'image-updates'`
+  // events are ignored; they don't change any tile on this card. Debounced
+  // so a burst of edits coalesces into a single fetch.
   useEffect(() => {
     let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
     const onInvalidate = (e: Event) => {
-      const detail = (e as CustomEvent<{ action?: string; scope?: string }>).detail;
-      if (detail?.action !== 'auto-update-settings-changed') return;
+      const detail = (e as CustomEvent<{ scope?: string }>).detail;
+      if (detail?.scope !== 'scheduled-tasks') return;
       if (invalidateTimer) clearTimeout(invalidateTimer);
       invalidateTimer = setTimeout(() => {
         invalidateTimer = null;
