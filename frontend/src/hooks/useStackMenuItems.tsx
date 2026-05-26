@@ -19,7 +19,7 @@ import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sid
 
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
-    stackStatus, hasPort, isBusy, isPaid, canDelete, isPinned, labels,
+    stackStatus, hasPort, isBusy, isPaid, canDelete, canEditLabels, isPinned, labels,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel,
     menuVisibility, autoUpdateEnabled, setAutoUpdateEnabled, openScheduleTask,
@@ -48,19 +48,21 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     groups.push({ id: 'inspect', items: inspect });
 
     const organize: MenuItem[] = [];
-    organize.push({
-      id: 'labels',
-      label: 'Labels',
-      icon: Tag,
-      shortcut: 'L ›',
-      onSelect: () => {},
-      subItems: labels.map(l => ({
-        id: `label:${l.id}`,
-        label: l.name,
+    if (canEditLabels) {
+      organize.push({
+        id: 'labels',
+        label: 'Labels',
         icon: Tag,
-        onSelect: () => toggleLabel(l.id),
-      })),
-    });
+        shortcut: 'L ›',
+        onSelect: () => {},
+        subItems: labels.map(l => ({
+          id: `label:${l.id}`,
+          label: l.name,
+          icon: Tag,
+          onSelect: () => toggleLabel(l.id),
+        })),
+      });
+    }
     organize.push(
       isPinned
         ? { id: 'pin', label: 'Unpin', icon: PinOff, shortcut: 'P', onSelect: unpin }
@@ -85,7 +87,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
 
     return groups;
   }, [
-    stackStatus, hasPort, isBusy, isPaid, canDelete, isPinned, labels,
+    stackStatus, hasPort, isBusy, isPaid, canDelete, canEditLabels, isPinned, labels,
     showDeploy, showStop, showRestart, showUpdate,
     autoUpdateEnabled, setAutoUpdateEnabled,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,

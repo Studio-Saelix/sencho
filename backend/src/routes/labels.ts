@@ -206,14 +206,21 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
       const results: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] = [];
 
       for (const stackName of validStacks) {
-        if (isDryRun) {
-          // Rehearse the action under the same lock + label resolution + fs
-          // intersection. Skip the destructive leaf call.
-          results.push({ stackName, success: true, dryRun: true });
-          continue;
+        // Client disconnected mid-bulk: stop dispatching new per-stack ops.
+        // The currently in-flight call still runs to completion; the outer
+        // finally releases the lock when it returns. Stays on `req.aborted`
+        // rather than `req.destroyed` because supertest's in-process server
+        // mode flips `destroyed` between handler and response write, which
+        // would cause every bulk-action test to look like a client abort.
+        if (req.aborted) {
+          if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action aborted by client at stack:', stackName);
+          break;
         }
         try {
           if (action === 'deploy') {
+            // Policy gate runs for both real and dry-run deploys: a dry-run
+            // that omits the policy check would falsely report success for
+            // stacks the real deploy would block.
             const gate = await enforcePolicyPreDeploy(
               stackName,
               req.nodeId,
@@ -221,11 +228,21 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
             );
             if (!gate.ok) {
               const blockedMsg = `Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`;
-              results.push({ stackName, success: false, error: blockedMsg });
+              results.push({ stackName, success: false, error: blockedMsg, ...(isDryRun ? { dryRun: true } : {}) });
+              continue;
+            }
+            if (isDryRun) {
+              results.push({ stackName, success: true, dryRun: true });
               continue;
             }
             await ComposeService.getInstance(req.nodeId).deployStack(stackName, undefined, false);
           } else {
+            // stop / restart have no pre-action policy gate; dry-run just
+            // confirms the stack would be reached.
+            if (isDryRun) {
+              results.push({ stackName, success: true, dryRun: true });
+              continue;
+            }
             const dockerController = DockerController.getInstance(req.nodeId);
             const containers = await dockerController.getContainersByStack(stackName);
             if (action === 'stop') {
@@ -242,12 +259,18 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
 
       const succeeded = results.filter(r => r.success).length;
       const failed = results.length - succeeded;
-      console.log(`[Labels] Bulk ${sanitizeForLog(action)}${isDryRun ? ' (dry run)' : ''} on label ${id}: ${validStacks.length} stacks (${succeeded} succeeded, ${failed} failed)`);
-      if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action complete:', { id, action, total: results.length, succeeded, failed, dryRun: isDryRun });
+      // Two-axis truncation reporting: `results.length` is what we actually
+      // processed; `validStacks.length` is what we set out to process. They
+      // differ when the client aborted mid-loop.
+      console.log(`[Labels] Bulk ${sanitizeForLog(action)}${isDryRun ? ' (dry run)' : ''} on label ${id}: ${results.length}/${validStacks.length} stacks (${succeeded} succeeded, ${failed} failed)`);
+      if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action complete:', { id, action, processed: results.length, total: validStacks.length, succeeded, failed, dryRun: isDryRun });
 
       if (succeeded > 0 && !isDryRun) {
         invalidateNodeCaches(req.nodeId);
       }
+      // Writing the response is harmless even if the client already
+      // disconnected; Node swallows the EPIPE / write-after-end. The
+      // lock release in the outer finally still happens.
       res.json({ results });
     } finally {
       activeBulkActions.delete(lockKey);
@@ -279,6 +302,13 @@ stackLabelsRouter.put('/:stackName/labels', authMiddleware, async (req: Request,
 
     if (!Array.isArray(labelIds) || !labelIds.every((id: unknown) => typeof id === 'number')) {
       res.status(400).json({ error: 'labelIds must be an array of numbers' });
+      return;
+    }
+    // A node can hold at most MAX_LABELS_PER_NODE labels, so any stack
+    // assignment over that count is either an authenticated client mistake
+    // or a deliberate transaction-bloat attempt. Reject before the DB sees it.
+    if (labelIds.length > MAX_LABELS_PER_NODE) {
+      res.status(400).json({ error: `labelIds may not exceed ${MAX_LABELS_PER_NODE} entries` });
       return;
     }
 

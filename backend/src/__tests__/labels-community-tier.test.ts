@@ -34,6 +34,14 @@ beforeAll(async () => {
 
 afterAll(() => cleanupTestDb(tmpDir));
 
+// Tests in this file accumulate labels in the shared DB; clear them between
+// runs so later tests do not bump into MAX_LABELS_PER_NODE.
+afterEach(() => {
+  const db = DatabaseService.getInstance().getDb();
+  db.prepare('DELETE FROM stack_label_assignments').run();
+  db.prepare('DELETE FROM stack_labels').run();
+});
+
 function mockTier(tier: 'paid' | 'community') {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue(tier);
 }
@@ -125,6 +133,40 @@ describe('Stack Labels on Community tier', () => {
       .send({ labelIds: [] });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Invalid stack name');
+  });
+
+  it('rejects labelIds arrays over the per-node cap', async () => {
+    mockTier('community');
+    const oversized = Array.from({ length: 51 }, (_, i) => i + 1);
+    const res = await request(app)
+      .put('/api/stacks/cap-stack/labels')
+      .set('Authorization', authHeader)
+      .send({ labelIds: oversized });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('may not exceed');
+  });
+
+  it('accepts labelIds at exactly the per-node cap', async () => {
+    mockTier('community');
+    // Seed 50 labels directly so the FK check on assignment passes without
+    // running 50 HTTP round trips per test. The route resolves nodeId via
+    // nodeContextMiddleware (default node when no x-node-id header), so the
+    // seeded rows must use the same nodeId the request will look up.
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const db = DatabaseService.getInstance().getDb();
+    const insert = db.prepare('INSERT INTO stack_labels (node_id, name, color) VALUES (?, ?, ?)');
+    const ids: number[] = [];
+    for (let i = 0; i < 50; i++) {
+      const r = insert.run(nodeId, `cap-edge-${i}`, 'teal');
+      ids.push(r.lastInsertRowid as number);
+    }
+    const res = await request(app)
+      .put('/api/stacks/cap-edge-stack/labels')
+      .set('Authorization', authHeader)
+      .send({ labelIds: ids });
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
   });
 });
 

@@ -28,6 +28,8 @@ export interface StackMenuCtx {
   isPaid: boolean;
   isAdmiral: boolean;
   canDelete: boolean;
+  canEditLabels: boolean;
+  canCreateLabels: boolean;
   isPinned: boolean;
   labels: Label[];
   assignedLabelIds: number[];
