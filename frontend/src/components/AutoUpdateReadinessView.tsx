@@ -46,6 +46,9 @@ interface StackCard {
   previewLoaded: boolean;
   scheduledTask: ScheduledTask | null;
   applying: boolean;
+  // True when at least one enabled action='update' scheduled task covers this
+  // stack on this node (per-stack row or fleet row). Drives the Auto: Off pill
+  // and the Apply now button's disabled state.
   autoUpdateEnabled: boolean;
 }
 
@@ -239,7 +242,7 @@ function StackReadinessCard({
                   disabled={blocked || applying || !autoUpdateEnabled}
                   title={
                     !autoUpdateEnabled
-                      ? 'Auto-updates are disabled for this stack. Update it from its actions menu.'
+                      ? 'No schedule covers this stack. Create one in Schedules → Auto-update Stack.'
                       : (blocked ? (blockedReason ?? undefined) : undefined)
                   }
                   className="gap-1.5"
@@ -295,7 +298,7 @@ function ReadinessHero({
           {total > 0 && (
             <span className="font-mono text-[11px] text-stat-subtitle/90">
               {ready} of {total} ready to apply automatically{acrossNodes}
-              {total - ready > 0 ? ` · ${total - ready} blocked by major bump` : ''}
+              {total - ready > 0 ? ` · ${total - ready} need a schedule or review` : ''}
             </span>
           )}
         </div>
@@ -395,8 +398,6 @@ function AutoUpdateReadinessContent() {
         apiFetch('/image-updates/fleet', { localOnly: true }),
         apiFetch('/scheduled-tasks?action=update', { localOnly: true }),
       ]);
-      // Auto-update settings are per-node; fetch lazily after we know which nodes have updates.
-      // Collected into a map keyed by nodeId once we know the fleet topology.
       if (token !== loadTokenRef.current) return;
 
       if (!statusRes.ok) {
@@ -406,32 +407,32 @@ function AutoUpdateReadinessContent() {
       setReachableNodeCount(Object.keys(fleetStatus).length);
 
       const tasks: ScheduledTask[] = tasksRes.ok ? await tasksRes.json() : [];
+      // A stack is "covered" by an enabled action='update' row when either
+      // a per-stack row targets it or a fleet row targets its node. We pick
+      // the earliest next-run covering task so the readiness card renders
+      // the next-run time accurately for both shapes.
       const taskByNodeStack = new Map<string, ScheduledTask>();
+      const fleetTaskByNode = new Map<number, ScheduledTask>();
       for (const t of tasks) {
-        if (t.target_type !== 'stack' || !t.target_id) continue;
-        // Tasks with node_id=null are local-node-scoped.
+        if (!t.enabled) continue;
+        // The fetch URL filters on action=update; this guard makes the
+        // coverage check robust against a future regression there.
+        if (t.action !== 'update') continue;
         const taskNodeId = t.node_id ?? localNodeId;
         if (taskNodeId == null) continue;
-        const key = `${taskNodeId}::${t.target_id}`;
-        const existing = taskByNodeStack.get(key);
-        if (!existing || (t.next_run_at ?? Infinity) < (existing.next_run_at ?? Infinity)) {
-          taskByNodeStack.set(key, t);
+        if (t.target_type === 'fleet') {
+          const existing = fleetTaskByNode.get(taskNodeId);
+          if (!existing || (t.next_run_at ?? Infinity) < (existing.next_run_at ?? Infinity)) {
+            fleetTaskByNode.set(taskNodeId, t);
+          }
+        } else if (t.target_type === 'stack' && t.target_id) {
+          const key = `${taskNodeId}::${t.target_id}`;
+          const existing = taskByNodeStack.get(key);
+          if (!existing || (t.next_run_at ?? Infinity) < (existing.next_run_at ?? Infinity)) {
+            taskByNodeStack.set(key, t);
+          }
         }
       }
-
-      // Fetch auto-update settings for all nodes that have pending updates.
-      const nodeIdsWithUpdates = [...new Set(
-        Object.keys(fleetStatus).map(Number).filter(id => Object.values(fleetStatus[String(id)]).some(Boolean))
-      )];
-      const autoUpdateByNode = new Map<number, Record<string, boolean>>();
-      await Promise.all(nodeIdsWithUpdates.map(async (nodeId) => {
-        try {
-          const res = await fetchForNode('/stacks/auto-update-settings', nodeId);
-          if (res.ok) autoUpdateByNode.set(nodeId, await res.json() as Record<string, boolean>);
-        } catch {
-          // If the fetch fails, default all stacks on that node to enabled.
-        }
-      }));
 
       const flatPairs: { nodeId: number; stack: string }[] = [];
       const initialGroups: NodeGroup[] = [];
@@ -445,17 +446,24 @@ function AutoUpdateReadinessContent() {
           .map(([stack]) => stack)
           .sort();
         if (stacks.length === 0) continue;
-        const nodeAutoUpdateSettings = autoUpdateByNode.get(nodeId) ?? {};
         const cards: StackCard[] = stacks.map(stack => {
           flatPairs.push({ nodeId, stack });
+          const stackTask = taskByNodeStack.get(`${nodeId}::${stack}`) ?? null;
+          const fleetTask = fleetTaskByNode.get(nodeId) ?? null;
+          // Prefer whichever covering task fires next.
+          // Earliest next-run wins; on a tie, the per-stack row beats the
+          // fleet row so the user sees the more specific schedule.
+          const scheduledTask = stackTask && fleetTask
+            ? ((stackTask.next_run_at ?? Infinity) <= (fleetTask.next_run_at ?? Infinity) ? stackTask : fleetTask)
+            : (stackTask ?? fleetTask);
           return {
             stack,
             nodeId,
             preview: null,
             previewLoaded: false,
-            scheduledTask: taskByNodeStack.get(`${nodeId}::${stack}`) ?? null,
+            scheduledTask,
             applying: false,
-            autoUpdateEnabled: nodeAutoUpdateSettings[stack] ?? true,
+            autoUpdateEnabled: scheduledTask !== null,
           };
         });
         initialGroups.push({
@@ -593,7 +601,15 @@ function AutoUpdateReadinessContent() {
   const flatCards = useMemo(() => groups.flatMap(g => g.cards), [groups]);
   const { total, ready } = useMemo(() => {
     const t = flatCards.length;
-    const r = flatCards.filter(c => c.previewLoaded && c.preview !== null && !c.preview.summary.blocked).length;
+    // "Ready" means a schedule covers the stack, the preview loaded without
+    // error, and no major-bump blocked it. Without a covering schedule the
+    // stack cannot apply automatically regardless of preview state.
+    const r = flatCards.filter(c =>
+      c.autoUpdateEnabled
+      && c.previewLoaded
+      && c.preview !== null
+      && !c.preview.summary.blocked,
+    ).length;
     return { total: t, ready: r };
   }, [flatCards]);
 

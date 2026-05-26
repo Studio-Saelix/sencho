@@ -79,7 +79,7 @@ describe('ConfigurationStatus tier parity', () => {
     expect(screen.queryByText('Notification routing')).toBeNull();
     expect(screen.queryByText('Automation')).toBeNull();
     expect(screen.queryByText('Auto-heal policies')).toBeNull();
-    expect(screen.queryByText('Auto-update stacks')).toBeNull();
+    expect(screen.queryByText('Auto-update schedules')).toBeNull();
     expect(screen.queryByText('Webhooks')).toBeNull();
     expect(screen.queryByText('Scheduled tasks')).toBeNull();
     expect(screen.queryByText('Vulnerability scanning')).toBeNull();
@@ -121,7 +121,7 @@ describe('ConfigurationStatus tier parity', () => {
 
     expect(screen.getByText('Automation')).toBeDefined();
     expect(screen.getByText('Auto-heal policies')).toBeDefined();
-    expect(screen.getByText('Auto-update stacks')).toBeDefined();
+    expect(screen.getByText('Auto-update schedules')).toBeDefined();
     expect(screen.getByText('Webhooks')).toBeDefined();
     expect(screen.getByText('Notification routing')).toBeDefined();
     expect(screen.getByText('Vulnerability scanning')).toBeDefined();

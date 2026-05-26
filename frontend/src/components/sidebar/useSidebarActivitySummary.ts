@@ -9,7 +9,7 @@ const RECENT_WINDOW_SECS = 60 * 60;
 export type SidebarActivitySummary =
   | { kind: 'active-op'; stackName: string; action: ActionVerb; startedAt: number }
   | { kind: 'failure'; notif: NotificationItem }
-  | { kind: 'automation'; enabledCount: number; totalCount: number; nextRunAt: number }
+  | { kind: 'automation'; nextRunAt: number }
   | { kind: 'recent-event'; notif: NotificationItem }
   | { kind: 'quiet-live' }
   | { kind: 'disconnected' };
@@ -19,9 +19,6 @@ interface SummaryInputs {
   tickerConnected: boolean;
   panelState: DeployPanelState;
   panelStartedAt: number | null;
-  /** Pre-aggregated by the caller so the memo dep list stays scalar; see EditorLayout. */
-  autoUpdateEnabledCount: number;
-  totalStackCount: number;
   nextAutoUpdateRunAt: number | null;
 }
 
@@ -54,7 +51,7 @@ function findRecent(notifications: NotificationItem[], nowSecs: number): Notific
  *   1. active-op:    a deploy panel is preparing/streaming
  *   2. failure:      newest unread stack-scoped error in the last 24h
  *   3. recent-event: newest non-error stack notification in the last hour
- *   4. automation:   auto-update is enabled and a next run is scheduled
+ *   4. automation:   a next auto-update run is scheduled
  *   5. disconnected: notification WebSocket is down
  *   6. quiet-live:   nothing else to surface
  *
@@ -64,7 +61,7 @@ function findRecent(notifications: NotificationItem[], nowSecs: number): Notific
  * follow the same order; if you change the cascade, update both.
  */
 function deriveSummary(inputs: SummaryInputs, nowSecs: number): SidebarActivitySummary {
-  const { panelState, panelStartedAt, notifications, autoUpdateEnabledCount, totalStackCount, nextAutoUpdateRunAt, tickerConnected } = inputs;
+  const { panelState, panelStartedAt, notifications, nextAutoUpdateRunAt, tickerConnected } = inputs;
 
   if (panelState.isOpen && (panelState.status === 'preparing' || panelState.status === 'streaming') && panelStartedAt !== null) {
     return { kind: 'active-op', stackName: panelState.stackName, action: panelState.action, startedAt: panelStartedAt };
@@ -77,8 +74,8 @@ function deriveSummary(inputs: SummaryInputs, nowSecs: number): SidebarActivityS
   }
 
   const recent = findRecent(notifications, nowSecs);
-  if (!recent && autoUpdateEnabledCount > 0 && nextAutoUpdateRunAt !== null) {
-    return { kind: 'automation', enabledCount: autoUpdateEnabledCount, totalCount: totalStackCount, nextRunAt: nextAutoUpdateRunAt };
+  if (!recent && nextAutoUpdateRunAt !== null) {
+    return { kind: 'automation', nextRunAt: nextAutoUpdateRunAt };
   }
 
   if (recent) {
@@ -111,22 +108,9 @@ export function useSidebarActivitySummary(inputs: SummaryInputs): SidebarActivit
       inputs.panelState.action,
       inputs.panelState.status,
       inputs.panelStartedAt,
-      inputs.autoUpdateEnabledCount,
-      inputs.totalStackCount,
       inputs.nextAutoUpdateRunAt,
     ],
   );
-}
-
-/**
- * Count stacks with auto-update enabled. Backend defaults missing rows to
- * enabled (DatabaseService.getStackAutoUpdateSettingsForNode); callers must
- * NOT treat absence as disabled.
- */
-export function countEnabledAutoUpdates(files: string[], settings: Record<string, boolean>): number {
-  let n = 0;
-  for (const f of files) if (settings[f] ?? true) n++;
-  return n;
 }
 
 // Exported for unit tests so we don't need to spin up a renderer to validate cascade logic.

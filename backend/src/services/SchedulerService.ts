@@ -596,15 +596,8 @@ export class SchedulerService {
         const compose = ComposeService.getInstance(task.node_id);
         const results: string[] = [];
 
-        // Single batch query for fleet mode; per-stack default is enabled (true) when no explicit row exists.
-        const policyMap = isFleet ? db.getStackAutoUpdateSettingsForNode(task.node_id) : null;
-
         for (const stackName of stackNames) {
             try {
-                if (isFleet && (policyMap![stackName] ?? true) === false) {
-                    results.push(`Stack "${stackName}": auto-updates disabled; skipped.`);
-                    continue;
-                }
                 const output = await this.executeUpdateForStack(stackName, task.node_id, docker, imageUpdateService, compose, db, isFleet || isWildcard);
                 results.push(output);
             } catch (e) {

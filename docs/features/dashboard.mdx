@@ -98,7 +98,7 @@ The Automation block only renders on Skipper or Admiral.
 | Row | What it shows |
 |-----|---------------|
 | **Auto-heal policies** | `<enabled> / <total> active` for crash-recovery policies across all stacks; reads `None` when no policies exist |
-| **Auto-update stacks** | `<enabled> / <total>` count of stacks enrolled in automated image-update checks; reads `None` when none are enrolled |
+| **Auto-update schedules** | `<enabled> / <total> active` count of `Auto-update Stack` / `Auto-update All Stacks` rows configured for this node; reads `None` when none are configured |
 | **Webhooks** (Skipper) | Active inbound deploy webhooks tied to Git Sources or stacks, formatted `<n> actives` |
 | **Scheduled tasks** (Admiral) | Active scheduled operations (backups, restarts, scripts), formatted `<n> actives` |
 
@@ -220,7 +220,7 @@ When you switch the active node from the node switcher, the dashboard resets eve
     Pilot-agent nodes connect outbound to the primary over a reverse tunnel, so there is no synchronous request-response loop to measure. The Heartbeat card uses the tunnel's last heartbeat to set the dot color, and intentionally renders `n/a` in the latency column. If the dot is red, check the agent container's logs for the first `[Pilot]` line and confirm the agent can reach the primary URL it is dialing. See [Pilot agent](/features/pilot-agent).
   </Accordion>
   <Accordion title="Configuration Status still shows the old value after I changed a setting">
-    The card refreshes every 60 seconds on its own schedule. Toggling a stack's **Auto-update** setting also dispatches a live invalidation that the card picks up within a second. Other settings changes (cloud backup provider switch, SSO provider change, alert rule edit, agent toggle) update on the next 60-second tick. If the row stays stale after a minute, hard-reload the dashboard tab to force a fresh fetch.
+    The card refreshes every 60 seconds on its own schedule. Creating, editing, toggling, or deleting a scheduled task also dispatches a live invalidation that the card picks up within a second. Other settings changes (cloud backup provider switch, SSO provider change, alert rule edit, agent toggle) update on the next 60-second tick. If the row stays stale after a minute, hard-reload the dashboard tab to force a fresh fetch.
   </Accordion>
   <Accordion title="The masthead shows a 'metrics stale' chip next to the node name">
     The chip appears after three consecutive failures of the live metrics endpoints (`/api/stats` or `/api/system/stats`), which usually means the Docker socket is unreachable from this Sencho instance or the metrics service has stopped. The dashboard keeps polling on every cycle; the chip describes the freshness of the visible numbers, not the polling cadence. The chip clears on the first successful response once both endpoints are within the threshold. Check the Docker daemon status on the active node first, then the Sencho container logs for `[Dashboard]` lines if the chip persists.

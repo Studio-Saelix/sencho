@@ -58,27 +58,12 @@ Blocked updates still surface in scheduled check runs so you stay informed, but 
 
 ## Per-stack control
 
-Auto-updates can be disabled on a per-stack basis from the stack's context menu. This lets you keep the global schedule active while opting specific stacks out of unattended updates, such as databases, self-built images, or any stack pinned to a fixed tag.
+Auto-update is opt-in per stack. A stack participates in unattended updates only when an enabled scheduled task covers it. To leave a stack out (databases, self-built images, anything pinned to a fixed tag), simply do not create a schedule for it.
 
-### Disabling auto-updates for a stack
-
-1. Right-click the stack in the sidebar, or open the kebab menu (three dots).
-2. In the **Inspect** group, click **Auto-update: Enabled** to toggle it off. The label changes to **Auto-update: Disabled** and the icon switches to a slash-circle.
-3. The setting persists across restarts. The readiness board shows an **Auto: Off** pill on that card, and the **Apply now** button is disabled with the tooltip "Auto-updates are disabled for this stack. Update it from its actions menu."
-
-<Note>
-  Per-stack auto-update control requires a **Skipper** or **Admiral** license.
-</Note>
-
-### What disabling means
-
-- **Scheduled and fleet-wide auto-update runs skip the stack entirely.** No registry call is made, and no image update is applied automatically.
-- **Image update detection still runs.** The sidebar dot and the readiness card still reflect whether an update is available. You are informed; the system just does not apply it for you.
-- **Manual updates are unaffected.** You can still click **Update** in the lifecycle menu (or **Deploy**) to apply an update on demand. Per-stack control governs only the automated path.
-
-### Re-enabling
-
-Open the same menu and click **Auto-update: Disabled** to toggle it back on. The next scheduled run will include the stack again.
+- **Per-stack schedule.** Create a **Auto-update Stack** task targeting that stack alone. Only this stack is updated when the cron fires.
+- **Fleet-wide schedule.** Create a **Auto-update All Stacks** task targeting a node. Every stack on that node is checked and updated when new images are available. If you do not want every stack covered, create per-stack schedules instead.
+- **Stack list dot.** Image-update *detection* runs every six hours regardless of whether any schedule is configured. The sidebar dot and the readiness board still show available updates so you can decide what to do with them.
+- **Manual updates are always available.** The lifecycle **Update** action on a stack applies an update on demand, independent of any scheduled task.
 
 ## Scheduling auto-updates
 
@@ -124,7 +109,7 @@ The preview is recomputed each time the readiness board loads, so it reflects th
     Image update detection runs every six hours on each node and the readiness board uses the same cached status. Trigger **Recheck** to force a fresh check across every reachable node.
   </Accordion>
   <Accordion title='Scheduled auto-update runs are not applying to a specific stack'>
-    The stack likely has auto-updates disabled. Open the stack's kebab menu or right-click context menu and check the **Inspect** group. If the item reads **Auto-update: Disabled**, click it to re-enable. Once re-enabled, the next scheduled run will include the stack, or you can trigger an immediate run from the Auto-Update view.
+    No schedule covers that stack. Open **Schedules** in the top nav, create a new **Auto-update Stack** task targeting the stack (or an **Auto-update All Stacks** task on its node), and pick a cron. The next firing will include the stack, or you can trigger an immediate run from the row.
   </Accordion>
   <Accordion title='Banner says "X of Y nodes reachable"'>
     One or more nodes that are marked online in your fleet did not respond within the request timeout. Pending updates from those nodes are not shown until they come back. Check the node's status from the Fleet view and the network path between this Sencho instance and the unreachable node.

@@ -18,7 +18,6 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     labels: [],
     assignedLabelIds: [],
     menuVisibility: { showDeploy: false, showStop: true, showRestart: true, showUpdate: false },
-    autoUpdateEnabled: true,
     openAlertSheet: vi.fn(),
     openAutoHeal: vi.fn(),
     checkUpdates: vi.fn(),
@@ -33,7 +32,6 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     toggleLabel: vi.fn(),
     createAndAssignLabel: vi.fn(),
     openLabelManager: vi.fn(),
-    setAutoUpdateEnabled: vi.fn(),
     openScheduleTask: vi.fn(),
     ...overrides,
   };
@@ -85,16 +83,15 @@ describe('useStackMenuItems', () => {
     expect(del.icon).toBe(Trash2);
   });
 
-  it('shows auto-update toggle in inspect when isPaid', () => {
-    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: true, autoUpdateEnabled: true })));
-    const inspect = result.current.find(g => g.id === 'inspect')!;
-    expect(inspect.items.find(i => i.id === 'auto-update')).toBeDefined();
-  });
-
-  it('hides auto-update toggle when !isPaid', () => {
-    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: false })));
-    const inspect = result.current.find(g => g.id === 'inspect')!;
-    expect(inspect.items.find(i => i.id === 'auto-update')).toBeUndefined();
+  it('does not show an auto-update entry; Schedule task is the auto-update path', () => {
+    const paid = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: true })));
+    const community = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: false })));
+    for (const r of [paid, community]) {
+      const groups = r.result.current;
+      expect(groups.some(g => g.items.some(i => i.id === 'auto-update'))).toBe(false);
+    }
+    const lifecycle = paid.result.current.find(g => g.id === 'lifecycle')!;
+    expect(lifecycle.items.some(i => i.id === 'schedule')).toBe(true);
   });
 
   it('keeps label assignment available when !isPaid', () => {
@@ -116,16 +113,6 @@ describe('useStackMenuItems', () => {
     const organize = result.current.find(g => g.id === 'organize')!;
     expect(organize.items.find(i => i.id === 'labels')).toBeUndefined();
     expect(organize.items.find(i => i.id === 'pin')).toBeDefined();
-  });
-
-  it('auto-update toggle calls setAutoUpdateEnabled with toggled value', () => {
-    const setAutoUpdateEnabled = vi.fn();
-    const { result } = renderHook(() =>
-      useStackMenuItems('web.yml', makeCtx({ isPaid: true, autoUpdateEnabled: true, setAutoUpdateEnabled }))
-    );
-    const inspect = result.current.find(g => g.id === 'inspect')!;
-    inspect.items.find(i => i.id === 'auto-update')!.onSelect();
-    expect(setAutoUpdateEnabled).toHaveBeenCalledWith(false);
   });
 
   it('lifecycle items follow menuVisibility flags', () => {

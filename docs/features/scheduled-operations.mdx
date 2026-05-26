@@ -60,7 +60,7 @@ The All tasks toggle swaps the lane track for a sortable table.
 |---|---|---|
 | **Restart Stack** | A specific stack (optionally specific services) on a specific node | Restarts all or selected containers in the stack. |
 | **Auto-update Stack** | A specific stack on a specific node | Checks each image in the stack for a newer tag and recreates the stack if any image has an update. See [Auto-Update Policies](/features/auto-update-policies) for the companion review board. |
-| **Auto-update All Stacks** | A specific node | Runs the auto-update check across every stack on the node that has auto-updates enabled. Stacks with auto-updates turned off are skipped. |
+| **Auto-update All Stacks** | A specific node | Runs the auto-update check across every stack on the node. Pair with **Auto-update Stack** rows when you want different cadences for specific stacks. |
 | **Fleet Snapshot** | The whole fleet | Creates a versioned, fleet-wide snapshot of every node's compose files and `.env` files. See [Fleet Backups](/features/fleet-backups). |
 | **System Prune** | The selected node | Prunes containers, images, networks, and volumes (any subset), optionally filtered by a Docker label. |
 | **Vulnerability Scan** | A specific node | Runs Trivy against every image on the node and persists the results. Requires Trivy to be installed on the target node ([Installing Trivy](/operations/trivy-setup)). |
@@ -88,7 +88,7 @@ Common fields:
 Conditional fields per action:
 
 - **Stack actions** (Restart Stack, Auto-update Stack, Backup Stack Files, Stop / Take Down / Start Stack) add a **Node** combobox and a **Stack** combobox. Restart Stack additionally renders a **Services** checkbox grid sourced from the stack's compose services, so you can scope the restart to a subset instead of restarting the entire stack.
-- **Auto-update All Stacks** adds a **Node** combobox with the helper text "Only stacks with auto-updates enabled on this node will be updated."
+- **Auto-update All Stacks** adds a **Node** combobox with the helper text "Every stack on the selected node will be checked and updated when new images are available."
 - **Vulnerability Scan** adds a **Node** combobox with the helper text "Every image on the selected node will be scanned."
 - **System Prune** adds a **Prune Targets** group (Containers, Images, Networks, Volumes; all selected by default) and a **Label Filter** input for scoping the prune to resources matching a Docker label.
 

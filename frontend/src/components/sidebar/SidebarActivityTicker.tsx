@@ -88,8 +88,7 @@ function buildConfig(summary: SidebarActivitySummary): RenderConfig {
         iconClass: 'text-warning',
         primary: (
           <span className="font-mono text-[11px] truncate">
-            <span className="text-foreground">Auto-update </span>
-            <span className="text-brand">{summary.enabledCount}/{summary.totalCount}</span>
+            <span className="text-foreground">Auto-update</span>
             <span className="text-muted-foreground"> · next run {nextLabel}</span>
           </span>
         ),

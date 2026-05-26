@@ -44,7 +44,6 @@ export function useStackListState() {
   const [stackPorts, setStackPorts] = useState<Record<string, number | undefined>>({});
   const [labels, setLabels] = useState<StackLabel[]>([]);
   const [stackLabelMap, setStackLabelMap] = useState<Record<string, StackLabel[]>>({});
-  const [autoUpdateSettings, setAutoUpdateSettings] = useState<Record<string, boolean>>({});
   const [filterChip, setFilterChip] = useState<FilterChip>('all');
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
@@ -180,20 +179,6 @@ export function useStackListState() {
   // never close over a stale refreshStacks.
   const refreshStacksRef = useRef(refreshStacks);
   useEffect(() => { refreshStacksRef.current = refreshStacks; });
-
-  const fetchAutoUpdateSettings = async () => {
-    try {
-      const res = await apiFetch('/stacks/auto-update-settings');
-      if (res.ok) {
-        const data = await res.json();
-        setAutoUpdateSettings(data as Record<string, boolean>);
-      } else {
-        console.error('[AutoUpdateSettings] fetch returned', res.status);
-      }
-    } catch (e: unknown) {
-      console.error('[AutoUpdateSettings] fetch failed:', e);
-    }
-  };
 
   const handleScanStacks = async () => {
     if (isScanning) return;
@@ -339,7 +324,6 @@ export function useStackListState() {
     stackPorts, setStackPorts,
     labels,
     stackLabelMap,
-    autoUpdateSettings, setAutoUpdateSettings,
     filterChip, setFilterChip,
     bulkMode, setBulkMode,
     selectedFiles, setSelectedFiles,
@@ -351,7 +335,6 @@ export function useStackListState() {
     setOptimisticStatus,
     refreshLabels,
     refreshStacks,
-    fetchAutoUpdateSettings,
     handleScanStacks,
     scheduleStateInvalidateRefresh,
     toggleBulkMode, toggleSelect, clearSelection, handleBulkAction,

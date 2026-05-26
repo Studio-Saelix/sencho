@@ -83,17 +83,17 @@ describe('useConfigurationStatus state-invalidate handling', () => {
     expect(apiFetchMock.mock.calls.length).toBe(baseline);
   });
 
-  it('refetches once on a settings-affecting auto-update-settings-changed event', async () => {
+  it('refetches once on a scheduled-tasks invalidation', async () => {
     renderHook(() => useConfigurationStatus());
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const baseline = apiFetchMock.mock.calls.length;
 
     act(() => {
-      // Burst three settings-change events; the debounce should collapse
-      // them into a single refetch.
-      fireInvalidate({ action: 'auto-update-settings-changed' });
-      fireInvalidate({ action: 'auto-update-settings-changed' });
-      fireInvalidate({ action: 'auto-update-settings-changed' });
+      // Burst three scheduled-tasks-change events; the debounce should
+      // collapse them into a single refetch.
+      fireInvalidate({ scope: 'scheduled-tasks', action: 'created' });
+      fireInvalidate({ scope: 'scheduled-tasks', action: 'toggled' });
+      fireInvalidate({ scope: 'scheduled-tasks', action: 'deleted' });
     });
     // Before debounce window elapses, no new fetch.
     expect(apiFetchMock.mock.calls.length).toBe(baseline);

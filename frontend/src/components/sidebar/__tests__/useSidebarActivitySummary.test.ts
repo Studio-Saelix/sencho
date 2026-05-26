@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { __testing, countEnabledAutoUpdates } from '../useSidebarActivitySummary';
+import { __testing } from '../useSidebarActivitySummary';
 import type { NotificationItem } from '@/components/dashboard/types';
 import type { DeployPanelState } from '@/context/DeployFeedbackContext';
 
@@ -29,8 +29,6 @@ function inputs(overrides: Partial<Parameters<typeof deriveSummary>[0]> = {}) {
     tickerConnected: true,
     panelState: IDLE_PANEL,
     panelStartedAt: null,
-    autoUpdateEnabledCount: 0,
-    totalStackCount: 0,
     nextAutoUpdateRunAt: null,
     ...overrides,
   };
@@ -69,8 +67,6 @@ describe('useSidebarActivitySummary.deriveSummary', () => {
     const recent = notif({ id: 10, timestamp: NOW_SECS - 5 });
     const r = deriveSummary(inputs({
       notifications: [failure, recent],
-      autoUpdateEnabledCount: 1,
-      totalStackCount: 1,
       nextAutoUpdateRunAt: NOW_SECS + 3600,
     }), NOW_SECS);
     expect(r.kind).toBe('failure');
@@ -84,16 +80,12 @@ describe('useSidebarActivitySummary.deriveSummary', () => {
     expect(r.kind).not.toBe('failure');
   });
 
-  it('returns automation when auto-update is enabled and no recent event exists', () => {
+  it('returns automation when a next-run is known and no recent event exists', () => {
     const r = deriveSummary(inputs({
-      autoUpdateEnabledCount: 2,
-      totalStackCount: 4,
       nextAutoUpdateRunAt: NOW_SECS + 3600,
     }), NOW_SECS);
     expect(r.kind).toBe('automation');
     if (r.kind === 'automation') {
-      expect(r.enabledCount).toBe(2);
-      expect(r.totalCount).toBe(4);
       expect(r.nextRunAt).toBe(NOW_SECS + 3600);
     }
   });
@@ -102,18 +94,14 @@ describe('useSidebarActivitySummary.deriveSummary', () => {
     const recent = notif({ id: 7, timestamp: NOW_SECS - 5 });
     const r = deriveSummary(inputs({
       notifications: [recent],
-      autoUpdateEnabledCount: 1,
-      totalStackCount: 1,
       nextAutoUpdateRunAt: NOW_SECS + 3600,
     }), NOW_SECS);
     expect(r.kind).toBe('recent-event');
     if (r.kind === 'recent-event') expect(r.notif.id).toBe(7);
   });
 
-  it('drops automation when no next-run is known, even with auto-update settings present', () => {
+  it('drops automation when no next-run is known', () => {
     const r = deriveSummary(inputs({
-      autoUpdateEnabledCount: 1,
-      totalStackCount: 1,
       nextAutoUpdateRunAt: null,
     }), NOW_SECS);
     expect(r.kind).toBe('quiet-live');
@@ -158,27 +146,5 @@ describe('useSidebarActivitySummary.deriveSummary', () => {
     const r = deriveSummary(inputs({ notifications: [systemErr] }), NOW_SECS);
     expect(r.kind).not.toBe('failure');
     expect(r.kind).toBe('quiet-live');
-  });
-});
-
-describe('countEnabledAutoUpdates', () => {
-  it('counts a stack with no explicit row as enabled (backend default-true contract)', () => {
-    expect(countEnabledAutoUpdates(['web', 'api'], {})).toBe(2);
-  });
-
-  it('respects an explicit false', () => {
-    expect(countEnabledAutoUpdates(['web', 'api', 'db'], { api: false })).toBe(2);
-  });
-
-  it('respects an explicit true', () => {
-    expect(countEnabledAutoUpdates(['web'], { web: true })).toBe(1);
-  });
-
-  it('returns 0 for an empty file list', () => {
-    expect(countEnabledAutoUpdates([], { web: true })).toBe(0);
-  });
-
-  it('ignores settings rows that do not correspond to known files', () => {
-    expect(countEnabledAutoUpdates(['web'], { ghost: false, web: true })).toBe(1);
   });
 });

@@ -52,7 +52,6 @@ export function useSidebarContextMenu({
       labels: stackListState.labels,
       assignedLabelIds: (stackListState.stackLabelMap[file] ?? []).map(l => l.id),
       menuVisibility: stackActions.getStackMenuVisibility(file),
-      autoUpdateEnabled: stackListState.autoUpdateSettings[sName] ?? true,
       openAlertSheet: () => overlayState.openAlertSheet(file),
       openAutoHeal: () => overlayState.openAutoHeal(file),
       checkUpdates: () => stackActions.checkUpdatesForStack(),
@@ -64,22 +63,6 @@ export function useSidebarContextMenu({
       remove: () => overlayState.openDeleteDialog(sName),
       pin: () => stackListState.pin(file),
       unpin: () => stackListState.unpin(file),
-      setAutoUpdateEnabled: async (enabled: boolean) => {
-        stackListState.setAutoUpdateSettings(prev => ({ ...prev, [sName]: enabled }));
-        try {
-          const res = await apiFetch(`/stacks/${encodeURIComponent(sName)}/auto-update`, {
-            method: 'PUT',
-            body: JSON.stringify({ enabled }),
-          });
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error((data as { error?: string })?.error || 'Failed to update auto-update setting.');
-          }
-        } catch (err: unknown) {
-          stackListState.setAutoUpdateSettings(prev => ({ ...prev, [sName]: !enabled }));
-          toast.error((err as Error)?.message || 'Failed to update auto-update setting.');
-        }
-      },
       toggleLabel: async (labelId: number) => {
         const currentIds = (stackListState.stackLabelMap[file] ?? []).map(l => l.id);
         const assigned = currentIds.includes(labelId);
@@ -142,7 +125,7 @@ export function useSidebarContextMenu({
   }, [
     stackListState.stackStatuses, stackListState.stackPorts, isPaid, isAdmiral,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
-    stackListState.autoUpdateSettings, stackListState.pin, stackListState.unpin,
+    stackListState.pin, stackListState.unpin,
   ]);
 
   return buildMenuCtx;

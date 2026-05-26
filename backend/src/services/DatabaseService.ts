@@ -738,14 +738,6 @@ export class DatabaseService {
         PRIMARY KEY (node_id, stack_name)
       );
 
-      CREATE TABLE IF NOT EXISTS stack_auto_update_settings (
-        node_id INTEGER NOT NULL DEFAULT 0,
-        stack_name TEXT NOT NULL,
-        auto_update_enabled INTEGER NOT NULL DEFAULT 1,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (node_id, stack_name)
-      );
-
       CREATE TABLE IF NOT EXISTS stack_scan_attempts (
         node_id INTEGER NOT NULL DEFAULT 0,
         stack_name TEXT NOT NULL,
@@ -2404,40 +2396,6 @@ export class DatabaseService {
 
     public clearStackUpdateStatus(nodeId: number, stackName: string): void {
         this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
-    }
-
-    // --- Stack Auto-Update Settings ---
-
-    public getStackAutoUpdateEnabled(nodeId: number, stackName: string): boolean {
-        const row = this.db.prepare(
-            'SELECT auto_update_enabled FROM stack_auto_update_settings WHERE node_id = ? AND stack_name = ?'
-        ).get(nodeId, stackName) as { auto_update_enabled: number } | undefined;
-        return row === undefined ? true : row.auto_update_enabled === 1;
-    }
-
-    // Returns only stacks with an explicit row. Missing keys default to true
-    // (auto-update enabled); callers must not treat absence as false.
-    public getStackAutoUpdateSettingsForNode(nodeId: number): Record<string, boolean> {
-        const rows = this.db.prepare(
-            'SELECT stack_name, auto_update_enabled FROM stack_auto_update_settings WHERE node_id = ?'
-        ).all(nodeId) as Array<{ stack_name: string; auto_update_enabled: number }>;
-        const result: Record<string, boolean> = {};
-        for (const row of rows) {
-            result[row.stack_name] = row.auto_update_enabled === 1;
-        }
-        return result;
-    }
-
-    public upsertStackAutoUpdateEnabled(nodeId: number, stackName: string, enabled: boolean): void {
-        this.db.prepare(
-            `INSERT INTO stack_auto_update_settings (node_id, stack_name, auto_update_enabled, updated_at)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(node_id, stack_name) DO UPDATE SET auto_update_enabled = excluded.auto_update_enabled, updated_at = excluded.updated_at`
-        ).run(nodeId, stackName, enabled ? 1 : 0, Date.now());
-    }
-
-    public clearStackAutoUpdateSetting(nodeId: number, stackName: string): void {
-        this.db.prepare('DELETE FROM stack_auto_update_settings WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
     // --- Stack Scan Attempts ---
