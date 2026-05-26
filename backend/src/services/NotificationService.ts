@@ -5,6 +5,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
+import { StackActivityMetricsService } from './StackActivityMetricsService';
 
 export type NotificationCategory =
     | 'deploy_success'
@@ -115,25 +116,42 @@ export class NotificationService {
         message: string,
         options?: { stackName?: string; containerName?: string; actor?: string },
     ) {
+        const t0 = Date.now();
         const { stackName, containerName, actor } = options ?? {};
         // Internal writes use the middleware default so they share a row key
         // with user-initiated requests; otherwise the UI and monitors split
         // between different node_id buckets.
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        // Use the full resolution chain (node.compose_dir → env → default)
+        // Use the full resolution chain (node.compose_dir, env, default)
         // so messages mentioning a per-node compose override get collapsed.
         const sanitized = sanitizeNotificationMessage(message, {
             composeDir: NodeRegistry.getInstance().getComposeDir(localNodeId),
         });
-        const notification = this.dbService.addNotificationHistory(localNodeId, {
-            level,
-            category,
-            message: sanitized,
-            timestamp: Date.now(),
-            stack_name: stackName,
-            container_name: containerName,
-            actor_username: actor ?? null,
-        });
+
+        let notification: NotificationHistory;
+        try {
+            notification = this.dbService.addNotificationHistory(localNodeId, {
+                level,
+                category,
+                message: sanitized,
+                timestamp: Date.now(),
+                stack_name: stackName,
+                container_name: containerName,
+                actor_username: actor ?? null,
+            });
+        } catch (err) {
+            StackActivityMetricsService.getInstance().record(localNodeId, 'write', Date.now() - t0, false);
+            throw err;
+        }
+        StackActivityMetricsService.getInstance().record(localNodeId, 'write', Date.now() - t0, true);
+        // Separate [StackActivity:diag] namespace from the [Notify:diag] lines
+        // below so a single grep can pull every per-stack timeline write across
+        // route reads and dispatch writes.
+        if (isDebugEnabled()) {
+            console.log('[StackActivity:diag] write', {
+                category, stackName, nodeId: localNodeId, actor: actor ?? null, messageLen: sanitized.length,
+            });
+        }
 
         // 2. Push to connected browser clients via WebSocket
         this.broadcastToSubscribers(notification);

@@ -51,6 +51,7 @@ import { stacksRouter } from './routes/stacks';
 import { stackActivityRouter } from './routes/stackActivity';
 import { stackMetricsRouter } from './routes/stackMetrics';
 import { fileExplorerMetricsRouter } from './routes/fileExplorerMetrics';
+import { stackActivityMetricsRouter } from './routes/stackActivityMetrics';
 import { secretsRouter } from './routes/secrets';
 
 // Suppress [DEP0060] DeprecationWarning emitted by http-proxy@1.18.1 which calls
@@ -145,6 +146,7 @@ app.use('/api/stacks', stackActivityRouter);
 app.use('/api/stacks', stacksRouter);
 app.use('/api/stack-metrics', stackMetricsRouter);
 app.use('/api/file-explorer-metrics', fileExplorerMetricsRouter);
+app.use('/api/stack-activity-metrics', stackActivityMetricsRouter);
 
 const { server, wss, pilotTunnelWss } = createServer(app);
 attachUpgrade(server, { wss, pilotTunnelWss });
