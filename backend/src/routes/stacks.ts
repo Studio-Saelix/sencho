@@ -12,7 +12,7 @@ import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { requirePermission, checkPermission } from '../middleware/permissions';
-import { requirePaid, requireAdmin, effectiveTier } from '../middleware/tierGates';
+import { requirePaid, effectiveTier } from '../middleware/tierGates';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
 import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
