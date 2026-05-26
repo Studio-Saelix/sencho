@@ -716,7 +716,7 @@ describe('MonitorService - breach state machine', () => {
     const svc = MonitorService.getInstance();
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'), { stackName: 'my-stack' });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'), { stackName: 'my-stack', actor: 'system:monitor' });
     expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
   });
 
@@ -890,7 +890,7 @@ describe('MonitorService - restart_count metric', () => {
 
     expect(mockGetContainerRestartCount).toHaveBeenCalledWith('c1');
     // restart_count=5 > threshold=3, should fire
-    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Restart count'), { stackName: 'my-stack' });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Restart count'), { stackName: 'my-stack', actor: 'system:monitor' });
   });
 
   it('skips Docker inspect when no restart_count rules exist', async () => {
@@ -1283,7 +1283,7 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     await (svc as any).evaluateJanitor();
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
-      'info', 'system', expect.stringContaining('3.0 GB'), { stackName: undefined },
+      'info', 'system', expect.stringContaining('3.0 GB'), { stackName: undefined, actor: 'system:monitor' },
     );
   });
 

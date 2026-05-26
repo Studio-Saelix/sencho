@@ -6,6 +6,7 @@ import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
+import { sanitizeNotificationMessage } from '../utils/notificationMessage';
 import { parseImageRef, getRemoteDigest } from './registry-api';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -308,7 +309,7 @@ export class ImageUpdateService {
                         'info',
                         'image_update_available',
                         `[Node: ${nodeName}] Stack "${stackName}" has image updates available.`,
-                        { stackName },
+                        { stackName, actor: 'system:image-update' },
                     );
                 } catch (e) {
                     console.error(`[ImageUpdateService] Failed to dispatch update notification for "${stackName}":`, e);
@@ -316,11 +317,16 @@ export class ImageUpdateService {
                     // Key on the local default: the iterated `nodeId` may be a remote's id in the
                     // control plane's DB, and the UI never queries that row (it proxies instead).
                     try {
-                        db.addNotificationHistory(NodeRegistry.getInstance().getDefaultNodeId(), {
+                        const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+                        db.addNotificationHistory(localNodeId, {
                             level: 'error',
                             category: 'system',
-                            message: `[Node: ${nodeName}] Failed to notify about image updates for stack "${stackName}": ${getErrorMessage(e, String(e))}`,
+                            message: sanitizeNotificationMessage(
+                                `[Node: ${nodeName}] Failed to notify about image updates for stack "${stackName}": ${getErrorMessage(e, String(e))}`,
+                                { composeDir: NodeRegistry.getInstance().getComposeDir(localNodeId) },
+                            ),
                             timestamp: Date.now(),
+                            actor_username: 'system:image-update',
                         });
                     } catch (dbErr) {
                         console.error('[ImageUpdateService] Failed to record dispatch error:', dbErr);

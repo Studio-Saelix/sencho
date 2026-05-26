@@ -5,6 +5,14 @@ import { isValidStackName } from '../utils/validation';
 
 export const stackActivityRouter = Router();
 
+function parseStrictPositiveInt(raw: unknown): number | null {
+  if (raw === undefined || raw === null) return null;
+  const s = String(raw).trim();
+  if (s === '' || !/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 1 ? n : null;
+}
+
 stackActivityRouter.get('/:stackName/activity', (req: Request, res: Response): void => {
   const stackName = req.params.stackName as string;
   if (!isValidStackName(stackName)) {
@@ -12,12 +20,43 @@ stackActivityRouter.get('/:stackName/activity', (req: Request, res: Response): v
     return;
   }
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
-  const limit = Math.min(parseInt(String(req.query.limit ?? '50'), 10) || 50, 200);
-  const before = req.query.before ? parseInt(String(req.query.before), 10) : undefined;
-  if (before !== undefined && isNaN(before)) {
-    res.status(400).json({ error: 'Invalid before parameter' });
+
+  const parsedLimit = parseStrictPositiveInt(req.query.limit ?? '50');
+  if (parsedLimit === null) {
+    res.status(400).json({ error: 'Invalid limit parameter' });
     return;
   }
-  const events = DatabaseService.getInstance().getStackActivity(req.nodeId, stackName, { limit, before });
+  const limit = Math.min(parsedLimit, 200);
+
+  const hasBefore = req.query.before !== undefined;
+  const hasBeforeId = req.query.beforeId !== undefined;
+  // beforeId without before would silently fall back to "page 1" in the DB
+  // layer; reject so a paginating client cannot loop on the same page.
+  if (hasBeforeId && !hasBefore) {
+    res.status(400).json({ error: 'beforeId requires before' });
+    return;
+  }
+
+  let before: number | undefined;
+  if (hasBefore) {
+    const parsed = parseStrictPositiveInt(req.query.before);
+    if (parsed === null) {
+      res.status(400).json({ error: 'Invalid before parameter' });
+      return;
+    }
+    before = parsed;
+  }
+
+  let beforeId: number | undefined;
+  if (hasBeforeId) {
+    const parsed = parseStrictPositiveInt(req.query.beforeId);
+    if (parsed === null) {
+      res.status(400).json({ error: 'Invalid beforeId parameter' });
+      return;
+    }
+    beforeId = parsed;
+  }
+
+  const events = DatabaseService.getInstance().getStackActivity(req.nodeId, stackName, { limit, before, beforeId });
   res.json({ events });
 });

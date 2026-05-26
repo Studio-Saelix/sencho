@@ -2040,13 +2040,6 @@ export class DatabaseService {
             notification.actor_username ?? null,
         );
 
-        this.db.prepare(`
-      DELETE FROM notification_history
-      WHERE node_id = ? AND id NOT IN (
-        SELECT id FROM notification_history WHERE node_id = ? ORDER BY timestamp DESC LIMIT 100
-      )
-    `).run(nodeId, nodeId);
-
         return {
             id: result.lastInsertRowid as number,
             level: notification.level,
@@ -2060,13 +2053,21 @@ export class DatabaseService {
         };
     }
 
-    public getStackActivity(nodeId: number, stackName: string, opts: { limit: number; before?: number }): NotificationHistory[] {
-        const sql = opts.before
-            ? 'SELECT * FROM notification_history WHERE node_id = ? AND stack_name = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?'
-            : 'SELECT * FROM notification_history WHERE node_id = ? AND stack_name = ? ORDER BY timestamp DESC LIMIT ?';
-        const args: (number | string)[] = opts.before
-            ? [nodeId, stackName, opts.before, opts.limit]
-            : [nodeId, stackName, opts.limit];
+    public getStackActivity(nodeId: number, stackName: string, opts: { limit: number; before?: number; beforeId?: number }): NotificationHistory[] {
+        // Composite (timestamp, id) cursor: pure timestamp pagination drops rows
+        // on same-millisecond bursts (Docker events from one compose up).
+        let sql: string;
+        let args: (number | string)[];
+        if (opts.before !== undefined && opts.beforeId !== undefined) {
+            sql = 'SELECT * FROM notification_history WHERE node_id = ? AND stack_name = ? AND (timestamp < ? OR (timestamp = ? AND id < ?)) ORDER BY timestamp DESC, id DESC LIMIT ?';
+            args = [nodeId, stackName, opts.before, opts.before, opts.beforeId, opts.limit];
+        } else if (opts.before !== undefined) {
+            sql = 'SELECT * FROM notification_history WHERE node_id = ? AND stack_name = ? AND timestamp < ? ORDER BY timestamp DESC, id DESC LIMIT ?';
+            args = [nodeId, stackName, opts.before, opts.limit];
+        } else {
+            sql = 'SELECT * FROM notification_history WHERE node_id = ? AND stack_name = ? ORDER BY timestamp DESC, id DESC LIMIT ?';
+            args = [nodeId, stackName, opts.limit];
+        }
         return (this.db.prepare(sql).all(...args) as unknown[]).map(row => this.mapNotificationRow(row as any));
     }
 
@@ -2157,9 +2158,50 @@ export class DatabaseService {
         stmt.run(cutoff);
     }
 
-    public cleanupOldNotifications(daysToKeep = 30): void {
+    public cleanupOldNotifications(daysToKeep = 30, opts: { perStackCap?: number; perNodeUnattachedCap?: number } = {}): { ttl: number; perStack: number; perNode: number } {
+        const perStackCap = opts.perStackCap ?? 500;
+        const perNodeUnattachedCap = opts.perNodeUnattachedCap ?? 1000;
         const cutoff = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
-        this.db.prepare('DELETE FROM notification_history WHERE timestamp < ?').run(cutoff);
+        const ttlInfo = this.db.prepare('DELETE FROM notification_history WHERE timestamp < ?').run(cutoff);
+
+        const deleteById = this.db.prepare('DELETE FROM notification_history WHERE id = ?');
+        const deleteMany = this.db.transaction((ids: number[]) => {
+            for (const id of ids) deleteById.run(id);
+        });
+
+        // Per (node_id, stack_name) cap so a chatty stack cannot evict a quieter stack's history.
+        const stackOverflow = this.db.prepare(`
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY node_id, stack_name
+                    ORDER BY timestamp DESC, id DESC
+                ) AS rn
+                FROM notification_history
+                WHERE stack_name IS NOT NULL
+            )
+            WHERE rn > ?
+        `).all(perStackCap) as { id: number }[];
+        if (stackOverflow.length > 0) deleteMany(stackOverflow.map(r => r.id));
+
+        // Unattached system events have no stack to scope by, so they cannot share the per-stack quota; cap them per-node separately.
+        const unattachedOverflow = this.db.prepare(`
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY node_id
+                    ORDER BY timestamp DESC, id DESC
+                ) AS rn
+                FROM notification_history
+                WHERE stack_name IS NULL
+            )
+            WHERE rn > ?
+        `).all(perNodeUnattachedCap) as { id: number }[];
+        if (unattachedOverflow.length > 0) deleteMany(unattachedOverflow.map(r => r.id));
+
+        return {
+            ttl: Number(ttlInfo.changes ?? 0),
+            perStack: stackOverflow.length,
+            perNode: unattachedOverflow.length,
+        };
     }
 
     // --- Nodes ---

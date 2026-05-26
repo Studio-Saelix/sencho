@@ -41,10 +41,10 @@ const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 function dlog(...args: Parameters<typeof console.log>): void {
   if (isDebugEnabled()) console.log(...args);
 }
-function notifyActionFailure(action: string, stackName: string, error: unknown): void {
+function notifyActionFailure(action: string, stackName: string, error: unknown, actor: string): void {
   const message = getErrorMessage(error, `Failed to ${action} stack`);
   NotificationService.getInstance()
-    .dispatchAlert('error', 'deploy_failure', message, { stackName })
+    .dispatchAlert('error', 'deploy_failure', message, { stackName, actor })
     .catch(err => console.error('[Stacks] Failed to dispatch failure notification for %s:', sanitizeForLog(stackName), err));
 }
 
@@ -341,7 +341,7 @@ async function runStackBulkOp(
         return { stackName, ok: false, error: 'No containers found for this stack', code: 'no_containers' };
       }
       if (outcome.kind === 'error') {
-        if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message));
+        if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), user);
         return { stackName, ok: false, error: outcome.message, code: 'op_failed' };
       }
       const meta = CONTAINER_ACTION_META[action];
@@ -349,7 +349,7 @@ async function runStackBulkOp(
     }
     return { stackName, ok: true };
   } catch (err) {
-    if (action !== 'start') notifyActionFailure(action, stackName, err);
+    if (action !== 'start') notifyActionFailure(action, stackName, err, user);
     return { stackName, ok: false, error: getErrorMessage(err, `${action} failed`), code: 'op_failed' };
   } finally {
     StackOpLockService.getInstance().release(req.nodeId, stackName);
@@ -962,7 +962,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       console.warn('[Stacks] Deploy failed, rollback did not complete: %s', sanitizeForLog(stackName));
     }
     const message = getErrorMessage(error, 'Failed to deploy stack');
-    notifyActionFailure('deploy', stackName, error);
+    notifyActionFailure('deploy', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
         res.status(503).json({ error: message, code: 'docker_unavailable', rolledBack });
@@ -993,7 +993,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     res.json({ status: 'Command started' });
   } catch (error: unknown) {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
-    notifyActionFailure('down', stackName, error);
+    notifyActionFailure('down', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
         res.status(503).json({ error: getErrorMessage(error, 'Docker daemon is unreachable'), code: 'docker_unavailable' });
@@ -1088,13 +1088,13 @@ async function bulkContainerOp(
     }
     if (outcome.kind === 'docker-unavailable') {
       console.error('[Stacks] %s failed: docker unavailable for %s', sanitizeForLog(titleCase), sanitizeForLog(stackName));
-      if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message));
+      if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), req.user?.username ?? 'system');
       res.status(503).json({ error: outcome.message, code: 'docker_unavailable' });
       return;
     }
     if (outcome.kind === 'error') {
       console.error('[Stacks] %s failed: %s %s', sanitizeForLog(titleCase), sanitizeForLog(stackName), sanitizeForLog(outcome.message));
-      if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message));
+      if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), req.user?.username ?? 'system');
       res.status(500).json({ error: outcome.message });
       return;
     }
@@ -1230,7 +1230,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     } else if (rollbackInfo?.attempted) {
       console.warn(`[Stacks] Update failed, rollback did not complete: ${sanitizeForLog(stackName)}`);
     }
-    notifyActionFailure('update', stackName, error);
+    notifyActionFailure('update', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
         res.status(503).json({ error: getErrorMessage(error, 'Docker daemon is unreachable'), code: 'docker_unavailable', rolledBack });

@@ -4,6 +4,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
+import { sanitizeNotificationMessage } from '../utils/notificationMessage';
 
 export type NotificationCategory =
     | 'deploy_success'
@@ -119,10 +120,15 @@ export class NotificationService {
         // with user-initiated requests; otherwise the UI and monitors split
         // between different node_id buckets.
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        // Use the full resolution chain (node.compose_dir → env → default)
+        // so messages mentioning a per-node compose override get collapsed.
+        const sanitized = sanitizeNotificationMessage(message, {
+            composeDir: NodeRegistry.getInstance().getComposeDir(localNodeId),
+        });
         const notification = this.dbService.addNotificationHistory(localNodeId, {
             level,
             category,
-            message,
+            message: sanitized,
             timestamp: Date.now(),
             stack_name: stackName,
             container_name: containerName,
@@ -151,7 +157,7 @@ export class NotificationService {
                 if (isDebugEnabled()) console.log(`[Notify:diag] Matched ${matched.length} route(s) for stack "${sanitizeForLog(stackName ?? '(none)')}", category="${sanitizeForLog(category)}"`);
                 await Promise.allSettled(
                     matched.map(route =>
-                        this.sendToChannel(route.channel_type, route.channel_url, level, message)
+                        this.sendToChannel(route.channel_type, route.channel_url, level, sanitized)
                             .then(() => {
                                 if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via route "${route.name}" (${route.channel_type})`);
                             })
@@ -176,7 +182,7 @@ export class NotificationService {
         if (isDebugEnabled()) console.log(`[Notify:diag] Falling back to ${agents.length} global agent(s)`);
         await Promise.allSettled(
             agents.map(agent =>
-                this.sendToChannel(agent.type, agent.url, level, message)
+                this.sendToChannel(agent.type, agent.url, level, sanitized)
                     .then(() => {
                         if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via global agent (${agent.type})`);
                     })

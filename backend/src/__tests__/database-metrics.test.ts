@@ -219,40 +219,96 @@ describe('DatabaseService - cleanupOldAuditLogs', () => {
   });
 });
 
-describe('DatabaseService - notification history cap', () => {
-  it('auto-prunes to 100 entries when adding notifications', () => {
-    // Insert 105 notifications
-    for (let i = 0; i < 105; i++) {
-      db.addNotificationHistory(0, {
-        level: 'info',
-        message: `cap-test-${i}`,
-        timestamp: Date.now() + i,
-      });
-    }
-
-    // The table should have at most 100 rows
-    const all = db.getNotificationHistory(0, 200);
-    expect(all.length).toBeLessThanOrEqual(100);
-  });
-
-  it('keeps the most recent entries after pruning', () => {
-    // Clear all first
+describe('DatabaseService - notification history cap (periodic)', () => {
+  it('does not prune on insert; periodic cleanup caps per (node, stack)', () => {
     db.deleteAllNotifications(0);
 
-    for (let i = 0; i < 105; i++) {
+    // A chatty stack writes 600 events.
+    const base = Date.now();
+    for (let i = 0; i < 600; i++) {
       db.addNotificationHistory(0, {
         level: 'info',
-        message: `order-test-${i}`,
-        timestamp: Date.now() + i * 10,
+        message: `chatty-${i}`,
+        timestamp: base + i,
+        stack_name: 'chatty',
+      });
+    }
+    // A quiet stack writes 3 events long before the chatty burst.
+    for (let i = 0; i < 3; i++) {
+      db.addNotificationHistory(0, {
+        level: 'info',
+        message: `quiet-${i}`,
+        timestamp: base - 10_000 + i,
+        stack_name: 'quiet',
       });
     }
 
-    const all = db.getNotificationHistory(0, 200);
-    // The newest entries should survive (ordered DESC by timestamp)
-    expect(all[0].message).toContain('order-test-');
-    // The oldest entries (0-4) should have been pruned
-    const oldest = all.find((n: any) => n.message === 'order-test-0');
-    expect(oldest).toBeUndefined();
+    // No per-insert prune: every row is present.
+    const beforeCleanup = db.getNotificationHistory(0, 2000);
+    expect(beforeCleanup.length).toBe(603);
+
+    db.cleanupOldNotifications(30, { perStackCap: 500, perNodeUnattachedCap: 1000 });
+
+    const after = db.getNotificationHistory(0, 2000);
+    const chatty = after.filter((n: any) => n.stack_name === 'chatty');
+    const quiet = after.filter((n: any) => n.stack_name === 'quiet');
+    expect(chatty.length).toBe(500);
+    // Quiet stack is untouched even though chatty is far noisier.
+    expect(quiet.length).toBe(3);
+  });
+
+  it('caps per-node events without a stack_name', () => {
+    db.deleteAllNotifications(0);
+
+    const base = Date.now();
+    for (let i = 0; i < 1200; i++) {
+      db.addNotificationHistory(0, {
+        level: 'info',
+        message: `system-${i}`,
+        timestamp: base + i,
+      });
+    }
+
+    db.cleanupOldNotifications(30, { perStackCap: 500, perNodeUnattachedCap: 1000 });
+
+    const all = db.getNotificationHistory(0, 2000);
+    const unattached = all.filter((n: any) => !n.stack_name);
+    expect(unattached.length).toBe(1000);
+  });
+
+  it('keeps the newest entries per (node, stack) after periodic cap', () => {
+    db.deleteAllNotifications(0);
+    const base = Date.now();
+    for (let i = 0; i < 600; i++) {
+      db.addNotificationHistory(0, {
+        level: 'info',
+        message: `ordered-${i}`,
+        timestamp: base + i * 10,
+        stack_name: 'ordered',
+      });
+    }
+
+    db.cleanupOldNotifications(30, { perStackCap: 500, perNodeUnattachedCap: 1000 });
+
+    const after = db.getNotificationHistory(0, 2000);
+    const ordered = after.filter((n: any) => n.stack_name === 'ordered');
+    expect(ordered.length).toBe(500);
+    // Newest 500 survive; oldest 100 are gone.
+    expect(ordered.find((n: any) => n.message === 'ordered-0')).toBeUndefined();
+    expect(ordered.find((n: any) => n.message === 'ordered-599')).toBeDefined();
+  });
+
+  it('uses safe defaults when called with only the retention argument', () => {
+    db.deleteAllNotifications(0);
+    const base = Date.now();
+    for (let i = 0; i < 600; i++) {
+      db.addNotificationHistory(0, { level: 'info', message: `d-${i}`, timestamp: base + i, stack_name: 'default' });
+    }
+    // Production caller (MonitorService) only passes daysToKeep; the cap defaults must enforce the per-stack 500 limit.
+    const summary = db.cleanupOldNotifications(30);
+    const after = db.getNotificationHistory(0, 2000).filter((n: any) => n.stack_name === 'default');
+    expect(after.length).toBe(500);
+    expect(summary.perStack).toBe(100);
   });
 });
 

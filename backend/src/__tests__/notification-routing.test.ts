@@ -45,6 +45,7 @@ vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
     getInstance: () => ({
       getDefaultNodeId: () => 1,
+      getComposeDir: () => '/app/compose',
     }),
   },
 }));
