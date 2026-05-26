@@ -1,0 +1,65 @@
+name: Sync Docs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - docs/**
+      - .github/workflows/docs-sync.yml
+  workflow_dispatch:
+
+concurrency:
+  group: docs-sync-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync-docs:
+    name: Sync docs to sencho-docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Mint an installation token scoped to the mirror repository only. The
+      # default GITHUB_TOKEN cannot push to Studio-Saelix/sencho-docs.
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: sencho-docs
+          permission-contents: write
+
+      - name: Checkout Sencho repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: sencho
+
+      - name: Checkout sencho-docs repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ github.repository_owner }}/sencho-docs
+          token: ${{ steps.app-token.outputs.token }}
+          path: sencho-docs
+
+      - name: Copy /docs into sencho-docs root
+        run: rsync -av --delete --exclude='.git' sencho/docs/ sencho-docs/
+
+      - name: Commit and push to sencho-docs
+        working-directory: sencho-docs
+        run: |
+          git config user.email "docs-bot@sencho.io"
+          git config user.name "Sencho Docs Bot"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No docs changes to sync."
+            exit 0
+          fi
+
+          git commit -m "docs: sync from main@${{ github.sha }}"
+          git push origin HEAD:main
