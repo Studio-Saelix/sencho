@@ -391,9 +391,10 @@ describe('GET /api/stacks/:stackName/files/download', () => {
   });
 
   it('records the download metric exactly once per successful response', async () => {
-    // The metric recorder is wired to the file stream lifecycle and guarded
-    // by a flag so a single completion does not double-fire. A regression
-    // that drops the flag would push successCount to 2 for one download.
+    // The metric recorder is wired to both res.on("finish") and
+    // res.on("close"), guarded by a flag so a single completion does not
+    // double-fire. A regression that drops the flag would push successCount
+    // to 2 for one download.
     const { FileExplorerMetricsService } = await import('../services/FileExplorerMetricsService');
     FileExplorerMetricsService.resetForTests();
 
@@ -403,7 +404,7 @@ describe('GET /api/stacks/:stackName/files/download', () => {
       .set('Cookie', adminCookie);
     expect(res.status).toBe(200);
 
-    // Allow the stream lifecycle tail event to fire after the test's await.
+    // Allow the res.on('close') tail event to fire after the test's await.
     await new Promise<void>((r) => setTimeout(r, 50));
 
     const metricsRes = await request(app)
