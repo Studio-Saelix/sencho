@@ -44,6 +44,10 @@ export function useSidebarContextMenu({
       isAdmiral,
       canDelete: can('stack:delete', 'stack', sName),
       canEditLabels: can('stack:edit', 'stack', sName),
+      // POST /api/labels (the inline "New label" entry) is guarded by the
+      // unscoped requirePermission('stack:edit'); a user with only per-stack
+      // scoped edit can toggle existing labels but cannot create new ones.
+      canCreateLabels: can('stack:edit'),
       isPinned: stackListState.isPinned(file),
       labels: stackListState.labels,
       assignedLabelIds: (stackListState.stackLabelMap[file] ?? []).map(l => l.id),

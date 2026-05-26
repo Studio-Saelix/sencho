@@ -13,6 +13,7 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     isAdmiral: false,
     canDelete: true,
     canEditLabels: true,
+    canCreateLabels: true,
     isPinned: false,
     labels: [],
     assignedLabelIds: [],

@@ -63,7 +63,7 @@ function LabelsSub({ item, ctx }: { item: MenuItem; ctx: StackMenuCtx }) {
               );
             })}
             <DropdownMenuSeparator />
-            {ctx.labels.length < MAX_LABELS_PER_NODE && (
+            {ctx.canCreateLabels && ctx.labels.length < MAX_LABELS_PER_NODE && (
               <DropdownMenuItem onSelect={e => { e.preventDefault(); setCreating(true); }}>
                 <Plus className="w-3.5 h-3.5 mr-2 text-muted-foreground" strokeWidth={1.5} />
                 <span className="text-xs">New label</span>

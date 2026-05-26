@@ -19,6 +19,10 @@ export function LabelInlineCreateForm({ onSubmit, onCancel }: LabelInlineCreateF
     setSaving(true);
     try {
       await onSubmit(trimmed, color);
+    } catch {
+      // Parents (createAndAssignLabel) toast and rethrow to signal failure;
+      // swallow here so the rejection does not surface as an unhandled
+      // event-handler rejection in the browser console.
     } finally {
       // Reset even on success so the form stays interactive if the parent
       // keeps it mounted (e.g. when reused outside the kebab/context menu).
