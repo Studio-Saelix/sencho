@@ -118,7 +118,13 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
     // happen to match the previous values, so the fetch re-runs exactly once.
   }, [open, load, page, search, reloadToken]);
 
+  // Skip the initial mount: the effect fires once with the original
+  // searchDraft, and unconditionally resetting page to 0 after 300ms races
+  // with any pagination the user may have done in that window.
+  const prevSearchDraftRef = useRef(searchDraft);
   useEffect(() => {
+    if (prevSearchDraftRef.current === searchDraft) return;
+    prevSearchDraftRef.current = searchDraft;
     const t = setTimeout(() => {
       setSearch(searchDraft);
       setPage(0);
