@@ -551,7 +551,9 @@ export class MonitorService {
             const notifSummary = db.cleanupOldNotifications(isNaN(retentionDays) ? 30 : retentionDays);
             const auditRetentionDays = parseInt(settings['audit_retention_days'] || '90', 10);
             db.cleanupOldAuditLogs(isNaN(auditRetentionDays) ? 90 : auditRetentionDays);
-            if (isDebugEnabled()) console.log(`[Monitor:diag] Cleanup: metrics ${isNaN(retentionHours) ? 24 : retentionHours}h, notifications ${isNaN(retentionDays) ? 30 : retentionDays}d (ttl=${notifSummary.ttl} perStack=${notifSummary.perStack} perNode=${notifSummary.perNode}), audit ${isNaN(auditRetentionDays) ? 90 : auditRetentionDays}d`);
+            const scanPerImage = parseInt(settings['scan_history_per_image_limit'] || '50', 10);
+            const scanPruned = db.pruneScanHistoryPerImage(isNaN(scanPerImage) ? 50 : scanPerImage);
+            if (isDebugEnabled()) console.log(`[Monitor:diag] Cleanup: metrics ${isNaN(retentionHours) ? 24 : retentionHours}h, notifications ${isNaN(retentionDays) ? 30 : retentionDays}d (ttl=${notifSummary.ttl} perStack=${notifSummary.perStack} perNode=${notifSummary.perNode}), audit ${isNaN(auditRetentionDays) ? 90 : auditRetentionDays}d, scans pruned ${scanPruned}`);
         } catch (e) {
             console.error('MonitorService: failed to cleanup old data', e);
         }

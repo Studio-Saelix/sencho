@@ -30,13 +30,14 @@ function SectionSkeleton() {
     );
 }
 
-type DeveloperFields = Pick<PatchableSettings, 'developer_mode' | 'metrics_retention_hours' | 'log_retention_days' | 'audit_retention_days'>;
+type DeveloperFields = Pick<PatchableSettings, 'developer_mode' | 'metrics_retention_hours' | 'log_retention_days' | 'audit_retention_days' | 'scan_history_per_image_limit'>;
 
 const DEFAULT_DEVELOPER: DeveloperFields = {
     developer_mode: DEFAULT_SETTINGS.developer_mode,
     metrics_retention_hours: DEFAULT_SETTINGS.metrics_retention_hours,
     log_retention_days: DEFAULT_SETTINGS.log_retention_days,
     audit_retention_days: DEFAULT_SETTINGS.audit_retention_days,
+    scan_history_per_image_limit: DEFAULT_SETTINGS.scan_history_per_image_limit,
 };
 
 export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
@@ -51,7 +52,8 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
         settings.developer_mode !== serverSettingsRef.current.developer_mode ||
         settings.metrics_retention_hours !== serverSettingsRef.current.metrics_retention_hours ||
         settings.log_retention_days !== serverSettingsRef.current.log_retention_days ||
-        settings.audit_retention_days !== serverSettingsRef.current.audit_retention_days;
+        settings.audit_retention_days !== serverSettingsRef.current.audit_retention_days ||
+        settings.scan_history_per_image_limit !== serverSettingsRef.current.scan_history_per_image_limit;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -85,6 +87,7 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
                     metrics_retention_hours: localData.metrics_retention_hours ?? DEFAULT_SETTINGS.metrics_retention_hours,
                     log_retention_days: localData.log_retention_days ?? DEFAULT_SETTINGS.log_retention_days,
                     audit_retention_days: localData.audit_retention_days ?? DEFAULT_SETTINGS.audit_retention_days,
+                    scan_history_per_image_limit: localData.scan_history_per_image_limit ?? DEFAULT_SETTINGS.scan_history_per_image_limit,
                 };
                 setSettings(safe);
                 serverSettingsRef.current = { ...safe };
@@ -108,6 +111,7 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
             metrics_retention_hours: settings.metrics_retention_hours,
             log_retention_days: settings.log_retention_days,
             audit_retention_days: settings.audit_retention_days,
+            scan_history_per_image_limit: settings.scan_history_per_image_limit,
         };
         setIsSaving(true);
         try {
@@ -182,6 +186,23 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
                             className="w-24"
                         />
                         <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">days</span>
+                    </div>
+                </SettingsField>
+
+                <SettingsField
+                    label="Scan history per image"
+                    helper="How many vulnerability scans to keep per image. Older scans beyond the cap are pruned."
+                >
+                    <div className="flex items-center gap-2">
+                        <Input
+                            type="number"
+                            min={5}
+                            max={1000}
+                            value={settings.scan_history_per_image_limit}
+                            onChange={(e) => onSettingChange('scan_history_per_image_limit', e.target.value)}
+                            className="w-24"
+                        />
+                        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">scans</span>
                     </div>
                 </SettingsField>
 

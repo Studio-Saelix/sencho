@@ -86,11 +86,19 @@ function scan(overrides: Partial<VulnerabilityScan> = {}): VulnerabilityScan {
   };
 }
 
-function listResponse(items: VulnerabilityScan[], total?: number): Response {
+function listResponse(
+  items: VulnerabilityScan[],
+  opts: { total?: number; cappedImageRefs?: string[]; perImageLimit?: number } = {},
+): Response {
   return {
     ok: true,
     status: 200,
-    json: async () => ({ items, total: total ?? items.length }),
+    json: async () => ({
+      items,
+      total: opts.total ?? items.length,
+      cappedImageRefs: opts.cappedImageRefs ?? [],
+      perImageLimit: opts.perImageLimit ?? 50,
+    }),
   } as unknown as Response;
 }
 
@@ -116,7 +124,7 @@ describe('SecurityHistoryView', () => {
   });
 
   it('advances offset when the user pages forward', async () => {
-    mockedFetch.mockResolvedValue(listResponse([scan()], 250));
+    mockedFetch.mockResolvedValue(listResponse([scan()], { total: 250 }));
     const user = userEvent.setup();
     render(<SecurityHistoryView open onClose={vi.fn()} />);
 
@@ -227,5 +235,22 @@ describe('SecurityHistoryView', () => {
     await user.click(checkboxes[1]);
 
     expect(screen.getByRole('button', { name: /Compare \(2\/2\)/ })).toBeEnabled();
+  });
+
+  it('renders the cap hint only for images flagged in cappedImageRefs', async () => {
+    mockedFetch.mockResolvedValue(
+      listResponse(
+        [
+          scan({ id: 1, image_ref: 'hot:latest', scanned_at: 1000 }),
+          scan({ id: 2, image_ref: 'cool:latest', scanned_at: 2000 }),
+        ],
+        { cappedImageRefs: ['hot:latest'], perImageLimit: 50 },
+      ),
+    );
+    render(<SecurityHistoryView open onClose={vi.fn()} />);
+
+    const cappedHint = await screen.findByText(/Capped at 50 . older scans pruned/);
+    expect(cappedHint).toBeInTheDocument();
+    expect(screen.queryAllByText(/Capped at 50/)).toHaveLength(1);
   });
 });
