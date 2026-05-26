@@ -1459,15 +1459,14 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     const encodedFilename = encodeURIComponent(result.filename);
     const safeFilename = result.filename.replace(/[\\"]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
-    // Track download completion off the file stream's lifecycle, not the
-    // response's. Node's `res.on('finish')` and `res.on('close')` fire in
-    // platform-dependent order under the in-process supertest transport
-    // (close occasionally precedes finish, which made the success-vs-error
-    // recorder racy in CI). The file stream's `end`, `error`, and `close`
-    // events ARE deterministic: a clean read emits `end` then `close`; a
-    // destroy emits `close` without `end`; a disk error emits `error` then
-    // `close`. Hanging the recorder off these signals removes the race.
+    // Track download completion from the file stream, but treat a close after
+    // all bytes were read as success even if the response flags have not
+    // settled yet under the in-process supertest transport.
     let downloadRecorded = false;
+    const streamWithBytes = result.stream as typeof result.stream & { bytesRead?: number };
+    const hasReadFullFile = (): boolean => (
+      typeof streamWithBytes.bytesRead === 'number' && streamWithBytes.bytesRead >= result.size
+    );
     const recordDownloadOnce = (ok: boolean): void => {
       if (downloadRecorded) return;
       downloadRecorded = true;
@@ -1481,11 +1480,11 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     });
     result.stream.on('end', () => recordDownloadOnce(true));
     result.stream.on('close', () => {
-      if (res.writableEnded) recordDownloadOnce(true);
+      if (res.writableEnded || hasReadFullFile()) recordDownloadOnce(true);
       else recordDownloadOnce(false);
     });
-    req.on('close', () => {
-      if (!res.writableEnded) result.stream.destroy();
+    res.on('close', () => {
+      if (!res.writableEnded && !hasReadFullFile()) result.stream.destroy();
     });
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
     result.stream.pipe(res);
