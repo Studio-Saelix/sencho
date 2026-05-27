@@ -1,241 +1,109 @@
 ---
 title: Introduction
-description: The self-hosted Docker Compose control plane for modern homelabs and fleet infrastructure.
+description: The self-hosted Docker Compose dashboard for homelabs and fleet infrastructure.
 ---
 
-Sencho is a self-hosted, full-stack Docker Compose dashboard. It provides a visual cockpit over a single Docker host or a large distributed fleet of nodes, allowing operators to deploy stacks, edit configurations, monitor container health, and orchestrate updates directly from a secure web console.
+Sencho is a self-hosted dashboard for Docker Compose. It turns the Compose projects on one Docker host, or across a fleet of hosts, into a single browser workspace for deploying stacks, editing configuration, watching health, cleaning up resources, and coordinating remote operations.
 
-Rather than relying on raw SSH access or exposing unauthenticated Docker TCP sockets, Sencho employs a decentralized agent-based and proxy-based architecture. Every server in your fleet runs its own autonomous Sencho instance that interacts with its local Docker engine. Control planes interact with remote instances via secure, long-lived JSON Web Tokens (JWT).
+A Sencho install can manage its local Docker host directly. It can also manage remote Sencho nodes through direct proxy connections or through the Pilot Agent for environments behind CG-NAT, firewalls, or networks where inbound ports are not available. Remote management does not require SSH access or an exposed Docker TCP socket.
 
 <Frame>
-  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho cockpit dashboard with status masthead, system gauges, and stack health table" />
+  <img src="/images/introduction/home-overview.png" alt="Sencho Home view with the health masthead, resource gauges, stack health table, Configuration Status, Fleet Heartbeat, and Recent Alerts" />
 </Frame>
 
----
+## Core concepts
 
-## Conceptual Architecture & Mental Model
+These are the main terms you will see across the app and docs:
 
-To operate Sencho effectively, it is helpful to understand the underlying moving parts and core concepts:
+- **Stack**: A Docker Compose project discovered under `COMPOSE_DIR`. A stack usually has a `compose.yaml` file, optional `.env` files, and any supporting files stored beside it.
+- **Node**: A Sencho instance managing one Docker host. The instance you are signed into is the local node; added hosts appear as remote nodes.
+- **Fleet**: The set of nodes managed from one Sencho control instance. Fleet views summarize health, updates, snapshots, actions, secrets, and placement state across nodes.
+- **Resource**: A Docker image, volume, network, or unmanaged container. Sencho classifies resources as managed, external, system, unused, or protected so cleanup decisions are visible.
+- **Blueprint**: A fleet deployment model for keeping a compose template assigned to matching nodes.
+- **Pilot Agent**: An outbound connector for remote nodes that cannot accept inbound traffic.
+- **Mesh**: Cross-node container networking for fleets that need stable service-to-service hostnames.
 
-* **Stack**: A distinct Docker Compose project. Each stack is defined by a directory under the designated `COMPOSE_DIR` containing a `compose.yaml` (or `docker-compose.yml`) file, optional `.env` configurations, and associated files.
-* **Node**: An active, running Sencho instance managing its local Docker environment. The instance hosting your web interface is the **local node**. **Remote nodes** are external hosts running their own Sencho service.
-* **Fleet**: A logical cluster of nodes grouped under a single control pane. Operators can switch between nodes, search across all nodes, and run fleet-wide operations.
-* **Resources**: The complete set of underlying Docker primitives: images, volumes, and networks. Sencho indexes and classifies these to identify which objects are active, external, or reclaimable.
-* **Blueprint**: A declarative, multi-stack deployment template. Blueprints allow you to define stack configurations once and enforce them continuously across groups of nodes using label selectors.
-* **Mesh**: A managed sidecar overlay network. It provides secure cross-node container communication and stable hostnames without exposing ports publicly.
-* **Pilot**: An outbound agent that enables remote nodes behind CG-NAT, firewalls, or strict VLANs to be managed from the control plane without requiring inbound open ports.
-* **Fleet Sync**: An automated state-propagation layer. The primary control instance acts as the security source of truth, replicating access control rules and settings to remote nodes.
+## What you see after sign-in
 
-<Note>
-  Sencho operates under a Distributed API model. The control node acts as a transparent HTTP and WebSocket proxy. When you select a remote node, the frontend injects a routing identifier, and the control plane routes requests directly to the remote instance.
-</Note>
+The **Home** view is the default landing page. It is designed for a fast operational read before you touch a stack.
 
----
+- The status masthead reports **Healthy**, **Degraded**, or **Critical**, names the active node, shows the node count, and lists the signals that need attention.
+- The resource gauge strip tracks **CPU**, **Memory**, **Disk**, and **Network** with sparklines and threshold coloring.
+- **Stack health** lists the active node's stacks by state and load, with uptime, CPU, memory, and a 10-minute CPU sparkline per stack.
+- **Configuration Status** summarizes notifications, automation, security, backups, thresholds, and crash detection. Rows link to the Settings section that controls each item.
+- The activity panel shows **Fleet Heartbeat** when remote nodes exist, or **Stack Restarts (7d)** on a local-only install.
+- **Recent Alerts** shows the latest notification feed and includes **Clear All Notifications** when there is anything to clear.
 
-## System Requirements & Prerequisites
+The top navigation includes **Home**, **Fleet**, **Resources**, **App Store**, and **Logs** on the standard dashboard surface. Depending on license, role, and node context, it can also include **Auto-Update**, **Schedules**, **Console**, and **Audit**.
 
-Before deploying Sencho, verify that your environment meets the minimum requirements:
+## Stack workspace
 
-### Plan Tiers
-* **Community**: Includes multi-node management, the compose editor, basic Git sources, manual snapshots, custom OIDC, and standard vulnerability scanning.
-* **Skipper**: Adds advanced automation, atomic deployments with rollback, notification routing, scheduled operations, and automated updates.
-* **Admiral**: Unlocks complete fleet governance, LDAP/Active Directory SSO, audit logs, interactive Host Consoles, custom registries, and cross-node container Mesh networks.
+The left sidebar is the main stack list. Use **Search stacks...** to filter by name, then combine it with the **All**, **Up**, **Down**, and **Updates** chips. The action row contains **Create Stack**, a bulk-mode toggle, and **Scan stacks folder** for importing Compose projects added outside Sencho.
 
-### Platform Support
-* **Operating Systems**: Production systems must run Linux (amd64 or arm64). macOS and Windows with WSL2 are supported for development.
-* **Docker Engine**: Requires Docker Engine version 20.10 or later and Docker Compose v2.
-* **System Privileges**: By default, Sencho runs as root inside its container. Mounting the host `/var/run/docker.sock` provides the dashboard with equivalent administrative control over the host engine.
-
-### Network Requirements
-* **Direct Proxy Mode**: Requires the control node to have direct HTTP/HTTPS network access to the remote node's API port (default `1852`).
-* **Pilot Agent Mode**: Requires the remote node to have outbound HTTPS/WebSocket access to the control node. No inbound port forwarding is required on the remote node.
-* **TLS Security**: In production environments, always front Sencho with a TLS-terminating reverse proxy (such as Nginx, Traefik, or Caddy). Plain HTTP should only be used over trusted, isolated local networks.
-
----
-
-## Step-by-Step Operational Workflow
-
-### 1. Installation & Access
-Deploy Sencho on your primary host using our lightweight Docker image. Once running, open your browser and navigate to the designated port. You are prompted to complete the initial setup, register your primary administrator account, and configure security defaults.
-
-### 2. Stack Deployment
-Manage your compose projects through our structured visual editor. Paste raw `docker run` commands to automatically convert them into clean compose files, link your configurations directly to Git repositories, or select pre-built application templates from the App Store.
+Stacks can be pinned and grouped by label. Each row carries a compact status marker, update indicators, Git source state, and a context menu for common lifecycle and organization actions.
 
 <Frame>
-  <img src="/images/introduction/stack-view.png" alt="Stack open in Sencho with running container, anatomy panel, and live log stream" />
+  <img src="/images/introduction/stack-workspace.png" alt="Sencho stack workspace with the stack identity header, action buttons, container health rows, logs, and Anatomy panel" />
 </Frame>
 
-### 3. Scaling to a Fleet
-Expand your deployment by adding remote nodes:
-* Go to the **Nodes** section in your settings.
-* Generate a secure API token on your remote server.
-* Add the node by entering its address and token (for Direct Proxy), or download the Pilot Agent compose template to connect a firewalled node outbound.
+Opening a stack gives you the day-to-day workspace:
+
+- The identity header shows the node, stack name, runtime state, primary image, digest, and main action buttons.
+- Running stacks expose **Restart**, **Stop**, and **Update**; stopped stacks expose **Start** and **Update**. The overflow menu holds less frequent actions such as rollback, config scan, and delete.
+- Container rows show health, uptime, published ports, live CPU and memory, network activity, logs, and service actions.
+- The logs panel can run in **Structured** mode or **Raw terminal** mode.
+- The right panel switches between **Anatomy** and **Activity**, with **Files** and **Edit** controls for browsing stack files and editing compose or env content.
+
+## Fleet operations
+
+The **Fleet** view is the multi-node command center. The masthead summarizes online nodes, critical nodes, aggregate CPU and memory, container counts, and sync freshness.
 
 <Frame>
-  <img src="/images/introduction/fleet-overview.png" alt="Sencho fleet view with three node cards and per-node metrics" />
+  <img src="/images/introduction/fleet-overview.png" alt="Sencho Fleet view with the masthead, tabs, toolbar, grid and topology controls, and node cards" />
 </Frame>
 
----
+The Fleet toolbar includes **Check Updates**, **Refresh**, and **Add node** for admins. The **Overview** tab supports search, sort, status filters, label filters, and a Grid or Topology view. Node cards show online state, resource use, container counts, version state, update actions, and direct drill-down into stacks on that node.
 
-## Key Capabilities
+Fleet also provides dedicated tabs for snapshots, node status, blueprint deployments, traffic management, federation, fleet actions, and secrets. Some fleet features require Skipper or Admiral. See [Licensing](/features/licensing) for the full tier breakdown.
 
-### Professional-Grade Compose Editor
-Edit `compose.yaml` and `.env` configurations in a full, in-browser Monaco editor featuring syntax highlighting, autocomplete, and inline schema validation. Save changes and trigger deployments in one step. 
+## Resources, templates, and logs
 
-### Secure File Explorer
-Browse, edit, download, and manage configuration files inside your stack directory directly from the UI. This includes editing supplementary files, viewing log outputs, and verifying volume attachments.
-
-### Atomic Deployments & Auto-Rollbacks
-Every stack deployment is preceded by a point-in-time snapshot of the active compose files and environment state. If a deployment fails or the new containers crash within their startup window, Sencho rolls back the configuration automatically to preserve service uptime. This capability requires **Skipper**.
-
-### Continuous Drift Reconciler
-Deploying a **Blueprint** activates our continuous background reconciler. The engine periodically compares the running container state against your declarative template. If drift is detected (such as manually stopped containers or altered env variables), the reconciler converges the environment back to the spec. This capability requires **Skipper**.
-
-### Automated Upgrades & Self-Healing
-* **Auto-Update Policies**: Automatically monitors your registries for new image digests. The dashboard exposes updates with risk categorization (major, minor, patch) and lets you apply safe patches on a schedule. This capability requires **Skipper**.
-* **Auto-Heal Policies**: Periodically checks the health state of running containers. If a container transitions to an unhealthy state, Sencho triggers a controlled restart sequence protected by cooldown periods and hourly limits. This capability requires **Skipper**.
-
-### Centralized Secret Vaults
-Store environment variable bundles encrypted at rest with AES-256-GCM. Push these secrets to matching stacks across your fleet, complete with a visual diff preview of the changes before writing to disk. This capability requires **Skipper**.
-
-### Fleet-Wide Backups
-Take manual or scheduled point-in-time snapshots of every compose configuration and environmental variable file across the entire fleet. Restoring a stack is as simple as selecting a prior snapshot and triggering a single-click deployment to any online node. Scheduled snapshots require **Skipper**.
-
-### Cross-Node Mesh Networking
-Connect containers running on different hosts into a unified, secure overlay network. Services communicate directly using stable hostnames over an encrypted tunnel, avoiding port conflicts and public IP exposure. This capability requires **Admiral**.
-
-### Audit & Security Governance
-* **Vulnerability Scanning**: Integrates directly with Trivy to inspect active container images, detect exposed secrets, and catalog software packages. This includes custom CVE suppression rules and automated scheduled scans.
-* **Audit Trail**: Keeps a permanent, searchable log of all administrative actions (such as stack modifications, settings changes, or terminal sessions) attributed to specific users and nodes. This capability requires **Admiral**.
+The **Resources** view shows what Docker is using on the active node. It starts with reclaimable storage, a Docker Disk Footprint treemap, and **Quick Clean** actions. The tabs below split resources into **images**, **volumes**, **networks**, and **Unmanaged** containers. Filters separate **All**, **Managed**, and **External** resources, and protected Sencho resources are marked so they are not removed accidentally.
 
 <Frame>
-  <img src="/images/introduction/resources-hub.png" alt="Sencho Resources hub showing reclaimable disk space and image inventory" />
+  <img src="/images/introduction/resources-overview.png" alt="Sencho Resources view with reclaimable storage, Docker Disk Footprint, Quick Clean, and resource tabs" />
 </Frame>
 
----
+The **App Store** lets you search templates, filter by category, open a deploy sheet, adjust essentials, customize advanced ports, volumes, and environment variables, and deploy a stack with live progress feedback.
 
-## Detailed System Behavior & Lifecycles
+The **Logs** view aggregates logs across stacks on the active node. It includes a live masthead, event counters, search, stack filters, stream filters, level filters, pause and resume controls, and download support for the filtered buffer.
 
-### Request Routing & Dispatch Mechanics
-When the frontend issues a request to a remote node, the client attaches a routing header (`x-node-id`) for standard HTTP traffic, or a query parameter (`?nodeId=`) for WebSocket streams. 
+## Settings and security
 
-```
-[Browser UI] 
-     │ (apiFetch)
-     ▼
-[Control Node (Proxy Router)]
-     │
-     ├─► [Local Execution Router] ──► (Local Docker Socket)
-     │
-     └─► [Remote Node Proxy] 
-              │ (Mutual JWT over HTTP/WebSocket)
-              ▼
-         [Remote Node] ──────────────► (Remote Docker Socket)
-```
+Settings are grouped by **Identity**, **System**, **Alerts**, and **Advanced**. Some sections are global to the control instance, while others are scoped to the active node.
 
-The control node intercepts these requests. If the identifier points to a remote host, the proxy intercepts the stream, injects a node-to-node Bearer JWT, and routes the request over the network. 
+Use Settings to manage account security, licensing, users, SSO, API tokens, host thresholds, node registration, alert delivery, security scanning, template registry settings, diagnostics, and build metadata. The [Configuration](/getting-started/configuration) guide covers the host and environment settings that matter before first deploy.
 
-WebSocket upgrades follow a strict, first-match-wins dispatch sequence:
-1. **Pilot Tunnel Upgrade**: Captures incoming agent WebSockets to register remote tunnels.
-2. **System Notification Upgrade**: Services client real-time state changes and alert notifications.
-3. **Remote Proxy Forwarder**: Chains client commands through to the appropriate remote node tunnel.
-4. **Interactive Streams**: Dedicated terminal log channels, host consoles, and container shells.
+## Typical workflow
 
-### Fleet Sync Security Replication
-When multiple Sencho nodes are connected, the primary control instance operates as the security source of truth. User records, RBAC roles, single sign-on properties, and access scopes are periodically pushed to remote nodes. Remote replicas run these rules in a read-only state, automatically rejecting direct local configuration modifications to ensure administrative consistency.
+1. Deploy Sencho with access to your compose directory and Docker host.
+2. Complete first boot and sign in as the first admin.
+3. Confirm the Home view sees your active node, resource gauges, and stack list.
+4. Create a stack from the sidebar, from Git, from a Docker Run command, or from the App Store.
+5. Open the stack workspace to inspect containers, logs, anatomy, files, and compose content.
+6. Add remote nodes from **Fleet** or **Settings · System · Nodes** when you are ready to manage more hosts.
+7. Use the rest of the top navigation as your operational needs grow.
 
-### Outbound Pilot Agent Tunnels
-For hosts located behind strict firewalls or CG-NAT, the Pilot Agent acts as an outbound connection pipeline. The agent establishes a persistent WebSocket connection back to the control node. All HTTP requests and WebSocket streams fanning out from the control plane are multiplexed through this single outbound WebSocket tunnel, removing the need for public IP addresses or port forwarding.
-
-### License Checks & Grace Periods
-Active licenses undergo a validation check every **72 hours**. If a control instance loses outbound network connectivity, Sencho enters a **30-day grace period**. Features continue to operate normally during this window; once the grace period expires, paid capabilities degrade gracefully to the Community tier until connectivity is restored.
-
----
-
-## Trust & Security Boundaries
-
-* **Decentralized Authorization**: Remote nodes do not trust the control plane blindly. Communication is authenticated using secure JWT Bearer tokens. Every remote node parses and validates the incoming token signature before executing administrative Docker operations.
-* **Outbound-Only Tunneling**: Pilot Agent tunnels are strictly outbound. The remote node initiates the WebSocket handshakes; the control plane cannot initiate raw TCP sockets back to the remote network.
-* **Host Access Isolation**: Terminal environments (such as host console shells) are restricted to explicit administrators. Operations run under strict user privileges and generate detailed events in the audit log.
-
----
-
-## Limitations, Constraints, and Non-Goals
-
-While Sencho is built to manage massive Docker setups, it has clear structural boundaries:
-
-* **Scale Boundaries**: Sencho is optimized for comfortable operation on tens of stacks and several hundred containers per node. Extremely busy nodes may encounter interface performance slowdowns during high-frequency log streams.
-* **No Built-in Trial Timer**: The software contains no automatic local trial activation sequence. Paid trials are initialized through the Lemon Squeezy payment checkout and activated by pasting the issued key.
-* **Mesh Network Constraints**: Mesh networking relies on a shared Docker network alias scheme. It does not support Docker Swarm or native overlay networks.
-* **Pilot Connection Limits**: A primary control node has a hard limit of **256 concurrent Pilot Agent connections** at any one time.
-* **Outbound Network Scans**: Vulnerability scans require outbound HTTPS access to download Trivy database updates, unless your environment is explicitly configured for air-gapped operations.
-* **No Direct Downgrades**: Downgrading the Sencho binary between minor releases is not supported due to persistent schema changes. Always take a manual backup of `/app/data` before running updates.
-
----
-
-## Multi-Node Topologies & Deployment Patterns
-
-### Standard Home Lab Setup
-A typical homelab configuration consists of a single primary Sencho control node running on a local server (such as an unRAID box or mini PC). It manages local compose stacks directly and accesses other local servers over the LAN using direct proxy connections.
-
-```
-                  ┌──────────────────────┐
-                  │  Control Plane Host  │
-                  │   [Sencho Console]   │
-                  └──────────┬───────────┘
-                             │
-                             ├─► [Local Stacks]
-                             │
-                             ▼ (Direct LAN Proxy)
-                  ┌──────────────────────┐
-                  │    Remote Server     │
-                  │    [Sencho Node]     │
-                  └──────────────────────┘
-```
-
-### Hybrid Cloud Setup (CG-NAT / Firewalled Nodes)
-A hybrid pattern uses a public VPS running the Sencho control plane with a publicly accessible domain and TLS termination. Home servers situated behind residential CG-NAT networks or firewalls run the Pilot Agent, opening outbound tunnels to the public VPS. Operators access the VPS dashboard to control all home and cloud stacks seamlessly.
-
-```
- ┌──────────────────────┐             ┌──────────────────────┐
- │      Home Node       │             │   Public Cloud VPS   │
- │    [Pilot Agent]     ├────────────►│   [Sencho Console]   │
- └──────────────────────┘ (Outbound   └──────────▲───────────┘
-                           WebSocket)            │
-                                                 ▼ (Direct Proxy)
-                                      ┌──────────────────────┐
-                                      │    Cloud VPS Host    │
-                                      │    [Sencho Node]     │
-                                      └──────────────────────┘
-```
-
-
-
-## FAQ & Common Questions
-
-### Do I need to set up port forwarding to manage remote nodes?
-No. If your remote nodes run behind firewalls or CG-NAT, deploy the Pilot Agent on the remote server. The agent initiates an outbound WebSocket connection, removing any need for port forwarding.
-
-### Is Sencho Mesh a replacement for generic VPNs?
-No. Sencho Mesh is designed strictly for secure, direct service-to-service communication between Docker containers across nodes. It does not provide host-level VPN routing or client-to-site access.
-
-### How does Fleet Sync manage security?
-The control plane replicates authentication, users, SSO profiles, and permissions to remote nodes. Replicas run these configurations read-only, preventing local settings overrides and ensuring uniform security across your entire fleet.
-
----
-
-## Next Steps
-
-To continue setting up your environment, select one of the following guides:
+## Next steps
 
 <CardGroup cols={3}>
-  <Card title="Quickstart Guide" icon="rocket" href="/getting-started/quickstart">
-    Deploy Sencho, launch your first stack, and enroll a remote node.
+  <Card title="Quickstart" icon="rocket" href="/getting-started/quickstart">
+    Deploy Sencho, complete first boot, and open the dashboard.
   </Card>
   <Card title="Configuration" icon="sliders" href="/getting-started/configuration">
-    Configure system environment variables, COMPOSE_DIR, and default settings.
+    Configure environment variables, storage paths, and host settings.
   </Card>
-  <Card title="Self-Hosting Production" icon="server" href="/operations/self-hosting">
-    Deploy behind reverse proxies, configure TLS, and establish database backups.
+  <Card title="Stack Management" icon="layer-group" href="/features/stack-management">
+    Create, deploy, edit, inspect, update, and remove Compose stacks.
   </Card>
 </CardGroup>
