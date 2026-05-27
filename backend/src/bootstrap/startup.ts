@@ -52,6 +52,20 @@ export function ensurePilotJwtSecret(): boolean {
   return true;
 }
 
+function clearSelfContainerNotificationRouting(): void {
+  const identity = SelfIdentityService.getInstance().getIdentity();
+  const changed = DatabaseService.getInstance().clearSelfContainerNotificationRouting(
+    NodeRegistry.getInstance().getDefaultNodeId(),
+    {
+      containerName: identity.containerName,
+      composeProjectName: identity.composeProjectName,
+    },
+  );
+  if (changed > 0) {
+    console.log(`[Startup] Cleared stack routing from ${changed} Sencho self-container notification(s)`);
+  }
+}
+
 /**
  * Run the startup sequence: stack-directory migration, service initialization,
  * background watchdogs, then bind the HTTP server. The caller passes the
@@ -118,12 +132,16 @@ export async function startServer(server: Server): Promise<void> {
   // the live loopback bridge instead of waiting for the 3-minute TTL.
   PilotTunnelManager.getInstance().on('tunnel-up', invalidateRemoteMetaCache);
 
-  // Async initializers are independent of each other; run in parallel
-  // so total boot time is the slowest one rather than the sum.
+  // Most async initializers still run in parallel. Docker event monitoring
+  // is sequenced after self identity so it never classifies Sencho's own
+  // container as a routeable stack event.
   await Promise.all([
     SelfUpdateService.getInstance().initialize(),
-    SelfIdentityService.getInstance().initialize(),
-    DockerEventManager.getInstance().start(),
+    (async () => {
+      await SelfIdentityService.getInstance().initialize();
+      clearSelfContainerNotificationRouting();
+      await DockerEventManager.getInstance().start();
+    })(),
     TrivyService.getInstance().initialize(),
   ]);
 
