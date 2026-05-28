@@ -24,11 +24,13 @@ class SelfIdentityService {
   private static instance: SelfIdentityService;
   private containerId: string | null = null;
   private containerName: string | null = null;
+  private composeProjectName: string | null = null;
   private imageIdHex: string | null = null;
   private networkIds = new Set<string>();
   private networkNames = new Set<string>();
   private volumeNames = new Set<string>();
   private initialized = false;
+  private initializePromise: Promise<void> | null = null;
 
   public static getInstance(): SelfIdentityService {
     if (!SelfIdentityService.instance) {
@@ -38,15 +40,23 @@ class SelfIdentityService {
   }
 
   async initialize(): Promise<void> {
+    if (this.initializePromise) return this.initializePromise;
     if (this.initialized) return;
-    this.initialized = true;
+    this.initializePromise = this.initializeInternal().finally(() => {
+      this.initialized = true;
+      this.initializePromise = null;
+    });
+    return this.initializePromise;
+  }
 
+  private async initializeInternal(): Promise<void> {
     const docker = DockerController.getInstance().getDocker();
     const info = await this.resolveSelfInspect(docker);
     if (!info) return;
 
     this.containerId = info.Id ?? null;
     this.containerName = (info.Name || '').replace(/^\//, '') || null;
+    this.composeProjectName = info.Config?.Labels?.['com.docker.compose.project'] ?? null;
     this.imageIdHex = SelfIdentityService.stripSha(info.Image ?? '') || null;
 
     const nets = info.NetworkSettings?.Networks ?? {};
@@ -148,6 +158,7 @@ class SelfIdentityService {
   getIdentity(): {
     containerId: string | null;
     containerName: string | null;
+    composeProjectName: string | null;
     imageId: string | null;
     networkNames: string[];
     volumeNames: string[];
@@ -155,6 +166,7 @@ class SelfIdentityService {
     return {
       containerId: this.containerId,
       containerName: this.containerName,
+      composeProjectName: this.composeProjectName,
       imageId: this.imageIdHex,
       networkNames: [...this.networkNames],
       volumeNames: [...this.volumeNames],
@@ -165,11 +177,13 @@ class SelfIdentityService {
   resetForTesting(): void {
     this.containerId = null;
     this.containerName = null;
+    this.composeProjectName = null;
     this.imageIdHex = null;
     this.networkIds.clear();
     this.networkNames.clear();
     this.volumeNames.clear();
     this.initialized = false;
+    this.initializePromise = null;
   }
 
   private static stripSha(s: string): string {

@@ -3,7 +3,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
 
 let tmpDir: string;
-let db: any;
+let db: import('../services/DatabaseService').DatabaseService;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -128,10 +128,13 @@ describe('DatabaseService.getStackActivity', () => {
     const ids: number[] = [];
     for (let i = 0; i < 5; i++) {
       const row = db.addNotificationHistory(0, { level: 'info', message: `e-${i}`, timestamp: ts, stack_name: 's' });
+      if (typeof row.id !== 'number') throw new Error('notification row missing id');
       ids.push(row.id);
     }
     // ids[0..4] all share ts. Cursor at the third row's id should return ids[0] and ids[1].
-    const out = db.getStackActivity(0, 's', { limit: 50, before: ts, beforeId: ids[2] });
+    const cursorId = ids[2];
+    if (cursorId === undefined) throw new Error('cursor id missing');
+    const out = db.getStackActivity(0, 's', { limit: 50, before: ts, beforeId: cursorId });
     const returnedIds = out.map((e: any) => e.id);
     expect(returnedIds).toEqual([ids[1], ids[0]]);
   });
@@ -151,6 +154,74 @@ describe('DatabaseService.getStackActivity', () => {
     db.addNotificationHistory(0, { level: 'info', message: 'other', timestamp: Date.now(), stack_name: 'other' });
     const out = db.getStackActivity(0, 'missing', { limit: 50 });
     expect(out).toEqual([]);
+  });
+});
+
+describe('DatabaseService.clearSelfContainerNotificationRouting', () => {
+  it('clears routing fields only from self Docker-event monitor notifications', () => {
+    const ts = Date.now();
+    const byProjectWithoutContainer = db.addNotificationHistory(0, {
+      level: 'error',
+      category: 'monitor_alert',
+      actor_username: 'system:docker-events',
+      message: 'sencho project crash without container',
+      timestamp: ts,
+      stack_name: 'sencho',
+    });
+    const byContainer = db.addNotificationHistory(0, {
+      level: 'error',
+      category: 'monitor_alert',
+      actor_username: 'system:docker-events',
+      message: 'sencho container crash',
+      timestamp: ts + 1,
+      stack_name: 'other',
+      container_name: 'sencho',
+    });
+    const sameProjectOtherContainer = db.addNotificationHistory(0, {
+      level: 'error',
+      category: 'monitor_alert',
+      actor_username: 'system:docker-events',
+      message: 'sencho sidecar crash',
+      timestamp: ts + 2,
+      stack_name: 'sencho',
+      container_name: 'sidecar',
+    });
+    const otherActor = db.addNotificationHistory(0, {
+      level: 'error',
+      category: 'monitor_alert',
+      actor_username: 'system:monitor',
+      message: 'user alert',
+      timestamp: ts + 3,
+      stack_name: 'sencho',
+      container_name: 'sencho',
+    });
+    const otherStack = db.addNotificationHistory(0, {
+      level: 'error',
+      category: 'monitor_alert',
+      actor_username: 'system:docker-events',
+      message: 'web crash',
+      timestamp: ts + 4,
+      stack_name: 'web',
+      container_name: 'web-1',
+    });
+
+    const changed = db.clearSelfContainerNotificationRouting(0, {
+      containerName: 'sencho',
+      composeProjectName: 'sencho',
+    });
+
+    expect(changed).toBe(2);
+    const rows = new Map(db.getNotificationHistory(0, 50).map(row => [row.message, row] as const));
+    expect(rows.get(byProjectWithoutContainer.message)?.stack_name).toBeUndefined();
+    expect(rows.get(byProjectWithoutContainer.message)?.container_name).toBeUndefined();
+    expect(rows.get(byContainer.message)?.stack_name).toBeUndefined();
+    expect(rows.get(byContainer.message)?.container_name).toBeUndefined();
+    expect(rows.get(sameProjectOtherContainer.message)?.stack_name).toBe('sencho');
+    expect(rows.get(sameProjectOtherContainer.message)?.container_name).toBe('sidecar');
+    expect(rows.get(otherActor.message)?.stack_name).toBe('sencho');
+    expect(rows.get(otherActor.message)?.container_name).toBe('sencho');
+    expect(rows.get(otherStack.message)?.stack_name).toBe('web');
+    expect(rows.get(otherStack.message)?.container_name).toBe('web-1');
   });
 });
 

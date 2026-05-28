@@ -20,6 +20,7 @@ import request from 'supertest';
 import bcrypt from 'bcrypt';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
 // On Windows, fs.unlink on a directory returns EPERM instead of EISDIR so the
@@ -35,6 +36,56 @@ let adminCookie: string;
 let viewerCookie: string;
 let stacksDir: string;
 const STACK = 'teststack';
+
+type FileExplorerMetricEntry = {
+  op: string;
+  count: number;
+  successCount: number;
+  errorCount: number;
+};
+
+type TestWritableResponse = NodeJS.WritableStream & {
+  headersSent?: boolean;
+  req?: { emit: (event: 'close') => boolean };
+  destroy: (error?: Error) => void;
+};
+
+function asTestWritableResponse(destination: NodeJS.WritableStream): TestWritableResponse {
+  return destination as unknown as TestWritableResponse;
+}
+
+async function resetFileExplorerMetrics(): Promise<void> {
+  const { FileExplorerMetricsService } = await import('../services/FileExplorerMetricsService');
+  FileExplorerMetricsService.resetForTests();
+}
+
+async function getDownloadMetric(): Promise<FileExplorerMetricEntry | undefined> {
+  const metricsRes = await request(app)
+    .get('/api/file-explorer-metrics')
+    .set('Cookie', adminCookie);
+  return (metricsRes.body.entries as FileExplorerMetricEntry[]).find(
+    e => e.op === 'download',
+  );
+}
+
+async function expectDownloadMetricCounts(count: number, successCount: number, errorCount: number): Promise<void> {
+  let downloadEntry: FileExplorerMetricEntry | undefined;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    downloadEntry = await getDownloadMetric();
+    if (
+      downloadEntry?.count === count &&
+      downloadEntry.successCount === successCount &&
+      downloadEntry.errorCount === errorCount
+    ) {
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  expect(downloadEntry).toBeDefined();
+  expect(downloadEntry!.count).toBe(count);
+  expect(downloadEntry!.successCount).toBe(successCount);
+  expect(downloadEntry!.errorCount).toBe(errorCount);
+}
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -355,6 +406,167 @@ describe('GET /api/stacks/:stackName/files/content', () => {
 // ── GET /:stackName/files/download ────────────────────────────────────────────
 
 describe('GET /api/stacks/:stackName/files/download', () => {
+  class CloseBeforeEndStream extends Readable {
+    public bytesRead: number;
+
+    constructor(private readonly payload: Buffer) {
+      super();
+      this.bytesRead = payload.length;
+    }
+
+    _read(): void {}
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      destination.write(this.payload);
+      this.emit('close');
+      this.emit('end');
+      destination.end();
+      return destination;
+    }
+  }
+
+  class RequestCloseBeforeReadStream extends Readable {
+    public bytesRead = 0;
+    public destroyCalls = 0;
+    public emittedRequestClose = false;
+
+    constructor(private readonly payload: Buffer) {
+      super();
+    }
+
+    _read(): void {}
+
+    override destroy(error?: Error): this {
+      this.destroyCalls += 1;
+      return super.destroy(error);
+    }
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      const req = asTestWritableResponse(destination).req;
+      if (req) {
+        this.emittedRequestClose = true;
+        req.emit('close');
+      }
+      destination.write(this.payload);
+      this.bytesRead = this.payload.length;
+      this.emit('close');
+      this.emit('end');
+      destination.end();
+      return destination;
+    }
+  }
+
+  class ResponseCloseBeforeReadStream extends Readable {
+    public bytesRead = 0;
+    public destroyCalls = 0;
+    public emittedResponseClose = false;
+
+    _read(): void {}
+
+    override destroy(_error?: Error): this {
+      this.destroyCalls += 1;
+      return this;
+    }
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      this.emittedResponseClose = destination.emit('close');
+      asTestWritableResponse(destination).destroy(new Error('synthetic client abort'));
+      return destination;
+    }
+  }
+
+  class ResponseCloseThenFullReadStream extends Readable {
+    public bytesRead = 0;
+    public destroyCalls = 0;
+    public emittedResponseClose = false;
+
+    constructor(private readonly payload: Buffer) {
+      super();
+    }
+
+    _read(): void {}
+
+    override destroy(error?: Error): this {
+      this.destroyCalls += 1;
+      return super.destroy(error);
+    }
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      this.emittedResponseClose = destination.emit('close');
+      destination.write(this.payload);
+      this.bytesRead = this.payload.length;
+      this.emit('end');
+      this.emit('close');
+      destination.end();
+      return destination;
+    }
+  }
+
+  class ErrorThenCloseStream extends Readable {
+    _read(): void {}
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      this.emit('error', new Error('synthetic read failure'));
+      this.emit('close');
+      return destination;
+    }
+  }
+
+  class PrematureCloseOnlyStream extends Readable {
+    public bytesRead = 0;
+
+    _read(): void {}
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      this.emit('close');
+      asTestWritableResponse(destination).destroy(new Error('synthetic premature close'));
+      return destination;
+    }
+  }
+
+  class EarlyEndBeforeFullReadStream extends Readable {
+    public bytesRead = 1;
+
+    _read(): void {}
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      this.emit('end');
+      this.emit('close');
+      asTestWritableResponse(destination).destroy(new Error('synthetic early end'));
+      return destination;
+    }
+  }
+
+  class PartialWriteThenErrorStream extends Readable {
+    public headersWereSent = false;
+
+    constructor(private readonly payload: Buffer) {
+      super();
+    }
+
+    _read(): void {}
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      destination.write(this.payload);
+      this.headersWereSent = Boolean(asTestWritableResponse(destination).headersSent);
+      this.emit('error', new Error('synthetic partial read failure'));
+      this.emit('close');
+      return destination;
+    }
+  }
+
+  async function mockDownloadStream(stream: Readable, size: number): Promise<void> {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
+      streamStackFile: vi.fn().mockResolvedValue({
+        stream,
+        size,
+        filename: 'compose.yaml',
+        mime: 'text/yaml',
+      }),
+    } as unknown as InstanceType<typeof FileSystemService>);
+  }
+
   it('rejects unauthenticated requests with 401', async () => {
     const res = await request(app)
       .get(`/api/stacks/${STACK}/files/download`)
@@ -390,13 +602,10 @@ describe('GET /api/stacks/:stackName/files/download', () => {
     expect(res.text).toContain('services');
   });
 
-  it('records the download metric exactly once per successful response', async () => {
-    // The metric recorder is wired to both res.on("finish") and
-    // res.on("close"), guarded by a flag so a single completion does not
-    // double-fire. A regression that drops the flag would push successCount
-    // to 2 for one download.
-    const { FileExplorerMetricsService } = await import('../services/FileExplorerMetricsService');
-    FileExplorerMetricsService.resetForTests();
+  it('records the download metric exactly once per successful file read', async () => {
+    // The metric recorder is wired to the file stream lifecycle and guarded
+    // by a flag so a later stream event cannot record the same download again.
+    await resetFileExplorerMetrics();
 
     const res = await request(app)
       .get(`/api/stacks/${STACK}/files/download`)
@@ -404,19 +613,133 @@ describe('GET /api/stacks/:stackName/files/download', () => {
       .set('Cookie', adminCookie);
     expect(res.status).toBe(200);
 
-    // Allow the res.on('close') tail event to fire after the test's await.
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await expectDownloadMetricCounts(1, 1, 0);
+  });
 
-    const metricsRes = await request(app)
-      .get('/api/file-explorer-metrics')
+  it('records a fully read stream as success when close fires before end', async () => {
+    await resetFileExplorerMetrics();
+    const payload = Buffer.from('services: {}\n');
+    await mockDownloadStream(new CloseBeforeEndStream(payload), payload.length);
+
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
       .set('Cookie', adminCookie);
-    const downloadEntry = (metricsRes.body.entries as Array<{ op: string; count: number; successCount: number; errorCount: number }>).find(
-      e => e.op === 'download',
-    );
-    expect(downloadEntry).toBeDefined();
-    expect(downloadEntry!.count).toBe(1);
-    expect(downloadEntry!.successCount).toBe(1);
-    expect(downloadEntry!.errorCount).toBe(0);
+    expect(res.status).toBe(200);
+    expect(res.text).toBe(payload.toString('utf-8'));
+
+    await expectDownloadMetricCounts(1, 1, 0);
+  });
+
+  it('does not destroy the stream when request close fires before the file is read', async () => {
+    await resetFileExplorerMetrics();
+    const payload = Buffer.from('services: {}\n');
+    const stream = new RequestCloseBeforeReadStream(payload);
+    await mockDownloadStream(stream, payload.length);
+
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.text).toBe(payload.toString('utf-8'));
+    expect(stream.emittedRequestClose).toBe(true);
+    expect(stream.destroyCalls).toBe(0);
+
+    await expectDownloadMetricCounts(1, 1, 0);
+  });
+
+  it('records response abort cleanup exactly once as a failed download', async () => {
+    await resetFileExplorerMetrics();
+    const stream = new ResponseCloseBeforeReadStream();
+    await mockDownloadStream(stream, 16);
+
+    await expect(request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie)).rejects.toThrow();
+
+    expect(stream.emittedResponseClose).toBe(true);
+    await expectDownloadMetricCounts(1, 0, 1);
+    expect(stream.destroyCalls).toBe(1);
+  });
+
+  it('lets full source completion win when response close fires first', async () => {
+    await resetFileExplorerMetrics();
+    const payload = Buffer.from('services: {}\n');
+    const stream = new ResponseCloseThenFullReadStream(payload);
+    await mockDownloadStream(stream, payload.length);
+
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(stream.emittedResponseClose).toBe(true);
+    expect(stream.destroyCalls).toBe(0);
+    await expectDownloadMetricCounts(1, 1, 0);
+  });
+
+  it('records stream error followed by close exactly once as a failed download', async () => {
+    await resetFileExplorerMetrics();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await mockDownloadStream(new ErrorThenCloseStream(), 16);
+
+    try {
+      const res = await request(app)
+        .get(`/api/stacks/${STACK}/files/download`)
+        .query({ path: 'compose.yaml' })
+        .set('Cookie', adminCookie);
+      expect(res.status).toBe(500);
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    await expectDownloadMetricCounts(1, 0, 1);
+  });
+
+  it('records bare source close before full read exactly once as a failed download', async () => {
+    await resetFileExplorerMetrics();
+    await mockDownloadStream(new PrematureCloseOnlyStream(), 16);
+
+    await expect(request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie)).rejects.toThrow();
+
+    await expectDownloadMetricCounts(1, 0, 1);
+  });
+
+  it('records source end before full read exactly once as a failed download', async () => {
+    await resetFileExplorerMetrics();
+    await mockDownloadStream(new EarlyEndBeforeFullReadStream(), 16);
+
+    await expect(request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie)).rejects.toThrow();
+
+    await expectDownloadMetricCounts(1, 0, 1);
+  });
+
+  it('records a partial stream error after headers are sent exactly once', async () => {
+    await resetFileExplorerMetrics();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const stream = new PartialWriteThenErrorStream(Buffer.from('partial'));
+    await mockDownloadStream(stream, 16);
+
+    try {
+      await expect(request(app)
+        .get(`/api/stacks/${STACK}/files/download`)
+        .query({ path: 'compose.yaml' })
+        .set('Cookie', adminCookie)).rejects.toThrow();
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(stream.headersWereSent).toBe(true);
+
+    await expectDownloadMetricCounts(1, 0, 1);
   });
 });
 

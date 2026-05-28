@@ -2,6 +2,7 @@ import Docker from 'dockerode';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationCategory, NotificationService } from './NotificationService';
 import { DatabaseService } from './DatabaseService';
+import SelfIdentityService from './SelfIdentityService';
 import {
     classifyDie,
     classifyGapExit,
@@ -79,6 +80,7 @@ const SETTINGS_CACHE_MS = 500;
 interface InternalContainerState extends ContainerLifecycleState {
     name?: string;
     stackName?: string;
+    isSelf?: boolean;
     lastCrashAlertAt?: number;
     lastActivityAt: number;
     healthStatus?: 'healthy' | 'unhealthy' | 'starting';
@@ -341,9 +343,10 @@ export class DockerEventService {
             const name = inspect.Name?.replace(/^\//, '') ?? containerId.slice(0, 12);
             const stackName = inspect.Config?.Labels?.[COMPOSE_PROJECT_LABEL];
             const exitCode = inspect.State?.ExitCode ?? 0;
+            const isSelf = this.isSelfContainer(containerId, name);
 
             // Gap exits have no in-memory state, so there's no dedup to bump.
-            await this.emitClassification(classification, null, { name, exitCode, stackName });
+            await this.emitClassification(classification, null, { name, exitCode, stackName, isSelf });
         } catch (err) {
             if (isDebugEnabled()) {
                 console.log(`[DockerEvents:${this.nodeName}:diag] gap inspect failed:`,
@@ -379,6 +382,8 @@ export class DockerEventService {
         const action = event.Action ?? '';
         const id = event.Actor?.ID;
         if (!id) return;
+        const attrs = event.Actor?.Attributes ?? {};
+        const isSelf = this.isSelfContainer(id, attrs.name);
 
         // Normalize: `health_status: unhealthy` -> base action
         const baseAction = action.startsWith('health_status') ? 'health_status' : action;
@@ -387,12 +392,12 @@ export class DockerEventService {
         // refetch stack statuses immediately on a real container event,
         // without waiting for the next polling tick. This is fire-and-forget
         // and is NOT persisted to the alerts history.
-        if (STATE_INVALIDATE_ACTIONS.has(baseAction)) {
+        if (STATE_INVALIDATE_ACTIONS.has(baseAction) && !isSelf) {
             this.notifier.broadcastEvent({
                 type: 'state-invalidate',
                 scope: 'stack',
                 nodeId: this.nodeId,
-                stackName: event.Actor?.Attributes?.[COMPOSE_PROJECT_LABEL] ?? null,
+                stackName: attrs[COMPOSE_PROJECT_LABEL] ?? null,
                 containerId: id,
                 action: baseAction,
                 ts: Date.now(),
@@ -449,12 +454,12 @@ export class DockerEventService {
             state.healthStatus = 'unhealthy';
             if (!this.isCrashAlertsEnabled()) return;
             const name = state.name ?? id.slice(0, 12);
-            const stackName = state.stackName;
             void this.emitError(
                 'monitor_alert',
                 `Healthcheck failed: ${name} is unhealthy.`,
-                stackName,
+                state.stackName,
                 state.name,
+                state.isSelf === true,
             );
         } else {
             state.unhealthySince = undefined;
@@ -534,6 +539,7 @@ export class DockerEventService {
             name: state.name ?? id.slice(0, 12),
             exitCode: exitCode ?? 0,
             stackName: state.stackName,
+            isSelf: state.isSelf === true,
         });
     }
 
@@ -544,7 +550,7 @@ export class DockerEventService {
     private async emitClassification(
         classification: Classification,
         state: InternalContainerState | null,
-        info: { name: string; exitCode: number; stackName?: string },
+        info: { name: string; exitCode: number; stackName?: string; isSelf?: boolean },
     ): Promise<void> {
         // Respect the existing global crash-alerts toggle so users who have
         // disabled these notifications in Settings remain opted out.
@@ -564,7 +570,7 @@ export class DockerEventService {
         // rate-suppressed alerts don't silently lock out the next real crash.
         if (state) state.lastCrashAlertAt = Date.now();
 
-        await this.emitError('monitor_alert', message, info.stackName, info.name);
+        await this.emitError('monitor_alert', message, info.stackName, info.name, info.isSelf === true);
     }
 
     private isCrashAlertsEnabled(): boolean {
@@ -649,7 +655,17 @@ export class DockerEventService {
             const project = attrs[COMPOSE_PROJECT_LABEL];
             if (project && !state.stackName) state.stackName = project;
         }
+        if (this.isSelfContainer(id, state.name)) {
+            state.isSelf = true;
+        }
         return state;
+    }
+
+    private isSelfContainer(id?: string, name?: string): boolean {
+        const self = SelfIdentityService.getInstance();
+        if (id && self.isOwnContainer(id)) return true;
+        const normalizedName = name?.replace(/^\//, '');
+        return normalizedName ? self.isOwnContainer(normalizedName) : false;
     }
 
     private eventTimeMs(event: DockerEventPayload): number {
@@ -672,16 +688,26 @@ export class DockerEventService {
     // Notification wrappers (prefix with node name for multi-node clarity)
     // ========================================================================
 
-    private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('error', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
+    private buildAlertOptions(
+        stackName?: string,
+        containerName?: string,
+        systemOnly = false,
+    ): { stackName?: string; containerName?: string; actor: string } {
+        return systemOnly
+            ? { actor: 'system:docker-events' }
+            : { stackName, containerName, actor: 'system:docker-events' };
+    }
+
+    private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string, systemOnly = false): Promise<void> {
+        return this.notifier.dispatchAlert('error', category, this.prefix(message), this.buildAlertOptions(stackName, containerName, systemOnly));
     }
 
     private async emitWarning(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('warning', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
+        return this.notifier.dispatchAlert('warning', category, this.prefix(message), this.buildAlertOptions(stackName, containerName));
     }
 
     private async emitInfo(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('info', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
+        return this.notifier.dispatchAlert('info', category, this.prefix(message), this.buildAlertOptions(stackName, containerName));
     }
 
     private prefix(message: string): string {
