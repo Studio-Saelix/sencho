@@ -32,7 +32,7 @@ function formatElapsed(seconds: number): string {
 }
 
 export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackModalProps) {
-  const { panelState, logRows, onTerminalReady, onMessage, onPanelClose } = useDeployFeedback();
+  const { panelState, logRows, onTerminalReady, onTerminalError, onMessage, onPanelClose } = useDeployFeedback();
   const { isPaid } = useLicense();
 
   const [showRaw, setShowRaw] = useState(false);
@@ -46,7 +46,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
   const autoCloseHoveredRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const { isOpen, stackName, action, status, errorMessage } = panelState;
+  const { isOpen, stackName, action, status, errorMessage, progressUnavailable } = panelState;
 
   useEffect(() => {
     if (isOpen) {
@@ -190,6 +190,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
           <div className="flex items-center gap-2 shrink-0">
             <StatusIndicator
               status={status}
+              progressUnavailable={progressUnavailable}
               rowCount={logRows.length}
               errorMessage={errorMessage}
               countdown={countdown}
@@ -232,7 +233,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
           onScroll={handleScroll}
         >
           {logRows.length === 0 ? (
-            <EmptyBody status={status} />
+            <EmptyBody status={status} progressUnavailable={progressUnavailable} />
           ) : (
             <div className="py-1">
               {logRows.map((row) => (
@@ -248,7 +249,9 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
           style={{ height: showRaw ? '200px' : 0, overflow: 'hidden' }}
         >
           <TerminalComponent
+            deploySessionId={panelState.deploySessionId}
             onReady={onTerminalReady}
+            onError={onTerminalError}
             onMessage={onMessage}
           />
         </div>
@@ -293,12 +296,24 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
 
 interface StatusIndicatorProps {
   status: 'preparing' | 'streaming' | 'succeeded' | 'failed';
+  progressUnavailable: boolean;
   rowCount: number;
   errorMessage?: string;
   countdown: number;
 }
 
-function StatusIndicator({ status, rowCount, errorMessage, countdown }: StatusIndicatorProps) {
+function StatusIndicator({ status, progressUnavailable, rowCount, errorMessage, countdown }: StatusIndicatorProps) {
+  // While the deploy is still in flight (preparing/streaming) but the progress
+  // socket is gone, the deploy keeps running server-side with no live output.
+  if (progressUnavailable && (status === 'preparing' || status === 'streaming')) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+        <span>Live progress unavailable</span>
+      </div>
+    );
+  }
+
   if (status === 'preparing') {
     return (
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -343,9 +358,18 @@ function StatusIndicator({ status, rowCount, errorMessage, countdown }: StatusIn
 
 interface EmptyBodyProps {
   status: 'preparing' | 'streaming' | 'succeeded' | 'failed';
+  progressUnavailable: boolean;
 }
 
-function EmptyBody({ status }: EmptyBodyProps) {
+function EmptyBody({ status, progressUnavailable }: EmptyBodyProps) {
+  if (progressUnavailable && (status === 'preparing' || status === 'streaming')) {
+    return (
+      <div className="flex items-center justify-center py-10 text-sm text-muted-foreground text-center px-4">
+        Live progress is unavailable for this deploy. It continues running in the background.
+      </div>
+    );
+  }
+
   if (status === 'preparing') {
     return (
       <div className="flex flex-col items-center justify-center gap-2 py-10 text-muted-foreground">

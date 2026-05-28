@@ -131,9 +131,6 @@ export class ComposeService {
           clearTimeout(forceKillTimeout);
           forceKillTimeout = null;
         }
-        if (ws) {
-          ws.removeListener('close', onClientDisconnect);
-        }
       };
 
       const finish = (complete: () => void) => {
@@ -161,20 +158,16 @@ export class ComposeService {
         }, 5000);
       };
 
-      const onClientDisconnect = () => {
-        const message = 'Command cancelled because the client disconnected';
-        terminateChild(new Error(message));
-      };
-
+      // The progress socket is output-only: a deploy/update/down is owned by the
+      // HTTP request that started it, so closing or losing the socket (the user
+      // minimizes the panel, navigates away, or the connection blips) must not
+      // terminate the compose process. Termination is driven solely by the
+      // command timeout below.
       timeout = setTimeout(() => {
         const message = `Command timed out after ${Math.round(timeoutMs / 1000)}s`;
         sendOutput(`${message}\n`);
         terminateChild(new Error(message));
       }, timeoutMs);
-
-      if (ws) {
-        ws.once('close', onClientDisconnect);
-      }
 
       const onData = (data: Buffer) => {
         const text = data.toString();

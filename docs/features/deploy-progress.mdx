@@ -20,7 +20,7 @@ The modal opens automatically when you trigger an action. It floats centered in 
 ### What the modal shows
 
 - **Header**: the action verb (Deploying, Updating, Installing, Restarting, Stopping), the stack name in monospace truncated at 200 px, and an elapsed-time chip that appears once the connection moves past the initial **Connecting...** state.
-- **Status indicator** in the upper right: one of `Connecting...` while the stream attaches, a live `<n> lines` counter while output is flowing, `Succeeded · closes in <n>s` after a clean finish, or the failure message itself when the run errors out.
+- **Status indicator** in the upper right: one of `Connecting...` while the stream attaches, a live `<n> lines` counter while output is flowing, `Succeeded · closes in <n>s` after a clean finish, or the failure message itself when the run errors out. If the live stream cannot attach or drops, the indicator switches to `Live progress unavailable` and the operation keeps running in the background.
 - **Structured log body**: one row per output line. Each row carries a timestamp, a fixed-width stage badge, and the log message. Error rows have a destructive left border and tinted background so they stand out without scanning.
 - **Footer**: a `Raw output` / `Hide raw` toggle on the left, with **Minimize** and **Close** buttons on the right.
 
@@ -76,6 +76,8 @@ Click **Minimize** to collapse the modal to a small status pill anchored at the 
 
 The pill is mounted as a portal, so it persists across navigation: leave the App Store mid-install and the pill follows you to the dashboard, the editor, or any other view.
 
+Minimizing, closing, or navigating away never cancels the operation. The progress view only displays output; the deploy, update, or stop runs to completion on its own. If you dismiss the view while live output is flowing, the run still finishes in the background, and its success or failure lands in your notifications.
+
 <Frame>
   <img src="/images/deploy-progress/pill.png" alt="Minimized deploy progress pill anchored at the bottom center of a stack editor view, showing the brand-colored pulsing dot and the text 'Updating docs-demo'" />
 </Frame>
@@ -95,8 +97,11 @@ The HTTP API also exposes a `down` action (compose-level teardown) that streams 
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="The modal shows 'Connecting...' and no rows appear">
-    The modal opens a WebSocket to the same host and port as the rest of the API and registers itself as the recipient of compose output. If the connection cannot upgrade, the status stays at **Connecting...** indefinitely. Check that an upstream proxy or firewall is not blocking WebSocket upgrades. For nginx, ensure `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";` are configured. See the [configuration guide](/getting-started/configuration#reverse-proxy-setup) for a full nginx example.
+  <Accordion title="The modal shows 'Live progress unavailable' or stays on 'Connecting...'">
+    The modal opens a WebSocket to the same host and port as the rest of the API to receive compose output. If that connection cannot upgrade, the modal switches to **Live progress unavailable** and the operation continues without live output, finishing in the background with its result in your notifications. To restore live streaming, check that an upstream proxy or firewall is not blocking WebSocket upgrades. For nginx, ensure `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";` are configured. See the [configuration guide](/getting-started/configuration#reverse-proxy-setup) for a full nginx example.
+  </Accordion>
+  <Accordion title="The modal said 'Live progress unavailable' but my stack still deployed">
+    That is expected. The deploy, update, or stop is driven by the action you triggered, not by the progress stream. The stream is a live view layered on top, so if it cannot connect or drops partway, the operation still runs to completion. Reopen the stack or check your notifications to confirm the final result.
   </Accordion>
   <Accordion title="Restart or Stop opens the modal but shows 0 lines">
     Restart and Stop hit the Docker Engine directly to act on the existing containers; they do not invoke `docker compose`, so there is no compose stream to render. The modal still opens to confirm the action and to surface a failure if one occurs. For a fully populated structured log, use **Deploy** or **Update** instead.

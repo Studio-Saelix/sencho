@@ -19,9 +19,9 @@ function notif(overrides: Partial<NotificationItem> = {}): NotificationItem {
   };
 }
 
-const IDLE_PANEL: DeployPanelState = { isOpen: false, stackName: '', action: 'deploy', status: 'preparing', sessionId: 0 };
-const STREAMING_PANEL: DeployPanelState = { isOpen: true, stackName: 'api', action: 'deploy', status: 'streaming', sessionId: 1 };
-const SUCCEEDED_PANEL: DeployPanelState = { isOpen: true, stackName: 'api', action: 'deploy', status: 'succeeded', sessionId: 1 };
+const IDLE_PANEL: DeployPanelState = { isOpen: false, stackName: '', action: 'deploy', status: 'preparing', progressUnavailable: false, deploySessionId: '', sessionId: 0 };
+const STREAMING_PANEL: DeployPanelState = { isOpen: true, stackName: 'api', action: 'deploy', status: 'streaming', progressUnavailable: false, deploySessionId: '', sessionId: 1 };
+const SUCCEEDED_PANEL: DeployPanelState = { isOpen: true, stackName: 'api', action: 'deploy', status: 'succeeded', progressUnavailable: false, deploySessionId: '', sessionId: 1 };
 
 function inputs(overrides: Partial<Parameters<typeof deriveSummary>[0]> = {}) {
   return {
