@@ -161,11 +161,15 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       params: { stackName: string; action: ActionVerb },
       run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>
     ): Promise<RunResult> => {
-      // Unique per-deploy id correlating the progress socket with the deploy POST.
-      // Built without crypto.randomUUID so it works outside secure contexts
-      // (LAN HTTP access). When the feature is disabled the id is never registered
-      // on the backend, so output simply streams nowhere.
-      const deploySessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      // Unique, unguessable per-deploy id correlating the progress socket with
+      // the deploy POST so concurrent deploys cannot read each other's output.
+      // Uses crypto.getRandomValues (the one Crypto member available in insecure
+      // contexts, so it works over LAN HTTP, unlike crypto.randomUUID). When the
+      // feature is disabled the id is never registered on the backend, so output
+      // simply streams nowhere.
+      const idBytes = new Uint8Array(16);
+      crypto.getRandomValues(idBytes);
+      const deploySessionId = Array.from(idBytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
       if (!isEnabled) {
         return run(Promise.resolve(), deploySessionId);
