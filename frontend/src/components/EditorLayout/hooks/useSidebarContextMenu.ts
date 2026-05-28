@@ -21,6 +21,7 @@ interface UseSidebarContextMenuOptions {
   activeNode: Node | null | undefined;
   isPaid: boolean;
   isAdmiral: boolean;
+  isAdmin: boolean;
   can: (action: PermissionAction, resourceType?: string, resourceId?: string) => boolean;
 }
 
@@ -32,6 +33,7 @@ export function useSidebarContextMenu({
   activeNode,
   isPaid,
   isAdmiral,
+  isAdmin,
   can,
 }: UseSidebarContextMenuOptions) {
   const buildMenuCtx = useCallback((file: string): StackMenuCtx => {
@@ -42,6 +44,7 @@ export function useSidebarContextMenu({
       isBusy: stackListState.isStackBusy(file),
       isPaid,
       isAdmiral,
+      isAdmin,
       canDelete: can('stack:delete', 'stack', sName),
       canEditLabels: can('stack:edit', 'stack', sName),
       // POST /api/labels (the inline "New label" entry) is guarded by the
@@ -121,9 +124,13 @@ export function useSidebarContextMenu({
         navState.setActiveView('scheduled-ops');
       },
     };
+    // Handlers from useStackActions, useOverlayState, useViewNavigationState are
+    // useCallback-stabilized at their owner hooks, so listing the menu surface
+    // values (status maps, role/tier flags, pin state) is sufficient. Exhaustive
+    // deps would force a rebuild on every parent render and defeat the memo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    stackListState.stackStatuses, stackListState.stackPorts, isPaid, isAdmiral,
+    stackListState.stackStatuses, stackListState.stackPorts, isPaid, isAdmiral, isAdmin,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
     stackListState.pin, stackListState.unpin,
   ]);

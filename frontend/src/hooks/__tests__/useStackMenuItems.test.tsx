@@ -11,6 +11,7 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     isBusy: false,
     isPaid: true,
     isAdmiral: false,
+    isAdmin: true,
     canDelete: true,
     canEditLabels: true,
     canCreateLabels: true,
@@ -92,6 +93,12 @@ describe('useStackMenuItems', () => {
     }
     const lifecycle = paid.result.current.find(g => g.id === 'lifecycle')!;
     expect(lifecycle.items.some(i => i.id === 'schedule')).toBe(true);
+  });
+
+  it('hides Schedule task when paid but not admin', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: true, isAdmin: false })));
+    const lifecycle = result.current.find(g => g.id === 'lifecycle');
+    expect(lifecycle?.items.some(i => i.id === 'schedule')).toBeFalsy();
   });
 
   it('keeps label assignment available when !isPaid', () => {
