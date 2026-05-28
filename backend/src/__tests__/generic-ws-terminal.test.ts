@@ -65,4 +65,20 @@ describe('generic ws terminal registry', () => {
     a.emit('close');
     expect(getTerminalWs()).toBeUndefined();
   });
+
+  it('does not expose a keyed socket as the id-less fallback', () => {
+    // A headerless operation (bulk / rollback / legacy) resolves via getTerminalWs()
+    // with no id; it must never reach a keyed deploy modal's socket.
+    const a = connect(wss, 'sess-keyed');
+    expect(getTerminalWs('sess-keyed')).toBe(a);
+    expect(getTerminalWs()).toBeUndefined();
+  });
+
+  it('drops the id-less fallback when that socket later adopts a session id', () => {
+    const a = connect(wss);
+    expect(getTerminalWs()).toBe(a);
+    a.emit('message', Buffer.from(JSON.stringify({ action: 'connectTerminal', sessionId: 'sess-late' })));
+    expect(getTerminalWs()).toBeUndefined();
+    expect(getTerminalWs('sess-late')).toBe(a);
+  });
 });

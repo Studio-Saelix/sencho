@@ -102,16 +102,23 @@ export function attachGenericConnectionHandlers(wss: WebSocketServer): void {
         if (!data.action) return;
 
         if (data.action === 'connectTerminal') {
-          lastTerminalWs = ws;
           const sessionId = typeof data.sessionId === 'string' && data.sessionId ? data.sessionId : undefined;
           // Rebind this socket to the new id, dropping any prior mapping it held.
           if (registeredSessionId && registeredSessionId !== sessionId && terminalRegistry.get(registeredSessionId) === ws) {
             terminalRegistry.delete(registeredSessionId);
           }
           registeredSessionId = sessionId;
-          if (sessionId) terminalRegistry.set(sessionId, ws);
+          if (sessionId) {
+            terminalRegistry.set(sessionId, ws);
+            // A keyed socket must never be the id-less fallback, or a headerless
+            // operation (bulk / rollback / legacy) would stream into this user's
+            // keyed deploy modal.
+            if (lastTerminalWs === ws) lastTerminalWs = undefined;
+          } else {
+            lastTerminalWs = ws;
+          }
           if (isDebugEnabled()) {
-            console.debug('[Deploy:diag] progress stream registered', { sessionId: sessionId ?? '(none)' });
+            console.debug('[Deploy:diag] progress stream registered', { session: sessionId ? `${sessionId.slice(0, 8)}…` : '(none)' });
           }
         } else if (data.action === 'streamStats') {
           const requestedId = data.nodeId ? parseInt(data.nodeId, 10) : NodeRegistry.getInstance().getDefaultNodeId();

@@ -203,7 +203,13 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         };
         // settle only runs asynchronously (timer fire or onTerminalReady/Error),
         // by which point `timer` is assigned, so the forward reference is safe.
-        const timer = setTimeout(settle, PROGRESS_CONNECT_TIMEOUT_MS);
+        const timer = setTimeout(() => {
+          // The stream neither connected nor errored within the window. Mark live
+          // output unavailable (so the modal stops showing "Connecting...") and
+          // release the deploy so a silent stall never blocks it.
+          setPanelState((prev) => (prev.isOpen ? { ...prev, progressUnavailable: true } : prev));
+          settle();
+        }, PROGRESS_CONNECT_TIMEOUT_MS);
         settleStartRef.current = settle;
       });
 

@@ -93,12 +93,14 @@ describe('DeployFeedbackContext', () => {
       });
 
       expect(runCount).toBe(0);
-      // Neither ready nor error fires; the 8s fallback must still release the deploy.
+      // Neither ready nor error fires; the 8s fallback must still release the deploy
+      // and flag live output unavailable so the modal stops showing "Connecting...".
       await act(async () => {
         await vi.advanceTimersByTimeAsync(8000);
         await outer;
       });
       expect(runCount).toBe(1);
+      expect(result.current.panelState.progressUnavailable).toBe(true);
     } finally {
       vi.useRealTimers();
     }
