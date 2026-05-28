@@ -88,4 +88,35 @@ describe('SidebarSearch', () => {
 
     expect(input.value).toBe('');
   });
+
+  it('cancels the pending debounce emit when the parent resets the value mid-window', () => {
+    const onValueChange = vi.fn();
+    // Start at a non-empty initial so the later reset to '' is a real prop
+    // transition; rerendering with the same string would no-op in React.
+    const { getByPlaceholderText, rerender } = renderInsideCommand({ value: 'initial', onValueChange });
+    const input = getByPlaceholderText('Search stacks...') as HTMLInputElement;
+    expect(input.value).toBe('initial');
+
+    act(() => {
+      fireEvent.input(input, { target: { value: 'web' } });
+    });
+    act(() => {
+      vi.advanceTimersByTime(50);
+    });
+    expect(onValueChange).not.toHaveBeenCalled();
+
+    rerender(
+      <Command shouldFilter={false}>
+        <SidebarSearch value="" onValueChange={onValueChange} />
+      </Command>,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+
+    // The stale timer must not fire and re-emit 'web', undoing the reset.
+    expect(onValueChange).not.toHaveBeenCalled();
+    expect(input.value).toBe('');
+  });
 });

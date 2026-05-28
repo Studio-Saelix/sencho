@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CommandInput } from '@/components/ui/command';
 
 interface SidebarSearchProps {
@@ -13,17 +13,32 @@ interface SidebarSearchProps {
 const DEBOUNCE_MS = 120;
 
 export function SidebarSearch({ value, onValueChange }: SidebarSearchProps) {
-  const [local, setLocal] = useState(value);
+  const [local, setLocalState] = useState(value);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastEmittedRef = useRef(value);
+  // localRef mirrors `local` for the value-sync effect. Reading state via the
+  // ref keeps the effect deps on [value] without dropping a real read of
+  // `local`, which would either lie to React or trigger spurious re-runs.
+  const localRef = useRef(value);
+
+  const setLocal = useCallback((next: string) => {
+    localRef.current = next;
+    setLocalState(next);
+  }, []);
 
   useEffect(() => {
-    // Parent value can move for two reasons:
-    //   1. Echo of our own debounced emit (lastEmittedRef matches): skip.
-    //   2. External reset (e.g., clear-on-filter-change): adopt it.
-    if (value === lastEmittedRef.current) return;
+    // The parent value moved. Skip only when it already matches what's shown
+    // locally: that is the post-emit steady state (the debounce echo settled
+    // back through the parent). Any other movement is an external change
+    // (clear-on-filter-change, navigation restore, programmatic set, or a
+    // coincidence) and must win: cancel any in-flight emit so it cannot undo
+    // the reset, then adopt the value.
+    if (value === localRef.current) return;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     setLocal(value);
-  }, [value]);
+  }, [value, setLocal]);
 
   useEffect(() => () => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -33,7 +48,7 @@ export function SidebarSearch({ value, onValueChange }: SidebarSearchProps) {
     setLocal(next);
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
-      lastEmittedRef.current = next;
+      timerRef.current = null;
       onValueChange(next);
     }, DEBOUNCE_MS);
   };
