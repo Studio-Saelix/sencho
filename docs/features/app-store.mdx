@@ -11,7 +11,7 @@ The **App Store** is a browseable catalogue of Docker Compose templates. Each te
 
 ## Browsing templates
 
-Templates load from a remote registry. The default registry is **LinuxServer.io**; you can point Sencho at any [Portainer v2 compatible JSON catalogue](#custom-template-registry) instead.
+Templates load from a remote registry. The default registry is **LinuxServer.io**; you can point Sencho at any [Portainer v2 compatible JSON catalogue](#custom-template-registry) instead. The registry is configured per node, so the catalogue reflects whichever node is active and reloads automatically when you switch nodes.
 
 ### Search and counts
 
@@ -143,7 +143,7 @@ The default registry display at the top of the page is informational only; you c
 
 <AccordionGroup>
   <Accordion title="No tiles appear">
-    Sencho fetches templates from the configured registry on demand. If the grid stays empty and the loading spinner is gone, the registry returned an empty list or the request failed before parsing. Open **Settings › Advanced › App Store** and confirm the **Registry URL** is reachable from the node (try the URL in a browser tab); a custom catalogue served from a private host will not load if the Sencho container cannot resolve or reach it. Click **Save & refresh** to invalidate the cache and try again. If you switched to a custom registry by mistake, click **Reset to default**.
+    Sencho fetches templates from the configured registry on demand. If the grid stays empty and the loading spinner is gone, the registry returned an empty list or the request failed before parsing. Open **Settings › Advanced › App Store** and confirm the **Registry URL** is reachable from the node (try the URL in a browser tab); a custom catalogue served from a private host will not load if the Sencho container cannot resolve or reach it. Click **Save & refresh** to invalidate the cache and try again. If you switched to a custom registry by mistake, click **Reset to default**. Sencho also bounds the registry response size: a catalogue that returns an excessively large payload is rejected with a size-limit error instead of being loaded, so a misconfigured or runaway endpoint cannot stall the node.
   </Accordion>
   <Accordion title="The port-conflict warning will not clear">
     The conflict indicator is computed against a snapshot of the node's bound ports taken when you opened the deployment sheet. If you freed the port from another stack while the sheet was open, the warning does not refresh on its own. Close the sheet and reopen it to recompute, or pick a different host port. The message `in use by an external app` means a process outside Sencho holds the binding (often the host's reverse proxy or a system service); changing the host port is usually faster than tracking down the offender.
