@@ -480,6 +480,59 @@ describe('countingBodyIterator (clone size cap)', () => {
     });
 });
 
+describe('GitSourceService.fetchFromGit (size limits)', () => {
+    const svc = () => GitSourceService.getInstance();
+    const fetchParams = {
+        repoUrl: 'https://github.com/example/repo.git',
+        branch: 'main',
+        composePath: 'compose.yaml',
+    };
+
+    it('rejects a compose file larger than the per-file read cap', async () => {
+        // The download cap bounds the compressed pack, not a single decompressed
+        // file, so readRepoFile guards the in-memory read by file size.
+        mockSuccessfulClone();
+        const { promises: fsp } = await import('fs');
+        const lstatSpy = vi.spyOn(fsp, 'lstat').mockResolvedValue({
+            isSymbolicLink: () => false,
+            size: 11 * 1024 * 1024,
+        } as Awaited<ReturnType<typeof fsp.lstat>>);
+
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({
+            code: 'GIT_ERROR',
+            message: expect.stringMatching(/too large/i),
+        });
+
+        lstatSpy.mockRestore();
+    });
+
+    it('surfaces a clone-size error when the download exceeds the cap', async () => {
+        // Drive the real size-counting transport the service injected into
+        // git.clone, with a tiny cap, and confirm fetchFromGit reports it as a
+        // clone-size error rather than a generic transport failure.
+        process.env.GITSOURCE_MAX_CLONE_BYTES = '8';
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response(new Uint8Array(64), { status: 200 }),
+        );
+        mockGitClone.mockImplementation(async (args: {
+            http: { request: (r: { url: string; method: string; headers: Record<string, string> }) => Promise<{ body: AsyncIterableIterator<Uint8Array> }> };
+        }) => {
+            const resp = await args.http.request({ url: 'https://example.test/info/refs', method: 'GET', headers: {} });
+            for await (const chunk of resp.body) { void chunk; }
+        });
+
+        try {
+            await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringMatching(/exceeds the maximum clone size/i),
+            });
+        } finally {
+            delete process.env.GITSOURCE_MAX_CLONE_BYTES;
+            fetchSpy.mockRestore();
+        }
+    });
+});
+
 describe('GitSourceService pending lifecycle', () => {
     it('dismissPending clears pending columns', async () => {
         mockSuccessfulClone();

@@ -266,6 +266,12 @@ const WEBHOOK_DEBOUNCE_MS = 10_000;
 // raise it via GITSOURCE_MAX_CLONE_BYTES.
 const DEFAULT_MAX_CLONE_BYTES = 100 * 1024 * 1024; // 100 MB
 
+// Per-file ceiling for the compose/env file read into memory after the clone.
+// These files are KB-scale in practice; the clone byte cap bounds the
+// compressed download, not the decompressed working tree, so this guards the
+// in-memory read against a single huge (or highly compressible) file.
+const MAX_REPO_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
 function maxCloneBytes(): number {
     const raw = process.env.GITSOURCE_MAX_CLONE_BYTES;
     const n = raw ? Number(raw) : NaN;
@@ -412,6 +418,12 @@ async function readRepoFile(rootDir: string, relPath: string, label: string): Pr
     }
     if (stat.isSymbolicLink()) {
         throw new GitSourceError('FILE_NOT_FOUND', `${label} cannot be a symbolic link.`);
+    }
+    // Bound the in-memory read. The clone byte cap only limits the compressed
+    // download; a single decompressed file can still be large, so reject an
+    // oversized compose/env file before reading it into a string.
+    if (stat.size > MAX_REPO_FILE_BYTES) {
+        throw new GitSourceError('GIT_ERROR', `${label} is too large (${formatBytes(stat.size)}); the maximum is ${formatBytes(MAX_REPO_FILE_BYTES)}.`);
     }
 
     let real;
