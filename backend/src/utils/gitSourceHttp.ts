@@ -27,6 +27,31 @@ export function gitSourceStatus(code: GitSourceErrorCode): number {
   }
 }
 
+/**
+ * Map a webhook-pull outcome to an HTTP status so a Git provider (and any
+ * monitoring on top of it) can tell delivery succeeded, was a no-op, or
+ * failed by status code alone, not just by parsing the JSON body. The
+ * missing-source case is handled by the route as a 404 before this runs.
+ *
+ *   success  -> 200  applied / pending update ready
+ *   skipped  -> 202  accepted but debounced (no work done this call)
+ *   error    -> 422  request understood, the pull/apply/deploy failed
+ */
+export function webhookPullStatus(status: 'success' | 'skipped' | 'error'): number {
+  switch (status) {
+    case 'success': return 200;
+    case 'skipped': return 202;
+    case 'error': return 422;
+    default: {
+      // Exhaustiveness guard: if a new status is added to the union without a
+      // case here, this becomes a compile error instead of returning undefined.
+      const _exhaustive: never = status;
+      void _exhaustive;
+      return 500;
+    }
+  }
+}
+
 export function sendGitSourceError(res: Response, err: unknown): void {
   if (err instanceof GitSourceError) {
     res.status(gitSourceStatus(err.code)).json({ error: err.message, code: err.code });
