@@ -7,11 +7,10 @@ import {
     useState,
     type ReactNode,
 } from 'react';
-import { Search } from 'lucide-react';
+import { Search, AlertCircle } from 'lucide-react';
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import {
     CommandDialog,
-    CommandEmpty,
     CommandGroup,
     CommandInput,
     CommandItem,
@@ -103,7 +102,7 @@ export function GlobalCommandPalette({ navItems, onNavigate, onSelectStack }: Gl
     const { nodes, activeNode, setActiveNode } = useNodes();
     const [query, setQuery] = useState('');
 
-    const { hits: remoteHits, loading: stacksLoading } = useCrossNodeStackSearch({
+    const { hits: remoteHits, failedNodes, loading: stacksLoading } = useCrossNodeStackSearch({
         query,
         enabled: open,
     });
@@ -131,14 +130,29 @@ export function GlobalCommandPalette({ navItems, onNavigate, onSelectStack }: Gl
         onSelectStack(node, hit.file);
     }, [handleOpenChange, nodes, onSelectStack]);
 
-    const visibleNodes = useMemo(() => {
-        const q = query.trim().toLowerCase();
-        if (!q) return nodes;
-        return nodes.filter(n => n.name.toLowerCase().includes(q));
-    }, [nodes, query]);
+    // cmdk's built-in filter is disabled (shouldFilter={false}) so the palette
+    // owns matching for every group. This keeps stack order deterministic (node
+    // order, then the 50-row cap) instead of being re-sorted by cmdk's scorer,
+    // and makes matching a plain case-insensitive substring across all groups.
+    const q = query.trim().toLowerCase();
+
+    const visiblePages = useMemo(
+        () => (q ? navItems.filter(i => i.label.toLowerCase().includes(q) || i.value.toLowerCase().includes(q)) : navItems),
+        [navItems, q],
+    );
+
+    const visibleNodes = useMemo(
+        () => (q ? nodes.filter(n => n.name.toLowerCase().includes(q)) : nodes),
+        [nodes, q],
+    );
+
+    const hasResults = visiblePages.length > 0 || visibleNodes.length > 0 || stackHits.length > 0;
+    // Suppress the empty state when a node failed (unless still loading): the
+    // "N nodes unreachable" line below already explains why results are missing.
+    const showEmptyState = !hasResults && (stacksLoading || failedNodes.length === 0);
 
     return (
-        <CommandDialog open={open} onOpenChange={handleOpenChange}>
+        <CommandDialog open={open} onOpenChange={handleOpenChange} shouldFilter={false}>
             <VisuallyHidden>
                 <DialogTitle>Search</DialogTitle>
                 <DialogDescription>Jump to a page, node, or stack</DialogDescription>
@@ -149,24 +163,28 @@ export function GlobalCommandPalette({ navItems, onNavigate, onSelectStack }: Gl
                 onValueChange={setQuery}
             />
             <CommandList>
-                <CommandEmpty>
-                    <span aria-live="polite">
-                        {stacksLoading ? 'Searching...' : 'No results.'}
-                    </span>
-                </CommandEmpty>
+                {showEmptyState && (
+                    <div className="py-6 text-center text-sm">
+                        <span aria-live="polite">
+                            {stacksLoading ? 'Searching...' : 'No results.'}
+                        </span>
+                    </div>
+                )}
 
-                <CommandGroup heading="Pages">
-                    {navItems.map(({ value, label, icon: Icon }) => (
-                        <CommandItem
-                            key={`nav-${value}`}
-                            value={`nav ${label} ${value}`}
-                            onSelect={() => handleSelectNav(value)}
-                        >
-                            <Icon className="h-4 w-4" strokeWidth={1.5} />
-                            <span>{label}</span>
-                        </CommandItem>
-                    ))}
-                </CommandGroup>
+                {visiblePages.length > 0 && (
+                    <CommandGroup heading="Pages">
+                        {visiblePages.map(({ value, label, icon: Icon }) => (
+                            <CommandItem
+                                key={`nav-${value}`}
+                                value={`nav ${label} ${value}`}
+                                onSelect={() => handleSelectNav(value)}
+                            >
+                                <Icon className="h-4 w-4" strokeWidth={1.5} />
+                                <span>{label}</span>
+                            </CommandItem>
+                        ))}
+                    </CommandGroup>
+                )}
 
                 {visibleNodes.length > 0 && (
                     <CommandGroup heading="Nodes">
@@ -220,6 +238,18 @@ export function GlobalCommandPalette({ navItems, onNavigate, onSelectStack }: Gl
                             </div>
                         )}
                     </CommandGroup>
+                )}
+
+                {failedNodes.length > 0 && (
+                    <div
+                        className="flex items-center gap-1.5 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.06em] text-warning"
+                        title={failedNodes.map(f => `${f.nodeName}: ${f.reason}`).join('\n')}
+                    >
+                        <AlertCircle className="h-3 w-3 shrink-0" strokeWidth={1.5} />
+                        <span aria-live="polite">
+                            {failedNodes.length} {failedNodes.length === 1 ? 'node' : 'nodes'} unreachable, stack results may be incomplete
+                        </span>
+                    </div>
                 )}
             </CommandList>
         </CommandDialog>
