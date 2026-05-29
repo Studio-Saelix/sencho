@@ -536,11 +536,18 @@ export class FileSystemService {
     // file in place would re-deploy a hybrid of old and new configuration.
     // Scope is strictly PROTECTED_STACK_FILES (the same set Sencho backs up);
     // user data and bind-mounted content in the stack directory are untouched.
+    // Canonical js/path-injection barrier: path.resolve(SAFE_ROOT, untrusted)
+    // followed by a single startsWith check, both inline with the sink. stackDir
+    // is already validated by resolveStackDir; this re-establishes containment at
+    // the delete sink itself so static analysis sees the barrier.
+    const baseResolved = path.resolve(this.baseDir);
     let removedOrphans = 0;
     for (const file of PROTECTED_STACK_FILES) {
       if (backedUp.has(file)) continue;
-      const target = path.join(stackDir, file);
-      this.assertWithinBase(target);
+      const target = path.resolve(baseResolved, path.join(stackDir, file));
+      if (!target.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
       try {
         await fsPromises.unlink(target);
         removedOrphans++;
