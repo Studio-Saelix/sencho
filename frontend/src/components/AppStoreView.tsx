@@ -60,13 +60,17 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
     const [sheetTab, setSheetTab] = useState<'essentials' | 'advanced'>('essentials');
 
     // The template registry is node-scoped, so the catalogue (and Trivy
-    // availability) must reload when the active node changes. The cancelled
-    // flag drops a slow response from a previous node so it cannot overwrite
-    // the current node's catalogue after a fast switch.
+    // availability) must reload when the active node changes. Both are reset at
+    // the start of every run so a failed fetch shows the new node's empty state
+    // rather than leaving the previous node's catalogue or scan toggle on
+    // screen. The cancelled flag drops a slow response from a previous node so
+    // it cannot overwrite the current node's catalogue after a fast switch.
     useEffect(() => {
         let cancelled = false;
         (async () => {
             setLoading(true);
+            setTemplates([]);
+            setTrivyAvailable(false);
             try {
                 const res = await apiFetch('/templates');
                 if (!res.ok) throw new Error('Failed to fetch templates');

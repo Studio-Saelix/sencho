@@ -105,8 +105,10 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
     console.log(`[Templates] Deploy started: ${stackName}`);
     if (debug) console.debug('[Templates:debug] Deploy payload', {
       stackName,
-      templateTitle: template.title,
-      source: template.source,
+      // title/source are registry/client-supplied; bound the title so a long
+      // value cannot bloat the log line. No env values or YAML are logged.
+      templateTitle: String(template.title ?? '').slice(0, 80),
+      source: String(template.source ?? '').slice(0, 40),
       portCount: Array.isArray(template.ports) ? template.ports.length : 0,
       volumeCount: Array.isArray(template.volumes) ? template.volumes.length : 0,
       envVarCount: envVars ? Object.keys(envVars).length : 0,

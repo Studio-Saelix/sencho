@@ -242,6 +242,12 @@ export class TemplateService {
 
     public async getTemplates(): Promise<Template[]> {
         try {
+            // getOrFetch serves the last-known-good catalogue when the fetcher
+            // rejects and a (now-expired) cache entry exists, so the mapped
+            // errors below surface only on a cold or freshly cleared cache.
+            // That is deliberate: a transient registry failure keeps the
+            // catalogue usable. The response size cap still protects memory in
+            // every case, since axios aborts before buffering the full body.
             return await CacheService.getInstance().getOrFetch<Template[]>(
                 TemplateService.CACHE_KEY,
                 this.CACHE_DURATION_MS,
