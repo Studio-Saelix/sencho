@@ -1,5 +1,5 @@
 import { useRef, useCallback, useEffect } from 'react';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, withDeploySession } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
@@ -61,7 +61,7 @@ interface UseStackActionsOptions {
   isPaid: boolean;
   runWithLog: (
     params: { stackName: string; action: ActionVerb },
-    run: (deployStarted: Promise<void>) => Promise<RunResult>,
+    run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>,
   ) => Promise<RunResult>;
   diffPreviewEnabled: boolean;
 }
@@ -511,6 +511,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackFile: string,
     ignorePolicy: boolean,
     started?: Promise<void>,
+    deploySessionId?: string,
   ): Promise<RunResult> => {
     const previousStatus = stackListState.stackStatuses[stackFile];
     stackListState.setOptimisticStatus(stackFile, 'running');
@@ -519,7 +520,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         ? `/stacks/${stackName}/deploy?ignorePolicy=true`
         : `/stacks/${stackName}/deploy`;
       if (started) await started;
-      const response = await apiFetch(path, { method: 'POST' });
+      const response = await apiFetch(path, withDeploySession(deploySessionId ?? '', { method: 'POST' }));
       if (!response.ok) {
         const rawBody = await response.text();
         if (response.status === 409) {
@@ -598,8 +599,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     stackListState.setStackAction(stackFile, 'deploy');
     try {
-      await runWithLog({ stackName, action: 'deploy' }, started =>
-        runDeploy(stackName, stackFile, false, started),
+      await runWithLog({ stackName, action: 'deploy' }, (started, ds) =>
+        runDeploy(stackName, stackFile, false, started, ds),
       );
     } finally {
       stackListState.clearStackAction(stackFile);
@@ -624,8 +625,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     overlayState.setPolicyBypassing(true);
     stackListState.setStackAction(existingFile, 'deploy');
     try {
-      await runWithLog({ stackName, action: 'deploy' }, started =>
-        runDeploy(stackName, existingFile, true, started),
+      await runWithLog({ stackName, action: 'deploy' }, (started, ds) =>
+        runDeploy(stackName, existingFile, true, started, ds),
       );
     } finally {
       overlayState.setPolicyBypassing(false);
@@ -719,10 +720,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackListState.setStackAction(stackFile, action);
     stackListState.setOptimisticStatus(stackFile, optimisticStatus);
     try {
-      await runWithLog({ stackName, action }, async (started) => {
+      await runWithLog({ stackName, action }, async (started, ds) => {
         await started;
         try {
-          const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST' });
+          const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, withDeploySession(ds, { method: 'POST' }));
           if (!response.ok) {
             const errText = await response.text();
             if (response.status === 409) {

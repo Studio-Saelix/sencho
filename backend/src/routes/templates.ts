@@ -14,7 +14,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
-import { getTerminalWs } from '../websocket/generic';
+import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
 export const templatesRouter = Router();
 
@@ -125,7 +125,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         return;
       }
       const atomic = effectiveTier(req) === 'paid';
-      await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
+      await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
       invalidateNodeCaches(req.nodeId);
       console.log(`[Templates] Deploy completed: ${stackName}`);
       res.json({ success: true, message: 'Template deployed successfully' });
