@@ -6,7 +6,7 @@ description: "Block deploys that violate a scan policy before docker compose up 
 Deploy enforcement is the pre-flight half of Sencho's vulnerability workflow. When a [scan policy](/features/vulnerability-scanning#scan-policies) with **Block on deploy** enabled matches a stack, Sencho scans every image referenced by the stack's compose file before starting any container. If any image meets or exceeds the policy's severity threshold, the deploy is rejected and the stack never starts. Detection always continues post-deploy and on a schedule, so images that develop new vulnerabilities after the initial deploy still surface through alerts.
 
 <Note>
-  Deploy enforcement requires a **Skipper** or **Admiral** license. Policies on Community are evaluation-only and cannot block deploys.
+  Deploy enforcement and scan policies require a **Skipper** or **Admiral** license.
 </Note>
 
 ## Configuring a block policy
@@ -31,7 +31,7 @@ The editor exposes the five fields that govern enforcement:
 | **Block on deploy** | When on, the pre-flight gate hard-rejects deploys that violate the threshold. When off, the policy still evaluates post-deploy and scheduled scans and dispatches warning alerts on violations. |
 | **Enabled** | Disabled policies are skipped during evaluation. |
 
-The editor sets the pattern, severity, and toggles. Per-node scoping is set via the [Security API](/api-reference/security#scan-policies) (`node_id`) or replicated from a control node via [Fleet Federation](/features/fleet-federation). The most specific enabled policy that matches the stack on the target node is the one that runs.
+The editor sets the pattern, severity, and toggles. Per-node scoping is set via the [Security API](/api-reference/security#scan-policies) (`node_id`) or replicated from a control node via [Fleet Federation](/features/fleet-federation). When more than one enabled policy matches a stack on the target node, a node-scoped policy wins over a fleet-wide one, a policy with a stack pattern wins over a catch-all, and the lowest-numbered policy breaks any remaining tie.
 
 ## How enforcement runs
 
@@ -39,14 +39,18 @@ Sencho applies the pre-flight gate on every code path that can start a compose s
 
 - **Deploy** from the stack page.
 - **Update** (re-pull plus restart).
-- **Deploy from a Git Source** when the initial deploy is requested at create time.
+- **Rollback** to a saved backup, which restores the previous files and re-runs the gate before redeploying.
+- **Deploy from a Git Source**, both the initial deploy at create time and a manual apply-with-deploy of a pulled commit.
 - **Template deploy** from the App Store.
 - **Bulk deploy** from the [Stack Labels](/features/stack-labels) page.
-- **Auto-update scheduler** (the gate is hard-enforced here; see [Auto-update scheduler interaction](#auto-update-scheduler-interaction)).
+- **Fleet deploy** to a node from the fleet view.
+- **Webhook-triggered deploys**.
+- **Mesh cascade redeploys** when a dependency change ripples to a stack.
+- **Scheduled auto-start and auto-update** (see [Auto-update scheduler interaction](#auto-update-scheduler-interaction)).
 
 On every one of these actions, Sencho:
 
-1. Looks up the most specific enabled policy that matches the stack on the target node.
+1. Picks the matching enabled policy by precedence (node-scoped over fleet-wide, stack-pattern over catch-all, then lowest id) on the target node.
 2. If the policy has **Block on deploy** off, lets the deploy proceed and evaluates the post-deploy scan against the policy for alerting.
 3. If **Block on deploy** is on, enumerates the stack's images with `docker compose config --images`, runs a pre-flight Trivy scan against each one, and compares the highest severity in each scan against the policy threshold.
 4. If every image is below the threshold, the deploy proceeds. A post-deploy drift scan still runs in the background.
@@ -88,7 +92,7 @@ API callers can pass `?ignorePolicy=true` on any deploy endpoint to request a by
 
 ### Auto-update scheduler interaction
 
-The auto-update scheduler runs deploys without an interactive user, so the bypass flag does not apply. When a scheduled auto-update is rejected by a policy, Sencho dispatches a `scan_finding` warning alert with the stack name, the policy name, and the offending images, then skips that stack and continues the rest of the schedule. The audit-log entry records the actor as `auto-update:<username>` for runs invoked by a logged-in user, or `auto-update:scheduler` for unattended runs. Re-enabling that stack in auto-update means either bringing the image down to compliant severity or relaxing the policy.
+The auto-update scheduler runs deploys without an interactive user, so the bypass flag does not apply. When a scheduled auto-update is rejected by a policy, Sencho dispatches a `scan_finding` warning alert with the stack name, the policy name, and the offending images, then skips that stack and continues the rest of the schedule. Re-enabling that stack in auto-update means either bringing the image down to compliant severity or relaxing the policy. A scheduled auto-start that is rejected is reported as a failed run with the same warning alert.
 
 ## Drift detection keeps running
 
@@ -122,7 +126,7 @@ Neither drift mechanism blocks, stops, or quarantines a running stack automatica
     Enforcement fails closed when the compose file cannot be parsed. The synthetic `(compose parse error)` violation prevents a malformed file from slipping past the gate. Open the stack's [file explorer](/features/stack-file-explorer) and fix the YAML; the deploy succeeds once the file parses cleanly and every image clears the threshold.
   </Accordion>
   <Accordion title="The auto-update scheduler skipped a stack I expected to roll forward">
-    A scheduled auto-update that pulls an image violating a matching policy is skipped, not blocked with a 409. The skip is announced through a `scan_finding` warning alert and recorded in the [Audit Log](/features/audit-log) with the actor `auto-update:<username>` (the user who launched the run) or `auto-update:scheduler` for unattended runs. To unblock the schedule, either upgrade the image to a compliant version or relax the policy threshold for that stack.
+    A scheduled auto-update that pulls an image violating a matching policy is skipped, not blocked with a 409. The skip is announced through a `scan_finding` warning alert naming the policy and the offending images. To unblock the schedule, either upgrade the image to a compliant version or relax the policy threshold for that stack.
   </Accordion>
   <Accordion title="I want a block policy that only applies to a subset of my fleet">
     Combine two mechanisms: scope the policy to a specific node (policies scoped to a node win over global ones) and tighten the stack-pattern glob. For example, a policy with `stack_pattern=prod-*` scoped to your production node fires only on `prod-*` stacks deployed to that node.

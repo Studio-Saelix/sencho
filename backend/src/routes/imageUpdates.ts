@@ -288,7 +288,8 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           }),
         );
         if (!autoUpdateGate.ok) {
-          const blockedMsg = `Policy "${autoUpdateGate.policy?.name}" blocked auto-update: ${autoUpdateGate.violations.length} image(s) exceed ${autoUpdateGate.policy?.max_severity}`;
+          const blockedImages = autoUpdateGate.violations.map((v) => v.imageRef).join(', ');
+          const blockedMsg = `Policy "${autoUpdateGate.policy?.name}" blocked auto-update: ${autoUpdateGate.violations.length} image(s) exceed ${autoUpdateGate.policy?.max_severity}${blockedImages ? ` (${blockedImages})` : ''}`;
           NotificationService.getInstance().dispatchAlert('warning', 'scan_finding', blockedMsg, { stackName, actor: 'system:image-update' });
           results.push(`Stack "${stackName}": ${blockedMsg}`);
           continue;
