@@ -266,6 +266,40 @@ test.describe('Deploy feedback modal', () => {
     await expect(modal).toBeVisible({ timeout: 5_000 });
   });
 
+  test('deploy continues to success after minimizing mid-deploy', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await enableDeployFeedback(page);
+    await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
+    await syncDeployFeedbackState(page);
+
+    await page.getByTestId('stack-deploy-button').click();
+
+    const modal = page.locator('[data-testid="deploy-feedback-modal"]');
+    await expect(modal).toBeVisible({ timeout: 10_000 });
+
+    // Wait until output is actually streaming so the minimize happens mid-deploy,
+    // not after a too-fast completion (which would pass vacuously).
+    await Promise.race([
+      page.getByText(/Connecting\.\.\./i).waitFor({ state: 'visible', timeout: 10_000 }),
+      page.getByText(/\d+ lines?/i).waitFor({ state: 'visible', timeout: 10_000 }),
+    ]);
+
+    // Minimize while the deploy is in flight. The progress socket closes when
+    // the dialog unmounts; the deploy is owned by its HTTP request and must
+    // keep running. Before the output-only fix this aborted the deploy with a
+    // "client disconnected" failure.
+    await page.getByRole('button', { name: 'Minimize' }).first().click();
+    const pill = page.locator('[data-testid="deploy-feedback-pill"]');
+    await expect(pill).toBeVisible({ timeout: 5_000 });
+
+    // Re-expand and confirm the deploy reached success, never a disconnect failure.
+    await pill.click();
+    await expect(modal).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('Succeeded')).toBeVisible({ timeout: 90_000 });
+    await expect(page.getByText(/client disconnected/i)).toHaveCount(0);
+  });
+
   test.afterEach(async ({ page }) => {
     await deleteStackViaApi(page, HAPPY_STACK);
     await deleteStackViaApi(page, FAIL_STACK);

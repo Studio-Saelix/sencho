@@ -6,7 +6,14 @@ import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
 import type { OverlayState } from './useOverlayState';
 
-vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
+vi.mock('@/lib/api', () => ({
+  apiFetch: vi.fn(),
+  DEPLOY_SESSION_HEADER: 'x-deploy-session-id',
+  withDeploySession: (deploySessionId: string, options: RequestInit = {}) => ({
+    ...options,
+    headers: { ...(options.headers as Record<string, string> | undefined), 'x-deploy-session-id': deploySessionId },
+  }),
+}));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
@@ -72,7 +79,7 @@ function makeOverlay(): OverlayState {
 }
 
 const runWithLog: Parameters<typeof useStackActions>[0]['runWithLog'] = async (_p, run) =>
-  run(Promise.resolve());
+  run(Promise.resolve(), 'test-session');
 
 function setup(over: { editorState?: Partial<EditorState> } = {}) {
   const editorState = makeEditorState(over.editorState);

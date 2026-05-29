@@ -6,6 +6,27 @@ export interface ApiFetchOptions extends RequestInit {
   localOnly?: boolean;
 }
 
+/** Header carrying a deploy's progress-stream correlation id. Mirrors the
+ *  `sessionId` the frontend sends in the `connectTerminal` WebSocket message so
+ *  the backend streams compose output to the matching socket.
+ *  Must stay in sync with `DEPLOY_SESSION_HEADER` in `backend/src/websocket/generic.ts`. */
+export const DEPLOY_SESSION_HEADER = 'x-deploy-session-id';
+
+/** Tag a deploy/update/down POST with its progress-stream session id, preserving
+ *  any caller-supplied options and headers. */
+export function withDeploySession(
+  deploySessionId: string,
+  options: ApiFetchOptions = {},
+): ApiFetchOptions {
+  return {
+    ...options,
+    headers: {
+      ...(options.headers as Record<string, string> | undefined),
+      [DEPLOY_SESSION_HEADER]: deploySessionId,
+    },
+  };
+}
+
 export async function apiFetch(
   endpoint: string,
   options: ApiFetchOptions = {}

@@ -76,6 +76,21 @@ describe('remote proxy mount order', () => {
     expect(res.status).not.toBe(502);
   });
 
+  it('short-circuits /api/stacks/statuses (the sidebar status poll) for remote nodes', async () => {
+    // The sidebar polls /api/stacks/statuses every few seconds; if a future
+    // refactor accidentally mounted a local fast-path before the proxy, every
+    // operator viewing a remote node would silently see the central instance's
+    // own statuses. Asserts the same 502 short-circuit as /api/stacks.
+    const res = await request(app)
+      .get('/api/stacks/statuses')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(502);
+    expect(res.headers['x-sencho-proxy']).toBeUndefined();
+    expect(res.body?.error).toMatch(/unreachable/i);
+  });
+
   it('handles proxy-exempt paths locally even when x-node-id targets a remote', async () => {
     // /api/nodes/:id is in PROXY_EXEMPT_PREFIXES. The proxy must never catch
     // gateway-level concerns; otherwise a user whose default node is remote

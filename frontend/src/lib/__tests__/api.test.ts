@@ -8,7 +8,7 @@
  * when the caller supplied any `headers` value.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { apiFetch } from '../api';
+import { apiFetch, DEPLOY_SESSION_HEADER, withDeploySession } from '../api';
 
 const originalFetch = globalThis.fetch;
 
@@ -72,5 +72,30 @@ describe('apiFetch header merge', () => {
     expect(headers['If-Match']).toBe('"1"');
     expect(headers['Content-Type']).toBe('application/json');
     localStorage.removeItem('sencho-active-node');
+  });
+});
+
+describe('withDeploySession', () => {
+  it('uses the canonical header name (kept in sync with the backend)', () => {
+    expect(DEPLOY_SESSION_HEADER).toBe('x-deploy-session-id');
+  });
+
+  it('tags a bare POST with the session header', () => {
+    const opts = withDeploySession('sess-123', { method: 'POST' });
+    expect(opts.method).toBe('POST');
+    expect((opts.headers as Record<string, string>)[DEPLOY_SESSION_HEADER]).toBe('sess-123');
+  });
+
+  it('preserves caller body and headers without clobbering them', () => {
+    const opts = withDeploySession('sess-abc', {
+      method: 'POST',
+      body: JSON.stringify({ a: 1 }),
+      headers: { 'X-Custom': 'keep' },
+    });
+    const headers = opts.headers as Record<string, string>;
+    expect(opts.method).toBe('POST');
+    expect(opts.body).toBe(JSON.stringify({ a: 1 }));
+    expect(headers['X-Custom']).toBe('keep');
+    expect(headers[DEPLOY_SESSION_HEADER]).toBe('sess-abc');
   });
 });

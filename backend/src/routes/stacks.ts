@@ -25,7 +25,7 @@ import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
-import { getTerminalWs } from '../websocket/generic';
+import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -311,7 +311,7 @@ async function runStackBulkOp(
         };
       }
       const atomic = effectiveTier(req) === 'paid';
-      await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
+      await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
       DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
       NotificationService.getInstance().broadcastEvent({
         type: 'state-invalidate',
@@ -892,7 +892,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
+    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
@@ -938,7 +938,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   let ok = false;
   try {
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs());
+    await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
     ok = true;
@@ -1152,7 +1152,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
+    await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     invalidateNodeCaches(req.nodeId);
     NotificationService.getInstance().broadcastEvent({
@@ -1209,7 +1209,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     dlog(`[Stacks] Rollback initiated: ${sanitizeForLog(stackName)}`);
     await fsSvc.restoreStackFiles(stackName);
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
-    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), false);
+    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), false);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
     res.json({ message: 'Stack rolled back successfully.' });
@@ -1459,33 +1459,54 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     const encodedFilename = encodeURIComponent(result.filename);
     const safeFilename = result.filename.replace(/[\\"]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
-    // Track download completion off the file stream's lifecycle, not the
-    // response's. Node's `res.on('finish')` and `res.on('close')` fire in
-    // platform-dependent order under the in-process supertest transport
-    // (close occasionally precedes finish, which made the success-vs-error
-    // recorder racy in CI). The file stream's `end`, `error`, and `close`
-    // events ARE deterministic: a clean read emits `end` then `close`; a
-    // destroy emits `close` without `end`; a disk error emits `error` then
-    // `close`. Hanging the recorder off these signals removes the race.
+    // Track normal download completion off the file stream's lifecycle, not
+    // the request lifecycle. Under the in-process supertest transport, request
+    // close events can race ahead of normal stream completion; response close
+    // is handled below only as delayed abort cleanup.
+    // End/error are the durable completion signals, and close can still count
+    // as success only when the stream reports it read the full file.
     let downloadRecorded = false;
+    const streamWithBytes = result.stream as typeof result.stream & { bytesRead?: number };
+    const hasReadFullFile = (): boolean => (
+      result.size === 0 ||
+      (typeof streamWithBytes.bytesRead === 'number' && streamWithBytes.bytesRead >= result.size)
+    );
+    let abortCleanupHandle: NodeJS.Immediate | null = null;
+    const clearAbortCleanup = (): void => {
+      if (!abortCleanupHandle) return;
+      clearImmediate(abortCleanupHandle);
+      abortCleanupHandle = null;
+    };
     const recordDownloadOnce = (ok: boolean): void => {
       if (downloadRecorded) return;
       downloadRecorded = true;
+      clearAbortCleanup();
       recordFileOp(req.nodeId, 'download', startedAt, ok);
     };
     result.stream.on('error', (streamErr) => {
       console.error('[files] stream error:', sanitizeForLog(getErrorMessage(streamErr, 'unknown')));
-      if (!res.headersSent) res.status(500).end();
-      else res.destroy();
+      if (!res.headersSent) {
+        res.removeHeader('Content-Length');
+        res.status(500).end();
+      } else {
+        res.destroy();
+      }
       recordDownloadOnce(false);
     });
-    result.stream.on('end', () => recordDownloadOnce(true));
-    result.stream.on('close', () => {
-      if (res.writableEnded) recordDownloadOnce(true);
-      else recordDownloadOnce(false);
-    });
-    req.on('close', () => {
-      if (!res.writableEnded) result.stream.destroy();
+    result.stream.on('end', () => recordDownloadOnce(hasReadFullFile()));
+    result.stream.on('close', () => recordDownloadOnce(hasReadFullFile()));
+    res.on('close', () => {
+      if (downloadRecorded || hasReadFullFile()) return;
+      // At this point, response close is treated as an abort signal. It can
+      // beat the source stream's final events in the in-process test transport.
+      // Give a same-turn clean source completion a chance to win before cleanup.
+      abortCleanupHandle = setImmediate(() => {
+        abortCleanupHandle = null;
+        if (downloadRecorded || hasReadFullFile()) return;
+        recordDownloadOnce(false);
+        result.stream.destroy();
+      });
+      abortCleanupHandle.unref?.();
     });
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
     result.stream.pipe(res);
