@@ -259,11 +259,11 @@ const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const TEMP_DIR_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const WEBHOOK_DEBOUNCE_MS = 10_000;
 
-// Hard ceiling on how many bytes a single clone may download. A shallow
-// single-branch clone of a compose repo is tiny; this guards against a
-// repository with a huge tree filling os.tmpdir() before the 30s timeout
-// fires. Generous default; operators with a legitimately large monorepo can
-// raise it via GITSOURCE_MAX_CLONE_BYTES.
+// Ceiling on how many bytes a single clone may download (the compressed pack
+// from the Git host) before it is aborted. This bounds network transfer and
+// abuse, not the decompressed on-disk checkout; it is paired with
+// MAX_REPO_FILE_BYTES and the 30s timeout. Generous default; operators with a
+// legitimately large monorepo can raise it via GITSOURCE_MAX_CLONE_BYTES.
 const DEFAULT_MAX_CLONE_BYTES = 100 * 1024 * 1024; // 100 MB
 
 // Per-file ceiling for the compose/env file read into memory after the clone.
