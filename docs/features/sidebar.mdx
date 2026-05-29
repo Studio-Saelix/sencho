@@ -85,7 +85,7 @@ Right-click any stack (or open the kebab that appears on hover) for its context 
 - **Destructive**: **Delete**.
 
 <Note>
-  **Auto-Heal** requires a **Skipper** or **Admiral** license. **Schedule task** requires a **Skipper** or **Admiral** license and an **admin** role.
+  **Auto-Heal** requires a **Skipper** or **Admiral** license; configuring policies (add, toggle, delete) also requires an **admin** role. **Schedule task** requires a **Skipper** or **Admiral** license and an **admin** role.
 </Note>
 
 <Frame>
@@ -145,5 +145,8 @@ The footer surfaces the most recent stack lifecycle event on the node. Each tick
   </Accordion>
   <Accordion title="Schedule task is missing from the right-click menu">
     Scheduling requires a **Skipper** or **Admiral** license and an **admin** role. Ask an admin on this node to schedule the task for you, or sign in with an admin account.
+  </Accordion>
+  <Accordion title="Auto-Heal panel opens but Add Policy and the toggles are missing">
+    Reading existing Auto-Heal policies only needs a **Skipper** or **Admiral** license, so the panel still opens for non-admin operators on paid tiers. Adding, enabling, disabling, or deleting policies also requires the **admin** role. Sign in with an admin account, or ask an admin on this node to make the change.
   </Accordion>
 </AccordionGroup>

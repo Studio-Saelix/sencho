@@ -482,6 +482,7 @@ function AlertsTab({ stackName }: { stackName: string }) {
 }
 
 function AutoHealTab({ stackName, open }: { stackName: string; open: boolean }) {
+    const { isAdmin } = useAuth();
     const [policies, setPolicies] = useState<AutoHealPolicy[]>([]);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -617,12 +618,14 @@ function AutoHealTab({ stackName, open }: { stackName: string; open: boolean }) 
                                 onToggle={handleToggle}
                                 deleting={deleting}
                                 saving={saving}
+                                isAdmin={isAdmin}
                             />
                         ))}
                     </div>
                 )}
             </SheetSection>
 
+            {isAdmin && (
             <SheetSection title="Add new policy">
                 <div className="space-y-3">
                     <div className="space-y-2">
@@ -700,6 +703,7 @@ function AutoHealTab({ stackName, open }: { stackName: string; open: boolean }) 
                     </Button>
                 </div>
             </SheetSection>
+            )}
         </>
     );
 }
@@ -710,9 +714,10 @@ interface PolicyRowProps {
     onToggle: (id: number, enabled: boolean) => void;
     deleting: boolean;
     saving: boolean;
+    isAdmin: boolean;
 }
 
-function PolicyRow({ policy, onDelete, onToggle, deleting, saving }: PolicyRowProps) {
+function PolicyRow({ policy, onDelete, onToggle, deleting, saving, isAdmin }: PolicyRowProps) {
     const [historyOpen, setHistoryOpen] = useState(false);
     const [history, setHistory] = useState<AutoHealHistoryEntry[]>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
@@ -760,12 +765,14 @@ function PolicyRow({ policy, onDelete, onToggle, deleting, saving }: PolicyRowPr
                     )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                    <TogglePill
-                        checked={policy.enabled === 1}
-                        onChange={(checked) => policy.id != null && onToggle(policy.id, checked)}
-                        disabled={saving}
-                        aria-label={`Toggle policy for ${policy.service_name ?? 'all services'}`}
-                    />
+                    {isAdmin && (
+                        <TogglePill
+                            checked={policy.enabled === 1}
+                            onChange={(checked) => policy.id != null && onToggle(policy.id, checked)}
+                            disabled={saving}
+                            aria-label={`Toggle policy for ${policy.service_name ?? 'all services'}`}
+                        />
+                    )}
                     <Button
                         variant="ghost"
                         size="icon"
@@ -782,16 +789,18 @@ function PolicyRow({ policy, onDelete, onToggle, deleting, saving }: PolicyRowPr
                             <ChevronDown className="h-4 w-4" strokeWidth={1.5} />
                         )}
                     </Button>
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
-                        onClick={() => policy.id != null && onDelete(policy.id)}
-                        disabled={deleting}
-                        aria-label="Delete policy"
-                    >
-                        <Trash2 className="h-4 w-4" strokeWidth={1.5} />
-                    </Button>
+                    {isAdmin && (
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                            onClick={() => policy.id != null && onDelete(policy.id)}
+                            disabled={deleting}
+                            aria-label="Delete policy"
+                        >
+                            <Trash2 className="h-4 w-4" strokeWidth={1.5} />
+                        </Button>
+                    )}
                 </div>
             </div>
 
