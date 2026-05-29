@@ -197,6 +197,10 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
     The clone did not finish in time. Fetches run with a 30-second timeout to keep a slow or unreachable host from hanging the stack panel. Check that the Sencho host can reach the repository host (proxies, firewalls, DNS) and try again. If the repository is genuinely large, pin a smaller compose subpath or mirror it somewhere closer to the Sencho host.
   </Accordion>
 
+  <Accordion title="Repository too large">
+    A clone is capped on how much it downloads (100 MB by default), and individual compose/env files are capped on read. A compose repository is normally tiny, so hitting either usually means the tracked branch carries large binaries. Point the source at a repository or branch that holds just your compose and `.env` files. If a large repository is unavoidable, an operator can raise the download ceiling with the `GITSOURCE_MAX_CLONE_BYTES` environment variable.
+  </Accordion>
+
   <Accordion title="Pending commit has changed since this pull was fetched">
     You opened a diff dialog, then a webhook fired and replaced the pending commit before you clicked **Apply**. Close the dialog and reopen the panel to load the latest pending commit; the **Review** button will fetch the newer one.
   </Accordion>
@@ -224,3 +228,4 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 - **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
 - **No submodules.** Submodule contents are not fetched; paths inside a submodule directory will be missing at deploy time. A warning is shown on create when `.gitmodules` is present.
 - **Branch-tracking only.** Sources follow the head of a branch. Specific commit SHAs and tags are not pinnable.
+- **Clone size cap.** A clone is bounded on how much it downloads (and each compose/env file is capped on read), so very large repositories are rejected. Operators can adjust the download ceiling with `GITSOURCE_MAX_CLONE_BYTES`.

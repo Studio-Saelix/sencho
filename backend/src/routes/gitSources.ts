@@ -7,7 +7,7 @@ import { checkPermission, requirePermission } from '../middleware/permissions';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { triggerPostDeployScan } from '../helpers/policyGate';
 import { isValidGitSourcePath, isValidStackName } from '../utils/validation';
-import { sendGitSourceError } from '../utils/gitSourceHttp';
+import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
@@ -260,9 +260,16 @@ stackGitSourceRouter.post('/:stackName/git-source/webhook-pull', async (req: Req
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
     const source = GitSourceService.getInstance().get(stackName);
-    if (source?.auto_apply_on_webhook && source.auto_deploy_on_apply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+    if (!source) {
+      res.status(404).json({ error: 'No Git source configured for this stack', status: 'error' });
+      return;
+    }
+    if (source.auto_apply_on_webhook && source.auto_deploy_on_apply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
     const result = await GitSourceService.getInstance().handleWebhookPull(stackName);
-    res.json(result);
+    // Map the outcome to a real HTTP status so a Git provider sees a 4xx on
+    // failure instead of a 200 with an error body (which it would read as
+    // "delivered fine, stop retrying").
+    res.status(webhookPullStatus(result.status)).json(result);
   } catch (error) {
     sendGitSourceError(res, error);
   }

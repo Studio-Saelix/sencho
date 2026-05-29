@@ -74,7 +74,51 @@ function responseBodyIterator(body: ReadableStream<Uint8Array> | null): AsyncIte
     return iterate();
 }
 
-function createAbortableGitHttp(signal: AbortSignal): HttpClient {
+/**
+ * Mutable counter shared across every request in one clone so the size cap
+ * is cumulative, and so the caller can tell a size abort from a timeout via
+ * `exceeded` rather than the thrown error (which isomorphic-git may wrap).
+ */
+interface CloneSizeState {
+    exceeded: boolean;
+    received: number;
+}
+
+/**
+ * Wrap a response-body iterator with a cumulative byte counter shared
+ * across every request in one clone. When the running total crosses
+ * `maxBytes`, flip `state.exceeded`, abort the transport (closing the
+ * socket so the download stops), and throw to unwind the stream. The
+ * caller distinguishes a size abort from a timeout/transport abort via
+ * `state.exceeded` rather than the thrown error, which isomorphic-git may
+ * wrap.
+ */
+export function countingBodyIterator(
+    src: AsyncIterableIterator<Uint8Array>,
+    controller: AbortController,
+    maxBytes: number,
+    state: CloneSizeState,
+): AsyncIterableIterator<Uint8Array> {
+    async function* iterate(): AsyncIterableIterator<Uint8Array> {
+        for await (const chunk of src) {
+            state.received += chunk.byteLength;
+            if (state.received > maxBytes) {
+                state.exceeded = true;
+                controller.abort();
+                throw new Error('Clone exceeded the maximum allowed size');
+            }
+            yield chunk;
+        }
+    }
+    return iterate();
+}
+
+function createAbortableGitHttp(
+    controller: AbortController,
+    maxBytes: number,
+    state: CloneSizeState,
+): HttpClient {
+    const signal = controller.signal;
     return {
         async request(request: GitHttpRequest): Promise<GitHttpResponse> {
             if (signal.aborted) {
@@ -94,7 +138,7 @@ function createAbortableGitHttp(signal: AbortSignal): HttpClient {
                 statusCode: response.status,
                 statusMessage: response.statusText,
                 headers: Object.fromEntries(response.headers.entries()),
-                body: responseBodyIterator(response.body),
+                body: countingBodyIterator(responseBodyIterator(response.body), controller, maxBytes, state),
             };
         },
     };
@@ -215,6 +259,31 @@ const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const TEMP_DIR_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const WEBHOOK_DEBOUNCE_MS = 10_000;
 
+// Ceiling on how many bytes a single clone may download (the compressed pack
+// from the Git host) before it is aborted. This bounds network transfer and
+// abuse, not the decompressed on-disk checkout; it is paired with
+// MAX_REPO_FILE_BYTES and the 30s timeout. Generous default; operators with a
+// legitimately large monorepo can raise it via GITSOURCE_MAX_CLONE_BYTES.
+const DEFAULT_MAX_CLONE_BYTES = 100 * 1024 * 1024; // 100 MB
+
+// Per-file ceiling for the compose/env file read into memory after the clone.
+// These files are KB-scale in practice; the clone byte cap bounds the
+// compressed download, not the decompressed working tree, so this guards the
+// in-memory read against a single huge (or highly compressible) file.
+const MAX_REPO_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+function maxCloneBytes(): number {
+    const raw = process.env.GITSOURCE_MAX_CLONE_BYTES;
+    const n = raw ? Number(raw) : NaN;
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_CLONE_BYTES;
+}
+
+function formatBytes(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} B`;
+}
+
 // ─── Credential scrubbing ────────────────────────────────────────────────────
 
 /**
@@ -242,6 +311,59 @@ export function repoHost(url: string): string {
         return new URL(url).host || 'unknown';
     } catch {
         return 'unknown';
+    }
+}
+
+/**
+ * Node's global `fetch()` reports every transport-level failure as a bare
+ * `TypeError('fetch failed')` and hides the real reason on `error.cause`
+ * (occasionally nested one level deeper through undici). Walk the cause
+ * chain for the first Node error code so DNS / connection / TLS failures
+ * can be translated into an actionable message instead of "fetch failed",
+ * which reads like an internal Sencho bug.
+ */
+function findCauseCode(err: unknown): { code?: string } {
+    let cur: unknown = err;
+    for (let depth = 0; depth < 5 && cur; depth++) {
+        const code = (cur as { code?: unknown }).code;
+        if (typeof code === 'string' && code) {
+            return { code };
+        }
+        cur = (cur as { cause?: unknown }).cause;
+    }
+    return {};
+}
+
+/**
+ * Translate a Node transport error code into a GitSourceError with a
+ * host-qualified, user-actionable message. Returns null for codes we do
+ * not specifically recognise so the caller can fall through to its generic
+ * handling. `host` is the bare hostname from `repoHost()` (never carries a
+ * credential), so it is safe to surface.
+ */
+function transportError(code: string, host: string): GitSourceError | null {
+    const dest = host && host !== 'unknown' ? ` ${host}` : ' the repository host';
+    switch (code) {
+        case 'ENOTFOUND':
+        case 'EAI_AGAIN':
+            return new GitSourceError('NETWORK_TIMEOUT', `Could not resolve${dest}. Check the repository URL and your network or DNS.`);
+        case 'ECONNREFUSED':
+            return new GitSourceError('NETWORK_TIMEOUT', `Connection refused by${dest}.`);
+        case 'ECONNRESET':
+            return new GitSourceError('NETWORK_TIMEOUT', `Connection to${dest} was reset. Retry; if it persists, check the host.`);
+        case 'ETIMEDOUT':
+        case 'UND_ERR_CONNECT_TIMEOUT':
+        case 'UND_ERR_HEADERS_TIMEOUT':
+        case 'UND_ERR_BODY_TIMEOUT':
+            return new GitSourceError('NETWORK_TIMEOUT', `Timed out reaching${dest}.`);
+        case 'DEPTH_ZERO_SELF_SIGNED_CERT':
+        case 'SELF_SIGNED_CERT_IN_CHAIN':
+        case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
+        case 'CERT_HAS_EXPIRED':
+        case 'ERR_TLS_CERT_ALTNAME_INVALID':
+            return new GitSourceError('GIT_ERROR', `TLS certificate error reaching${dest} (${code}). The host certificate could not be verified.`);
+        default:
+            return null;
     }
 }
 
@@ -296,6 +418,12 @@ async function readRepoFile(rootDir: string, relPath: string, label: string): Pr
     }
     if (stat.isSymbolicLink()) {
         throw new GitSourceError('FILE_NOT_FOUND', `${label} cannot be a symbolic link.`);
+    }
+    // Bound the in-memory read. The clone byte cap only limits the compressed
+    // download; a single decompressed file can still be large, so reject an
+    // oversized compose/env file before reading it into a string.
+    if (stat.size > MAX_REPO_FILE_BYTES) {
+        throw new GitSourceError('GIT_ERROR', `${label} is too large (${formatBytes(stat.size)}); the maximum is ${formatBytes(MAX_REPO_FILE_BYTES)}.`);
     }
 
     let real;
@@ -526,6 +654,8 @@ export class GitSourceService {
             // fetches do not keep sockets and packfile streams alive.
             let timer: NodeJS.Timeout | undefined;
             const controller = new AbortController();
+            const maxBytes = maxCloneBytes();
+            const sizeState = { exceeded: false, received: 0 };
             const timeout = new Promise<never>((_, reject) => {
                 timer = setTimeout(() => {
                     controller.abort();
@@ -536,7 +666,7 @@ export class GitSourceService {
                 await Promise.race([
                     git.clone({
                         fs: { promises: fsPromises },
-                        http: createAbortableGitHttp(controller.signal),
+                        http: createAbortableGitHttp(controller, maxBytes, sizeState),
                         dir,
                         url: repoUrl,
                         ref: branch,
@@ -548,7 +678,15 @@ export class GitSourceService {
                     timeout,
                 ]);
             } catch (e) {
-                throw this.mapGitError(e as Error, Boolean(token));
+                // A size abort surfaces as a generic transport error once
+                // isomorphic-git unwinds, so detect it via the shared flag.
+                if (sizeState.exceeded) {
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        `Repository exceeds the maximum clone size of ${formatBytes(maxBytes)}.`,
+                    );
+                }
+                throw this.mapGitError(e as Error, Boolean(token), repoHost(repoUrl));
             } finally {
                 if (timer) clearTimeout(timer);
             }
@@ -619,7 +757,7 @@ export class GitSourceService {
         }
     }
 
-    private mapGitError(err: Error, hasToken: boolean): GitSourceError {
+    private mapGitError(err: Error, hasToken: boolean, host = 'unknown'): GitSourceError {
         const raw = scrubCredentials(err.message || String(err));
         const code = (err as Error & { code?: string }).code;
         // isomorphic-git's HttpError exposes the numeric status on .data; inspect
@@ -647,6 +785,18 @@ export class GitSourceService {
                 return new GitSourceError('AUTH_FAILED', 'Repository authentication failed. Check your token.');
             }
             return new GitSourceError('REPO_NOT_FOUND', 'Repository not found, or it is private. Add a Personal Access Token if the repo is private.');
+        }
+
+        // Transport failures: Node's fetch() throws a bare "fetch failed"
+        // TypeError with the real reason (ENOTFOUND, ECONNREFUSED, TLS, ...)
+        // on err.cause. Translate the underlying code before falling through
+        // to the generic branches, which only see the useless "fetch failed".
+        if (!statusCode) {
+            const cause = findCauseCode(err);
+            if (cause.code) {
+                const mapped = transportError(cause.code, host);
+                if (mapped) return mapped;
+            }
         }
 
         // Fallbacks for errors without a numeric status attached (e.g. git CLI
@@ -770,62 +920,69 @@ export class GitSourceService {
     // ─── Pull / apply ────────────────────────────────────────────────────────
 
     public async pull(stackName: string): Promise<PullResult> {
-        // Guarded by the same per-stack mutex as apply(). Without this, a
-        // concurrent delete-source + pull can land a pending row on a
-        // stack whose config row has just been removed; the DELETE clears
-        // the row but the subsequent setGitSourcePending re-inserts via
-        // UPDATE failing silently (no row), and a later upsert would
-        // inherit stale pending columns on read.
-        return this.withStackLock(stackName, async () => {
-            const db = DatabaseService.getInstance();
-            const src = db.getGitSource(stackName);
-            if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
+        // Guarded by the per-stack mutex (see withStackLock). Without this, a
+        // concurrent delete-source + pull can land a pending row on a stack
+        // whose config row has just been removed.
+        return this.withStackLock(stackName, () => this.pullLocked(stackName));
+    }
 
-            const diag = isDebugEnabled();
-            if (diag) {
-                console.log(`[GitSource:diag] pull start stack=${stackName} branch=${src.branch} host=${repoHost(src.repo_url)}`);
-            }
+    /**
+     * Body of pull(); assumes the caller already holds the per-stack lock.
+     * handleWebhookPull calls this directly so that its debounce re-check,
+     * this fetch, and the apply all run inside the single lock that
+     * handleWebhookPull holds. Without that, a concurrent webhook fan-out
+     * reads last_debounce_at while it is still unset on every request, slips
+     * past the gate, and clones once per request.
+     */
+    private async pullLocked(stackName: string): Promise<PullResult> {
+        const db = DatabaseService.getInstance();
+        const src = db.getGitSource(stackName);
+        if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
 
-            const token = src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null;
-            const fetched = await this.fetchFromGit({
-                repoUrl: src.repo_url,
-                branch: src.branch,
-                composePath: src.compose_path,
-                envPath: src.sync_env ? src.env_path : null,
-                token,
-            });
+        const diag = isDebugEnabled();
+        if (diag) {
+            console.log(`[GitSource:diag] pull start stack=${stackName} branch=${src.branch} host=${repoHost(src.repo_url)}`);
+        }
 
-            const validation = await this.validateCompose(fetched.composeContent, fetched.envContent);
-            const disk = await this.readDiskContent(stackName, src.sync_env);
-            const currentHash = this.hashContent(disk.compose, disk.env);
-            const hasLocalChanges = src.last_applied_content_hash !== null
-                && src.last_applied_content_hash !== currentHash;
-
-            // Store pending so a subsequent apply doesn't re-fetch. Compose files
-            // routinely contain secrets inlined as env interpolations or passwords,
-            // so encrypt the pending buffers at rest.
-            db.setGitSourcePending(
-                stackName,
-                fetched.commitSha,
-                this.crypto.encrypt(fetched.composeContent),
-                fetched.envContent !== null ? this.crypto.encrypt(fetched.envContent) : null,
-            );
-
-            console.log(`[GitSource] Pending update ready for ${stackName} at ${fetched.commitSha.slice(0, 7)} (validation=${validation.ok ? 'ok' : 'fail'}, localEdits=${hasLocalChanges})`);
-            if (diag) {
-                console.log(`[GitSource:diag] pull done stack=${stackName} sha=${fetched.commitSha.slice(0, 7)} validation=${validation.ok} localEdits=${hasLocalChanges}`);
-            }
-
-            return {
-                commitSha: fetched.commitSha,
-                incomingCompose: fetched.composeContent,
-                incomingEnv: fetched.envContent,
-                currentCompose: disk.compose,
-                currentEnv: disk.env,
-                validation,
-                hasLocalChanges,
-            };
+        const token = src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null;
+        const fetched = await this.fetchFromGit({
+            repoUrl: src.repo_url,
+            branch: src.branch,
+            composePath: src.compose_path,
+            envPath: src.sync_env ? src.env_path : null,
+            token,
         });
+
+        const validation = await this.validateCompose(fetched.composeContent, fetched.envContent);
+        const disk = await this.readDiskContent(stackName, src.sync_env);
+        const currentHash = this.hashContent(disk.compose, disk.env);
+        const hasLocalChanges = src.last_applied_content_hash !== null
+            && src.last_applied_content_hash !== currentHash;
+
+        // Store pending so a subsequent apply doesn't re-fetch. Compose files
+        // routinely contain secrets inlined as env interpolations or passwords,
+        // so encrypt the pending buffers at rest.
+        db.setGitSourcePending(
+            stackName,
+            fetched.commitSha,
+            this.crypto.encrypt(fetched.composeContent),
+            fetched.envContent !== null ? this.crypto.encrypt(fetched.envContent) : null,
+        );
+
+        console.log(`[GitSource] Pending update ready for ${stackName} at ${fetched.commitSha.slice(0, 7)} (validation=${validation.ok ? 'ok' : 'fail'}, localEdits=${hasLocalChanges})`);
+        if (diag) {
+            console.log(`[GitSource:diag] pull done stack=${stackName} sha=${fetched.commitSha.slice(0, 7)} validation=${validation.ok} localEdits=${hasLocalChanges}`);
+        }
+
+        return {
+            commitSha: fetched.commitSha,
+            incomingCompose: fetched.composeContent,
+            incomingEnv: fetched.envContent,
+            currentCompose: disk.compose,
+            currentEnv: disk.env,
+            validation,
+            hasLocalChanges,
+        };
     }
 
     /**
@@ -845,72 +1002,79 @@ export class GitSourceService {
         commitSha: string,
         opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean } = {},
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string }> {
-        return this.withStackLock(stackName, async () => {
-            const diag = isDebugEnabled();
-            const db = DatabaseService.getInstance();
-            const src = db.getGitSource(stackName);
-            if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
+        return this.withStackLock(stackName, () => this.applyLocked(stackName, commitSha, opts));
+    }
 
-            if (!src.pending_commit_sha || !src.pending_compose_content) {
-                throw new GitSourceError('GIT_ERROR', 'No pending pull to apply. Fetch the source again.');
+    /** Body of apply(); assumes the caller already holds the per-stack lock. */
+    private async applyLocked(
+        stackName: string,
+        commitSha: string,
+        opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean },
+    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string }> {
+        const diag = isDebugEnabled();
+        const db = DatabaseService.getInstance();
+        const src = db.getGitSource(stackName);
+        if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
+
+        if (!src.pending_commit_sha || !src.pending_compose_content) {
+            throw new GitSourceError('GIT_ERROR', 'No pending pull to apply. Fetch the source again.');
+        }
+        if (src.pending_commit_sha !== commitSha) {
+            if (diag) console.log('[GitSource:diag] apply sha mismatch stack=%s expected=%s pending=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(src.pending_commit_sha.slice(0, 7)));
+            throw new GitSourceError('GIT_ERROR', 'Pending commit has changed since this pull was fetched. Please review the latest diff.');
+        }
+
+        // Pending buffers are stored encrypted; decrypt is a no-op for any
+        // legacy plaintext rows (isEncrypted check inside CryptoService).
+        const composeContent = this.crypto.decrypt(src.pending_compose_content);
+        const envContent = src.pending_env_content !== null
+            ? this.crypto.decrypt(src.pending_env_content)
+            : null;
+
+        // Re-validate before writing.
+        const validation = await this.validateCompose(composeContent, envContent);
+        if (!validation.ok) {
+            if (diag) console.log(`[GitSource:diag] apply validation fail stack=${stackName}`);
+            throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
+        }
+
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.saveStackContent(stackName, composeContent);
+        if (src.sync_env && envContent !== null) {
+            await fsSvc.saveEnvContent(stackName, envContent);
+        }
+
+        const hash = this.hashContent(composeContent, envContent);
+        db.markGitSourceApplied(stackName, commitSha, hash);
+
+        const shouldDeploy = opts.deploy ?? src.auto_deploy_on_apply;
+        if (diag) console.log('[GitSource:diag] apply wrote stack=%s sha=%s deploy=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(shouldDeploy));
+
+        if (shouldDeploy) {
+            try {
+                const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+                await assertPolicyGateAllows(
+                    stackName,
+                    nodeId,
+                    buildSystemPolicyGateOptions(opts.actor ?? 'git-source', {
+                        bypass: opts.bypassPolicy === true,
+                        auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                    }),
+                );
+                await ComposeService.getInstance().deployStack(stackName);
+                console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
+                return { applied: true, deployed: true };
+            } catch (e) {
+                // File is on disk, DB is marked applied. Returning the
+                // error separately lets the UI flag it as a partial
+                // success rather than rolling back the disk.
+                const scrubbed = scrubCredentials((e as Error).message || String(e));
+                console.error(`[GitSource] Auto-deploy failed for ${stackName}: ${scrubbed}`);
+                return { applied: true, deployed: false, deployError: scrubbed };
             }
-            if (src.pending_commit_sha !== commitSha) {
-                if (diag) console.log('[GitSource:diag] apply sha mismatch stack=%s expected=%s pending=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(src.pending_commit_sha.slice(0, 7)));
-                throw new GitSourceError('GIT_ERROR', 'Pending commit has changed since this pull was fetched. Please review the latest diff.');
-            }
-
-            // Pending buffers are stored encrypted; decrypt is a no-op for any
-            // legacy plaintext rows (isEncrypted check inside CryptoService).
-            const composeContent = this.crypto.decrypt(src.pending_compose_content);
-            const envContent = src.pending_env_content !== null
-                ? this.crypto.decrypt(src.pending_env_content)
-                : null;
-
-            // Re-validate before writing.
-            const validation = await this.validateCompose(composeContent, envContent);
-            if (!validation.ok) {
-                if (diag) console.log(`[GitSource:diag] apply validation fail stack=${stackName}`);
-                throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
-            }
-
-            const fsSvc = FileSystemService.getInstance();
-            await fsSvc.saveStackContent(stackName, composeContent);
-            if (src.sync_env && envContent !== null) {
-                await fsSvc.saveEnvContent(stackName, envContent);
-            }
-
-            const hash = this.hashContent(composeContent, envContent);
-            db.markGitSourceApplied(stackName, commitSha, hash);
-
-            const shouldDeploy = opts.deploy ?? src.auto_deploy_on_apply;
-            if (diag) console.log('[GitSource:diag] apply wrote stack=%s sha=%s deploy=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(shouldDeploy));
-
-            if (shouldDeploy) {
-                try {
-                    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-                    await assertPolicyGateAllows(
-                        stackName,
-                        nodeId,
-                        buildSystemPolicyGateOptions(opts.actor ?? 'git-source', {
-                            bypass: opts.bypassPolicy === true,
-                            auditPath: `/api/stacks/${stackName}/git-source/apply`,
-                        }),
-                    );
-                    await ComposeService.getInstance().deployStack(stackName);
-                    console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
-                    return { applied: true, deployed: true };
-                } catch (e) {
-                    // File is on disk, DB is marked applied. Returning the
-                    // error separately lets the UI flag it as a partial
-                    // success rather than rolling back the disk.
-                    const scrubbed = scrubCredentials((e as Error).message || String(e));
-                    console.error(`[GitSource] Auto-deploy failed for ${stackName}: ${scrubbed}`);
-                    return { applied: true, deployed: false, deployError: scrubbed };
-                }
-            }
-            console.log(`[GitSource] Applied ${stackName} at ${commitSha.slice(0, 7)}`);
-            return { applied: true, deployed: false };
-        });
+        }
+        console.log(`[GitSource] Applied ${stackName} at ${commitSha.slice(0, 7)}`);
+        return { applied: true, deployed: false };
     }
 
     public dismissPending(stackName: string): void {
@@ -1035,47 +1199,63 @@ export class GitSourceService {
      * record in webhook_executions. Enforces the per-source debounce.
      */
     public async handleWebhookPull(stackName: string): Promise<{ status: 'success' | 'skipped' | 'error'; message: string }> {
-        const diag = isDebugEnabled();
-        const db = DatabaseService.getInstance();
-        const src = db.getGitSource(stackName);
-        if (!src) {
-            return { status: 'error', message: 'No Git source configured for this stack.' };
-        }
-
-        const now = Date.now();
-        if (src.last_debounce_at !== null && (now - src.last_debounce_at) < WEBHOOK_DEBOUNCE_MS) {
-            if (diag) console.log(`[GitSource:diag] webhook debounced stack=${stackName} age=${now - src.last_debounce_at}ms`);
-            return { status: 'skipped', message: 'Rate limited (debounced).' };
-        }
-
-        try {
-            const pullResult = await this.pull(stackName);
-            // Only burn the debounce window once the fetch actually produced
-            // something. A transient network failure should be retriable
-            // immediately rather than locked out for the debounce interval.
-            db.touchGitSourceDebounce(stackName);
-            if (!pullResult.validation.ok) {
-                return { status: 'error', message: `Validation failed: ${pullResult.validation.error}` };
+        // Run the whole critical section under a single lock acquisition so a
+        // concurrent fan-out (N webhooks for one push) serializes AND re-reads
+        // last_debounce_at after acquiring the lock. The first request stamps
+        // the window; every queued duplicate then sees the stamp and skips
+        // instead of cloning again. The debounce is still stamped only after a
+        // successful fetch, so a transient failure stays immediately retriable.
+        return this.withStackLock<{ status: 'success' | 'skipped' | 'error'; message: string }>(stackName, async () => {
+            const diag = isDebugEnabled();
+            const db = DatabaseService.getInstance();
+            const src = db.getGitSource(stackName);
+            if (!src) {
+                return { status: 'error', message: 'No Git source configured for this stack.' };
             }
 
-            if (!src.auto_apply_on_webhook) {
-                if (diag) console.log(`[GitSource:diag] webhook pending-only stack=${stackName} sha=${pullResult.commitSha.slice(0, 7)}`);
-                return { status: 'success', message: `Pending update ready at ${pullResult.commitSha.slice(0, 7)}.` };
+            const now = Date.now();
+            if (src.last_debounce_at !== null && (now - src.last_debounce_at) < WEBHOOK_DEBOUNCE_MS) {
+                if (diag) console.log(`[GitSource:diag] webhook debounced stack=${stackName} age=${now - src.last_debounce_at}ms`);
+                return { status: 'skipped', message: 'Rate limited (debounced).' };
             }
 
-            const applied = await this.apply(stackName, pullResult.commitSha, { deploy: src.auto_deploy_on_apply });
-            if (applied.deployError) {
-                // Apply wrote to disk but deploy failed. Surface it so the
-                // webhook_executions row records a degraded outcome instead
-                // of a clean success.
-                return { status: 'error', message: `Applied commit ${pullResult.commitSha.slice(0, 7)} but deploy failed: ${applied.deployError}` };
+            try {
+                const pullResult = await this.pullLocked(stackName);
+                // Only burn the debounce window once the fetch actually produced
+                // something. A transient network failure should be retriable
+                // immediately rather than locked out for the debounce interval.
+                db.touchGitSourceDebounce(stackName);
+                if (!pullResult.validation.ok) {
+                    // Webhooks are unattended, so always leave a server-side
+                    // breadcrumb; the caller only sees the HTTP status.
+                    console.warn(`[GitSource] Webhook pull validation failed for ${sanitizeForLog(stackName)}: ${sanitizeForLog(pullResult.validation.error ?? 'unknown')}`);
+                    return { status: 'error', message: `Validation failed: ${pullResult.validation.error}` };
+                }
+
+                if (!src.auto_apply_on_webhook) {
+                    if (diag) console.log(`[GitSource:diag] webhook pending-only stack=${stackName} sha=${pullResult.commitSha.slice(0, 7)}`);
+                    return { status: 'success', message: `Pending update ready at ${pullResult.commitSha.slice(0, 7)}.` };
+                }
+
+                const applied = await this.applyLocked(stackName, pullResult.commitSha, { deploy: src.auto_deploy_on_apply });
+                if (applied.deployError) {
+                    // Apply wrote to disk but deploy failed. Surface it so the
+                    // webhook_executions row records a degraded outcome instead
+                    // of a clean success.
+                    return { status: 'error', message: `Applied commit ${pullResult.commitSha.slice(0, 7)} but deploy failed: ${applied.deployError}` };
+                }
+                const suffix = applied.deployed ? ' and deployed' : '';
+                return { status: 'success', message: `Applied commit ${pullResult.commitSha.slice(0, 7)}${suffix}.` };
+            } catch (e) {
+                const msg = e instanceof GitSourceError ? `${e.code}: ${e.message}` : (e as Error).message;
+                const scrubbed = scrubCredentials(msg);
+                // Unattended path: record the failure server-side so an operator
+                // can diagnose without diag mode, since the Git provider only
+                // logs the HTTP status.
+                console.error(`[GitSource] Webhook pull failed for ${sanitizeForLog(stackName)}: ${sanitizeForLog(scrubbed)}`);
+                return { status: 'error', message: scrubbed };
             }
-            const suffix = applied.deployed ? ' and deployed' : '';
-            return { status: 'success', message: `Applied commit ${pullResult.commitSha.slice(0, 7)}${suffix}.` };
-        } catch (e) {
-            const msg = e instanceof GitSourceError ? `${e.code}: ${e.message}` : (e as Error).message;
-            return { status: 'error', message: scrubCredentials(msg) };
-        }
+        });
     }
 
     // ─── Concurrency ─────────────────────────────────────────────────────────

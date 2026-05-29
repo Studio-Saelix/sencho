@@ -362,6 +362,66 @@ describe('GitSourceService error mapping', () => {
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
     });
 
+    it('maps a bare "fetch failed" TypeError with an ENOTFOUND cause to NETWORK_TIMEOUT', async () => {
+        // Node's global fetch() reports DNS failure as TypeError('fetch failed')
+        // with the real reason on err.cause. Without cause-unwrapping this fell
+        // through to a useless GIT_ERROR: "fetch failed".
+        mockGitClone.mockRejectedValueOnce(
+            new TypeError('fetch failed', {
+                cause: Object.assign(new Error('getaddrinfo ENOTFOUND github.com'), { code: 'ENOTFOUND' }),
+            }),
+        );
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
+    });
+
+    it('maps a "fetch failed" TypeError with an ECONNREFUSED cause to NETWORK_TIMEOUT', async () => {
+        mockGitClone.mockRejectedValueOnce(
+            new TypeError('fetch failed', {
+                cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), { code: 'ECONNREFUSED' }),
+            }),
+        );
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
+    });
+
+    it('surfaces the host instead of bare "fetch failed" in transport errors', async () => {
+        mockGitClone.mockRejectedValueOnce(
+            new TypeError('fetch failed', {
+                cause: Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
+            }),
+        );
+        try {
+            await svc().fetchFromGit(fetchParams);
+            expect.fail('should have thrown');
+        } catch (e) {
+            const err = e as Error;
+            expect(err.message).not.toMatch(/^fetch failed$/i);
+            expect(err.message).toContain('github.com');
+        }
+    });
+
+    it('unwraps a nested fetch cause chain to find the transport code', async () => {
+        mockGitClone.mockRejectedValueOnce(
+            new TypeError('fetch failed', {
+                cause: new TypeError('terminated', {
+                    cause: Object.assign(new Error('reset'), { code: 'ECONNRESET' }),
+                }),
+            }),
+        );
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
+    });
+
+    it('maps a TLS certificate "fetch failed" cause to a certificate GIT_ERROR', async () => {
+        mockGitClone.mockRejectedValueOnce(
+            new TypeError('fetch failed', {
+                cause: Object.assign(new Error('self-signed certificate'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
+            }),
+        );
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({
+            code: 'GIT_ERROR',
+            message: expect.stringMatching(/certificate/i),
+        });
+    });
+
     it('surfaces FILE_NOT_FOUND when the compose path is missing from the clone', async () => {
         mockGitClone.mockImplementation(async () => { /* clone empty repo */ });
         mockGitLog.mockResolvedValue([{ oid: 'deadbeef' }]);
@@ -380,6 +440,95 @@ describe('GitSourceService error mapping', () => {
             const err = e as Error;
             expect(err.message).not.toContain('supersecret');
             expect(err.message).toContain('***');
+        }
+    });
+});
+
+describe('countingBodyIterator (clone size cap)', () => {
+    function chunkStream(...sizes: number[]): AsyncIterableIterator<Uint8Array> {
+        async function* gen(): AsyncIterableIterator<Uint8Array> {
+            for (const s of sizes) yield new Uint8Array(s);
+        }
+        return gen();
+    }
+
+    it('passes chunks through unchanged while under the cap', async () => {
+        const { countingBodyIterator } = await import('../services/GitSourceService');
+        const controller = new AbortController();
+        const state = { exceeded: false, received: 0 };
+        const out: number[] = [];
+        for await (const c of countingBodyIterator(chunkStream(10, 20, 30), controller, 1000, state)) {
+            out.push(c.byteLength);
+        }
+        expect(out).toEqual([10, 20, 30]);
+        expect(state.exceeded).toBe(false);
+        expect(state.received).toBe(60);
+        expect(controller.signal.aborted).toBe(false);
+    });
+
+    it('aborts the transport and throws once the cumulative size exceeds the cap', async () => {
+        const { countingBodyIterator } = await import('../services/GitSourceService');
+        const controller = new AbortController();
+        const state = { exceeded: false, received: 0 };
+        await expect((async () => {
+            for await (const _c of countingBodyIterator(chunkStream(60, 60), controller, 100, state)) {
+                void _c;
+            }
+        })()).rejects.toThrow(/maximum allowed size/i);
+        expect(state.exceeded).toBe(true);
+        expect(controller.signal.aborted).toBe(true);
+    });
+});
+
+describe('GitSourceService.fetchFromGit (size limits)', () => {
+    const svc = () => GitSourceService.getInstance();
+    const fetchParams = {
+        repoUrl: 'https://github.com/example/repo.git',
+        branch: 'main',
+        composePath: 'compose.yaml',
+    };
+
+    it('rejects a compose file larger than the per-file read cap', async () => {
+        // The download cap bounds the compressed pack, not a single decompressed
+        // file, so readRepoFile guards the in-memory read by file size.
+        mockSuccessfulClone();
+        const { promises: fsp } = await import('fs');
+        const lstatSpy = vi.spyOn(fsp, 'lstat').mockResolvedValue({
+            isSymbolicLink: () => false,
+            size: 11 * 1024 * 1024,
+        } as Awaited<ReturnType<typeof fsp.lstat>>);
+
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({
+            code: 'GIT_ERROR',
+            message: expect.stringMatching(/too large/i),
+        });
+
+        lstatSpy.mockRestore();
+    });
+
+    it('surfaces a clone-size error when the download exceeds the cap', async () => {
+        // Drive the real size-counting transport the service injected into
+        // git.clone, with a tiny cap, and confirm fetchFromGit reports it as a
+        // clone-size error rather than a generic transport failure.
+        process.env.GITSOURCE_MAX_CLONE_BYTES = '8';
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response(new Uint8Array(64), { status: 200 }),
+        );
+        mockGitClone.mockImplementation(async (args: {
+            http: { request: (r: { url: string; method: string; headers: Record<string, string> }) => Promise<{ body: AsyncIterableIterator<Uint8Array> }> };
+        }) => {
+            const resp = await args.http.request({ url: 'https://example.test/info/refs', method: 'GET', headers: {} });
+            for await (const chunk of resp.body) { void chunk; }
+        });
+
+        try {
+            await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringMatching(/exceeds the maximum clone size/i),
+            });
+        } finally {
+            delete process.env.GITSOURCE_MAX_CLONE_BYTES;
+            fetchSpy.mockRestore();
         }
     });
 });
@@ -438,6 +587,64 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         const result = await svc.handleWebhookPull('does-not-exist');
         expect(result.status).toBe('error');
         expect(result.message).toMatch(/no git source/i);
+    });
+
+    it('runs a single clone for a concurrent webhook fan-out', async () => {
+        // The original failure: N webhooks for one push each ran a full clone
+        // because the debounce gate was read before the per-stack lock. The
+        // gate now lives inside the lock, so the first request stamps the
+        // window and the rest skip.
+        const sha = 'eeee555eeee555eeee555eeee555eeee555eeee5';
+        mockSuccessfulClone({ sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        await svc.upsert({
+            stackName: 'fanout-stack',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePath: 'compose.yaml',
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        // upsert performs a dry-run fetch; clear that call so we count only
+        // the clones triggered by the webhook fan-out below.
+        mockGitClone.mockClear();
+
+        const results = await Promise.all(
+            Array.from({ length: 5 }, () => svc.handleWebhookPull('fanout-stack')),
+        );
+
+        expect(mockGitClone.mock.calls.length).toBe(1);
+        expect(results.filter(r => r.status === 'success')).toHaveLength(1);
+        expect(results.filter(r => r.status === 'skipped')).toHaveLength(4);
+        validateSpy.mockRestore();
+    });
+
+    it('returns error when the pulled compose fails validation', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'webhook-validate-fail',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePath: 'compose.yaml',
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        // upsert runs a dry-run fetch but not validateCompose, so the stub only
+        // affects the webhook pull below.
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: false, error: 'bad compose' });
+
+        const result = await svc.handleWebhookPull('webhook-validate-fail');
+        expect(result.status).toBe('error');
+        expect(result.message).toMatch(/validation failed/i);
+        validateSpy.mockRestore();
     });
 });
 

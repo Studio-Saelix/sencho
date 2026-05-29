@@ -217,4 +217,35 @@ describe('node-aware Git source webhooks', () => {
         expect(history[0].error).toMatch(/timed out/i);
         vi.useRealTimers();
     });
+
+    it('records a debounced (202 skipped) remote git-pull as success, not failure', async () => {
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-debounce-webhook',
+            type: 'remote',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'http://remote-debounce.example',
+            api_token: 'remote-token',
+        });
+        const webhookId = db.addWebhook({
+            node_id: remoteNodeId,
+            name: 'debounced remote git',
+            stack_name: 'remote-stack',
+            action: 'git-pull',
+            secret: WebhookService.getInstance().generateSecret(),
+            enabled: true,
+        });
+        // 202 Accepted + status "skipped" is a debounce, not a failure.
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response(JSON.stringify({ status: 'skipped', message: 'Rate limited (debounced).' }), { status: 202 }),
+        );
+
+        const result = await WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'git-pull', 'test');
+
+        expect(result.success).toBe(true);
+        const history = db.getWebhookExecutions(webhookId);
+        expect(history[0].status).toBe('success');
+        expect(history[0].error).toMatch(/debounced/i);
+    });
 });
