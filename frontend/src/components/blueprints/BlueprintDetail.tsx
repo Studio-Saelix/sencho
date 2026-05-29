@@ -229,7 +229,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 crumb={['Blueprints', blueprint?.name ?? '…']}
                 name={blueprint?.name ?? <Skeleton className="h-7 w-40 inline-block" />}
                 meta={meta}
-                primaryAction={blueprint ? {
+                primaryAction={blueprint && canEdit ? {
                     label: 'Apply now',
                     icon: Play,
                     onClick: handleApply,

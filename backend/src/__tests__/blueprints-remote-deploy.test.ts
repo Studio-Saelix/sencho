@@ -92,6 +92,14 @@ describe('BlueprintService remote deploy', () => {
         expect(putSpy.mock.calls[0][0]).toContain('docker-compose.yml');
         expect(putSpy.mock.calls[1][0]).toContain('.blueprint.json');
         expect(postSpy.mock.calls[1][0]).toMatch(/\/deploy$/);
+        // Assert global interleaving across spies, not just per-method order:
+        // create < compose < marker < deploy. (mock.calls indices alone would not
+        // catch the deploy POST firing before the file PUTs.)
+        const [createOrder, deployOrder] = postSpy.mock.invocationCallOrder;
+        const [composeOrder, markerOrder] = putSpy.mock.invocationCallOrder;
+        expect(createOrder).toBeLessThan(composeOrder);
+        expect(composeOrder).toBeLessThan(markerOrder);
+        expect(markerOrder).toBeLessThan(deployOrder);
 
         const dep = DatabaseService.getInstance().getDeployment(bp.id, node.id);
         expect(dep?.status).toBe('active');
