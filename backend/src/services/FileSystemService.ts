@@ -488,6 +488,28 @@ export class FileSystemService {
     const backupDir = this.getBackupDir(stackName);
     await fsPromises.mkdir(backupDir, { recursive: true });
 
+    // Clear stale managed files from the backup slot before writing the current
+    // ones. The slot is reused across runs, so a managed file removed from the
+    // stack since the last backup (e.g. a deleted .env or a switched compose
+    // variant) would otherwise linger here and a later restore would resurrect
+    // it, breaking the faithful-revert guarantee. Scope is the protected set
+    // Sencho writes; .timestamp is rewritten below. Containment is re-checked at
+    // the sink, rooted at the backup base, for the same reason restoreStackFiles
+    // does it. A clear failure is logged but not fatal: it only risks a stale
+    // future rollback, so it should not block an otherwise valid deploy.
+    const backupRoot = path.resolve(getBackupBaseDir());
+    for (const file of PROTECTED_STACK_FILES) {
+      const stale = path.resolve(backupRoot, path.join(backupDir, file));
+      if (!stale.startsWith(backupRoot + path.sep)) continue;
+      try {
+        await fsPromises.unlink(stale);
+      } catch (e: unknown) {
+        if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          console.warn(`[FileSystemService] Could not clear stale backup ${file}:`, (e as Error).message);
+        }
+      }
+    }
+
     // Copy compose file
     const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
     for (const file of composeFiles) {

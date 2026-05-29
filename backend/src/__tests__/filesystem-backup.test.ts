@@ -166,6 +166,30 @@ describe('FileSystemService backup location', () => {
     expect(restored).toBe('name: original\n');
   });
 
+  it('does not retain a managed file in the backup slot once the stack drops it', async () => {
+    const stackName = 'slot';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: v1\n', 'utf-8');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'SECRET=v1\n', 'utf-8');
+
+    const service = FileSystemService.getInstance();
+    // Backup #1: stack has compose.yaml + .env.
+    await service.backupStackFiles(stackName);
+
+    // The stack drops the .env, then is backed up again. The reused slot must
+    // not keep the stale .env from backup #1, or a later restore resurrects it.
+    await fsPromises.rm(path.join(stackDir, '.env'));
+    await service.backupStackFiles(stackName);
+
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: mutated\n', 'utf-8');
+    await service.restoreStackFiles(stackName);
+
+    await expect(fsPromises.access(path.join(stackDir, '.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const restored = await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8');
+    expect(restored).toBe('name: v1\n');
+  });
+
   it('restoreStackFiles removes multiple orphans in one restore', async () => {
     const stackName = 'multi';
     const stackDir = path.join(composeDir, stackName);
