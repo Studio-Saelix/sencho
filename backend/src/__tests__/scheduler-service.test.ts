@@ -612,6 +612,36 @@ describe('SchedulerService - executeUpdate', () => {
     expect(mockClearStackUpdateStatus).toHaveBeenCalledWith(1, 'web-app');
   });
 
+  it('runs the update without the atomic wrapper on the community tier', async () => {
+    mockGetTier.mockReturnValue('community');
+    mockGetScheduledTask.mockReturnValue({
+      id: 82,
+      name: 'update-community',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([
+      { Id: 'c1', Image: 'nginx:latest' },
+    ]);
+    mockCheckImage.mockResolvedValue({ hasUpdate: true });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(82);
+
+    // Atomic backup/rollback is a paid capability: the auto-update path derives
+    // the flag from the licence, so a community instance updates without it.
+    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, false);
+
+    // clearAllMocks does not reset return values; restore the suite default so
+    // later tier-agnostic tests keep the paid behavior they assume.
+    mockGetTier.mockReturnValue('paid');
+  });
+
   it('skips when all images up to date', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 81,
