@@ -119,6 +119,26 @@ describe('ResourcesView', () => {
     expect(screen.queryByText('node1-img:latest')).not.toBeInTheDocument();
   });
 
+  it('does not surface a load failure that resolves after the view unmounts', async () => {
+    let rejectResources: ((e: unknown) => void) | undefined;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return new Promise<Response>((_resolve, reject) => { rejectResources = reject; });
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const { unmount } = render(<ResourcesView />);
+    await waitFor(() => expect(rejectResources).toBeDefined());
+
+    unmount();
+    rejectResources!(new Error('network down'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
   it('surfaces the server error on a failed prune instead of a false success (M-2)', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (url === '/system/prune/system' && opts?.method === 'POST') {

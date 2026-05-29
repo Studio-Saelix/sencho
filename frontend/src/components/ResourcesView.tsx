@@ -443,6 +443,10 @@ export default function ResourcesView() {
         return () => scanAbortRef.current?.abort();
     }, [activeNode]);
 
+    // Bump the fetch generation on unmount so a fetch that resolves after the
+    // view is gone cannot run state setters or surface a load-error toast.
+    useEffect(() => () => { fetchGenerationRef.current += 1; }, []);
+
     const handlePrune = async () => {
         if (!confirmPrune) return;
         setIsActioning(true);
@@ -548,6 +552,7 @@ export default function ResourcesView() {
             const res = await apiFetch('/security/scan', {
                 method: 'POST',
                 body: JSON.stringify({ imageRef, force, scanners }),
+                signal,
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data?.error || 'Failed to start scan');
@@ -561,20 +566,22 @@ export default function ResourcesView() {
                     signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
                 });
                 if (signal.aborted) return;
-                const poll = await apiFetch(`/security/scans/${scanId}`);
+                const poll = await apiFetch(`/security/scans/${scanId}`, { signal });
                 if (signal.aborted) return;
                 if (!poll.ok) continue;
                 const poll_data = await poll.json();
+                if (signal.aborted) return;
                 if (poll_data.status !== 'in_progress') {
                     if (poll_data.status === 'failed') {
                         throw new Error(poll_data.error || 'Scan failed');
                     }
                     toast.success(`Scan complete: ${poll_data.total_vulnerabilities} vulnerabilities found`);
                     setInspectScanId(scanId);
-                    const summariesRes = await apiFetch('/security/image-summaries');
+                    const summariesRes = await apiFetch('/security/image-summaries', { signal });
                     if (signal.aborted) return;
                     if (summariesRes.ok) {
                         const summaries = await summariesRes.json();
+                        if (signal.aborted) return;
                         setScanSummaries(summaries ?? {});
                     }
                     return;
