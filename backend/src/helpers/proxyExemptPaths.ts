@@ -23,11 +23,14 @@ export function isProxyExemptPath(path: string): boolean {
   return false;
 }
 
-// Path prefixes that are hub-only: they manage state owned by the local hub
-// (centralized audit, fleet schedules, notification routing rules). Routed
-// to the local hub when nodeId resolves to local, but rejected with 409 when
-// nodeId resolves to a remote node so a script/curl call cannot trick the
-// proxy into forwarding hub-only authority across a node boundary.
+// Path prefixes that are hub-only: they manage or expose state owned by the
+// local hub (centralized audit, fleet schedules, notification routing rules,
+// the admin-only aggregated logs feed and its stream counters). Routed to the
+// local hub when nodeId resolves to local, but rejected when nodeId resolves
+// to a remote node so a script/curl call cannot trick the proxy into
+// forwarding hub-only authority across a node boundary. This matters for the
+// logs feed in particular: its admin gate lives in the local route handler,
+// which the proxy would skip entirely when forwarding a remote nodeId.
 //
 // Entries are stored with a trailing slash; the matcher accepts the exact
 // collection path (without the trailing slash) AND any sub-path under it,
@@ -44,6 +47,8 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/scheduled-tasks/',
   '/api/audit-log/',
   '/api/notification-routes/',
+  '/api/logs/global/',
+  '/api/system/log-stream-metrics/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

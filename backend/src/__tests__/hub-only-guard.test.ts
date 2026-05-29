@@ -120,6 +120,51 @@ describe('hubOnlyGuard', () => {
     expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
   });
 
+  // Regression for the Global Observability admin gate: the logs feed's
+  // `requireAdmin` lives in the local route handler, which the proxy skips when
+  // forwarding a remote nodeId. Without these prefixes the guard would let the
+  // request through to the proxy and a hub user could read a remote node's logs
+  // as the node-proxy admin. Cover the collection, the SSE sub-path, and the
+  // stream-metrics endpoint, with and without a trailing slash.
+  it('rejects /api/logs/global with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/logs/global')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/logs/global/stream with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/logs/global/stream')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/logs/global/stream via the ?nodeId= query param (SSE transport)', async () => {
+    const res = await request(app)
+      .get(`/api/logs/global/stream?nodeId=${remoteNodeId}`)
+      .set('Authorization', authHeader);
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/system/log-stream-metrics with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/system/log-stream-metrics')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
   it('does not interfere with non-hub paths even when nodeId targets a remote node', async () => {
     // /api/stacks is not hub-only and should be forwarded by the proxy.
     // The exact upstream-error status is not the contract here; what
