@@ -59,28 +59,33 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
     const [trivyAvailable, setTrivyAvailable] = useState(false);
     const [sheetTab, setSheetTab] = useState<'essentials' | 'advanced'>('essentials');
 
+    // The template registry is node-scoped, so the catalogue (and Trivy
+    // availability) must reload when the active node changes. The cancelled
+    // flag drops a slow response from a previous node so it cannot overwrite
+    // the current node's catalogue after a fast switch.
     useEffect(() => {
-        fetchTemplates();
+        let cancelled = false;
+        (async () => {
+            setLoading(true);
+            try {
+                const res = await apiFetch('/templates');
+                if (!res.ok) throw new Error('Failed to fetch templates');
+                const data = await res.json();
+                if (!cancelled) setTemplates(data || []);
+            } catch (err) {
+                if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load App Store');
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        })();
         apiFetch('/security/trivy-status')
             .then(r => r.ok ? r.json() : null)
-            .then(d => { if (d) setTrivyAvailable(!!d.available); })
+            .then(d => { if (!cancelled && d) setTrivyAvailable(!!d.available); })
             .catch((err) => {
                 console.error('Failed to fetch Trivy status:', err);
             });
-    }, []);
-
-    const fetchTemplates = async () => {
-        try {
-            const res = await apiFetch('/templates');
-            if (!res.ok) throw new Error('Failed to fetch templates');
-            const data = await res.json();
-            setTemplates(data || []);
-        } catch (err) {
-            toast.error((err as Error).message || 'Failed to load App Store');
-        } finally {
-            setLoading(false);
-        }
-    };
+        return () => { cancelled = true; };
+    }, [activeNode?.id]);
 
     const handleSelectTemplate = (t: Template) => {
         const envsCopy = [...(t.env || [])];

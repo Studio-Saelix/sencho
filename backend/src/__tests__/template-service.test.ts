@@ -3,7 +3,17 @@
  * env string generation, conditional env_file, and cache clearing.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TemplateService, Template } from '../services/TemplateService';
+import YAML from 'yaml';
+import { TemplateService } from '../services/TemplateService';
+
+// Parse the generated compose and return the single service block keyed by
+// `name`. Asserting on the parsed structure (rather than exact text lines)
+// keeps the tests stable across the YAML emitter's quoting choices.
+function serviceOf(yaml: string, name = 'app'): Record<string, unknown> {
+  const parsed = YAML.parse(yaml) as { services?: Record<string, Record<string, unknown>> };
+  expect(parsed.services).toBeDefined();
+  return parsed.services![name];
+}
 
 describe('TemplateService', () => {
   let service: TemplateService;
@@ -16,177 +26,134 @@ describe('TemplateService', () => {
 
   describe('generateComposeFromTemplate', () => {
     it('generates minimal compose with just image and restart policy', () => {
-      const template: Template = {
-        title: 'nginx',
-        description: 'Web server',
-        image: 'nginx:latest',
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toContain('image: nginx:latest');
-      expect(yaml).toContain('restart: unless-stopped');
-      expect(yaml).not.toContain('ports:');
-      expect(yaml).not.toContain('volumes:');
-      expect(yaml).not.toContain('env_file:');
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'nginx', description: 'Web server', image: 'nginx:latest',
+      }, 'app'));
+      expect(svc.image).toBe('nginx:latest');
+      expect(svc.restart).toBe('unless-stopped');
+      expect(svc.ports).toBeUndefined();
+      expect(svc.volumes).toBeUndefined();
+      expect(svc.env_file).toBeUndefined();
     });
 
     it('includes ports when template has port mappings', () => {
-      const template: Template = {
-        title: 'nginx',
-        description: 'Web server',
-        image: 'nginx:latest',
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'nginx', description: 'Web server', image: 'nginx:latest',
         ports: ['80:80', '443:443/tcp'],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toContain('ports:');
-      expect(yaml).toContain('"80:80"');
-      expect(yaml).toContain('"443:443/tcp"');
+      }, 'app'));
+      expect(svc.ports).toEqual(['80:80', '443:443/tcp']);
     });
 
     it('handles string volumes with host:container format', () => {
-      const template: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
         volumes: ['/host/data:/container/data'],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toContain('volumes:');
-      expect(yaml).toContain('/host/data:/container/data');
+      }, 'app'));
+      expect(svc.volumes).toEqual(['/host/data:/container/data']);
     });
 
     it('handles string volumes with single path (named volume)', () => {
-      const template: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
         volumes: ['/data'],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toContain('- /data');
+      }, 'app'));
+      expect(svc.volumes).toEqual(['/data']);
     });
 
     it('handles object volumes with container and bind', () => {
-      const template: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
         volumes: [{ container: '/config', bind: './config' }],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toContain('./config:/config');
+      }, 'app'));
+      expect(svc.volumes).toEqual(['./config:/config']);
     });
 
     it('generates bind path from container folder when bind is not specified', () => {
-      const template: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
         volumes: [{ container: '/app/data' }],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toContain('./data:/app/data');
+      }, 'app'));
+      expect(svc.volumes).toEqual(['./data:/app/data']);
     });
 
     it('adds :ro suffix for readonly volumes', () => {
-      const template: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
         volumes: [{ container: '/config', bind: './config', readonly: true }],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toContain('./config:/config:ro');
+      }, 'app'));
+      expect(svc.volumes).toEqual(['./config:/config:ro']);
     });
 
     it('includes env_file only when env vars are present', () => {
-      const withEnv: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
+      const withEnv = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
         env: [{ name: 'TZ', default: 'UTC' }],
-      };
-
-      const withoutEnv: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
-        env: [],
-      };
-
-      expect(service.generateComposeFromTemplate(withEnv, 'app')).toContain('env_file:');
-      expect(service.generateComposeFromTemplate(withoutEnv, 'app')).not.toContain('env_file:');
+      }, 'app'));
+      const withoutEnv = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest', env: [],
+      }, 'app'));
+      expect(withEnv.env_file).toEqual(['.env']);
+      expect(withoutEnv.env_file).toBeUndefined();
     });
 
     it('does not include env_file when env is undefined', () => {
-      const template: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
-      };
-
-      expect(service.generateComposeFromTemplate(template, 'app')).not.toContain('env_file:');
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
+      }, 'app'));
+      expect(svc.env_file).toBeUndefined();
     });
 
     it('handles string volumes with options (e.g., host:container:ro)', () => {
-      const template: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
         volumes: ['/host/config:/config:ro'],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toContain('/host/config:/config:ro');
+      }, 'app'));
+      expect(svc.volumes).toEqual(['/host/config:/config:ro']);
     });
 
     it('skips object volumes without container path', () => {
-      const template: Template = {
-        title: 'app',
-        description: 'Test',
-        image: 'test:latest',
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
         volumes: [{ container: '' }],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      // Empty container means `continue` is hit, no volume line emitted
-      expect(yaml).toContain('volumes:');
-      // The volume header is added but no actual volume entry
-      const volumeLines = yaml.split('\n').filter(l => l.trim().startsWith('- '));
-      expect(volumeLines).toHaveLength(0);
-    });
-
-    it('produces valid YAML structure starting with services key', () => {
-      const template: Template = {
-        title: 'full',
-        description: 'Full template',
-        image: 'app:v1',
-        ports: ['8080:80'],
-        volumes: [{ container: '/data', bind: './data' }],
-        env: [{ name: 'KEY', default: 'val' }],
-      };
-
-      const yaml = service.generateComposeFromTemplate(template, 'app');
-      expect(yaml).toMatch(/^services:\n/);
-      expect(yaml).toContain('  app:');
+      }, 'app'));
+      // Empty container is skipped, leaving no volume entries; the key is
+      // omitted entirely rather than emitted as an empty list.
+      expect(svc.volumes).toBeUndefined();
     });
 
     it('uses the supplied service name as the compose service key', () => {
-      const template: Template = {
-        title: 'Plex',
-        description: 'Media server',
-        image: 'plex:latest',
-      };
+      const yaml = service.generateComposeFromTemplate({
+        title: 'Plex', description: 'Media server', image: 'plex:latest',
+      }, 'plex');
+      const parsed = YAML.parse(yaml) as { services: Record<string, unknown> };
+      expect(Object.keys(parsed.services)).toEqual(['plex']);
+    });
 
-      const yaml = service.generateComposeFromTemplate(template, 'plex');
-      expect(yaml).toMatch(/^services:\n {2}plex:\n/);
-      expect(yaml).not.toContain('  app:');
+    it('escapes values that would break hand-built YAML (round-trips intact)', () => {
+      // Registry values containing YAML structural characters (newlines,
+      // indentation, anchors, flow collectors, colon-space) must survive a
+      // serialize/parse round-trip rather than injecting sibling keys.
+      const hostileImage = 'evil:latest\n    privileged: true';
+      const yaml = service.generateComposeFromTemplate({
+        title: 'x', description: 'Test', image: hostileImage,
+        ports: ['*anchor', '8080:80\n    cap_add: [ALL]'],
+        volumes: ['/h: weird:/c # not-a-comment'],
+      }, 'app');
+      const svc = serviceOf(yaml);
+      expect(svc.image).toBe(hostileImage);
+      expect(svc.ports).toEqual(['*anchor', '8080:80\n    cap_add: [ALL]']);
+      expect(svc.volumes).toEqual(['/h: weird:/c # not-a-comment']);
+      // None of the injected sibling keys may escape into the service block.
+      expect(svc).not.toHaveProperty('privileged');
+      expect(svc).not.toHaveProperty('cap_add');
+    });
+
+    it('keeps later valid volumes when an earlier entry is skipped', () => {
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'app', description: 'Test', image: 'test:latest',
+        volumes: [{ container: '' }, { container: '/config', bind: './config' }],
+      }, 'app'));
+      expect(svc.volumes).toEqual(['./config:/config']);
     });
   });
 

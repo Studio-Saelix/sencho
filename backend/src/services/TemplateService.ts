@@ -1,4 +1,5 @@
-import axios from 'axios';
+import axios, { type AxiosRequestConfig } from 'axios';
+import YAML from 'yaml';
 import { DatabaseService } from './DatabaseService';
 import { CacheService } from './CacheService';
 import { isDebugEnabled } from '../utils/debug';
@@ -41,6 +42,17 @@ export interface Template {
 interface TemplatesResponse {
     version: string;
     templates: Template[];
+}
+
+// Shape of a single compose service block emitted for a deployed template.
+// restart is always set; the other fields appear only when the template
+// supplies them.
+interface ComposeServiceDefinition {
+    image?: string;
+    restart: string;
+    ports?: string[];
+    volumes?: string[];
+    env_file?: string[];
 }
 
 // Typed shapes for the LinuxServer.io API response
@@ -214,6 +226,14 @@ function getCategoriesForApp(name: string): string[] {
 export class TemplateService {
     private static readonly CACHE_KEY = 'templates:all';
     private readonly CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
+    // Cap the registry response so a large or compromised custom registry
+    // cannot exhaust backend memory by streaming an unbounded body.
+    private static readonly MAX_REGISTRY_RESPONSE_BYTES = 25 * 1024 * 1024;
+    private static readonly REGISTRY_FETCH_OPTIONS = {
+        timeout: 20_000,
+        maxContentLength: TemplateService.MAX_REGISTRY_RESPONSE_BYTES,
+        maxBodyLength: TemplateService.MAX_REGISTRY_RESPONSE_BYTES,
+    } satisfies AxiosRequestConfig;
 
     public clearCache(): void {
         CacheService.getInstance().invalidate(TemplateService.CACHE_KEY);
@@ -236,7 +256,7 @@ export class TemplateService {
                     let registryHost = '';
                     try { registryHost = new URL(registryUrl).hostname.toLowerCase(); } catch { /* invalid URL, treated as non-LSIO */ }
                     if (registryHost === 'api.linuxserver.io') {
-                        const response = await axios.get<LsioApiResponse>(registryUrl, { timeout: 20_000 });
+                        const response = await axios.get<LsioApiResponse>(registryUrl, TemplateService.REGISTRY_FETCH_OPTIONS);
                         // Official LSIO API Schema Mapping
                         const lsioApps = response.data?.data?.repositories?.linuxserver ?? {};
 
@@ -275,7 +295,7 @@ export class TemplateService {
 
                     // Legacy Portainer v2 Format (Fallback for custom registries)
                     // The Portainer v2 spec includes a native `categories` field; pass it through.
-                    const response = await axios.get<TemplatesResponse>(registryUrl, { timeout: 20_000 });
+                    const response = await axios.get<TemplatesResponse>(registryUrl, TemplateService.REGISTRY_FETCH_OPTIONS);
                     const templates = (response.data.templates || [])
                         .filter((t: Template) => !!t.image && t.type === 1)
                         .map((t: Template) => ({ ...t, source: 'custom' }));
@@ -286,62 +306,56 @@ export class TemplateService {
             );
         } catch (error) {
             console.error('[Templates] Failed to fetch from registry:', error);
-            throw new Error('Could not fetch templates from registry');
+            // Match the stable axios error code first; fall back to the
+            // message text in case a transport reports the cap differently.
+            const oversized = axios.isAxiosError(error)
+                && (error.code === 'ERR_FR_MAX_CONTENT_LENGTH_EXCEEDED'
+                    || /maxContentLength|maxBodyLength/i.test(error.message ?? ''));
+            if (oversized) {
+                throw new Error('Could not fetch templates from registry (response exceeded the size limit)', { cause: error });
+            }
+            throw new Error('Could not fetch templates from registry', { cause: error });
         }
     }
 
     public generateComposeFromTemplate(template: Template, serviceName: string): string {
-        let yaml = `services:\n  ${serviceName}:\n`;
+        const service: ComposeServiceDefinition = { restart: 'unless-stopped' };
 
         if (template.image) {
-            yaml += `    image: ${template.image}\n`;
+            service.image = template.image;
         }
 
-        yaml += `    restart: unless-stopped\n`;
-
         if (template.ports && template.ports.length > 0) {
-            yaml += `    ports:\n`;
-            for (const port of template.ports) {
-                yaml += `      - "${port}"\n`;
-            }
+            service.ports = [...template.ports];
         }
 
         if (template.volumes && template.volumes.length > 0) {
-            yaml += `    volumes:\n`;
+            const volumes: string[] = [];
             for (const vol of template.volumes) {
-                let hostPath = '';
-                let containerPath = '';
-                let options = '';
-
                 if (typeof vol === 'string') {
-                    const parts = vol.split(':');
-                    if (parts.length === 1) {
-                        yaml += `      - ${vol}\n`;
-                        continue;
-                    }
-                    hostPath = parts[0];
-                    containerPath = parts[1];
-                    options = parts.slice(2).join(':');
-                    if (options) options = `:${options}`;
+                    // Pass string volumes through verbatim; the YAML emitter
+                    // handles any escaping the raw value needs.
+                    volumes.push(vol);
                 } else if (vol.container) {
-                    containerPath = vol.container;
+                    const containerPath = vol.container;
                     const containerFolder = containerPath.split('/').filter(Boolean).pop() || 'data';
-                    hostPath = vol.bind ? vol.bind : `./${containerFolder}`;
-                    options = vol.readonly ? ':ro' : '';
-                } else {
-                    continue;
+                    const hostPath = vol.bind ? vol.bind : `./${containerFolder}`;
+                    const options = vol.readonly ? ':ro' : '';
+                    volumes.push(`${hostPath}:${containerPath}${options}`);
                 }
-
-
-                yaml += `      - ${hostPath}:${containerPath}${options}\n`;
+            }
+            if (volumes.length > 0) {
+                service.volumes = volumes;
             }
         }
 
         if (template.env && template.env.length > 0) {
-            yaml += `    env_file:\n      - .env\n`;
+            service.env_file = ['.env'];
         }
 
-        return yaml;
+        // Serialize through the YAML emitter so registry-supplied values are
+        // escaped correctly instead of interpolated raw into hand-built lines.
+        return YAML.stringify({ services: { [serviceName]: service } }, { lineWidth: 0 });
     }
 
     public generateEnvString(envVars: Record<string, string>): string {
