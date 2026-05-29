@@ -18,7 +18,8 @@ import TrivyService from './TrivyService';
 import type { ScanAllNodeImagesResult } from './TrivyService';
 import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { enforcePolicyPreDeploy } from './PolicyEnforcement';
 
 const TRIVY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TRIVY_UPDATE_CHECK_STARTUP_DELAY_MS = 5 * 60 * 1000;
@@ -169,6 +170,40 @@ export class SchedulerService {
         NotificationService.getInstance()
             .dispatchAlert(level, category, message, { stackName, actor: 'system:scheduler' })
             .catch(err => console.error('[SchedulerService] Notification dispatch failed:', getErrorMessage(err, 'unknown error')));
+    }
+
+    /**
+     * Run the pre-deploy scan-policy gate for a scheduler-driven action. On a
+     * block, dispatch the documented `scan_finding` warning naming the policy
+     * and the offending images, then throw so the caller records the outcome:
+     * the auto-update loop catches per stack and continues the rest of the run,
+     * while a single-stack auto-start surfaces as a task failure. The gate
+     * fails open when Trivy is missing and is evaluation-only when the node's
+     * local tier is unpaid.
+     */
+    private async enforceSchedulerPolicyGate(
+        stackName: string,
+        nodeId: number,
+        action: 'Auto-start' | 'Auto-update',
+        auditPath: string,
+    ): Promise<void> {
+        const actor = action === 'Auto-start' ? 'scheduler:auto-start' : 'scheduler:auto-update';
+        const gate = await enforcePolicyPreDeploy(
+            stackName,
+            nodeId,
+            buildSystemPolicyGateOptions(actor, { auditPath }),
+        );
+        if (gate.ok) return;
+        const images = gate.violations.map((v) => v.imageRef).join(', ');
+        this.safeDispatch(
+            'warning',
+            'scan_finding',
+            `${action} blocked for "${stackName}" by policy "${gate.policy?.name}": ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}${images ? ` (${images})` : ''}`,
+            stackName,
+        );
+        throw new Error(
+            `${action} blocked by policy "${gate.policy?.name}": ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`,
+        );
     }
 
     private async tick(): Promise<void> {
@@ -436,12 +471,11 @@ export class SchedulerService {
 
     private async executeAutoStart(task: ScheduledTask): Promise<string> {
         this.assertStackTarget(task, 'Auto-start');
-        await assertPolicyGateAllows(
+        await this.enforceSchedulerPolicyGate(
             task.target_id,
             task.node_id,
-            buildSystemPolicyGateOptions('scheduler:auto-start', {
-                auditPath: `/api/scheduled-tasks/${task.id}/run`,
-            }),
+            'Auto-start',
+            `/api/scheduled-tasks/${task.id}/run`,
         );
         await ComposeService.getInstance(task.node_id).deployStack(task.target_id);
         return `Started stack "${task.target_id}"`;
@@ -712,12 +746,11 @@ export class SchedulerService {
             return `Stack "${stackName}": all images up to date.`;
         }
 
-        await assertPolicyGateAllows(
+        await this.enforceSchedulerPolicyGate(
             stackName,
             nodeId,
-            buildSystemPolicyGateOptions('scheduler:auto-update', {
-                auditPath: `/api/scheduled-tasks/auto-update/${stackName}`,
-            }),
+            'Auto-update',
+            `/api/scheduled-tasks/auto-update/${stackName}`,
         );
         await compose.updateStack(stackName, undefined, true);
         db.clearStackUpdateStatus(nodeId, stackName);

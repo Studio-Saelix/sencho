@@ -547,7 +547,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
                 <div>
                   <Label className="text-sm">Block on deploy</Label>
                   <p className="text-xs text-muted-foreground">
-                    Emit a critical alert when this policy is violated after a deploy.
+                    Reject a deploy before containers start when any image meets or exceeds the threshold. With this off, the policy only evaluates and raises an alert.
                   </p>
                 </div>
                 <TogglePill

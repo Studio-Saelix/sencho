@@ -18,6 +18,7 @@ import TrivyService from './TrivyService';
 import { isSeverityAtLeast } from '../utils/severity';
 import { validateImageRef } from '../utils/image-ref';
 import { getErrorMessage } from '../utils/errors';
+import { isDebugEnabled } from '../utils/debug';
 
 export interface PolicyViolation {
     imageRef: string;
@@ -140,6 +141,14 @@ export async function enforcePolicyForImageRefs(
         return { ok: true, bypassed: false, policy, violations: [], trivyMissing: true };
     }
 
+    const debug = isDebugEnabled();
+    if (debug) {
+        console.log(
+            '[Policy:debug] Evaluating "%s" against policy "%s" (max=%s, images=%d)',
+            sanitizeForLog(stackName), sanitizeForLog(policy.name), policy.max_severity, imageRefs.length,
+        );
+    }
+
     const violations: PolicyViolation[] = [];
     for (const imageRef of imageRefs) {
         if (!validateImageRef(imageRef)) {
@@ -157,6 +166,12 @@ export async function enforcePolicyForImageRefs(
         try {
             const scan = await svc.scanImagePreflight(imageRef, nodeId, stackName);
             const severity = scan.highest_severity ?? 'UNKNOWN';
+            if (debug) {
+                console.log(
+                    '[Policy:debug] %s scanned: highest=%s vs max=%s',
+                    sanitizeForLog(imageRef), severity, policy.max_severity,
+                );
+            }
             if (isSeverityAtLeast(severity, policy.max_severity)) {
                 violations.push({
                     imageRef,
@@ -198,8 +213,18 @@ export async function enforcePolicyForImageRefs(
         } catch (err) {
             console.error('[Policy] Failed to record bypass audit entry:', err);
         }
+        if (debug) {
+            console.log(
+                '[Policy:debug] Bypass by "%s" for "%s" (%d violation(s))',
+                sanitizeForLog(opts.actor), sanitizeForLog(stackName), violations.length,
+            );
+        }
         return { ok: true, bypassed: true, policy, violations };
     }
 
+    console.warn(
+        '[Policy] Blocked deploy for "%s": %d image(s) exceed %s (policy "%s")',
+        sanitizeForLog(stackName), violations.length, policy.max_severity, sanitizeForLog(policy.name),
+    );
     return { ok: false, bypassed: false, policy, violations };
 }

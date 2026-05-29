@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { SENCHO_OPEN_LOGS_EVENT } from '@/lib/events';
 import type { SenchoOpenLogsDetail } from '@/lib/events';
-import type { PolicyBlockPayload } from '../../stack/PolicyBlockDialog';
+import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
 import type { Node } from '@/context/NodeContext';
 
 type DiffPreview = {
@@ -12,7 +12,12 @@ type DiffPreview = {
   fileName: string;
 };
 
-type PolicyBlock = { stackName: string; payload: PolicyBlockPayload };
+type PolicyBlock = {
+  stackName: string;
+  stackFile: string;
+  action: PolicyBlockableAction;
+  payload: PolicyBlockPayload;
+};
 type Container = { id: string; name: string };
 
 export function useOverlayState() {

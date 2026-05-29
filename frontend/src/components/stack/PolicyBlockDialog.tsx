@@ -22,6 +22,9 @@ export interface PolicyBlockPayload {
   violations: PolicyBlockViolation[];
 }
 
+/** The only stack operations the backend scan-policy gate can reject. */
+export type PolicyBlockableAction = 'deploy' | 'update';
+
 interface PolicyBlockDialogProps {
   open: boolean;
   payload: PolicyBlockPayload | null;

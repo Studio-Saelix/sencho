@@ -66,26 +66,28 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
   return { ...base, ...over } as unknown as StackListState;
 }
 
-function makeOverlay(): OverlayState {
+function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
   return {
     setPendingUnsavedLoad: vi.fn(),
     setPendingUnsavedNode: vi.fn(),
     pendingUnsavedLoad: null,
     pendingUnsavedNode: null,
+    policyBlock: null,
     setPolicyBlock: vi.fn(),
     setPolicyBypassing: vi.fn(),
     setDiffPreview: vi.fn(),
+    ...over,
   } as unknown as OverlayState;
 }
 
 const runWithLog: Parameters<typeof useStackActions>[0]['runWithLog'] = async (_p, run) =>
   run(Promise.resolve(), 'test-session');
 
-function setup(over: { editorState?: Partial<EditorState> } = {}) {
+function setup(over: { editorState?: Partial<EditorState>; overlay?: Partial<OverlayState> } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState();
   const navState = { setActiveView: vi.fn() } as unknown as NavState;
-  const overlayState = makeOverlay();
+  const overlayState = makeOverlay(over.overlay);
 
   const { result } = renderHook(() =>
     useStackActions({
@@ -175,5 +177,107 @@ describe('useStackActions.handleSaveAndDeploy', () => {
     await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
     const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
     expect(calls.some(c => String(c).includes('/deploy'))).toBe(true);
+  });
+});
+
+describe('useStackActions policy-block dialog wiring', () => {
+  const policyPayload = {
+    error: 'Policy "block-high" blocked deploy: 1 image(s) exceed HIGH',
+    policy: { id: 1, name: 'block-high', maxSeverity: 'HIGH' },
+    violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 2, highCount: 5, scanId: 9 }],
+  };
+  const mouseEvent = { preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent;
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('opens the dialog with action "deploy" when an editor deploy is blocked', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify(policyPayload), { status: 409 }));
+    const { result, overlayState } = setup();
+    await result.current.deployStack(mouseEvent);
+    expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy' }),
+    );
+  });
+
+  it('opens the dialog with action "update" when an update is blocked', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify(policyPayload), { status: 409 }));
+    const { result, overlayState } = setup();
+    await result.current.updateStack(mouseEvent);
+    expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
+    );
+  });
+
+  it('opens the dialog with action "deploy" when a sidebar deploy is blocked', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify(policyPayload), { status: 409 }));
+    const { result, overlayState } = setup();
+    await result.current.executeStackActionByFile('web.yml', 'deploy', 'deploy');
+    expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy' }),
+    );
+  });
+
+  it('does not open the dialog for a stack-op-in-progress 409', async () => {
+    const inProgress = JSON.stringify({
+      code: 'stack_op_in_progress',
+      inProgress: { action: 'deploy', startedAt: Date.now(), user: 'someone' },
+    });
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(inProgress, { status: 409 }));
+    const { result, overlayState } = setup();
+    await result.current.updateStack(mouseEvent);
+    expect(overlayState.setPolicyBlock).not.toHaveBeenCalled();
+  });
+
+  it('opens the dialog with action "update" via the sidebar update entry point', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify(policyPayload), { status: 409 }));
+    const { result, overlayState } = setup();
+    await result.current.executeStackActionByFile('web.yml', 'update', 'update');
+    expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
+    );
+  });
+});
+
+describe('useStackActions.bypassPolicyAndRetry', () => {
+  const payload = {
+    error: 'blocked',
+    policy: { id: 1, name: 'block-high', maxSeverity: 'HIGH' },
+    violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 1, highCount: 0, scanId: 1 }],
+  };
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('retries an update bypass against the update endpoint with ?ignorePolicy=true', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null, { status: 200 })); // update OK
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response('[]', { status: 200 })); // containers refresh
+    const { result } = setup({
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'update', payload } as never },
+    });
+    await result.current.bypassPolicyAndRetry();
+    const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
+    expect(urls).toContain('/stacks/web/update?ignorePolicy=true');
+    expect(urls.some(u => u.includes('/deploy'))).toBe(false);
+  });
+
+  it('retries a deploy bypass against the deploy endpoint with ?ignorePolicy=true', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null, { status: 200 })); // deploy OK
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response('[]', { status: 200 })); // containers refresh
+    const { result } = setup({
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'deploy', payload } as never },
+    });
+    await result.current.bypassPolicyAndRetry();
+    const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
+    expect(urls).toContain('/stacks/web/deploy?ignorePolicy=true');
+    expect(urls.some(u => u.includes('/update'))).toBe(false);
+  });
+
+  it('does nothing when no policy block is stored', async () => {
+    const { result } = setup({ overlay: { policyBlock: null as never } });
+    await result.current.bypassPolicyAndRetry();
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 });
