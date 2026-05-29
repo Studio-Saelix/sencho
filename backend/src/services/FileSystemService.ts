@@ -539,8 +539,10 @@ export class FileSystemService {
     let removedOrphans = 0;
     for (const file of PROTECTED_STACK_FILES) {
       if (backedUp.has(file)) continue;
+      const target = path.join(stackDir, file);
+      this.assertWithinBase(target);
       try {
-        await fsPromises.unlink(path.join(stackDir, file));
+        await fsPromises.unlink(target);
         removedOrphans++;
       } catch (e: unknown) {
         const code = (e as NodeJS.ErrnoException)?.code;
