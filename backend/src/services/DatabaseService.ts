@@ -2046,6 +2046,38 @@ export class DatabaseService {
         };
     }
 
+    public clearSelfContainerNotificationRouting(
+        nodeId: number,
+        self: { containerName?: string | null; composeProjectName?: string | null },
+    ): number {
+        const containerName = self.containerName?.trim() || null;
+        const composeProjectName = self.composeProjectName?.trim() || null;
+        if (!containerName && !composeProjectName) return 0;
+
+        const predicates: string[] = [];
+        const args: (number | string)[] = [nodeId];
+        if (containerName) {
+            predicates.push('container_name = ?');
+            args.push(containerName);
+        }
+        if (composeProjectName) {
+            predicates.push('(container_name IS NULL AND stack_name = ?)');
+            args.push(composeProjectName);
+        }
+
+        const result = this.db.prepare(`
+            UPDATE notification_history
+               SET stack_name = NULL,
+                   container_name = NULL
+             WHERE node_id = ?
+               AND actor_username = 'system:docker-events'
+               AND category = 'monitor_alert'
+               AND (stack_name IS NOT NULL OR container_name IS NOT NULL)
+               AND (${predicates.join(' OR ')})
+        `).run(...args);
+        return result.changes;
+    }
+
     public getStackActivity(nodeId: number, stackName: string, opts: { limit: number; before?: number; beforeId?: number }): NotificationHistory[] {
         // Composite (timestamp, id) cursor: pure timestamp pagination drops rows
         // on same-millisecond bursts (Docker events from one compose up).

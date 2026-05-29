@@ -65,6 +65,7 @@ describe('SelfIdentityService.initialize', () => {
       Id: FULL_CONTAINER_ID,
       Name: '/sencho',
       Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+      Config: { Labels: { 'com.docker.compose.project': 'sencho' } },
       NetworkSettings: {
         Networks: {
           sencho_mesh: { NetworkID: FULL_NETWORK_ID },
@@ -82,9 +83,36 @@ describe('SelfIdentityService.initialize', () => {
     const id = svc.getIdentity();
     expect(id.containerId).toBe(FULL_CONTAINER_ID);
     expect(id.containerName).toBe('sencho');
+    expect(id.composeProjectName).toBe('sencho');
     expect(id.imageId).toBe(FULL_IMAGE_ID_HEX);
     expect(id.networkNames).toEqual(['sencho_mesh']);
     expect(id.volumeNames).toEqual(['sencho_data']);
+  });
+
+  it('shares an in-flight initialization across concurrent callers', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    let resolveInspect: (value: unknown) => void = () => {};
+    mockContainer.inspect.mockReturnValue(new Promise(resolve => {
+      resolveInspect = resolve;
+    }));
+
+    const svc = SelfIdentityService.getInstance();
+    const first = svc.initialize();
+    const second = svc.initialize();
+
+    expect(mockContainer.inspect).toHaveBeenCalledTimes(1);
+    resolveInspect({
+      Id: FULL_CONTAINER_ID,
+      Name: '/sencho',
+      Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+      Config: { Labels: { 'com.docker.compose.project': 'sencho' } },
+      NetworkSettings: { Networks: { sencho_mesh: { NetworkID: FULL_NETWORK_ID } } },
+      Mounts: [{ Type: 'volume', Name: 'sencho_data' }],
+    });
+    await Promise.all([first, second]);
+
+    expect(svc.getIdentity().containerId).toBe(FULL_CONTAINER_ID);
+    expect(svc.getIdentity().composeProjectName).toBe('sencho');
   });
 
   it('stays empty when HOSTNAME is unset (dev mode)', async () => {

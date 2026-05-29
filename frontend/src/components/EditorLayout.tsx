@@ -176,6 +176,7 @@ export default function EditorLayout() {
     activeNode,
     isPaid,
     isAdmiral,
+    isAdmin,
     can,
   });
 

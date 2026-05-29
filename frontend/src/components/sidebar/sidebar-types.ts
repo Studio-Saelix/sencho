@@ -27,6 +27,7 @@ export interface StackMenuCtx {
   isBusy: boolean;
   isPaid: boolean;
   isAdmiral: boolean;
+  isAdmin: boolean;
   canDelete: boolean;
   canEditLabels: boolean;
   canCreateLabels: boolean;

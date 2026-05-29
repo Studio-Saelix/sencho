@@ -254,22 +254,21 @@ describe('ComposeService - runCommand', () => {
     await expectation;
   });
 
-  it('kills and rejects running commands when the WebSocket disconnects', async () => {
+  it('keeps the command running when the WebSocket disconnects (progress socket is output-only)', async () => {
     const proc = createMockProcess();
     mockSpawn.mockReturnValue(proc);
     const ws = createMockWs();
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.runCommand('my-stack', 'restart', ws);
-    const expectation = expect(promise).rejects.toThrow('client disconnected');
-    let settled = false;
-    promise.finally(() => { settled = true; }).catch(() => undefined);
+    // The deploy is owned by its HTTP request; closing the progress socket
+    // (panel minimized, navigated away, connection blip) must not abort it.
     ws.emit('close');
+    expect(proc.kill).not.toHaveBeenCalled();
 
-    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
-    expect(settled).toBe(false);
-    proc.emit('close', null);
-    await expectation;
+    // The command still completes on its own exit, not the socket close.
+    proc.emit('close', 0);
+    await expect(promise).resolves.toBeUndefined();
   });
 
   it('rewrites ENOMEM spawn failures as host out-of-memory', async () => {
