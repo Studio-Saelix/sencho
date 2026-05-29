@@ -9,6 +9,8 @@ function panel(over: Partial<DeployPanelState> = {}): DeployPanelState {
     stackName: '',
     action: 'deploy',
     status: 'preparing',
+    progressUnavailable: false,
+    deploySessionId: '',
     sessionId: 0,
     ...over,
   };

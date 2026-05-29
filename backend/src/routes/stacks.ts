@@ -25,7 +25,7 @@ import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
-import { getTerminalWs } from '../websocket/generic';
+import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -312,7 +312,7 @@ async function runStackBulkOp(
         };
       }
       const atomic = effectiveTier(req) === 'paid';
-      await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
+      await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
       DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
       NotificationService.getInstance().broadcastEvent({
         type: 'state-invalidate',
@@ -893,7 +893,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
+    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
@@ -939,7 +939,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   let ok = false;
   try {
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs());
+    await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
     ok = true;
@@ -1153,7 +1153,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
+    await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     invalidateNodeCaches(req.nodeId);
     NotificationService.getInstance().broadcastEvent({
@@ -1217,7 +1217,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     dlog(`[Stacks] Rollback initiated: ${sanitizeForLog(stackName)}`);
     await fsSvc.restoreStackFiles(stackName);
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
-    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), false);
+    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), false);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
     res.json({ message: 'Stack rolled back successfully.' });

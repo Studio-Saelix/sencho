@@ -9,7 +9,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Search, Rocket, Loader2, Info, ExternalLink, Star, ShieldCheck } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, withDeploySession } from '@/lib/api';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
@@ -189,9 +189,9 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
         });
 
         try {
-            const result = await runWithLog({ stackName: stackName.trim(), action: 'install' }, async (started) => {
+            const result = await runWithLog({ stackName: stackName.trim(), action: 'install' }, async (started, ds) => {
                 await started;
-                const res = await apiFetch('/templates/deploy', {
+                const res = await apiFetch('/templates/deploy', withDeploySession(ds, {
                     method: 'POST',
                     body: JSON.stringify({
                         stackName: stackName.trim(),
@@ -199,7 +199,7 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
                         envVars: finalEnvVars,
                         skip_scan: !autoScan,
                     }),
-                });
+                }));
                 const data = await res.json();
                 if (!res.ok) return { ok: false, errorMessage: data.error || 'Failed to deploy template' };
                 return { ok: true };

@@ -7,11 +7,17 @@ import { buildXtermTheme } from '@/lib/terminalTheme';
 
 interface TerminalComponentProps {
   stackName?: string;
+  /** Correlation id sent on the generic `connectTerminal` handshake so the
+   *  backend streams the matching deploy's output to this socket. */
+  deploySessionId?: string;
   onReady?: () => void;
+  /** Fired when the socket fails to connect or drops while still mounted, so the
+   *  caller can stop waiting on a best-effort progress stream. */
+  onError?: () => void;
   onMessage?: (text: string) => void;
 }
 
-export default function TerminalComponent({ stackName, onReady, onMessage }: TerminalComponentProps) {
+export default function TerminalComponent({ stackName, deploySessionId, onReady, onError, onMessage }: TerminalComponentProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -124,8 +130,9 @@ export default function TerminalComponent({ stackName, onReady, onMessage }: Ter
         ws.onopen = () => {
           if (mounted) {
             if (!cleanStackName) {
-              // Generic terminal mode - send connect action
-              ws.send(JSON.stringify({ action: 'connectTerminal' }));
+              // Generic terminal mode - send connect action with the deploy
+              // correlation id so the backend streams this deploy's output here.
+              ws.send(JSON.stringify({ action: 'connectTerminal', sessionId: deploySessionId }));
               onReady?.();
             }
             // For stack logs mode, the server starts streaming automatically on connection
@@ -142,10 +149,21 @@ export default function TerminalComponent({ stackName, onReady, onMessage }: Ter
 
         ws.onerror = (err) => {
           console.error('WebSocket error:', err);
+          if (mounted) onError?.();
+        };
+
+        ws.onclose = () => {
+          // Only surface unexpected closes. Intentional teardown sets mounted
+          // false before closing, so this skips minimize/navigation/unmount.
+          if (mounted) onError?.();
         };
 
       } catch (err) {
         console.error('Error initializing terminal:', err);
+        // A synchronous setup failure (e.g. WebSocket construction blocked by
+        // CSP) gives no onerror/onclose, so release the deploy gate now instead
+        // of waiting out the connect timeout.
+        if (mounted) onError?.();
       }
     };
 
@@ -195,7 +213,7 @@ export default function TerminalComponent({ stackName, onReady, onMessage }: Ter
       searchAddonRef.current = null;
       serializeAddonRef.current = null;
     };
-  }, [stackName, onReady, onMessage]);
+  }, [stackName, deploySessionId, onReady, onError, onMessage]);
 
   const handleDownload = () => {
     if (!serializeAddonRef.current) return;
