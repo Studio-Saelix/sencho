@@ -3,6 +3,7 @@ import { VolumeBrowserService, isValidVolumeName, PathTraversalError, VolumeNotF
 import { DatabaseService } from '../services/DatabaseService';
 import { requireAdmin } from '../middleware/tierGates';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isDebugEnabled } from '../utils/debug';
 
 export const volumesRouter = Router();
 
@@ -27,7 +28,13 @@ volumesRouter.get('/:name/list', async (req: Request, res: Response) => {
     const name = req.params.name as string;
     if (!isValidVolumeName(name)) return res.status(400).json({ error: 'Invalid volume name' });
     const path = readPathParam(req);
+    const startedAt = Date.now();
     const entries = await VolumeBrowserService.getInstance(req.nodeId).listDir(name, path);
+    if (isDebugEnabled()) {
+      console.debug('[Volumes:debug] list', {
+        volume: sanitizeForLog(name), path: sanitizeForLog(path || '/'), entries: entries.length, ms: Date.now() - startedAt,
+      });
+    }
     res.json(entries);
   } catch (error: unknown) {
     mapServiceError(error, res, 'Failed to list volume directory');
@@ -54,8 +61,16 @@ volumesRouter.get('/:name/read', async (req: Request, res: Response) => {
   let outcome: 'success' | 'error' = 'error';
   try {
     if (!isValidVolumeName(name)) return res.status(400).json({ error: 'Invalid volume name' });
+    const startedAt = Date.now();
     const result = await VolumeBrowserService.getInstance(req.nodeId).readFile(name, requestPath);
     outcome = 'success';
+    if (isDebugEnabled()) {
+      // Never log the file body; only its shape.
+      console.debug('[Volumes:debug] read', {
+        volume: sanitizeForLog(name), path: sanitizeForLog(requestPath || '/'),
+        size: result.size, binary: result.binary, truncated: result.truncated, ms: Date.now() - startedAt,
+      });
+    }
     res.json(result);
   } catch (error: unknown) {
     mapServiceError(error, res, 'Failed to read volume file');

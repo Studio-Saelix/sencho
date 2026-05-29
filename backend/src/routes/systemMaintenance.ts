@@ -120,11 +120,17 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
           'docker disk usage',
         );
       }
+      if (isDebugEnabled()) {
+        console.debug('[Resources:debug] Prune dry-run', {
+          target, scope: pruneScope, reclaimableBytes: estimate.reclaimableBytes,
+        });
+      }
       res.json({ message: 'Dry run', success: true, dryRun: true, reclaimedBytes: estimate.reclaimableBytes });
       return;
     }
 
     console.log(`[Resources] System prune: ${target} (scope: ${pruneScope})`);
+    const pruneStartedAt = Date.now();
     let result: { success: boolean; reclaimedBytes: number };
     if (pruneScope === 'managed' && target !== 'containers') {
       const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
@@ -137,6 +143,11 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     }
 
     console.log(`[Resources] System prune completed: ${target}, reclaimed ${result.reclaimedBytes} bytes`);
+    if (isDebugEnabled()) {
+      console.debug('[Resources:debug] System prune', {
+        target, scope: pruneScope, ms: Date.now() - pruneStartedAt, reclaimedBytes: result.reclaimedBytes,
+      });
+    }
     if (target === 'containers') {
       invalidateNodeCaches(req.nodeId);
     }
@@ -390,6 +401,15 @@ systemMaintenanceRouter.post('/networks', async (req: Request, res: Response) =>
     if (attachable) options.Attachable = true;
 
     const dockerController = DockerController.getInstance(req.nodeId);
+    if (isDebugEnabled()) {
+      console.debug('[Resources:debug] Network create', {
+        driver: options.Driver ?? 'bridge',
+        internal: !!options.Internal,
+        attachable: !!options.Attachable,
+        hasSubnet: !!subnet,
+        hasGateway: !!gateway,
+      });
+    }
     const network = await dockerController.createNetwork(options);
     console.log(`[Resources] Network created: ${sanitizeForLog(name)}`);
     invalidateNodeCaches(req.nodeId);
