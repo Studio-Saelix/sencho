@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from "@/components/ui/tabs";
@@ -386,8 +386,17 @@ export default function ResourcesView() {
     const [scanSummaries, setScanSummaries] = useState<Record<string, ScanSummary>>({});
     const [scanningImageRef, setScanningImageRef] = useState<string | null>(null);
     const [inspectScanId, setInspectScanId] = useState<number | null>(null);
+    // Holds the AbortController for the in-flight scan poll so it can be
+    // cancelled; the scan keeps running server-side, only the client poll stops.
+    const scanAbortRef = useRef<AbortController | null>(null);
+
+    // Generation counter so a slow fetch for a previously-active node cannot
+    // stomp the visible resources after the user switches nodes. Each call
+    // claims a generation; only the latest call is allowed to write state.
+    const fetchGenerationRef = useRef(0);
 
     const fetchAllData = async () => {
+        const generation = ++fetchGenerationRef.current;
         setIsLoading(true);
         try {
             const [usageRes, resourcesRes, orphansRes, summariesRes] = await Promise.all([
@@ -397,30 +406,46 @@ export default function ResourcesView() {
                 apiFetch('/security/image-summaries').catch(() => null),
             ]);
 
-            if (usageRes.ok) setUsage(await usageRes.json());
-            if (resourcesRes.ok) {
-                const resources = await resourcesRes.json();
-                setImages(resources.images ?? []);
-                setVolumes(resources.volumes ?? []);
-                setNetworks(resources.networks ?? []);
+            // Resolve every body before the staleness check so a stale
+            // generation cannot write any subset of the resource slices.
+            const usageData = usageRes.ok ? await usageRes.json() : null;
+            const resourcesData = resourcesRes.ok ? await resourcesRes.json() : null;
+            const orphansData = orphansRes.ok ? await orphansRes.json() : null;
+            const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
+
+            if (fetchGenerationRef.current !== generation) return;
+
+            if (usageData) setUsage(usageData);
+            if (resourcesData) {
+                setImages(resourcesData.images ?? []);
+                setVolumes(resourcesData.volumes ?? []);
+                setNetworks(resourcesData.networks ?? []);
             }
-            if (orphansRes.ok) {
-                setOrphans(await orphansRes.json());
+            if (orphansData) {
+                setOrphans(orphansData);
                 setSelectedOrphans([]);
             }
-            if (summariesRes && summariesRes.ok) {
-                const data = await summariesRes.json();
-                setScanSummaries(data ?? {});
-            }
+            if (summariesData) setScanSummaries(summariesData);
         } catch (err) {
+            if (fetchGenerationRef.current !== generation) return;
             console.error('Failed to fetch data', err);
             toast.error('Failed to load resources data');
         } finally {
-            setIsLoading(false);
+            if (fetchGenerationRef.current === generation) setIsLoading(false);
         }
     };
 
     useEffect(() => { fetchAllData(); }, [activeNode]);
+
+    // Cancel an in-flight scan poll on unmount or node switch; its result
+    // belongs to the node it started on.
+    useEffect(() => {
+        return () => scanAbortRef.current?.abort();
+    }, [activeNode]);
+
+    // Bump the fetch generation on unmount so a fetch that resolves after the
+    // view is gone cannot run state setters or surface a load-error toast.
+    useEffect(() => () => { fetchGenerationRef.current += 1; }, []);
 
     const handlePrune = async () => {
         if (!confirmPrune) return;
@@ -431,16 +456,21 @@ export default function ResourcesView() {
                 method: 'POST',
                 body: JSON.stringify({ target: confirmPrune.target, scope: confirmPrune.scope })
             });
-            const data = await res.json();
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                throw new Error(data?.error || `Failed to prune ${confirmPrune.target}`);
+            }
             const scopeLabel = confirmPrune.scope === 'managed' ? 'Sencho-managed' : 'all';
             toast.success(
-                data.reclaimedBytes !== undefined
+                data?.reclaimedBytes !== undefined
                     ? `Pruned ${scopeLabel} ${confirmPrune.target}. Reclaimed ${formatBytes(data.reclaimedBytes)}.`
                     : `Pruned ${scopeLabel} ${confirmPrune.target}.`
             );
             await fetchAllData();
-        } catch {
-            toast.error(confirmPrune ? `Failed to prune ${confirmPrune.target}` : 'Prune failed');
+        } catch (error) {
+            console.error('Failed to prune', error);
+            const err = error as { message?: string };
+            toast.error(err?.message || `Failed to prune ${confirmPrune.target}`);
         } finally {
             toast.dismiss(loadingId);
             setIsActioning(false);
@@ -511,12 +541,18 @@ export default function ResourcesView() {
         options: { force?: boolean; scanners?: ('vuln' | 'secret')[] } = {},
     ) => {
         const { force = false, scanners } = options;
+        // Supersede any prior in-flight scan poll before claiming this one.
+        scanAbortRef.current?.abort();
+        const controller = new AbortController();
+        scanAbortRef.current = controller;
+        const { signal } = controller;
         setScanningImageRef(imageRef);
         const loadingId = toast.loading(`Scanning ${imageRef}...`);
         try {
             const res = await apiFetch('/security/scan', {
                 method: 'POST',
                 body: JSON.stringify({ imageRef, force, scanners }),
+                signal,
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data?.error || 'Failed to start scan');
@@ -524,19 +560,28 @@ export default function ResourcesView() {
 
             const deadline = Date.now() + 5 * 60 * 1000;
             while (Date.now() < deadline) {
-                await new Promise(r => setTimeout(r, 3000));
-                const poll = await apiFetch(`/security/scans/${scanId}`);
+                await new Promise<void>((resolve) => {
+                    if (signal.aborted) { resolve(); return; }
+                    const timer = setTimeout(resolve, 3000);
+                    signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+                });
+                if (signal.aborted) return;
+                const poll = await apiFetch(`/security/scans/${scanId}`, { signal });
+                if (signal.aborted) return;
                 if (!poll.ok) continue;
                 const poll_data = await poll.json();
+                if (signal.aborted) return;
                 if (poll_data.status !== 'in_progress') {
                     if (poll_data.status === 'failed') {
                         throw new Error(poll_data.error || 'Scan failed');
                     }
                     toast.success(`Scan complete: ${poll_data.total_vulnerabilities} vulnerabilities found`);
                     setInspectScanId(scanId);
-                    const summariesRes = await apiFetch('/security/image-summaries');
+                    const summariesRes = await apiFetch('/security/image-summaries', { signal });
+                    if (signal.aborted) return;
                     if (summariesRes.ok) {
                         const summaries = await summariesRes.json();
+                        if (signal.aborted) return;
                         setScanSummaries(summaries ?? {});
                     }
                     return;
@@ -544,11 +589,22 @@ export default function ResourcesView() {
             }
             throw new Error('Scan timed out');
         } catch (error) {
+            if (signal.aborted) {
+                // Suppress the toast for a deliberately cancelled poll, but keep
+                // a breadcrumb so a real error racing the abort is not lost.
+                console.debug('Scan poll aborted', error);
+                return;
+            }
             const err = error as { message?: string; error?: string; data?: { error?: string } };
             toast.error(err?.message || err?.error || err?.data?.error || 'Scan failed');
         } finally {
             toast.dismiss(loadingId);
-            setScanningImageRef(null);
+            // Only the owning poll resets shared state; a superseded poll leaves
+            // it to the scan that replaced it.
+            if (scanAbortRef.current === controller) {
+                scanAbortRef.current = null;
+                setScanningImageRef(null);
+            }
         }
     };
 
