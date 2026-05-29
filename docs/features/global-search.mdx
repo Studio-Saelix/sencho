@@ -37,7 +37,7 @@ Each stack row shows a status dot on the left (green for running, grey for exite
 
 ## Typing to filter
 
-Start typing and the results narrow in real time. Pages and nodes filter instantly; stack search debounces for about 250 ms before fanning out across the fleet, so a fast typist sees the Stacks group fill in a beat after the rest. Matching is substring-based, so you can type a fragment from anywhere in a stack's filename or a node's name. Examples:
+Start typing and the results narrow in real time. Pages and nodes filter instantly. Stack search debounces for about 250 ms before fanning out across the fleet when you begin a search; once the results are in, refining the query filters them instantly without querying the fleet again. Matching is substring-based, so you can type a fragment from anywhere in a stack's filename or a node's name. Examples:
 
 - `fleet` jumps to the Fleet page.
 - `local` selects the Local node and switches the active context to it.
@@ -57,6 +57,8 @@ The Stacks group caps at 50 rows. When a query matches more than that, a `Showin
 
 While the fleet is responding, the empty area reads `Searching...` until the first batch of stack hits arrives. If no group has a hit at all, the empty area reads `No results.`
 
+If a node cannot be reached while the search is running, the palette still shows the stacks it could gather from the rest of the fleet and adds a `N nodes unreachable, stack results may be incomplete` line beneath the Stacks group. Hover the line to see which nodes were skipped and why. This tells you a match might exist on a host that did not answer, rather than leaving you to assume the stack does not exist.
+
 ## Keyboard navigation
 
 Once the palette is open:
@@ -66,3 +68,23 @@ Once the palette is open:
 - <kbd>Esc</kbd> closes the palette.
 
 Offline nodes show as greyed-out and are not selectable.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The Stacks group is empty even though I know a stack matches">
+    Stack search needs permission to read stacks on each node. If your account lacks that access on a node, that node's stacks are skipped and it is reported in the `nodes unreachable` line beneath the group. Search also only covers online nodes; a node that is offline in your fleet list is never queried. Confirm the node is online and that your account can read its stacks, then run the search again.
+  </Accordion>
+  <Accordion title="A node is missing from the results and I see 'nodes unreachable'">
+    The palette fans out to every online node when you start a search. If a node does not answer in time, returns an error, or drops mid-search, its stacks are left out and the count is added to the `N nodes unreachable, stack results may be incomplete` line. Hover that line to see which nodes were skipped and the reason. The stacks from every node that did answer still appear, so you are never left with a silently short list. Re-run the search once the node is reachable to fold its stacks back in.
+  </Accordion>
+  <Accordion title="A stack I just created on another node does not show up">
+    The fleet-wide stack list is gathered once when you begin a search and reused while you keep typing, so a stack created on a remote node after you started typing will not appear yet. Clear the query and search again to pull a fresh list from the fleet.
+  </Accordion>
+  <Accordion title="A stack row shows a faded grey status dot">
+    The dot reflects the stack's run state: green for running, grey for exited, faded grey for unknown. Unknown means the node listed the stack but its status could not be read at that moment, usually a transient hiccup talking to that host's Docker engine. The stack is still selectable; open it to see its real state in the editor.
+  </Accordion>
+  <Accordion title="Ctrl+K does not open the palette">
+    The shortcut is handled at the window level, so it works from any screen, but a focused element that captures the keystroke first (for example a terminal in the host console) can intercept it. Click outside that element, or use the search icon in the top bar to open the palette instead.
+  </Accordion>
+</AccordionGroup>
