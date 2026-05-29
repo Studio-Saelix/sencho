@@ -24,7 +24,13 @@ function formatTimestamp(ms: number | null): string {
     return date.toLocaleString();
 }
 
-export function FederationTab() {
+interface FederationTabProps {
+    /** Whether the current user may change pin placement. Pinning is admin-only on the backend
+     * (PUT /api/blueprints/:id/pin requires admin); non-admins see the placement read-only. */
+    canManage: boolean;
+}
+
+export function FederationTab({ canManage }: FederationTabProps) {
     const [nodes, setNodes] = useState<NodeRecord[]>([]);
     const [blueprints, setBlueprints] = useState<BlueprintListItem[]>([]);
     const [loading, setLoading] = useState(true);
@@ -150,6 +156,7 @@ export function FederationTab() {
                     <h3 className="text-sm font-medium">Pin policy</h3>
                     <span className="text-xs text-muted-foreground">
                         Force a blueprint onto a specific node, overriding its selector.
+                        {!canManage && ' Pin changes require an administrator.'}
                     </span>
                 </div>
                 <div className="p-4">
@@ -188,24 +195,30 @@ export function FederationTab() {
                                                     {describeSelector(bp.selector)}
                                                 </td>
                                                 <td className="py-2 pr-4 align-top">
-                                                    <Select
-                                                        value={bp.pinned_node_id !== null ? String(bp.pinned_node_id) : UNPINNED}
-                                                        onValueChange={(value) => void handlePinChange(bp.id, value)}
-                                                        disabled={savingId === bp.id}
-                                                    >
-                                                        <SelectTrigger className="h-8 w-56">
-                                                            <SelectValue placeholder="(unpinned)" />
-                                                        </SelectTrigger>
-                                                        <SelectContent>
-                                                            <SelectItem value={UNPINNED}>(unpinned)</SelectItem>
-                                                            {nodes.map(node => (
-                                                                <SelectItem key={node.id} value={String(node.id)}>
-                                                                    {node.name}
-                                                                    {node.cordoned ? ' · cordoned' : ''}
-                                                                </SelectItem>
-                                                            ))}
-                                                        </SelectContent>
-                                                    </Select>
+                                                    {canManage ? (
+                                                        <Select
+                                                            value={bp.pinned_node_id !== null ? String(bp.pinned_node_id) : UNPINNED}
+                                                            onValueChange={(value) => void handlePinChange(bp.id, value)}
+                                                            disabled={savingId === bp.id}
+                                                        >
+                                                            <SelectTrigger className="h-8 w-56">
+                                                                <SelectValue placeholder="(unpinned)" />
+                                                            </SelectTrigger>
+                                                            <SelectContent>
+                                                                <SelectItem value={UNPINNED}>(unpinned)</SelectItem>
+                                                                {nodes.map(node => (
+                                                                    <SelectItem key={node.id} value={String(node.id)}>
+                                                                        {node.name}
+                                                                        {node.cordoned ? ' · cordoned' : ''}
+                                                                    </SelectItem>
+                                                                ))}
+                                                            </SelectContent>
+                                                        </Select>
+                                                    ) : (
+                                                        <span className={pinnedName ? 'text-sm' : 'text-xs text-muted-foreground'}>
+                                                            {pinnedName ?? '(unpinned)'}
+                                                        </span>
+                                                    )}
                                                 </td>
                                                 <td className="py-2 pr-4 align-top text-xs text-muted-foreground">
                                                     {effective}
