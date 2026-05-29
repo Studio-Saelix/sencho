@@ -395,7 +395,7 @@ describe('GitSourceService error mapping', () => {
         } catch (e) {
             const err = e as Error;
             expect(err.message).not.toMatch(/^fetch failed$/i);
-            expect(err.message).toMatch(/github\.com/);
+            expect(err.message).toContain('github.com');
         }
     });
 
