@@ -110,7 +110,7 @@ export function ShellOverlays({
         canBypass={isAdmin}
         bypassing={policyBypassing}
         onClose={() => setPolicyBlock(null)}
-        onBypass={stackActions.bypassPolicyAndDeploy}
+        onBypass={stackActions.bypassPolicyAndRetry}
       />
 
       {/* Git Source Panel */}

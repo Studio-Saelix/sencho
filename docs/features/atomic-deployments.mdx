@@ -29,7 +29,7 @@ Atomic deployments wrap:
 - **Webhook** triggers for deploy and pull actions.
 - **Image auto-updates** triggered by an auto-update policy.
 
-Scheduled tasks invoke `docker compose` without the atomic wrapper, so a deploy or update launched from a schedule runs without a backup or auto-rollback. If you need atomic safety on a recurring deploy, trigger it through a webhook on a cron rather than through Scheduled Tasks.
+A scheduled image-update task uses the same atomic wrapper as a manual update, so a recurring update still takes a backup and rolls back automatically when a container crashes. Scheduled lifecycle actions (start, stop, restart) change no stack configuration and run `docker compose` directly without a backup.
 
 ## Manual rollback
 
@@ -46,6 +46,8 @@ The menu entry is hidden when no backup exists for the stack, for example on a f
 Backups live under `<DATA_DIR>/backups/<stack>/`, in the same writable volume Sencho uses for its database and other persisted state. They are intentionally kept outside the user's compose folder, so the operation works even when a container has chowned its bind-mounted stack directory to root.
 
 Each backup is a flat copy of the compose file Sencho found, plus `.env` if it exists, plus a `.timestamp` marker that records when the backup was taken. There is one backup slot per stack: every protected deploy or update overwrites the previous backup, so the **Rollback** menu always reverts to the configuration that was on disk immediately before the most recent run.
+
+A restore is a faithful revert, not an overlay. Sencho replaces the compose file and `.env` with the backed-up copies and removes any compose variant or `.env` that was added after the backup was taken, so the stack returns to exactly the file set it had before the run. For example, if a deploy switched the stack from `compose.yaml` to `docker-compose.yml` or introduced a new `.env`, a rollback undoes both. Files Sencho does not manage are left untouched.
 
 ## Community Edition behavior
 

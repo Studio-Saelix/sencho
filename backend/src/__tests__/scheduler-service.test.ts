@@ -26,6 +26,7 @@ const {
   mockRunCommand,
   mockDeployStack,
   mockBackupStackFiles,
+  mockEnforcePolicyPreDeploy,
 } = vi.hoisted(() => ({
   mockGetDueScheduledTasks: vi.fn().mockReturnValue([]),
   mockCreateScheduledTaskRun: vi.fn().mockReturnValue(1),
@@ -66,6 +67,7 @@ const {
   mockRunCommand: vi.fn().mockResolvedValue(undefined),
   mockDeployStack: vi.fn().mockResolvedValue(undefined),
   mockBackupStackFiles: vi.fn().mockResolvedValue(undefined),
+  mockEnforcePolicyPreDeploy: vi.fn(),
 }));
 
 vi.mock('../services/DatabaseService', () => ({
@@ -185,10 +187,16 @@ vi.mock('../services/TrivyService', () => ({
   },
 }));
 
+vi.mock('../services/PolicyEnforcement', () => ({
+  enforcePolicyPreDeploy: mockEnforcePolicyPreDeploy,
+}));
+
 import { SchedulerService } from '../services/SchedulerService';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: the scan-policy gate allows. Individual tests override to a block.
+  mockEnforcePolicyPreDeploy.mockResolvedValue({ ok: true, bypassed: false, violations: [] });
   (SchedulerService as any).instance = undefined;
 });
 
@@ -612,6 +620,36 @@ describe('SchedulerService - executeUpdate', () => {
     expect(mockClearStackUpdateStatus).toHaveBeenCalledWith(1, 'web-app');
   });
 
+  it('runs the update without the atomic wrapper on the community tier', async () => {
+    mockGetTier.mockReturnValue('community');
+    mockGetScheduledTask.mockReturnValue({
+      id: 82,
+      name: 'update-community',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([
+      { Id: 'c1', Image: 'nginx:latest' },
+    ]);
+    mockCheckImage.mockResolvedValue({ hasUpdate: true });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(82);
+
+    // Atomic backup/rollback is a paid capability: the auto-update path derives
+    // the flag from the licence, so a community instance updates without it.
+    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, false);
+
+    // clearAllMocks does not reset return values; restore the suite default so
+    // later tier-agnostic tests keep the paid behavior they assume.
+    mockGetTier.mockReturnValue('paid');
+  });
+
   it('skips when all images up to date', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 81,
@@ -780,6 +818,73 @@ describe('SchedulerService - executeUpdate', () => {
         output: expect.not.stringContaining('WARNING'),
       })
     );
+  });
+
+  it('dispatches a scan_finding warning and skips the stack when a policy blocks the update', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 88,
+      name: 'blocked-update',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:1.14' }]);
+    mockCheckImage.mockResolvedValue({ hasUpdate: true });
+    mockEnforcePolicyPreDeploy.mockResolvedValue({
+      ok: false,
+      bypassed: false,
+      policy: { id: 1, name: 'block-high', max_severity: 'HIGH' },
+      violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 2, highCount: 5, scanId: 7 }],
+    });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(88);
+
+    // Gate blocked it: the stack must not be updated.
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    // A scan_finding warning naming the policy and the offending image fired.
+    const warn = mockDispatchAlert.mock.calls.find((c) => c[0] === 'warning' && c[1] === 'scan_finding');
+    expect(warn).toBeDefined();
+    expect(warn![2]).toContain('block-high');
+    expect(warn![2]).toContain('nginx:1.14');
+    // The run completes (skip-and-continue), not a hard task failure.
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
+  });
+
+  it('reports a failed run and an Auto-start warning when a policy blocks a scheduled auto-start', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 89,
+      name: 'blocked-start',
+      action: 'auto_start',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockEnforcePolicyPreDeploy.mockResolvedValue({
+      ok: false,
+      bypassed: false,
+      policy: { id: 1, name: 'block-high', max_severity: 'HIGH' },
+      violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 1, highCount: 0, scanId: 3 }],
+    });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(89);
+
+    // Gate blocked it: the stack must not start.
+    expect(mockDeployStack).not.toHaveBeenCalled();
+    const warn = mockDispatchAlert.mock.calls.find((c) => c[0] === 'warning' && c[1] === 'scan_finding');
+    expect(warn).toBeDefined();
+    expect(warn![2]).toContain('Auto-start');
+    expect(warn![2]).toContain('block-high');
+    // Auto-start does not skip-and-continue; the run is recorded as a failure.
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
   });
 
   it('exposes isTaskRunning status', async () => {
