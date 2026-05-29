@@ -39,7 +39,8 @@ Sencho applies the pre-flight gate on every code path that can start a compose s
 
 - **Deploy** from the stack page.
 - **Update** (re-pull plus restart).
-- **Deploy from a Git Source** when the initial deploy is requested at create time.
+- **Rollback** to a saved backup, which restores the previous files and re-runs the gate before redeploying.
+- **Deploy from a Git Source**, both the initial deploy at create time and a manual apply-with-deploy of a pulled commit.
 - **Template deploy** from the App Store.
 - **Bulk deploy** from the [Stack Labels](/features/stack-labels) page.
 - **Fleet deploy** to a node from the fleet view.

@@ -238,6 +238,15 @@ describe('useStackActions policy-block dialog wiring', () => {
       expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
     );
   });
+
+  it('opens the dialog with action "rollback" when a rollback is blocked', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify(policyPayload), { status: 409 }));
+    const { result, overlayState } = setup();
+    await result.current.rollbackStack();
+    expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'rollback' }),
+    );
+  });
 });
 
 describe('useStackActions.bypassPolicyAndRetry', () => {
@@ -273,6 +282,18 @@ describe('useStackActions.bypassPolicyAndRetry', () => {
     const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
     expect(urls).toContain('/stacks/web/deploy?ignorePolicy=true');
     expect(urls.some(u => u.includes('/update'))).toBe(false);
+  });
+
+  it('retries a rollback bypass against the rollback endpoint with ?ignorePolicy=true', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null, { status: 200 })); // rollback OK
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response('content', { status: 200 })); // content reload
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({ exists: true }), { status: 200 })); // backup info
+    const { result } = setup({
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'rollback', payload } as never },
+    });
+    await result.current.bypassPolicyAndRetry();
+    const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
+    expect(urls).toContain('/stacks/web.yml/rollback?ignorePolicy=true');
   });
 
   it('does nothing when no policy block is stored', async () => {

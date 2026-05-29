@@ -638,6 +638,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     try {
       if (action === 'update') {
         await runStackAction(existingFile, 'update', 'update', 'running', 'Stack updated successfully!', true);
+      } else if (action === 'rollback') {
+        await rollbackStack(true);
       } else {
         stackListState.setStackAction(existingFile, 'deploy');
         try {
@@ -654,18 +656,36 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const rollbackStack = async () => {
+  const rollbackStack = async (ignorePolicy = false) => {
     if (!stackListState.selectedFile || stackListState.isStackBusy(stackListState.selectedFile))
       return;
     const stackFile = stackListState.selectedFile;
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     stackListState.setStackAction(stackFile, 'rollback');
     stackListState.setOptimisticStatus(stackFile, 'running');
     try {
-      const res = await apiFetch(`/stacks/${stackFile}/rollback`, { method: 'POST' });
+      const path = ignorePolicy
+        ? `/stacks/${stackFile}/rollback?ignorePolicy=true`
+        : `/stacks/${stackFile}/rollback`;
+      const res = await apiFetch(path, { method: 'POST' });
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err?.error || 'Rollback failed');
+        const rawBody = await res.text();
+        if (res.status === 409) {
+          const inProgress = parseStackOpInProgress(rawBody);
+          if (inProgress) {
+            const message = stackOpInProgressMessage(stackName, inProgress);
+            toast.error(message);
+            return;
+          }
+          const blockedBy = tryOpenPolicyBlock(rawBody, stackName, stackFile, 'rollback');
+          if (blockedBy) {
+            toast.error(`Rollback blocked by policy "${blockedBy}"`);
+            return;
+          }
+        }
+        throw parseStackActionError(rawBody, 'Rollback failed');
       }
+      overlayState.setPolicyBlock(null);
       toast.success('Stack rolled back successfully.');
       const contentRes = await apiFetch(`/stacks/${stackFile}`);
       const text = await contentRes.text();
