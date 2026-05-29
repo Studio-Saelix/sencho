@@ -528,3 +528,38 @@ describe('DELETE /api/notifications/:id - validation', () => {
     expect(res.body.error).toContain('Invalid');
   });
 });
+
+// --- Notification history endpoints ---
+
+describe('GET /api/notifications - history', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    // Restore the license spies the suite relies on after a full mock reset.
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('paid');
+    vi.spyOn(licenseService, 'getVariant').mockReturnValue('admiral');
+  });
+
+  it('returns 200 with an array for an authenticated user', async () => {
+    const res = await request(app).get('/api/notifications').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('returns 401 without auth', async () => {
+    const res = await request(app).get('/api/notifications');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 500 and logs the error when the history read throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'getNotificationHistory').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).get('/api/notifications').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to fetch notifications');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to fetch notifications:', expect.any(Error));
+  });
+});

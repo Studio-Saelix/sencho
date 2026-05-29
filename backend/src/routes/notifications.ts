@@ -9,6 +9,7 @@ import {
   NOTIFICATION_CHANNEL_TYPES,
   validateHttpsUrl,
   cleanStackPatterns,
+  maskWebhookUrl,
 } from '../helpers/notificationChannels';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -56,7 +57,8 @@ notificationsRouter.get('/', authMiddleware, async (req: Request, res: Response)
     const category = typeof req.query.category === 'string' ? req.query.category : undefined;
     const history = DatabaseService.getInstance().getNotificationHistory(nodeId, 50, category);
     res.json(history);
-  } catch {
+  } catch (error) {
+    console.error('Failed to fetch notifications:', error);
     res.status(500).json({ error: 'Failed to fetch notifications' });
   }
 });
@@ -66,7 +68,8 @@ notificationsRouter.post('/read', authMiddleware, async (req: Request, res: Resp
     const nodeId = req.nodeId ?? 0;
     DatabaseService.getInstance().markAllNotificationsRead(nodeId);
     res.json({ success: true });
-  } catch {
+  } catch (error) {
+    console.error('Failed to mark notifications read:', error);
     res.status(500).json({ error: 'Failed to mark notifications read' });
   }
 });
@@ -78,7 +81,8 @@ notificationsRouter.delete('/:id', authMiddleware, async (req: Request, res: Res
     const nodeId = req.nodeId ?? 0;
     DatabaseService.getInstance().deleteNotification(nodeId, id);
     res.json({ success: true });
-  } catch {
+  } catch (error) {
+    console.error('Failed to delete notification:', error);
     res.status(500).json({ error: 'Failed to delete notification' });
   }
 });
@@ -88,7 +92,8 @@ notificationsRouter.delete('/', authMiddleware, async (req: Request, res: Respon
     const nodeId = req.nodeId ?? 0;
     DatabaseService.getInstance().deleteAllNotifications(nodeId);
     res.json({ success: true });
-  } catch {
+  } catch (error) {
+    console.error('Failed to clear notifications:', error);
     res.status(500).json({ error: 'Failed to clear notifications' });
   }
 });
@@ -284,7 +289,7 @@ notificationRoutesRouter.post('/:id/test', authMiddleware, async (req: Request, 
     const route = DatabaseService.getInstance().getNotificationRoute(id);
     if (!route) { res.status(404).json({ error: 'Route not found' }); return; }
 
-    if (isDebugEnabled()) console.log(`[Routes:diag] Test dispatch for route ${id} (${route.channel_type} -> ${route.channel_url})`);
+    if (isDebugEnabled()) console.log(`[Routes:diag] Test dispatch for route ${id} (${route.channel_type} -> ${maskWebhookUrl(route.channel_url)})`);
     await NotificationService.getInstance().testDispatch(route.channel_type, route.channel_url);
     res.json({ success: true });
   } catch (error) {
