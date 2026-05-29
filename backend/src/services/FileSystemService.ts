@@ -488,6 +488,28 @@ export class FileSystemService {
     const backupDir = this.getBackupDir(stackName);
     await fsPromises.mkdir(backupDir, { recursive: true });
 
+    // Clear stale managed files from the backup slot before writing the current
+    // ones. The slot is reused across runs, so a managed file removed from the
+    // stack since the last backup (e.g. a deleted .env or a switched compose
+    // variant) would otherwise linger here and a later restore would resurrect
+    // it, breaking the faithful-revert guarantee. Scope is the protected set
+    // Sencho writes; .timestamp is rewritten below. Containment is re-checked at
+    // the sink, rooted at the backup base, for the same reason restoreStackFiles
+    // does it. A clear failure is logged but not fatal: it only risks a stale
+    // future rollback, so it should not block an otherwise valid deploy.
+    const backupRoot = path.resolve(getBackupBaseDir());
+    for (const file of PROTECTED_STACK_FILES) {
+      const stale = path.resolve(backupRoot, path.join(backupDir, file));
+      if (!stale.startsWith(backupRoot + path.sep)) continue;
+      try {
+        await fsPromises.unlink(stale);
+      } catch (e: unknown) {
+        if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          console.warn(`[FileSystemService] Could not clear stale backup ${file}:`, (e as Error).message);
+        }
+      }
+    }
+
     // Copy compose file
     const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
     for (const file of composeFiles) {
@@ -527,11 +549,49 @@ export class FileSystemService {
     const backupDir = this.getBackupDir(stackName);
 
     const items = await fsPromises.readdir(backupDir);
+    const backedUp = new Set(items);
+
+    // Remove managed files the backup does not contain before copying, so a
+    // rollback is a faithful revert rather than an additive overlay. If the
+    // failed deploy switched compose variants (e.g. compose.yaml ->
+    // docker-compose.yml) or added a .env the backup predates, leaving the new
+    // file in place would re-deploy a hybrid of old and new configuration.
+    // Scope is strictly PROTECTED_STACK_FILES (the same set Sencho backs up);
+    // user data and bind-mounted content in the stack directory are untouched.
+    // Canonical js/path-injection barrier: path.resolve(SAFE_ROOT, untrusted)
+    // followed by a single startsWith check, both inline with the sink. stackDir
+    // is already validated by resolveStackDir; this re-establishes containment at
+    // the delete sink itself so static analysis sees the barrier.
+    const baseResolved = path.resolve(this.baseDir);
+    let removedOrphans = 0;
+    for (const file of PROTECTED_STACK_FILES) {
+      if (backedUp.has(file)) continue;
+      const target = path.resolve(baseResolved, path.join(stackDir, file));
+      if (!target.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      try {
+        await fsPromises.unlink(target);
+        removedOrphans++;
+      } catch (e: unknown) {
+        const code = (e as NodeJS.ErrnoException)?.code;
+        // ENOENT means the file is already absent, which is the desired end
+        // state. Any other code (EACCES on a chowned bind mount, EBUSY on a
+        // held file) means a managed file Sencho meant to remove is still on
+        // disk: completing the copy below would leave a hybrid config while
+        // reporting success. Abort so the caller surfaces a real failure and
+        // preserves the backup for manual recovery.
+        if (code !== 'ENOENT') {
+          throw new Error(`Rollback aborted: could not remove stale ${file} (${code ?? 'unknown error'}); the restore would leave a mix of old and new configuration.`);
+        }
+      }
+    }
+
     for (const item of items) {
       if (item === '.timestamp') continue;
       await fsPromises.copyFile(path.join(backupDir, item), path.join(stackDir, item));
     }
-    if (debug) console.debug(`[FileSystemService:debug] Restore completed in ${Date.now() - t0}ms`, { stackName, files: items.filter(i => i !== '.timestamp') });
+    if (debug) console.debug(`[FileSystemService:debug] Restore completed in ${Date.now() - t0}ms`, { stackName, restored: items.filter(i => i !== '.timestamp').length, removedOrphans });
   }
 
   async getBackupInfo(stackName: string): Promise<{ exists: boolean; timestamp: number | null }> {

@@ -752,7 +752,13 @@ export class SchedulerService {
             'Auto-update',
             `/api/scheduled-tasks/auto-update/${stackName}`,
         );
-        await compose.updateStack(stackName, undefined, true);
+        // Atomic backup/rollback is a paid capability. Every path that reaches
+        // this method is already paid-gated (the scheduler tick and the manual
+        // run route both require a paid licence), but the flag is resolved from
+        // the licence here so the tier intent is explicit at the call site and
+        // survives any future refactor that introduces another caller.
+        const atomic = LicenseService.getInstance().getTier() === 'paid';
+        await compose.updateStack(stackName, undefined, atomic);
         db.clearStackUpdateStatus(nodeId, stackName);
 
         this.safeDispatch(
