@@ -126,4 +126,99 @@ describe('FileSystemService backup location', () => {
     const restored = await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8');
     expect(restored).toBe('version: original\n');
   });
+
+  it('restoreStackFiles removes a managed file the backup does not contain', async () => {
+    const stackName = 'noenv';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    // Backup captures a stack that has no .env.
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf-8');
+
+    const service = FileSystemService.getInstance();
+    await service.backupStackFiles(stackName);
+
+    // A later deploy adds a .env the backup predates. A faithful revert must
+    // remove it so the restored stack is not a hybrid of old + new config.
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'SECRET=added-after-backup\n', 'utf-8');
+    await service.restoreStackFiles(stackName);
+
+    await expect(fsPromises.access(path.join(stackDir, '.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fsPromises.access(path.join(stackDir, 'compose.yaml'))).resolves.toBeUndefined();
+  });
+
+  it('restoreStackFiles reverts a compose-variant switch', async () => {
+    const stackName = 'variant';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: original\n', 'utf-8');
+
+    const service = FileSystemService.getInstance();
+    await service.backupStackFiles(stackName);
+
+    // The failed deploy renamed the compose variant: it removed compose.yaml and
+    // wrote docker-compose.yml instead. Restore must undo both halves.
+    await fsPromises.rm(path.join(stackDir, 'compose.yaml'));
+    await fsPromises.writeFile(path.join(stackDir, 'docker-compose.yml'), 'name: broken\n', 'utf-8');
+    await service.restoreStackFiles(stackName);
+
+    await expect(fsPromises.access(path.join(stackDir, 'docker-compose.yml'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const restored = await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8');
+    expect(restored).toBe('name: original\n');
+  });
+
+  it('restoreStackFiles removes multiple orphans in one restore', async () => {
+    const stackName = 'multi';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: original\n', 'utf-8');
+
+    const service = FileSystemService.getInstance();
+    await service.backupStackFiles(stackName);
+
+    // The failed deploy switched the compose variant AND added a .env at once.
+    await fsPromises.rm(path.join(stackDir, 'compose.yaml'));
+    await fsPromises.writeFile(path.join(stackDir, 'docker-compose.yml'), 'name: broken\n', 'utf-8');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'SECRET=x\n', 'utf-8');
+    await service.restoreStackFiles(stackName);
+
+    await expect(fsPromises.access(path.join(stackDir, 'docker-compose.yml'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fsPromises.access(path.join(stackDir, '.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const restored = await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8');
+    expect(restored).toBe('name: original\n');
+  });
+
+  it('restoreStackFiles aborts instead of leaving a hybrid when an orphan cannot be removed', async () => {
+    const stackName = 'blocked';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: original\n', 'utf-8');
+
+    const service = FileSystemService.getInstance();
+    await service.backupStackFiles(stackName);
+
+    // An orphan managed name that is a directory: unlink fails with a non-ENOENT
+    // code (EPERM/EISDIR), standing in for the EACCES/EBUSY cases on a real
+    // chowned bind mount. The restore must reject rather than report success
+    // with a stale file still present.
+    await fsPromises.mkdir(path.join(stackDir, 'docker-compose.yml'));
+    await expect(service.restoreStackFiles(stackName)).rejects.toThrow(/Rollback aborted/i);
+  });
+
+  it('restoreStackFiles leaves non-managed files untouched', async () => {
+    const stackName = 'userdata';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf-8');
+
+    const service = FileSystemService.getInstance();
+    await service.backupStackFiles(stackName);
+
+    // A file Sencho does not manage (user notes, mounted config) must survive a
+    // rollback: the cleanup is scoped to the protected compose/.env set only.
+    await fsPromises.writeFile(path.join(stackDir, 'notes.txt'), 'keep me\n', 'utf-8');
+    await service.restoreStackFiles(stackName);
+
+    const kept = await fsPromises.readFile(path.join(stackDir, 'notes.txt'), 'utf-8');
+    expect(kept).toBe('keep me\n');
+  });
 });

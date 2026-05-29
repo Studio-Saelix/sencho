@@ -1,13 +1,14 @@
 /**
  * Tracks in-flight stack lifecycle operations (deploy, down, restart, stop,
- * start, update) per (nodeId, stackName). A second request to the same stack
- * while the first is still running returns 409 instead of racing the first.
+ * start, update, rollback) per (nodeId, stackName). A second request to the
+ * same stack while the first is still running returns 409 instead of racing
+ * the first.
  *
  * State is intentionally process-local: a Sencho restart clears all locks,
  * which matches the lifecycle of any in-flight `docker compose` child process.
  */
 
-export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update';
+export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'rollback';
 
 export interface StackOpLock {
   action: StackOpAction;

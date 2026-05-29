@@ -61,6 +61,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   stop: 'stopping',
   start: 'starting',
   update: 'updating',
+  rollback: 'rolling back',
 };
 
 function tryAcquireStackOpLock(
@@ -1200,11 +1201,18 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!requirePaid(req, res)) return;
+  // Rollback restores files and re-deploys, so it must hold the same per-stack
+  // lock deploy/update use. Without it a rollback racing an in-flight deploy
+  // would mutate the compose files and run a second `docker compose up` against
+  // the same project. Lock held below: all early-returns stay inside the try so
+  // finally fires.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'rollback')) return;
   try {
     const fsSvc = FileSystemService.getInstance(req.nodeId);
     const backupInfo = await fsSvc.getBackupInfo(stackName);
     if (!backupInfo.exists) {
-      return res.status(404).json({ error: 'No backup available for this stack.' });
+      res.status(404).json({ error: 'No backup available for this stack.' });
+      return;
     }
     dlog(`[Stacks] Rollback initiated: ${sanitizeForLog(stackName)}`);
     await fsSvc.restoreStackFiles(stackName);
@@ -1213,14 +1221,24 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
     res.json({ message: 'Stack rolled back successfully.' });
+    notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
     const message = getErrorMessage(error, 'Rollback failed.');
-    res.status(500).json({ error: message });
+    notifyActionFailure('rollback', stackName, error, req.user?.username ?? 'system');
+    if (!res.headersSent) {
+      res.status(500).json({ error: message });
+    }
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 });
 
 stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
+  // Backup metadata exists only to drive the paid-only Rollback affordance, so
+  // the read is gated to paid to match the frontend, which only fetches it when
+  // the instance is licensed.
+  if (!requirePaid(req, res)) return;
   try {
     const stackName = req.params.stackName as string;
     const fsSvc = FileSystemService.getInstance(req.nodeId);
