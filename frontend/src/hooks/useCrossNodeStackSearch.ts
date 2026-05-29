@@ -69,7 +69,14 @@ export function useCrossNodeStackSearch({ query, enabled, excludeNodeId }: Optio
             setLoading(false);
             return;
         }
+        // Starting a new fetch session (a search became active, or the active
+        // node changed via excludeNodeId): drop the previous session's results
+        // so a stale inventory or unreachable warning never lingers during the
+        // refetch window. Refining the query keeps `active` true and does not
+        // re-run this effect, so the cached inventory survives keystrokes.
         setLoading(true);
+        setInventory([]);
+        setFailedNodes([]);
         const controller = new AbortController();
         const timer = setTimeout(async () => {
             try {

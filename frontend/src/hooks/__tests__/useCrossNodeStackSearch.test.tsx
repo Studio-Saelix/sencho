@@ -261,6 +261,27 @@ describe('useCrossNodeStackSearch', () => {
     expect(new Set(fetchForNodeMock.mock.calls.map(c => c[1]))).toEqual(new Set([1]));
   });
 
+  it('clears stale results immediately when excludeNodeId changes, before the refetch resolves', async () => {
+    useNodesMock.mockReturnValue({ nodes: [node(1, 'local'), node(2, 'opsix'), node(3, 'edge')] });
+    mockFleet({ 1: { files: ['a.yml'] }, 2: { files: ['a.yml'] }, 3: { files: ['a.yml'] } });
+
+    const { result, rerender } = renderHook(
+      ({ excludeNodeId }) => useCrossNodeStackSearch({ query: 'a', enabled: true, excludeNodeId }),
+      { initialProps: { excludeNodeId: 1 } },
+    );
+    await flushDebounce();
+    expect(result.current.hits.map(h => h.nodeId).sort()).toEqual([2, 3]);
+
+    // Switching active node (excludeNodeId 1 -> 2) must drop the stale inventory
+    // at once, before the new fanout resolves, so node 2 does not linger.
+    rerender({ excludeNodeId: 2 });
+    expect(result.current.hits).toEqual([]);
+    expect(result.current.loading).toBe(true);
+
+    await flushDebounce();
+    expect(result.current.hits.map(h => h.nodeId).sort()).toEqual([1, 3]);
+  });
+
   it('degrades to unknown when the status endpoint is 200 with an unparseable body', async () => {
     useNodesMock.mockReturnValue({ nodes: [node(1, 'local')] });
     fetchForNodeMock.mockImplementation((endpoint: string) => {
