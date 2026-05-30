@@ -29,6 +29,13 @@ describe('maskWebhookUrl', () => {
     expect(maskWebhookUrl('https://example.com/')).toBe('https://example.com');
   });
 
+  it('strips embedded userinfo credentials (origin omits user:pass@)', () => {
+    const masked = maskWebhookUrl('https://user:s3cr3t@example.com/');
+    expect(masked).toBe('https://example.com');
+    expect(masked).not.toContain('s3cr3t');
+    expect(masked).not.toContain('user');
+  });
+
   it('returns a placeholder for empty or non-string input', () => {
     expect(maskWebhookUrl('')).toBe('<no url>');
     expect(maskWebhookUrl(undefined)).toBe('<no url>');

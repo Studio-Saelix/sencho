@@ -13,6 +13,7 @@ import {
 } from '../helpers/notificationChannels';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 import { parseIntParam } from '../utils/parseIntParam';
 
 const VALID_CATEGORIES: ReadonlySet<NotificationCategory> = new Set(ALL_NOTIFICATION_CATEGORIES);
@@ -177,8 +178,8 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
       created_at: now,
       updated_at: now,
     });
-    console.log(`[Routes] Route "${route.name}" created (id=${route.id})`);
-    if (isDebugEnabled()) console.log(`[Routes:diag] Route "${route.name}" created with patterns=[${cleanedPatterns}], channel=${channel_type}`);
+    console.log(`[Routes] Route "${sanitizeForLog(route.name)}" created (id=${route.id})`);
+    if (isDebugEnabled()) console.log(`[Routes:diag] Route "${sanitizeForLog(route.name)}" created with patterns=[${sanitizeForLog(cleanedPatterns.join(', '))}], channel=${channel_type}`);
     res.status(201).json(route);
   } catch (error) {
     console.error('Failed to create notification route:', error);

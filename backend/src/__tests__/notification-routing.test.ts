@@ -549,4 +549,25 @@ describe('NotificationService - crash safety (dispatchAlert never rejects)', () 
     expect(mockAddNotificationHistory).toHaveBeenCalledTimes(1);
     expect(consoleErrorSpy).toHaveBeenCalledWith('[Notify] dispatchAlert failed:', expect.any(Error));
   });
+
+  it('snapshots subscribers so an unsubscribe during a send does not skip later subscribers', async () => {
+    const sent: string[] = [];
+    let unsubscribeB: () => void = () => {};
+    const wsB = {
+      readyState: 1, // WebSocket.OPEN
+      send: () => { sent.push('B'); },
+    } as unknown as import('ws').WebSocket;
+    // A's send removes B mid-iteration, mimicking a 'close' handler firing.
+    const wsA = {
+      readyState: 1,
+      send: () => { sent.push('A'); unsubscribeB(); },
+    } as unknown as import('ws').WebSocket;
+    svc.subscribe(wsA);
+    unsubscribeB = svc.subscribe(wsB);
+
+    await svc.dispatchAlert('info', 'system', 'Host rebooted');
+
+    // B still receives the broadcast because iteration runs over a snapshot.
+    expect(sent).toEqual(['A', 'B']);
+  });
 });

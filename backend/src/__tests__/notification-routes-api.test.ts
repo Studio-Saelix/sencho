@@ -562,4 +562,43 @@ describe('GET /api/notifications - history', () => {
     expect(res.body.error).toBe('Failed to fetch notifications');
     expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to fetch notifications:', expect.any(Error));
   });
+
+  it('POST /read returns 500 and logs the error when the mark-read write throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'markAllNotificationsRead').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).post('/api/notifications/read').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to mark notifications read');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to mark notifications read:', expect.any(Error));
+  });
+
+  it('DELETE /:id returns 500 and logs the error when the delete throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'deleteNotification').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).delete('/api/notifications/1').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to delete notification');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to delete notification:', expect.any(Error));
+  });
+
+  it('DELETE / returns 500 and logs the error when the clear-all write throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'deleteAllNotifications').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).delete('/api/notifications').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to clear notifications');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to clear notifications:', expect.any(Error));
+  });
 });
