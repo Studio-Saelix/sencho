@@ -544,11 +544,11 @@ describe('ImageUpdateService - check() concurrency guard', () => {
     (ImageUpdateService as any).instance = undefined;
   });
 
-  async function stubDbWithLocalNode() {
+  async function stubDbWithLocalNode(developerMode: '0' | '1' = '0') {
     const dbModule = await import('../services/DatabaseService');
     const orig = dbModule.DatabaseService.getInstance;
     dbModule.DatabaseService.getInstance = (() => ({
-      getGlobalSettings: () => ({ developer_mode: '0' }),
+      getGlobalSettings: () => ({ developer_mode: developerMode }),
       getNodes: () => [{ type: 'local', id: 1, name: 'local', mode: 'proxy', compose_dir: '/tmp/compose', is_default: true, status: 'online', created_at: 1 }],
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
@@ -623,6 +623,37 @@ describe('ImageUpdateService - check() concurrency guard', () => {
 
     restoreDb();
     first.catch(() => {});
+  });
+
+  it('logs a debug skip line for a mid-scan trigger when developer mode is on', async () => {
+    const restoreDb = await stubDbWithLocalNode('1');
+    // isDebugEnabled short-circuits to false under NODE_ENV=test unless DATA_DIR
+    // is set; set it so the developer_mode flag is actually consulted.
+    const prevDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = prevDataDir ?? '/tmp/image-update-debug-test';
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const service = ImageUpdateService.getInstance();
+      const checkNodeMock = vi.fn().mockImplementation(() =>
+        new Promise(() => { /* never resolves */ })
+      );
+      (service as any).checkNode = checkNodeMock;
+
+      const first = (service as any).check();
+      await new Promise(r => setTimeout(r, 10));
+
+      // Under the long-run threshold with developer mode on, the skipped trigger
+      // takes the debug branch rather than the WARN branch.
+      await (service as any).check();
+      expect(checkNodeMock).toHaveBeenCalledTimes(1);
+      expect(logSpy.mock.calls.some(c => /Check already in progress; skipping/.test(String(c[0])))).toBe(true);
+
+      first.catch(() => {});
+    } finally {
+      logSpy.mockRestore();
+      if (prevDataDir === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = prevDataDir;
+      restoreDb();
+    }
   });
 
   it('releases the lock when a check finishes and allows the next run', async () => {
