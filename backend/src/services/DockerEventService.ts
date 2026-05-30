@@ -33,6 +33,13 @@ export interface ContainerHealthSnapshot {
     healthStatus?: 'healthy' | 'unhealthy' | 'starting';
     unhealthySince?: number;
     lastKillAt?: number;
+    /**
+     * Timestamp (ms) of the last exit classified as a crash or OOM kill, cleared
+     * when the container next starts. Set independently of the crash-alert toggle
+     * so Auto-Heal can distinguish a crash (heal-worthy) from an operator stop or
+     * clean exit (which are never stamped here).
+     */
+    crashedAt?: number;
 }
 
 /** Grace window after a `die` before classifying, to absorb out-of-order kill events. */
@@ -85,6 +92,7 @@ interface InternalContainerState extends ContainerLifecycleState {
     lastActivityAt: number;
     healthStatus?: 'healthy' | 'unhealthy' | 'starting';
     unhealthySince?: number;
+    crashedAt?: number;
 }
 
 interface DockerEventPayload {
@@ -478,6 +486,7 @@ export class DockerEventService {
         state.lastKillAt = undefined;
         state.oomPending = undefined;
         state.lastCrashAlertAt = undefined;
+        state.crashedAt = undefined;
         state.unhealthySince = undefined;
         state.healthStatus = 'starting';
         state.lastActivityAt = Date.now();
@@ -509,6 +518,12 @@ export class DockerEventService {
         state.lastActivityAt = now;
 
         if (classification === 'intentional' || classification === 'clean') return;
+
+        // Stamp the heal signal for Auto-Heal before the alert dedup/toggle gates
+        // below. This must be independent of whether a crash alert is dispatched,
+        // so Auto-Heal still sees the crash when crash alerts are disabled or
+        // rate-suppressed. Cleared on the next `start`.
+        state.crashedAt = now;
 
         // Dedup early: crashloops repeatedly reach this point with exit 137,
         // and the OOM fallback below issues a Docker inspect. Skipping the
@@ -759,6 +774,7 @@ export class DockerEventService {
             healthStatus: s.healthStatus,
             unhealthySince: s.unhealthySince,
             lastKillAt: s.lastKillAt,
+            crashedAt: s.crashedAt,
         };
     }
 }
