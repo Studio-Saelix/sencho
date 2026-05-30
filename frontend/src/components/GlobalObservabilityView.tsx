@@ -305,8 +305,9 @@ export function GlobalObservabilityView() {
     const liveTone: 'live' | 'idle' = lastEventAt != null && (tick - lastEventAt) < LIVE_WINDOW_MS ? 'live' : 'idle';
     const masterTone = fetchError ? 'error' : liveTone;
     const stateWord = fetchError ? 'Offline' : masterTone === 'live' ? 'Streaming' : 'Idle';
-    const nodeLabel = activeNode ? (activeNode.type === 'local' ? 'LOCAL' : activeNode.name.toUpperCase()) : 'LOCAL';
-    const kicker = `LIVE LOGS · NODE · ${nodeLabel}`;
+    // The Logs tab is hub-only (hidden and redirected when a remote node is
+    // active), so the feed always reflects the local hub.
+    const kicker = 'LIVE LOGS · NODE · LOCAL';
 
     const mastheadMetadata = useMemo(() => {
         const uptime = mountedAt != null ? formatUptime(tick - mountedAt) : '—';

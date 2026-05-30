@@ -104,8 +104,10 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
       { value: 'fleet', label: 'Fleet', icon: Radar },
       { value: 'resources', label: 'Resources', icon: HardDrive },
       { value: 'templates', label: 'App Store', icon: CloudDownload },
-      { value: 'global-observability', label: 'Logs', icon: Activity },
     ];
+    // The aggregated Logs feed crosses every managed stack, so it is an
+    // admin-only operator view (the backend gates the same routes on admin).
+    if (isAdmin) items.push({ value: 'global-observability', label: 'Logs', icon: Activity });
     if (isPaid && isAdmin) {
       items.push({ value: 'auto-updates', label: 'Auto-Update', icon: RefreshCw });
       items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
@@ -120,12 +122,17 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   }, [isAdmin, isPaid, license?.variant, can, isRemote]);
 
   useEffect(() => {
-    if (isRemote && HUB_ONLY_VIEWS.has(activeView)) {
+    // Redirect off a view the active context can't reach: a hub-only view while
+    // a remote node is active, or the admin-only Logs view as a non-admin (e.g.
+    // arrived via a deep-link event rather than the now-hidden nav item).
+    const blockedByRemote = isRemote && HUB_ONLY_VIEWS.has(activeView);
+    const blockedByRole = !isAdmin && activeView === 'global-observability';
+    if (blockedByRemote || blockedByRole) {
       onNavigateToDashboard?.();
       setActiveView('dashboard');
       setFilterNodeId(null);
     }
-  }, [isRemote, activeView, onNavigateToDashboard]);
+  }, [isRemote, isAdmin, activeView, onNavigateToDashboard]);
 
   return {
     activeView, setActiveView,
