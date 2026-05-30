@@ -134,7 +134,13 @@ export class AutoHealService {
             if (node.id === undefined) return;
             const nodeId = node.id;
             const target = registry.getProxyTarget(nodeId);
-            if (!target) return;
+            if (!target) {
+                // No reachable proxy target (e.g. a pilot-agent tunnel that is down
+                // or a remote missing its URL/token): count it so a persistently
+                // untargetable node is surfaced rather than silently skipped.
+                this.noteLeaseRefreshFailure(nodeId, 'no proxy target');
+                return;
+            }
             const baseUrl = target.apiUrl.replace(/\/$/, '');
             try {
                 const res = await fetch(`${baseUrl}/api/auto-heal/policies`, {
@@ -336,6 +342,21 @@ export class AutoHealService {
         now: number,
     ): HealSignal {
         const key = this.containerKey(nodeId, container.Id);
+
+        // Stopped: heal only when the event stream classified the exit as a crash
+        // or OOM kill. crashedAt is never stamped for operator stops or clean
+        // exits, so intentionally-stopped containers are not resurrected. Checked
+        // before any health-text parsing so an exited container can never fall into
+        // the healthcheck path.
+        const rawState = (container.State ?? '').toLowerCase();
+        if (rawState === 'exited' || rawState === 'dead') {
+            this.observedUnhealthySince.delete(key);
+            if (eventState?.crashedAt) {
+                return { reason: 'crashed', downSince: eventState.crashedAt, lastKillAt: eventState.lastKillAt };
+            }
+            return { lastKillAt: eventState?.lastKillAt };
+        }
+
         const statusText = `${container.State ?? ''} ${container.Status ?? ''}`.toLowerCase();
         const dockerHealth = statusText.includes('unhealthy')
             ? 'unhealthy'
@@ -357,18 +378,6 @@ export class AutoHealService {
         // Running and healthy (or warming up): clear unhealthy tracking, nothing to heal.
         if (dockerHealth === 'healthy' || dockerHealth === 'starting') {
             this.observedUnhealthySince.delete(key);
-            return { lastKillAt: eventState?.lastKillAt };
-        }
-
-        // Stopped: heal only when the event stream classified the exit as a crash
-        // or OOM kill. crashedAt is never stamped for operator stops or clean
-        // exits, so intentionally-stopped containers are not resurrected.
-        const rawState = (container.State ?? '').toLowerCase();
-        if (rawState === 'exited' || rawState === 'dead') {
-            this.observedUnhealthySince.delete(key);
-            if (eventState?.crashedAt) {
-                return { reason: 'crashed', downSince: eventState.crashedAt, lastKillAt: eventState.lastKillAt };
-            }
             return { lastKillAt: eventState?.lastKillAt };
         }
 

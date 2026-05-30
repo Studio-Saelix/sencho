@@ -487,6 +487,33 @@ describe('AutoHealService.evaluate', () => {
         expect(calledUrls.some(u => u.includes('bad-host'))).toBe(true);
     });
 
+    it('warns after repeated lease refreshes find no reachable proxy target', async () => {
+        const db = DatabaseService.getInstance();
+        db.addNode({
+            name: 'no-target-remote',
+            type: 'remote',
+            compose_dir: '',
+            is_default: false,
+            api_url: '',
+            api_token: '',
+        });
+        vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+        vi.spyOn(LicenseService.getInstance(), 'getProxyHeaders').mockReturnValue(
+            { tier: 'paid', variant: 'admiral' } as ReturnType<ReturnType<typeof LicenseService.getInstance>['getProxyHeaders']>,
+        );
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
+        const fetchSpy = vi.spyOn(global, 'fetch');
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        const svc = resetAutoHealSingleton() as unknown as { refreshRemoteLeases: () => Promise<void> };
+        await svc.refreshRemoteLeases();
+        await svc.refreshRemoteLeases();
+        expect(warnSpy).not.toHaveBeenCalled();
+        await svc.refreshRemoteLeases(); // third consecutive failure crosses the threshold
+        expect(warnSpy).toHaveBeenCalled();
+        expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
     it('does not create duplicate timers when start is called twice', () => {
         vi.useFakeTimers();
         try {
