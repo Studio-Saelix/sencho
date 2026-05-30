@@ -528,3 +528,77 @@ describe('DELETE /api/notifications/:id - validation', () => {
     expect(res.body.error).toContain('Invalid');
   });
 });
+
+// --- Notification history endpoints ---
+
+describe('GET /api/notifications - history', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    // Restore the license spies the suite relies on after a full mock reset.
+    vi.spyOn(licenseService, 'getTier').mockReturnValue('paid');
+    vi.spyOn(licenseService, 'getVariant').mockReturnValue('admiral');
+  });
+
+  it('returns 200 with an array for an authenticated user', async () => {
+    const res = await request(app).get('/api/notifications').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('returns 401 without auth', async () => {
+    const res = await request(app).get('/api/notifications');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 500 and logs the error when the history read throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'getNotificationHistory').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).get('/api/notifications').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to fetch notifications');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to fetch notifications:', expect.any(Error));
+  });
+
+  it('POST /read returns 500 and logs the error when the mark-read write throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'markAllNotificationsRead').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).post('/api/notifications/read').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to mark notifications read');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to mark notifications read:', expect.any(Error));
+  });
+
+  it('DELETE /:id returns 500 and logs the error when the delete throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'deleteNotification').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).delete('/api/notifications/1').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to delete notification');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to delete notification:', expect.any(Error));
+  });
+
+  it('DELETE / returns 500 and logs the error when the clear-all write throws', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(DatabaseService.getInstance(), 'deleteAllNotifications').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const res = await request(app).delete('/api/notifications').set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to clear notifications');
+    expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to clear notifications:', expect.any(Error));
+  });
+});
