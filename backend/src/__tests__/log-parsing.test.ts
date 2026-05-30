@@ -5,7 +5,17 @@ import {
   detectLogLevel,
   stripControlChars,
   demuxDockerLog,
+  createFrameDemuxer,
 } from '../utils/log-parsing';
+
+/** Build one Docker multiplexed frame: [streamType, 0,0,0, len(BE)] + payload. */
+function frame(streamType: 1 | 2, payload: string): Buffer {
+  const body = Buffer.from(payload);
+  const header = Buffer.alloc(8);
+  header[0] = streamType;
+  header.writeUInt32BE(body.length, 4);
+  return Buffer.concat([header, body]);
+}
 
 // ── normalizeContainerName ──────────────────────────────────────────────────
 
@@ -192,27 +202,18 @@ describe('demuxDockerLog', () => {
     const buf = Buffer.from('line1\nline2\n');
     const lines: Array<{ line: string; source: string }> = [];
     demuxDockerLog(buf, true, (line, source) => lines.push({ line, source }));
+    // A trailing newline does not produce a spurious empty final line.
     expect(lines).toEqual([
       { line: 'line1', source: 'STDOUT' },
       { line: 'line2', source: 'STDOUT' },
-      { line: '', source: 'STDOUT' },
     ]);
   });
 
   it('parses multiplexed STDOUT frame', () => {
-    // Build a frame: [1, 0, 0, 0, <length BE>, ...payload]
-    const payload = Buffer.from('hello stdout\n');
-    const header = Buffer.alloc(8);
-    header[0] = 1; // STDOUT
-    header.writeUInt32BE(payload.length, 4);
-    const buf = Buffer.concat([header, payload]);
-
+    const buf = frame(1, 'hello stdout\n');
     const lines: Array<{ line: string; source: string }> = [];
     demuxDockerLog(buf, false, (line, source) => lines.push({ line, source }));
-    expect(lines).toEqual([
-      { line: 'hello stdout', source: 'STDOUT' },
-      { line: '', source: 'STDOUT' },
-    ]);
+    expect(lines).toEqual([{ line: 'hello stdout', source: 'STDOUT' }]);
   });
 
   it('parses multiplexed STDERR frame', () => {
@@ -252,5 +253,72 @@ describe('demuxDockerLog', () => {
     const lines: Array<{ line: string; source: string }> = [];
     demuxDockerLog(buf, true, (line, source) => lines.push({ line, source }));
     expect(lines[0]).toEqual({ line: 'cleantext', source: 'STDOUT' });
+  });
+});
+
+// ── createFrameDemuxer (stateful, survives chunk boundaries) ─────────────────
+
+describe('createFrameDemuxer', () => {
+  function collect() {
+    const lines: Array<{ line: string; source: string }> = [];
+    let errors = 0;
+    const d = createFrameDemuxer(false, (line, source) => lines.push({ line, source }), () => { errors += 1; });
+    return { lines, push: d.push, flush: d.flush, errors: () => errors };
+  }
+
+  it('reassembles a frame whose 8-byte header is split across two chunks', () => {
+    const full = frame(1, 'split header\n');
+    const c = collect();
+    c.push(full.subarray(0, 3)); // first 3 bytes of the header
+    c.push(full.subarray(3));    // remainder
+    c.flush();
+    expect(c.lines).toEqual([{ line: 'split header', source: 'STDOUT' }]);
+  });
+
+  it('reassembles a frame whose payload is split across two chunks', () => {
+    const full = frame(2, 'partial payload\n');
+    const c = collect();
+    c.push(full.subarray(0, 12)); // header + start of payload
+    c.push(full.subarray(12));
+    c.flush();
+    expect(c.lines).toEqual([{ line: 'partial payload', source: 'STDERR' }]);
+  });
+
+  it('joins a single log line split across two frames', () => {
+    const c = collect();
+    c.push(frame(1, 'hello ')); // no newline yet
+    c.push(frame(1, 'world\n'));
+    c.flush();
+    expect(c.lines).toEqual([{ line: 'hello world', source: 'STDOUT' }]);
+  });
+
+  it('keeps interleaved STDOUT/STDERR partial lines separate', () => {
+    const c = collect();
+    c.push(frame(1, 'out-part '));
+    c.push(frame(2, 'err-part '));
+    c.push(frame(1, 'out-end\n'));
+    c.push(frame(2, 'err-end\n'));
+    c.flush();
+    expect(c.lines).toEqual([
+      { line: 'out-part out-end', source: 'STDOUT' },
+      { line: 'err-part err-end', source: 'STDERR' },
+    ]);
+  });
+
+  it('flushes a buffered partial line with no trailing newline on stream end', () => {
+    const c = collect();
+    c.push(frame(1, 'no newline'));
+    expect(c.lines).toEqual([]); // held until flush
+    c.flush();
+    expect(c.lines).toEqual([{ line: 'no newline', source: 'STDOUT' }]);
+  });
+
+  it('counts a malformed frame header and resyncs instead of stalling', () => {
+    const c = collect();
+    // A stray byte > 2 where a stream type is expected, then a valid frame.
+    c.push(Buffer.concat([Buffer.from([0x07]), frame(1, 'recovered\n')]));
+    c.flush();
+    expect(c.errors()).toBeGreaterThanOrEqual(1);
+    expect(c.lines).toContainEqual({ line: 'recovered', source: 'STDOUT' });
   });
 });

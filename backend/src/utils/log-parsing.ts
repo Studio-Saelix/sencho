@@ -7,10 +7,13 @@
  * them here eliminates duplication and provides a single place to test.
  */
 
+/** Which Docker stream a log line came from. */
+export type LogStreamSource = 'STDOUT' | 'STDERR';
+
 export interface GlobalLogEntry {
   stackName: string;
   containerName: string;
-  source: 'STDOUT' | 'STDERR';
+  source: LogStreamSource;
   level: 'INFO' | 'WARN' | 'ERROR';
   message: string;
   timestampMs: number;
@@ -87,7 +90,7 @@ export function parseLogTimestamp(line: string): { timestampMs: number; cleanMes
  *   3. ERROR/FATAL/CRIT/PANIC keywords or `Exception:` pattern
  *   4. Fallback: STDERR -> ERROR, STDOUT -> INFO
  */
-export function detectLogLevel(message: string, source: 'STDOUT' | 'STDERR'): 'INFO' | 'WARN' | 'ERROR' {
+export function detectLogLevel(message: string, source: LogStreamSource): 'INFO' | 'WARN' | 'ERROR' {
   // Tier 1: INFO/DEBUG/TRACE (overrides STDERR default)
   if (INFO_STRUCTURED_RE.test(message) || INFO_BRACKET_RE.test(message) || INFO_KEYWORD_RE.test(message)) {
     return 'INFO';
@@ -109,32 +112,106 @@ export function stripControlChars(text: string): string {
   return text.replace(CONTROL_CHARS_RE, '');
 }
 
+/** A stateful demuxer that survives chunk boundaries. See `createFrameDemuxer`. */
+export interface FrameDemuxer {
+  /** Feed the next chunk of stream bytes; emits every complete line found. */
+  push(chunk: Buffer): void;
+  /** Emit any buffered partial line that has no trailing newline. Call once on stream end. */
+  flush(): void;
+}
+
 /**
- * Parse Docker's multiplexed log stream format and call `onLine` for each
- * line. TTY containers produce raw text (no headers); non-TTY containers
- * prepend an 8-byte header per frame:
+ * Create a stateful demuxer for Docker's multiplexed log stream.
+ *
+ * Unlike a one-shot parse, this retains state across `push` calls so a frame
+ * header or payload split across two chunk boundaries is reassembled instead
+ * of dropped, and a log line split across two frames is joined instead of
+ * emitted as two partials. Line buffers are kept per source so interleaved
+ * STDOUT/STDERR frames don't bleed into one another.
+ *
+ * TTY containers produce raw text (no headers, single STDOUT stream); non-TTY
+ * containers prepend an 8-byte header per frame:
  *   [streamType(1), reserved(3), payloadLength(4 BE)]
+ *
+ * @param onFrameError called once per malformed frame header (invalid stream
+ *   type). The demuxer advances one byte to attempt resync rather than
+ *   stalling; the callback lets the caller count corruption events.
+ */
+export function createFrameDemuxer(
+  isTty: boolean,
+  onLine: (line: string, source: LogStreamSource) => void,
+  onFrameError?: () => void,
+): FrameDemuxer {
+  if (isTty) {
+    let lineBuf = '';
+    return {
+      push(chunk: Buffer): void {
+        lineBuf += stripControlChars(chunk.toString('utf-8'));
+        const parts = lineBuf.split('\n');
+        lineBuf = parts.pop() ?? '';
+        for (const line of parts) onLine(line, 'STDOUT');
+      },
+      flush(): void {
+        if (lineBuf) {
+          onLine(lineBuf, 'STDOUT');
+          lineBuf = '';
+        }
+      },
+    };
+  }
+
+  let leftover: Buffer = Buffer.alloc(0);
+  const lineBufs: Record<LogStreamSource, string> = { STDOUT: '', STDERR: '' };
+
+  const emitPayload = (payload: string, source: LogStreamSource): void => {
+    const parts = (lineBufs[source] + payload).split('\n');
+    lineBufs[source] = parts.pop() ?? '';
+    for (const line of parts) onLine(line, source);
+  };
+
+  return {
+    push(chunk: Buffer): void {
+      const buf = leftover.length ? Buffer.concat([leftover, chunk]) : chunk;
+      let offset = 0;
+      while (offset + 8 <= buf.length) {
+        const streamType = buf[offset];
+        // Valid Docker stream types: 0 (stdin, unused here), 1 (stdout), 2 (stderr).
+        if (streamType > 2) {
+          onFrameError?.();
+          offset += 1; // attempt resync rather than stalling on a corrupt header
+          continue;
+        }
+        const length = buf.readUInt32BE(offset + 4);
+        if (offset + 8 + length > buf.length) break; // payload not fully arrived yet
+        const payload = buf.slice(offset + 8, offset + 8 + length).toString('utf-8');
+        offset += 8 + length;
+        emitPayload(payload, streamType === 2 ? 'STDERR' : 'STDOUT');
+      }
+      leftover = offset < buf.length ? buf.subarray(offset) : Buffer.alloc(0);
+    },
+    flush(): void {
+      for (const source of ['STDOUT', 'STDERR'] as const) {
+        if (lineBufs[source]) {
+          onLine(lineBufs[source], source);
+          lineBufs[source] = '';
+        }
+      }
+    },
+  };
+}
+
+/**
+ * One-shot demux of a complete Docker log buffer (the polling snapshot path,
+ * where the whole response is in hand). Implemented on top of
+ * `createFrameDemuxer` so frame- and line-splitting are handled identically to
+ * the streaming path.
  */
 export function demuxDockerLog(
   buf: Buffer,
   isTty: boolean,
-  onLine: (line: string, source: 'STDOUT' | 'STDERR') => void,
+  onLine: (line: string, source: LogStreamSource) => void,
 ): void {
-  if (isTty) {
-    stripControlChars(buf.toString('utf-8'))
-      .split('\n')
-      .forEach(line => onLine(line, 'STDOUT'));
-    return;
-  }
-  let offset = 0;
-  while (offset < buf.length) {
-    if (offset + 8 > buf.length) break;
-    const streamType = buf[offset];
-    const length = buf.readUInt32BE(offset + 4);
-    offset += 8;
-    if (offset + length > buf.length) break;
-    const payload = buf.slice(offset, offset + length).toString('utf-8');
-    offset += length;
-    payload.split('\n').forEach(line => onLine(line, streamType === 2 ? 'STDERR' : 'STDOUT'));
-  }
+  const demuxer = createFrameDemuxer(isTty, onLine);
+  demuxer.push(buf);
+  demuxer.flush();
 }
