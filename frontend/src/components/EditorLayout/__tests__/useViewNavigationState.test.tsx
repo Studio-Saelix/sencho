@@ -38,6 +38,17 @@ function mockAdmiralAdmin() {
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
+function mockCommunityAdmin() {
+  vi.mocked(AuthContext.useAuth).mockReturnValue({
+    isAdmin: true,
+    can: () => false,
+  } as unknown as ReturnType<typeof AuthContext.useAuth>);
+  vi.mocked(LicenseContext.useLicense).mockReturnValue({
+    isPaid: false,
+    license: null,
+  } as unknown as ReturnType<typeof LicenseContext.useLicense>);
+}
+
 function mockSkipperAdmin() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: true,
@@ -199,18 +210,38 @@ describe('useViewNavigationState', () => {
 
   // ── navItems: community user ───────────────────────────────────────────────
 
-  it('navItems for community non-paid user contains base items only', () => {
+  it('navItems for community non-admin user contains base items only and hides admin-only Logs', () => {
     const { result } = renderHook(() => useViewNavigationState());
     const values = result.current.navItems.map(i => i.value);
     expect(values).toContain('dashboard');
     expect(values).toContain('fleet');
     expect(values).toContain('resources');
     expect(values).toContain('templates');
-    expect(values).toContain('global-observability');
+    // Logs is an admin-only operator view; a non-admin must not see the entry.
+    expect(values).not.toContain('global-observability');
     expect(values).not.toContain('auto-updates');
     expect(values).not.toContain('host-console');
     expect(values).not.toContain('audit-log');
     expect(values).not.toContain('scheduled-ops');
+  });
+
+  it('shows the admin-only Logs entry for an admin on any tier (role gate, not tier gate)', () => {
+    mockCommunityAdmin();
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.navItems.map(i => i.value)).toContain('global-observability');
+  });
+
+  it('redirects a non-admin off the Logs view when reached via a deep-link event', () => {
+    const onNavigateToDashboard = vi.fn();
+    // Community (non-admin) is the beforeEach default.
+    const { result } = renderHook(() => useViewNavigationState({ onNavigateToDashboard }));
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'global-observability' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('dashboard');
+    expect(onNavigateToDashboard).toHaveBeenCalled();
   });
 
   // ── navItems: admiral admin ────────────────────────────────────────────────

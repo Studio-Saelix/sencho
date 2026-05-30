@@ -166,6 +166,22 @@ describe('GlobalCommandPalette', () => {
     });
   });
 
+  it('closes the palette when Escape is pressed in the search input', async () => {
+    renderPalette();
+    open();
+    const input = screen.getByPlaceholderText('Search the app...');
+    fireEvent.keyDown(input, { key: 'Escape' });
+    // Behavioral smoke test only: in jsdom Radix's dismissable layer already
+    // closes a single-layer dialog on Escape, so this cannot isolate the
+    // palette's own Escape handler from that fallback. The deterministic-close
+    // regression the handler fixes (Escape dropped during streaming re-renders)
+    // is guarded by the Playwright command-palette spec.
+    await waitFor(() => {
+      const dialog = screen.queryByRole('dialog');
+      expect(dialog?.getAttribute('data-state') ?? 'unmounted').not.toBe('open');
+    });
+  });
+
   it('disables an offline node row', () => {
     nodesValue = {
       nodes: [node(1, 'local'), node(2, 'opsix', 'offline')],
