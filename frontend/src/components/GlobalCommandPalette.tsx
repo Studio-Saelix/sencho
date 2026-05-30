@@ -161,6 +161,19 @@ export function GlobalCommandPalette({ navItems, onNavigate, onSelectStack }: Gl
                 placeholder="Search the app..."
                 value={query}
                 onValueChange={setQuery}
+                // Own the Escape-to-close instead of relying solely on Radix
+                // Dialog's dismissable layer. While the palette is open the
+                // cross-node stack search streams results in and re-renders the
+                // tree; an Escape that lands during that churn was observed to be
+                // dropped before Radix's layer dismissed it. Closing here via
+                // handleOpenChange(false) keeps Escape deterministic and is
+                // idempotent if Radix also dismisses on the same key.
+                onKeyDown={e => {
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        handleOpenChange(false);
+                    }
+                }}
             />
             <CommandList>
                 {showEmptyState && (
