@@ -1251,6 +1251,25 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
   }
 });
 
+stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
+  // Triggers a server-side backup of the stack's managed files: the same
+  // rollback snapshot a deploy takes. Exposed so a scheduled backup can run on
+  // a remote node through the proxy path, and so an operator can capture an
+  // on-demand snapshot. Paid-gated to match the rollback feature it feeds.
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!requirePaid(req, res)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    await FileSystemService.getInstance(req.nodeId).backupStackFiles(stackName);
+    dlog(`[Stacks] Backup completed: ${sanitizeForLog(stackName)}`);
+    res.json({ success: true });
+  } catch (error: unknown) {
+    console.error('[Stacks] Backup failed: %s', sanitizeForLog(stackName), error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to back up stack files') });
+  }
+});
+
 /**
  * Returns the latest post-deploy scan attempt for this stack, or null if
  * no scan has been attempted yet. Used by the editor UI to flag stacks
