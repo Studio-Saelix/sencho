@@ -5,14 +5,22 @@
  * highest-severity rollup, duplicate scan prevention, and graceful handling
  * when the binary is not available.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import TrivyService, { parseTrivyOutput } from '../services/TrivyService';
+import { getActiveCapabilities, enableCapability } from '../services/CapabilityRegistry';
 
 describe('TrivyService', () => {
   let svc: TrivyService;
 
   beforeEach(() => {
     svc = TrivyService.getInstance();
+  });
+
+  afterEach(() => {
+    // detectTrivy() toggles a process-global capability flag. Restore the
+    // default (enabled) so this suite cannot leak a disabled state into another
+    // suite sharing the worker.
+    enableCapability('vulnerability-scanning');
   });
 
   describe('isTrivyAvailable', () => {
@@ -36,6 +44,20 @@ describe('TrivyService', () => {
       const before = Date.now();
       await svc.detectTrivy();
       expect(svc.getDetectionTimestamp()).toBeGreaterThanOrEqual(before);
+    });
+
+    it('keeps the vulnerability-scanning capability in lockstep with detected availability', async () => {
+      // Regression guard: detection used to toggle the capability only on a
+      // state transition, so a process that boots without Trivy (source starts
+      // at 'none', wasAvailable === false) never disabled it and kept
+      // advertising scanning on a node that cannot scan. Start from the enabled
+      // state (the buggy starting point) so that on a Trivy-less runner this
+      // proves the disable branch fired; the advertised capability must equal
+      // the detected availability after every detection.
+      enableCapability('vulnerability-scanning');
+      const result = await svc.detectTrivy();
+      const advertised = getActiveCapabilities().includes('vulnerability-scanning');
+      expect(advertised).toBe(result.available);
     });
   });
 

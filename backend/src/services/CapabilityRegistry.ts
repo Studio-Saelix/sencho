@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import semver from 'semver';
 import { SENCHO_VERSION } from '../generated/version';
+import { isDebugEnabled } from '../utils/debug';
 
 /**
  * Static registry of capabilities supported by THIS Sencho instance.
@@ -133,13 +134,22 @@ export async function fetchRemoteMeta(baseUrl: string, apiToken: string): Promis
       timeout: 5000,
     });
     const rawVersion: string | undefined = res.data.version;
-    return {
+    const meta: RemoteMeta = {
       version: isValidVersion(rawVersion) ? rawVersion : null,
       capabilities: Array.isArray(res.data.capabilities) ? res.data.capabilities : [],
       startedAt: typeof res.data.startedAt === 'number' ? res.data.startedAt : null,
       updateError: typeof res.data.updateError === 'string' ? res.data.updateError : null,
       online: true,
     };
+    if (isDebugEnabled()) {
+      // Diagnostic aid for "why is this feature gated?": log the resolved version
+      // and capability count (not the full list) at the one boundary that decides
+      // gating. baseUrl is operator-configured and carries no token.
+      console.log(
+        `[CapabilityRegistry:diag] meta ok from ${baseUrl}: version=${meta.version ?? 'null'} capabilities=${meta.capabilities.length}`,
+      );
+    }
+    return meta;
   } catch (err) {
     console.warn(`[CapabilityRegistry] Failed to fetch meta from ${baseUrl}:`, (err as Error).message);
     return { ...OFFLINE_META };

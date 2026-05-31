@@ -62,26 +62,30 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
       if (Date.now() - cached.fetchedAt < ttl) return;
     }
 
+    const setMeta = (meta: NodeMeta) =>
+      setNodeMeta(prev => {
+        const next = new Map(prev);
+        next.set(nodeId, meta);
+        return next;
+      });
+
     try {
       const res = await apiFetch(`/nodes/${nodeId}/meta`, { localOnly: true });
       if (res.ok) {
         const data = await res.json();
-        setNodeMeta(prev => {
-          const next = new Map(prev);
-          next.set(nodeId, {
-            version: data.version ?? null,
-            capabilities: Array.isArray(data.capabilities) ? data.capabilities : [],
-            fetchedAt: Date.now(),
-          });
-          return next;
+        setMeta({
+          version: data.version ?? null,
+          capabilities: Array.isArray(data.capabilities) ? data.capabilities : [],
+          fetchedAt: Date.now(),
         });
+      } else {
+        // A non-OK response (proxy error, auth, 5xx) is a resolved failure: record an
+        // offline meta so gates fail closed to the lock card and the short failure TTL
+        // throttles retries, instead of leaving hasCapability optimistically open.
+        setMeta({ version: null, capabilities: [], fetchedAt: Date.now() });
       }
     } catch {
-      setNodeMeta(prev => {
-        const next = new Map(prev);
-        next.set(nodeId, { version: null, capabilities: [], fetchedAt: Date.now() });
-        return next;
-      });
+      setMeta({ version: null, capabilities: [], fetchedAt: Date.now() });
     }
   }, []);
 

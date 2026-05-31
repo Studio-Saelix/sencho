@@ -16,6 +16,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import type { RemoteMeta } from '../services/CapabilityRegistry';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { CacheService } from '../services/CacheService';
 
 const LOOPBACK = 'http://127.0.0.1:54322';
 
@@ -231,5 +232,53 @@ describe('POST /api/fleet/update-all (pilot-agent mixed fleet)', () => {
     expect(res.body.updating).toEqual([]);
     expect(res.body.skipped).toEqual(expect.arrayContaining(['pilot-update-test', 'proxy-update-test']));
     expect(systemUpdateCalls).toEqual([]);
+  });
+});
+
+describe('GET /api/fleet/update-status (remote-meta cache invalidation)', () => {
+  // Satisfy getCompareTarget's GitHub lookup with a benign response so the
+  // route does not make a real network call during the test.
+  function mockCompareTargetFetch() {
+    mockFetch(() =>
+      new Response(JSON.stringify({ tag_name: 'v0.99.0' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+  }
+
+  it('drops the cached meta when a node transitions to completed', async () => {
+    mockTargetForPilot();
+    mockCompareTargetFetch();
+    // Remote now reports a different version than before the update (signal 1).
+    mockMeta({ version: '0.99.0', capabilities: ['stacks'], startedAt: 2, updateError: null, online: true });
+
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, tracker.create('updating', '0.83.0', null));
+
+    const invalidateSpy = vi.spyOn(CacheService.getInstance(), 'invalidate');
+
+    const res = await request(app).get('/api/fleet/update-status').set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.status).toBe('completed');
+    expect(invalidateSpy).toHaveBeenCalledWith(`remote-meta:${proxyNodeId}`);
+  });
+
+  it('does not drop the cache on a steady-state completed poll (transition guard)', async () => {
+    mockTargetForPilot();
+    mockCompareTargetFetch();
+    mockMeta({ version: '0.99.0', capabilities: ['stacks'], startedAt: 2, updateError: null, online: true });
+
+    // Already completed before this poll: no transition, so no invalidation.
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, tracker.create('completed', '0.83.0', null));
+
+    const invalidateSpy = vi.spyOn(CacheService.getInstance(), 'invalidate');
+
+    const res = await request(app).get('/api/fleet/update-status').set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    expect(invalidateSpy).not.toHaveBeenCalledWith(`remote-meta:${proxyNodeId}`);
   });
 });
