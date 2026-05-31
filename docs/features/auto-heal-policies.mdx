@@ -1,6 +1,6 @@
 ---
 title: "Auto-Heal Policies"
-description: "Restart containers that fail their Docker healthcheck and stay unhealthy, with per-policy thresholds and a built-in safety rail set."
+description: "Restart containers that fail their Docker healthcheck or crash, with per-policy thresholds and a built-in safety rail set."
 ---
 
 <Note>
@@ -9,15 +9,26 @@ description: "Restart containers that fail their Docker healthcheck and stay unh
 
 ## Overview
 
-Auto-Heal Policies watch each container's Docker healthcheck and restart it when it has been continuously unhealthy for longer than you allow. Policies are scoped to a stack and can target every container in the stack or a single Compose service. Each policy runs with its own thresholds and four built-in safety rails so a persistently broken container cannot be restarted in a tight loop.
+Auto-Heal Policies restart a container when it stays broken for longer than you allow. A policy acts on two conditions:
+
+- The container reports Docker's `unhealthy` status continuously past your threshold.
+- The container crashes (exits with a non-zero code) and stays down past your threshold.
+
+Policies are scoped to a stack and can target every container in the stack or a single Compose service. Each policy runs with its own thresholds and four built-in safety rails so a persistently broken container cannot be restarted in a tight loop.
+
+A container that you stop yourself, or that exits cleanly (a one-shot job finishing with exit code 0), is never restarted. Auto-Heal only acts on failures, not on intentional shutdowns.
 
 Policies live next to your stack-level alert rules in the stack's **Monitor** sheet, which has two tabs: **Alerts** and **Auto-heal**.
 
 ## Prerequisites
 
-- Containers must declare a `HEALTHCHECK` in the Dockerfile or a `healthcheck` block in `docker-compose.yml`. Auto-Heal only acts on containers that report a Docker health status; a container that fails to start or exits with a non-zero code without ever reaching `unhealthy` is not in scope.
+- For **healthcheck-based** healing, containers must declare a `HEALTHCHECK` in the Dockerfile or a `healthcheck` block in `docker-compose.yml` so they report a Docker health status. **Crash-based** healing needs no healthcheck: any container that exits with a non-zero code qualifies.
 - You must be signed in as an admin.
 - A Skipper or Admiral license.
+
+<Note>
+  Crash healing acts on crashes Sencho observes while it is running. A container that crashed before Sencho started is left for you to inspect rather than restarted automatically.
+</Note>
 
 ## Workflow
 
@@ -37,7 +48,7 @@ You can add as many policies to a stack as you need. Each policy is evaluated in
 | Field | Meaning |
 |-------|---------|
 | **Service** | The Compose service this policy applies to. Leave on **All services** for a stack-wide policy, or pick a specific service to limit the policy to that service's containers. |
-| **Unhealthy for (minutes)** | How long a container must be continuously reporting `unhealthy` before Auto-Heal restarts it. |
+| **Unhealthy for (minutes)** | How long a container must stay broken before Auto-Heal restarts it. This applies to both conditions: continuously reporting `unhealthy`, or staying down after a crash. |
 | **Cooldown (minutes)** | After a restart fires, the policy pauses evaluation for this many minutes so the container has time to come back up. |
 | **Max restarts / hr** | The most times this policy will restart a given container in a rolling one-hour window. Once the cap is reached, further restarts are skipped until the window clears. |
 | **Auto-disable after (failures)** | If the restart call itself fails this many times in a row, the policy disables itself so it stops looping on a broken setup. The counter resets after any successful restart. |
@@ -55,9 +66,9 @@ Each policy has four safety rails built in. They run before any restart.
 
 **Hourly cap.** The **Max restarts / hr** value is enforced as a rolling one-hour window per container. When the cap is reached, evaluations continue but restarts are skipped until the window clears.
 
-**Recent operator action.** If you or another operator manually stops or restarts the container, the policy suppresses evaluation for that container for 60 seconds. This avoids fighting an operator who is intentionally power-cycling a service.
+**Recent operator action.** If you or another operator manually stops or restarts the container, the policy suppresses evaluation for that container for 60 seconds. This avoids fighting an operator who is intentionally power-cycling a service. A clean stop is also never seen as a crash, so a service you take down stays down.
 
-**Auto-disable.** If the restart call itself fails (for example, the Docker daemon is not reachable, or the container is in a state that cannot be restarted), the policy increments a consecutive-failure counter. When the counter reaches the configured **Auto-disable after (failures)** value, the policy disables itself and emits a notification. A successful restart resets the counter to zero.
+**Auto-disable.** If the restart call itself fails (for example, the Docker daemon is not reachable, or the container is in a state that cannot be restarted), the policy increments a consecutive-failure counter. Failed attempts are spaced by the cooldown, so a broken setup is retried on the cooldown interval rather than on every evaluation tick. When the counter reaches the configured **Auto-disable after (failures)** value, the policy disables itself and emits a notification. A successful restart resets the counter to zero.
 
 ## Managing policies
 
@@ -117,7 +128,7 @@ The dashboard's **Configuration status** card surfaces an **Auto-heal policies**
   </Accordion>
 
   <Accordion title="The policy did not fire when expected">
-    Auto-Heal only acts on Docker's `unhealthy` state. A container that crashes (non-zero exit) or never starts will not trigger a policy. Use `docker inspect <container>` and check `State.Health.Status` to confirm the container actually reaches `unhealthy`.
+    Auto-Heal acts on two conditions: a container that stays `unhealthy`, and a container that crashes (non-zero exit) and stays down. It does **not** act on a container that exited cleanly (exit code 0), one you stopped yourself, or a crash that happened before Sencho was running. For the healthcheck path, use `docker inspect <container>` and check `State.Health.Status` to confirm the container actually reaches `unhealthy`; for the crash path, check `State.ExitCode` is non-zero.
 
     Evaluation runs every 30 seconds, so there is up to a 30-second delay between the **Unhealthy for (minutes)** threshold being crossed and the restart firing. The 60-second operator-action window also suppresses evaluation right after a manual stop or restart.
   </Accordion>
@@ -131,6 +142,6 @@ The dashboard's **Configuration status** card surfaces an **Auto-heal policies**
   </Accordion>
 
   <Accordion title="I cannot see the Auto-heal tab on a stack">
-    The tab is hidden for Community-tier installs. Upgrade to Skipper to unlock auto-heal alongside the rest of Sencho's automation surface.
+    Auto-Heal Policies require a Skipper or Admiral license and an admin sign-in. If the **Auto-heal** tab is not present on the **Monitor** sheet, confirm your license tier under **Settings → License** and that you are signed in as an admin.
   </Accordion>
 </AccordionGroup>

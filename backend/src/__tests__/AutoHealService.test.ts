@@ -3,7 +3,8 @@
  *
  * shouldHeal is private; accessed via type cast (service as any) to avoid
  * exposing it in production API surface. All tests are pure (no I/O, no
- * timers) - they exercise the decision function directly.
+ * timers) - they exercise the decision function directly against a normalized
+ * HealSignal.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { INTENTIONAL_KILL_WINDOW_MS } from '../services/ContainerLifecycleClassifier';
@@ -35,98 +36,108 @@ describe('AutoHealService.shouldHeal', () => {
         updated_at: Date.now(),
     };
 
-    const baseState = {
-        id: 'container123',
-        name: 'mystack-web-1',
-        stackName: 'mystack',
-        healthStatus: 'unhealthy' as const,
-        unhealthySince: Date.now() - 6 * 60_000, // 6 minutes ago (past 5 min threshold)
+    // Unhealthy past the 5-min threshold, no recent kill.
+    const baseSignal = {
+        reason: 'unhealthy' as const,
+        downSince: Date.now() - 6 * 60_000,
         lastKillAt: undefined,
     };
 
     it('returns heal:true when all conditions are met', () => {
-        const result = service.shouldHeal(baseState, basePolicy, 'container123', Date.now());
+        const result = service.shouldHeal(baseSignal, basePolicy, 'container123', Date.now());
         expect(result.heal).toBe(true);
+        expect(result.reason).toBe('unhealthy');
     });
 
-    it('returns heal:false when healthStatus is not unhealthy', () => {
+    it('returns heal:true with reason "crashed" for a crashed trigger', () => {
         const result = service.shouldHeal(
-            { ...baseState, healthStatus: 'healthy' },
+            { reason: 'crashed', downSince: Date.now() - 6 * 60_000, lastKillAt: undefined },
+            basePolicy,
+            'container123',
+            Date.now(),
+        );
+        expect(result.heal).toBe(true);
+        expect(result.reason).toBe('crashed');
+    });
+
+    it('returns heal:false when there is no heal-worthy reason', () => {
+        const result = service.shouldHeal(
+            { reason: undefined, downSince: undefined },
             basePolicy,
             'container123',
             Date.now(),
         );
         expect(result.heal).toBe(false);
+        expect(result.skipReason).toBe('not_unhealthy');
     });
 
-    it('returns heal:false when healthStatus is undefined', () => {
+    it('returns heal:false when downSince is undefined', () => {
         const result = service.shouldHeal(
-            { ...baseState, healthStatus: undefined },
+            { ...baseSignal, downSince: undefined },
             basePolicy,
             'container123',
             Date.now(),
         );
         expect(result.heal).toBe(false);
-    });
-
-    it('returns heal:false when state is undefined', () => {
-        const result = service.shouldHeal(undefined, basePolicy, 'container123', Date.now());
-        expect(result.heal).toBe(false);
-    });
-
-    it('returns heal:false when unhealthySince is undefined', () => {
-        const result = service.shouldHeal(
-            { ...baseState, unhealthySince: undefined },
-            basePolicy,
-            'container123',
-            Date.now(),
-        );
-        expect(result.heal).toBe(false);
+        expect(result.skipReason).toBe('not_unhealthy');
     });
 
     it('returns heal:false when duration threshold is not yet met', () => {
         // Only 2 minutes, threshold is 5
-        const state = { ...baseState, unhealthySince: Date.now() - 2 * 60_000 };
-        const result = service.shouldHeal(state, basePolicy, 'container123', Date.now());
+        const signal = { ...baseSignal, downSince: Date.now() - 2 * 60_000 };
+        const result = service.shouldHeal(signal, basePolicy, 'container123', Date.now());
         expect(result.heal).toBe(false);
         expect(result.skipReason).toBe('duration_not_met');
     });
 
     it('returns skipped_user_action when lastKillAt is within the window', () => {
         // 30s ago, well within the 60s INTENTIONAL_KILL_WINDOW_MS
-        const state = { ...baseState, lastKillAt: Date.now() - 30_000 };
-        const result = service.shouldHeal(state, basePolicy, 'container123', Date.now());
+        const signal = { ...baseSignal, lastKillAt: Date.now() - 30_000 };
+        const result = service.shouldHeal(signal, basePolicy, 'container123', Date.now());
+        expect(result.heal).toBe(false);
+        expect(result.skipReason).toBe('skipped_user_action');
+    });
+
+    it('suppresses a crashed trigger when lastKillAt is within the window', () => {
+        // An operator stop that Docker reports with a non-zero exit must not be
+        // resurrected: the kill-window is the backstop behind the crash classifier.
+        const signal = {
+            reason: 'crashed' as const,
+            downSince: Date.now() - 6 * 60_000,
+            lastKillAt: Date.now() - 30_000,
+        };
+        const result = service.shouldHeal(signal, basePolicy, 'container123', Date.now());
         expect(result.heal).toBe(false);
         expect(result.skipReason).toBe('skipped_user_action');
     });
 
     it('does not suppress when lastKillAt is outside the intentional kill window', () => {
-        const state = {
-            ...baseState,
+        const signal = {
+            ...baseSignal,
             lastKillAt: Date.now() - (INTENTIONAL_KILL_WINDOW_MS + 5_000),
         };
-        const result = service.shouldHeal(state, basePolicy, 'container123', Date.now());
+        const result = service.shouldHeal(signal, basePolicy, 'container123', Date.now());
         expect(result.heal).toBe(true);
     });
 
     it('returns skipped_cooldown when last_fired_at is within cooldown period', () => {
         // Fired 5 min ago, cooldown is 10 min
         const policy = { ...basePolicy, last_fired_at: Date.now() - 5 * 60_000, cooldown_mins: 10 };
-        const result = service.shouldHeal(baseState, policy, 'container123', Date.now());
+        const result = service.shouldHeal(baseSignal, policy, 'container123', Date.now());
         expect(result.heal).toBe(false);
         expect(result.skipReason).toBe('skipped_cooldown');
     });
 
     it('does not apply cooldown when last_fired_at is 0', () => {
         const policy = { ...basePolicy, last_fired_at: 0 };
-        const result = service.shouldHeal(baseState, policy, 'container123', Date.now());
+        const result = service.shouldHeal(baseSignal, policy, 'container123', Date.now());
         expect(result.heal).toBe(true);
     });
 
     it('does not apply cooldown when last_fired_at exceeds the cooldown window', () => {
         // Fired 15 min ago, cooldown is 10 min
         const policy = { ...basePolicy, last_fired_at: Date.now() - 15 * 60_000, cooldown_mins: 10 };
-        const result = service.shouldHeal(baseState, policy, 'container123', Date.now());
+        const result = service.shouldHeal(baseSignal, policy, 'container123', Date.now());
         expect(result.heal).toBe(true);
     });
 
@@ -135,7 +146,7 @@ describe('AutoHealService.shouldHeal', () => {
         // Pre-populate with 3 entries within the last hour (policy max is 3)
         const map = (service as any).restartTimestamps as Map<string, number[]>;
         map.set('container123', [now - 10_000, now - 20_000, now - 30_000]);
-        const result = service.shouldHeal(baseState, basePolicy, 'container123', now);
+        const result = service.shouldHeal(baseSignal, basePolicy, 'container123', now);
         expect(result.heal).toBe(false);
         expect(result.skipReason).toBe('skipped_rate_limit');
     });
@@ -145,7 +156,7 @@ describe('AutoHealService.shouldHeal', () => {
         const map = (service as any).restartTimestamps as Map<string, number[]>;
         // All entries are >1 hour old, so they fall outside the rate-limit window
         map.set('container123', [now - 70 * 60_000, now - 80 * 60_000, now - 90 * 60_000]);
-        const result = service.shouldHeal(baseState, basePolicy, 'container123', now);
+        const result = service.shouldHeal(baseSignal, basePolicy, 'container123', now);
         expect(result.heal).toBe(true);
     });
 
@@ -154,17 +165,7 @@ describe('AutoHealService.shouldHeal', () => {
         const map = (service as any).restartTimestamps as Map<string, number[]>;
         // 2 old (outside window) + 1 recent = 1 active restart; max is 3, so still allowed
         map.set('container123', [now - 70 * 60_000, now - 80 * 60_000, now - 5_000]);
-        const result = service.shouldHeal(baseState, basePolicy, 'container123', now);
+        const result = service.shouldHeal(baseSignal, basePolicy, 'container123', now);
         expect(result.heal).toBe(true);
-    });
-
-    it('returns not_unhealthy as skipReason when container is healthy', () => {
-        const result = service.shouldHeal(
-            { ...baseState, healthStatus: 'healthy' },
-            basePolicy,
-            'container123',
-            Date.now(),
-        );
-        expect(result.skipReason).toBe('not_unhealthy');
     });
 });

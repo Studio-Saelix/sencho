@@ -142,6 +142,57 @@ describe('DockerEventService - die classification', () => {
         );
     });
 
+    it('stamps a crash signal and clears it on a later clean exit', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // Crash: non-zero exit, no prior kill.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-clean', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(service.getContainerState('c-clean')?.crashedAt).toBeTypeOf('number');
+
+        // A subsequent clean exit (code 0) must wipe the stale crash signal.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-clean', Attributes: { exitCode: '0', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(service.getContainerState('c-clean')?.crashedAt).toBeUndefined();
+    });
+
+    it('does not stamp a crash for a die that was superseded by a start', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // Establish tracked state so the later start is recorded.
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: healthy',
+            Actor: { ID: 'c-race', Attributes: { name: 'web' } },
+        });
+        // Crash, then restart strictly later but still within the 500ms grace
+        // window before the die is classified.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-race', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        stream.push({
+            Type: 'container',
+            Action: 'start',
+            Actor: { ID: 'c-race', Attributes: { name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(service.getContainerState('c-race')?.crashedAt).toBeUndefined();
+    });
+
     it('keeps stack and container routing for non-self compose crashes', async () => {
         service = new DockerEventService(1, 'local');
         await service.start();
