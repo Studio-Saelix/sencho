@@ -74,7 +74,9 @@ export class NotificationService {
     private broadcastToSubscribers(notification: NotificationHistory): void {
         if (this.subscribers.size === 0) return;
         const msg = JSON.stringify({ type: 'notification', payload: notification });
-        for (const ws of this.subscribers) {
+        // Snapshot first: a 'close'/'error' handler firing during a send would
+        // otherwise mutate the Set mid-iteration.
+        for (const ws of [...this.subscribers]) {
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(msg);
             }
@@ -93,7 +95,9 @@ export class NotificationService {
     public broadcastEvent(envelope: { type: string; [key: string]: unknown }): void {
         if (this.subscribers.size === 0) return;
         const msg = JSON.stringify(envelope);
-        for (const ws of this.subscribers) {
+        // Snapshot first: a 'close'/'error' handler firing during a send would
+        // otherwise mutate the Set mid-iteration.
+        for (const ws of [...this.subscribers]) {
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(msg);
             }
@@ -104,9 +108,14 @@ export class NotificationService {
      * Dispatch an alert: log to history, push via WebSocket, and route to
      * external channels.
      *
-     * Routing uses two tiers that coexist intentionally:
-     *  - notification_routes (Admiral tier): per-stack pattern-based routing
-     *    with priority ordering. If any route matches, global agents are skipped.
+     * Never rejects. Callers fire this off without awaiting, so any failure
+     * (node resolution, history insert, channel-table read, broadcast) is
+     * caught and logged internally rather than propagated.
+     *
+     * Routing uses two layers that coexist intentionally:
+     *  - notification_routes (paid tier, admin-managed): per-stack
+     *    pattern/label/category routing with priority ordering. If any route
+     *    matches, global agents are skipped.
      *  - agents table (all tiers): global fallback channels used when no
      *    notification_routes match or when no stackName is provided.
      */
@@ -118,48 +127,59 @@ export class NotificationService {
     ) {
         const t0 = Date.now();
         const { stackName, containerName, actor } = options ?? {};
-        // Internal writes use the middleware default so they share a row key
-        // with user-initiated requests; otherwise the UI and monitors split
-        // between different node_id buckets.
-        const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        // Use the full resolution chain (node.compose_dir, env, default)
-        // so messages mentioning a per-node compose override get collapsed.
-        const sanitized = sanitizeNotificationMessage(message, {
-            composeDir: NodeRegistry.getInstance().getComposeDir(localNodeId),
-        });
 
-        let notification: NotificationHistory;
+        // dispatchAlert is called fire-and-forget from monitors, event streams,
+        // and request handlers across the app. It must never reject: node
+        // resolution, the history insert, channel-table reads, and the
+        // WebSocket broadcast can all throw on an unhealthy DB, which would
+        // otherwise surface as an unhandledRejection and take the process down.
+        // The whole body is wrapped so the worst case is a dropped notification.
         try {
-            notification = this.dbService.addNotificationHistory(localNodeId, {
-                level,
-                category,
-                message: sanitized,
-                timestamp: Date.now(),
-                stack_name: stackName,
-                container_name: containerName,
-                actor_username: actor ?? null,
+            // Internal writes use the middleware default so they share a row key
+            // with user-initiated requests; otherwise the UI and monitors split
+            // between different node_id buckets.
+            const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            // Use the full resolution chain (node.compose_dir, env, default)
+            // so messages mentioning a per-node compose override get collapsed.
+            const sanitized = sanitizeNotificationMessage(message, {
+                composeDir: NodeRegistry.getInstance().getComposeDir(localNodeId),
             });
-        } catch (err) {
-            StackActivityMetricsService.getInstance().record(localNodeId, 'write', Date.now() - t0, false);
-            throw err;
-        }
-        StackActivityMetricsService.getInstance().record(localNodeId, 'write', Date.now() - t0, true);
-        // Separate [StackActivity:diag] namespace from the [Notify:diag] lines
-        // below so a single grep can pull every per-stack timeline write across
-        // route reads and dispatch writes.
-        if (isDebugEnabled()) {
-            console.log('[StackActivity:diag] write', {
-                category, stackName, nodeId: localNodeId, actor: actor ?? null, messageLen: sanitized.length,
-            });
-        }
 
-        // 2. Push to connected browser clients via WebSocket
-        this.broadcastToSubscribers(notification);
+            // The inner try only distinguishes a write success from a write
+            // failure for metrics; on failure there is no row to dispatch, so
+            // we log and stop.
+            let notification: NotificationHistory;
+            try {
+                notification = this.dbService.addNotificationHistory(localNodeId, {
+                    level,
+                    category,
+                    message: sanitized,
+                    timestamp: Date.now(),
+                    stack_name: stackName,
+                    container_name: containerName,
+                    actor_username: actor ?? null,
+                });
+                StackActivityMetricsService.getInstance().record(localNodeId, 'write', Date.now() - t0, true);
+            } catch (err) {
+                StackActivityMetricsService.getInstance().record(localNodeId, 'write', Date.now() - t0, false);
+                console.error('[Notify] Failed to persist notification:', err);
+                return;
+            }
+            // Separate [StackActivity:diag] namespace from the [Notify:diag] lines
+            // below so a single grep can pull every per-stack timeline write across
+            // route reads and dispatch writes.
+            if (isDebugEnabled()) {
+                console.log('[StackActivity:diag] write', {
+                    category, stackName, nodeId: localNodeId, actor: actor ?? null, messageLen: sanitized.length,
+                });
+            }
 
-        // 3. Check notification routing rules — always evaluated, matchers compose AND
-        const errors: string[] = [];
+            // 2. Push to connected browser clients via WebSocket
+            this.broadcastToSubscribers(notification);
 
-        {
+            // 3. Check notification routing rules — always evaluated, matchers compose AND
+            const errors: string[] = [];
+
             const routes = this.dbService.getEnabledNotificationRoutes();
             const needsLabels = stackName !== undefined && routes.some(r => r.label_ids != null && r.label_ids.length > 0);
             const stackLabelIds = needsLabels ? this.dbService.getStackLabelIds(localNodeId, stackName!) : [];
@@ -177,10 +197,10 @@ export class NotificationService {
                     matched.map(route =>
                         this.sendToChannel(route.channel_type, route.channel_url, level, sanitized)
                             .then(() => {
-                                if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via route "${route.name}" (${route.channel_type})`);
+                                if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via route "${sanitizeForLog(route.name)}" (${route.channel_type})`);
                             })
                             .catch(error => {
-                                console.error(`Failed to dispatch notification via route "${route.name}":`, error);
+                                console.error(`Failed to dispatch notification via route "${sanitizeForLog(route.name)}":`, error);
                                 errors.push(`Route "${route.name}": ${getErrorMessage(error, String(error))}`);
                             })
                     )
@@ -188,29 +208,31 @@ export class NotificationService {
                 this.recordDispatchErrors(notification.id!, errors);
                 return;
             }
-        }
 
-        // 4. Fall back to this instance's agents (keyed by this instance's default node id).
-        const agents = this.dbService.getEnabledAgents(localNodeId);
-        if (agents.length === 0) {
-            if (isDebugEnabled()) console.log('[Notify:diag] No routes or agents matched; skipping external dispatch');
-            return;
-        }
+            // 4. Fall back to this instance's agents (keyed by this instance's default node id).
+            const agents = this.dbService.getEnabledAgents(localNodeId);
+            if (agents.length === 0) {
+                if (isDebugEnabled()) console.log('[Notify:diag] No routes or agents matched; skipping external dispatch');
+                return;
+            }
 
-        if (isDebugEnabled()) console.log(`[Notify:diag] Falling back to ${agents.length} global agent(s)`);
-        await Promise.allSettled(
-            agents.map(agent =>
-                this.sendToChannel(agent.type, agent.url, level, sanitized)
-                    .then(() => {
-                        if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via global agent (${agent.type})`);
-                    })
-                    .catch(error => {
-                        console.error(`Failed to dispatch notification to ${agent.type}:`, error);
-                        errors.push(`${agent.type}: ${getErrorMessage(error, String(error))}`);
-                    })
-            )
-        );
-        this.recordDispatchErrors(notification.id!, errors);
+            if (isDebugEnabled()) console.log(`[Notify:diag] Falling back to ${agents.length} global agent(s)`);
+            await Promise.allSettled(
+                agents.map(agent =>
+                    this.sendToChannel(agent.type, agent.url, level, sanitized)
+                        .then(() => {
+                            if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via global agent (${agent.type})`);
+                        })
+                        .catch(error => {
+                            console.error(`Failed to dispatch notification to ${agent.type}:`, error);
+                            errors.push(`${agent.type}: ${getErrorMessage(error, String(error))}`);
+                        })
+                )
+            );
+            this.recordDispatchErrors(notification.id!, errors);
+        } catch (err) {
+            console.error('[Notify] dispatchAlert failed:', err);
+        }
     }
 
     /** Persist dispatch errors to the notification record for user visibility. */

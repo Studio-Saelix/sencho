@@ -1,12 +1,12 @@
 ---
 title: Global Observability
-description: A unified, searchable log stream from every running container on the active node.
+description: A unified, searchable log stream from the containers Sencho manages on the hub.
 ---
 
-The **Logs** tab aggregates output from every running container on the active node into a single live feed. Instead of tailing one container at a time, you scan everything in one place, with a live event-rate readout, stream / level / stack filters, and a downloadable replay of the current buffer.
+The **Logs** tab aggregates output from the containers Sencho manages into a single live feed. Instead of tailing one container at a time, you scan everything in one place, with a live event-rate readout, stream / level / stack filters, and a downloadable replay of the current buffer.
 
 <Note>
-  Logs is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
+  Logs is an administrator view. It is scoped to the hub and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
 </Note>
 
 <Frame>
@@ -23,11 +23,11 @@ The masthead at the top of the page is the single place to read the stream's cur
 
 It carries:
 
-- A **kicker** in uppercase mono tracking that reads `LIVE LOGS · NODE · <NAME>`. The local node renders as `LOCAL`; remote nodes render with their configured name uppercased.
+- A **kicker** in uppercase mono tracking that reads `LIVE LOGS · NODE · LOCAL`, a reminder that the feed is the hub's own managed containers.
 - A **pulsing dot** that mirrors the stream tone: brand cyan and pulsing while events arrive within the live window, gray and steady when the stream goes quiet, solid rose when the underlying SSE connection has errored.
 - A **state word** set in the editorial display face: `Streaming` while the dot is live, `Idle` when the stream has gone quiet, `Offline` when the connection has failed.
 - A **LAST EVENT** stat that names the band of the most recent event using the same vocabulary as the feed (`NOW`, `2M AGO`, `1H AGO`, then the calendar date), so you can see how stale the latest line is at a glance.
-- A **SESSION** stat counting how long this Logs tab has been open, formatted with uppercase letter suffixes: `1H 43M` once the session crosses an hour, `0M 12S` under it. The session resets when you switch the active node, since the stream re-connects against the new node.
+- A **SESSION** stat counting how long this Logs tab has been open, formatted with uppercase letter suffixes: `1H 43M` once the session crosses an hour, `0M 12S` under it.
 
 The state word flips to `Idle` after ten seconds without an event. That is a feature of the readout, not the stream: the SSE connection stays open in the background and the dot will pulse cyan again on the next event.
 
@@ -59,7 +59,7 @@ A row of controls between the signal rail and the feed lets you narrow what you 
 | Control | What it does |
 |---------|--------------|
 | **Search** | Case-insensitive substring filter against the message body, container name, and stack name. |
-| **Stacks** | Dropdown of every stack discovered on the active node; ticking one or more boxes restricts the feed to those stacks. The trigger reads `Stacks · All` when nothing is selected and `Stacks · <n>` once at least one box is ticked. |
+| **Stacks** | Dropdown of every stack discovered on the hub; ticking one or more boxes restricts the feed to those stacks. The trigger reads `Stacks · All` when nothing is selected and `Stacks · <n>` once at least one box is ticked. |
 | **Stream** | Segmented control with `All`, `Out`, `Err` for filtering by stream source. `Out` is `STDOUT`, `Err` is `STDERR`. |
 | **Level** | Segmented control with `All`, `Info`, `Warn`, `Error` for filtering by detected severity. |
 
@@ -116,7 +116,7 @@ The level on each row is detected from the message body, not the stream source. 
 
 ## How streaming works
 
-The page opens an `EventSource` against `/api/logs/global/stream?nodeId=<id>` as soon as it mounts. Each event is one log line emitted by `docker logs --follow` against every running container on the active node, demultiplexed and parsed before it leaves the server. When the connection opens, the server replays the last five hundred lines per container before switching to live tail, so you see immediate context instead of an empty feed while you wait for the next event.
+The page opens an `EventSource` against `/api/logs/global/stream` as soon as it mounts. Each event is one log line emitted by `docker logs --follow` against each managed container on the hub, demultiplexed and parsed before it leaves the server. When the connection opens, the server replays the last two hundred lines per container before switching to live tail, so you see immediate context instead of an empty feed while you wait for the next event.
 
 A 30-second SSE keep-alive comment is written every tick to defeat reverse-proxy idle timeouts, so the stream stays open behind nginx, Cloudflare, Caddy, and so on without configuration.
 
@@ -124,20 +124,21 @@ If the browser cannot open the `EventSource` connection at all (a corporate prox
 
 ## Display limits
 
-Two budgets keep the page responsive even on a chatty fleet:
+Three budgets keep the page responsive even on a chatty host:
 
 - **Buffer** of two thousand entries in the browser's memory. As new events arrive past the cap, the oldest entries are dropped. The buffer keeps filling while the feed is paused, so a long pause does not stretch memory unbounded.
 - **Rendered rows** capped at three hundred. Beyond that, the `Showing last 300 of <n>` banner appears so you know more matches exist behind the slice.
+- **Followed containers** capped per stream. When the hub manages more containers than the cap, the feed follows the first set and posts a `Following <n> of <m> managed containers` notice so you know the feed is truncated; use the per-container log viewer for the rest.
 
 When you need to chase older lines than the buffer holds, jump to the [per-container log viewer](/features/editor#log-viewer) in the Editor tab or run `docker compose logs` from the [Host Console](/features/host-console).
 
-## Active node
+## Scope
 
-The Logs tab is scoped to one node at a time, the active node selected from the sidebar's node switcher.
+The Logs tab is scoped to the hub and streams the containers Sencho manages on the local instance.
 
-- The kicker reads `LIVE LOGS · NODE · LOCAL` for the local node and `LIVE LOGS · NODE · <NAME>` for any registered remote node, so you always know which fleet member you are watching.
-- Switching the active node tears down the SSE connection, clears the buffer, and opens a fresh stream against the new node. The session timer in the masthead resets at the same moment.
-- There is no fleet-wide aggregation view. To compare two nodes, open the Logs tab in two browser tabs and switch the active node in each.
+- The kicker reads `LIVE LOGS · NODE · LOCAL`, so it is always clear the feed is the hub's own managed containers.
+- The feed covers managed containers only. Containers running on the host that Sencho does not manage (started outside its compose directory) are not shown; reach those through their own tooling or the [Host Console](/features/host-console).
+- There is no fleet-wide aggregation view. When a remote node is the active selection, the Logs entry is hidden from the nav strip; read a remote node's containers from the Logs tab on that node's own Sencho.
 
 ## Refresh cadence
 
@@ -156,7 +157,7 @@ The page is built from several independent loops so the masthead and the sparkli
 
 <AccordionGroup>
   <Accordion title="The masthead reads 'Offline' and a 'Failed to fetch logs. Retrying...' banner is visible">
-    The polling fallback got an HTTP error when it tried to read `/api/logs/global`. The most common cause is that the active remote node is unreachable; check the same node from **Settings · Nodes** and confirm the API token is still valid. If the active node is local, check the host's Docker daemon is reachable on the socket Sencho is configured to use. The page retries the request every five seconds; once it succeeds, the banner clears on its own.
+    The polling fallback got an HTTP error when it tried to read `/api/logs/global`. Check that the host's Docker daemon is reachable on the socket Sencho is configured to use. The page retries the request every five seconds; once it succeeds, the banner clears on its own.
   </Accordion>
   <Accordion title="The dot is gray and the state reads 'Idle' even though logs are appearing further down the page">
     `Idle` only checks whether an event has arrived in the last ten seconds. If your fleet is genuinely quiet (a maintenance window, a single low-traffic container), the dot rests gray and the band headers in the feed roll up to `2M AGO`, `5M AGO`, and so on. The next event flips the dot back to brand cyan and the state word back to `Streaming` on the next one-second tick.
@@ -170,11 +171,14 @@ The page is built from several independent loops so the masthead and the sparkli
   <Accordion title="Clear hid the rows but a few old lines came back a moment later">
     **Clear** records the click time and hides every row whose timestamp is earlier than that moment, but the SSE stream keeps delivering events whose timestamps were generated by Docker before the click. A line emitted at `16:51:43.987` that arrives at the browser at `16:51:44.020` will still pass the filter even if you clicked **Clear** at `16:51:44.000`. The lag is normally a few hundred milliseconds; click **Clear** again to hide them.
   </Accordion>
-  <Accordion title="Logs disappear when I switch the active node">
-    The page is scoped to one node at a time. Switching the active node tears down the current SSE connection, drops the in-browser buffer, and connects against the new node. To compare two nodes side by side, open the Logs tab in two browser tabs and switch the active node in each.
+  <Accordion title="A container I expect is missing from the feed">
+    The feed shows the containers Sencho manages (those started from its compose directory). A container started outside Sencho, or one belonging to a stack on a different node, does not appear. Open it from the [per-container log viewer](/features/editor#log-viewer) in the Editor, or use the [Host Console](/features/host-console) for ad-hoc `docker compose logs`.
+  </Accordion>
+  <Accordion title="A row says a log stream ended unexpectedly">
+    When one container's follow stream drops (the container was removed, or the Docker daemon hiccuped), the feed posts a single warning row for that container and stops following it; the other containers keep streaming. Reopen the Logs tab to re-attach to every managed container.
   </Accordion>
   <Accordion title="I want to see logs from every node at once">
-    The Logs tab does not aggregate across the fleet. Use the per-container log viewer in the Editor for a single container's history, or jump to the Host Console for ad-hoc `docker compose logs` against any node. Fleet-wide aggregation is not on the current roadmap; pipe container logs to your existing observability stack (Loki, ELK, Datadog) if you need cross-node search.
+    The Logs tab does not aggregate across the fleet. Use the per-container log viewer in the Editor for a single container's history, or jump to the Host Console for ad-hoc `docker compose logs`. Fleet-wide aggregation is not on the current roadmap; pipe container logs to your existing observability stack (Loki, ELK, Datadog) if you need cross-node search.
   </Accordion>
 </AccordionGroup>
 
