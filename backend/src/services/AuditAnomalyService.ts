@@ -68,49 +68,32 @@ export interface AuditStats {
     failures_by_hour: number[];
 }
 
-export function computeAuditStats(input: {
-    now: number;
-    last24h: AuditLogEntry[];
-    last7d: AuditLogEntry[];
-    last30d: AuditLogEntry[];
-}): AuditStats {
-    const { now, last24h, last7d, last30d } = input;
-    const events24 = last24h.length;
-    const prior7d = last7d.length - events24;
+/**
+ * Format the signal-rail stats from exact aggregate inputs (see
+ * DatabaseService.getAuditStatsInputs). This is pure presentation: counts,
+ * hourly series, and new-ip detection are computed exactly upstream in SQL so
+ * the tiles never undercount on a large window.
+ */
+export interface AuditStatsInput {
+    events24: number;
+    events7d: number;
+    actors24: number;
+    failures24: number;
+    activityByHour: number[];
+    failuresByHour: number[];
+    newIpCount: number;
+    sampleNewIpActor: string | null;
+}
+
+export function computeAuditStats(input: AuditStatsInput): AuditStats {
+    const { events24, events7d, actors24, failures24, activityByHour, failuresByHour, newIpCount, sampleNewIpActor } = input;
+    const prior7d = events7d - events24;
     const avg7dPerDay = Math.max(0, prior7d) / 6;
     const deltaPct = avg7dPerDay > 0 ? Math.round(((events24 - avg7dPerDay) / avg7dPerDay) * 100) : null;
 
-    const actors24 = new Set(last24h.map(e => e.username).filter(Boolean));
-    const olderIpByActor = new Map<string, Set<string>>();
-    for (const e of last30d) {
-        if (!e.username || !e.ip_address) continue;
-        if (e.timestamp >= now - 24 * 60 * 60 * 1000) continue;
-        let set = olderIpByActor.get(e.username);
-        if (!set) { set = new Set(); olderIpByActor.set(e.username, set); }
-        set.add(e.ip_address);
-    }
-    let newIpCount = 0;
-    let sampleNewIpActor: string | null = null;
-    for (const e of last24h) {
-        if (!e.username || !e.ip_address) continue;
-        const prior = olderIpByActor.get(e.username);
-        if (prior && prior.size > 0 && !prior.has(e.ip_address)) {
-            newIpCount++;
-            if (!sampleNewIpActor) sampleNewIpActor = e.username;
-        }
-    }
-
-    const failureCount = last24h.filter(e => e.status_code >= 400).length;
-    const failureRate = events24 > 0 ? failureCount / events24 : 0;
+    const failureRate = events24 > 0 ? failures24 / events24 : 0;
     const failurePct = Math.round(failureRate * 100);
 
-    const activityByHour = Array.from({ length: 24 }, () => 0);
-    const failuresByHour = Array.from({ length: 24 }, () => 0);
-    for (const e of last24h) {
-        const hour = new Date(e.timestamp).getHours();
-        activityByHour[hour]++;
-        if (e.status_code >= 400) failuresByHour[hour]++;
-    }
     const peakHour = activityByHour.reduce(
         (best, count, hour) => (count > best.count ? { count, hour } : best),
         { count: -1, hour: 0 }
@@ -125,7 +108,7 @@ export function computeAuditStats(input: {
             severity: deltaPct !== null && deltaPct > 150 ? 'warn' : 'ok',
         },
         actors_24h: {
-            value: actors24.size,
+            value: actors24,
             label: 'actors',
             detail: newIpCount > 0
                 ? `${newIpCount} new ip${newIpCount === 1 ? '' : 's'}${sampleNewIpActor ? ` · ${sampleNewIpActor}` : ''}`
@@ -135,7 +118,7 @@ export function computeAuditStats(input: {
         failure_rate: {
             value: failurePct,
             label: 'failure rate',
-            detail: `${failureCount} of ${events24} request${events24 === 1 ? '' : 's'}`,
+            detail: `${failures24} of ${events24} request${events24 === 1 ? '' : 's'}`,
             severity: failurePct >= 20 ? 'alert' : failurePct >= 5 ? 'warn' : 'ok',
         },
         unusual_hour: {

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
+import type { AuditStatsInput } from './AuditAnomalyService';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -3007,6 +3008,65 @@ export class DatabaseService {
         return this.db.prepare(
             'SELECT * FROM audit_log WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC'
         ).all(from, to) as AuditLogEntry[];
+    }
+
+    /**
+     * Exact aggregate inputs for the audit signal-rail stats, computed with SQL
+     * COUNT / GROUP BY rather than materializing rows. The counts and hourly
+     * series stay exact regardless of window size (no row cap), while the
+     * new-ip detection works over the small DISTINCT (user, ip) pair sets.
+     */
+    public getAuditStatsInputs(now: number): AuditStatsInput {
+        this.flushAuditLogBuffer();
+        const cutoff24h = now - 24 * 60 * 60 * 1000;
+        const cutoff7d = now - 7 * 24 * 60 * 60 * 1000;
+        const cutoff30d = now - 30 * 24 * 60 * 60 * 1000;
+        const countOf = (sql: string, ...params: number[]): number =>
+            (this.db.prepare(sql).get(...params) as { c: number }).c;
+
+        const events24 = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ?', cutoff24h);
+        const events7d = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ?', cutoff7d);
+        const actors24 = countOf("SELECT COUNT(DISTINCT username) AS c FROM audit_log WHERE timestamp >= ? AND username != ''", cutoff24h);
+        const failures24 = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ? AND status_code >= 400', cutoff24h);
+
+        const activityByHour = Array.from({ length: 24 }, () => 0);
+        const failuresByHour = Array.from({ length: 24 }, () => 0);
+        const hourRows = this.db.prepare(
+            `SELECT CAST(strftime('%H', timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS failures
+             FROM audit_log WHERE timestamp >= ? GROUP BY hour`,
+        ).all(cutoff24h) as { hour: number; total: number; failures: number }[];
+        for (const r of hourRows) {
+            if (r.hour >= 0 && r.hour < 24) {
+                activityByHour[r.hour] = r.total;
+                failuresByHour[r.hour] = r.failures;
+            }
+        }
+
+        const recentPairs = this.db.prepare(
+            "SELECT DISTINCT username, ip_address FROM audit_log WHERE timestamp >= ? AND username != '' AND ip_address != ''",
+        ).all(cutoff24h) as { username: string; ip_address: string }[];
+        const priorPairs = this.db.prepare(
+            "SELECT DISTINCT username, ip_address FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND username != '' AND ip_address != ''",
+        ).all(cutoff30d, cutoff24h) as { username: string; ip_address: string }[];
+        const priorByActor = new Map<string, Set<string>>();
+        for (const p of priorPairs) {
+            let set = priorByActor.get(p.username);
+            if (!set) { set = new Set(); priorByActor.set(p.username, set); }
+            set.add(p.ip_address);
+        }
+        let newIpCount = 0;
+        let sampleNewIpActor: string | null = null;
+        for (const p of recentPairs) {
+            const prior = priorByActor.get(p.username);
+            if (prior && prior.size > 0 && !prior.has(p.ip_address)) {
+                newIpCount++;
+                if (!sampleNewIpActor) sampleNewIpActor = p.username;
+            }
+        }
+
+        return { events24, events7d, actors24, failures24, activityByHour, failuresByHour, newIpCount, sampleNewIpActor };
     }
 
     // --- API Tokens ---

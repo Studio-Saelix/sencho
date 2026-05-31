@@ -55,14 +55,8 @@ auditLogRouter.get('/stats', async (req: Request, res: Response): Promise<void> 
     if (isDebugEnabled()) {
       console.log('[Audit:diag] Stats requested');
     }
-    const now = Date.now();
     const db = DatabaseService.getInstance();
-    const cutoff24h = now - 24 * 60 * 60 * 1000;
-    const cutoff7d = now - 7 * 24 * 60 * 60 * 1000;
-    const last30d = db.getAuditLogsInRange(now - HISTORY_WINDOW_MS, now, AUDIT_ANOMALY_HISTORY_CAP);
-    const last7d = last30d.filter(e => e.timestamp >= cutoff7d);
-    const last24h = last7d.filter(e => e.timestamp >= cutoff24h);
-    res.json(computeAuditStats({ now, last24h, last7d, last30d }));
+    res.json(computeAuditStats(db.getAuditStatsInputs(Date.now())));
   } catch (error) {
     console.error('[AuditLog] Failed to compute audit stats:', error);
     res.status(500).json({ error: 'Failed to compute audit stats' });

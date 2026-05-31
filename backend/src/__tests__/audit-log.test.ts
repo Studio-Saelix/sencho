@@ -288,6 +288,92 @@ describe('DatabaseService audit methods', () => {
     expect(uncapped.length).toBe(10);
     expect(uncapped[0].timestamp).toBe(base);
   });
+
+  it('getAuditStatsInputs counts the current window exactly (no row cap)', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const ts = now - 60 * 60 * 1000; // 1 hour ago, inside the 24h window
+    const hour = new Date(ts).getHours();
+
+    const before = db.getAuditStatsInputs(now);
+    const K = 12;
+    const FAILURES = 4;
+    for (let i = 0; i < K; i++) {
+      db.insertAuditLog({
+        timestamp: ts,
+        username: 'statsexactuser',
+        method: 'POST',
+        path: `/api/stacks/statsexact${i}`,
+        status_code: i < FAILURES ? 500 : 200,
+        node_id: null,
+        ip_address: '127.0.0.1',
+        summary: `stats exact ${i}`,
+      });
+    }
+    const after = db.getAuditStatsInputs(now);
+
+    expect(after.events24 - before.events24).toBe(K);
+    expect(after.events7d - before.events7d).toBe(K);
+    expect(after.failures24 - before.failures24).toBe(FAILURES);
+    expect(after.activityByHour[hour] - before.activityByHour[hour]).toBe(K);
+    expect(after.failuresByHour[hour] - before.failuresByHour[hour]).toBe(FAILURES);
+  });
+
+  it('getAuditStatsInputs flags an actor whose recent ip is new versus prior history', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    // Prior IP for this actor, older than 24h but inside 30d.
+    db.insertAuditLog({
+      timestamp: now - 5 * 24 * 60 * 60 * 1000,
+      username: 'newipscenariouser',
+      method: 'POST',
+      path: '/api/stacks/old',
+      status_code: 200,
+      node_id: null,
+      ip_address: '10.0.0.1',
+      summary: 'old',
+    });
+    const before = db.getAuditStatsInputs(now);
+    // Recent action from a different IP.
+    db.insertAuditLog({
+      timestamp: now - 60 * 1000,
+      username: 'newipscenariouser',
+      method: 'POST',
+      path: '/api/stacks/new',
+      status_code: 200,
+      node_id: null,
+      ip_address: '203.0.113.9',
+      summary: 'new',
+    });
+    const after = db.getAuditStatsInputs(now);
+
+    expect(after.newIpCount).toBeGreaterThan(before.newIpCount);
+  });
+
+  it('getAuditStatsInputs counts distinct non-empty actors, excluding blank usernames', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const ts = now - 30 * 60 * 1000; // inside 24h
+    const before = db.getAuditStatsInputs(now);
+
+    const usernames = ['actorcountA', 'actorcountB', 'actorcountB', 'actorcountC', ''];
+    for (const username of usernames) {
+      db.insertAuditLog({
+        timestamp: ts,
+        username,
+        method: 'POST',
+        path: '/api/stacks/actorcount',
+        status_code: 200,
+        node_id: null,
+        ip_address: '127.0.0.1',
+        summary: 'actor count',
+      });
+    }
+    const after = db.getAuditStatsInputs(now);
+
+    // Three distinct non-empty actors (A, B, C); the blank username is excluded.
+    expect(after.actors24 - before.actors24).toBe(3);
+  });
 });
 
 // ---- API endpoint tests ----
@@ -358,22 +444,42 @@ describe('GET /api/audit-log', () => {
     expect(res.body.total).toBeGreaterThan(1);
   });
 
-  it('clamps an oversized limit to the 200 cap', async () => {
+  it('clamps an oversized limit to the 200 cap even when more rows match', async () => {
+    const db = DatabaseService.getInstance();
+    for (let i = 0; i < 205; i++) {
+      db.insertAuditLog({
+        timestamp: Date.now() - i,
+        username: 'limitcapuser205',
+        method: 'POST',
+        path: `/api/stacks/limitcap${i}`,
+        status_code: 200,
+        node_id: null,
+        ip_address: '127.0.0.1',
+        summary: `limit cap entry ${i}`,
+      });
+    }
+
     const res = await request(app)
-      .get('/api/audit-log?limit=99999')
+      .get('/api/audit-log?limit=99999&search=limitcapuser205')
       .set('Authorization', `Bearer ${adminToken()}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.entries.length).toBeLessThanOrEqual(200);
+    expect(res.body.total).toBe(205);
+    expect(res.body.entries.length).toBe(200);
   });
 
   it('clamps a non-positive page to page 1', async () => {
-    const res = await request(app)
+    const negative = await request(app)
       .get('/api/audit-log?page=-5&limit=5')
       .set('Authorization', `Bearer ${adminToken()}`);
+    const first = await request(app)
+      .get('/api/audit-log?page=1&limit=5')
+      .set('Authorization', `Bearer ${adminToken()}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body.entries.length).toBeGreaterThan(0);
+    expect(negative.status).toBe(200);
+    expect(negative.body.entries.length).toBeGreaterThan(0);
+    // page=-5 must resolve to the same first page, not a negative offset.
+    expect(negative.body.entries[0].id).toBe(first.body.entries[0].id);
   });
 
   it('annotates entries with a flags array when with_anomalies=1', async () => {
