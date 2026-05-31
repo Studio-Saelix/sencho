@@ -305,30 +305,49 @@ describe('POST /api/auth/login/mfa', () => {
     const { backupCodes: codes } = await seedMfaUser(u, p);
     const chosen = codes[0];
 
-    // Two independent pending challenges, then fire both /login/mfa calls with
-    // the same backup code at once. The bcrypt.compare await lets both requests
-    // read the same hash set before either consumes it; the atomic consume must
-    // still let exactly one win (the regression guard for the consume race).
-    const [login1, login2] = await Promise.all([
-      request(app).post('/api/auth/login').send({ username: u, password: p }),
-      request(app).post('/api/auth/login').send({ username: u, password: p }),
-    ]);
-    const pending1 = findCookie(login1.headers, 'sencho_mfa_pending')!;
-    const pending2 = findCookie(login2.headers, 'sencho_mfa_pending')!;
+    // Force the race deterministically rather than relying on scheduling: hold
+    // both requests just after verifyBackupCode (so both have already read the
+    // same stored set and matched) until both have arrived, then let them race
+    // into the atomic consume. The pre-fix non-atomic path would let both win
+    // here; the fix must still let exactly one through. A timeout releases the
+    // barrier if only one request ever arrives, so a setup fault fails loudly
+    // instead of hanging.
+    let arrived = 0;
+    let releaseBarrier!: () => void;
+    const bothVerified = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+    const realVerify = MfaService.verifyBackupCode.bind(MfaService);
+    const spy = vi.spyOn(MfaService, 'verifyBackupCode').mockImplementation(async (hashes, code) => {
+      const result = await realVerify(hashes, code);
+      arrived += 1;
+      if (arrived >= 2) releaseBarrier();
+      await Promise.race([bothVerified, new Promise<void>((r) => setTimeout(r, 3000))]);
+      return result;
+    });
 
-    const [r1, r2] = await Promise.all([
-      request(app).post('/api/auth/login/mfa').set('Cookie', pending1).send({ code: chosen, isBackupCode: true }),
-      request(app).post('/api/auth/login/mfa').set('Cookie', pending2).send({ code: chosen, isBackupCode: true }),
-    ]);
+    try {
+      const [login1, login2] = await Promise.all([
+        request(app).post('/api/auth/login').send({ username: u, password: p }),
+        request(app).post('/api/auth/login').send({ username: u, password: p }),
+      ]);
+      const pending1 = findCookie(login1.headers, 'sencho_mfa_pending')!;
+      const pending2 = findCookie(login2.headers, 'sencho_mfa_pending')!;
 
-    expect([r1, r2].filter((r) => r.status === 200)).toHaveLength(1);
-    expect([r1, r2].filter((r) => r.status === 401)).toHaveLength(1);
+      const [r1, r2] = await Promise.all([
+        request(app).post('/api/auth/login/mfa').set('Cookie', pending1).send({ code: chosen, isBackupCode: true }),
+        request(app).post('/api/auth/login/mfa').set('Cookie', pending2).send({ code: chosen, isBackupCode: true }),
+      ]);
 
-    // Exactly one code was consumed from the stored set.
-    const db = DatabaseService.getInstance();
-    const mfa = db.getUserMfa(db.getUserByUsername(u)!.id)!;
-    const hashes = mfa.backup_codes_json ? (JSON.parse(mfa.backup_codes_json) as string[]) : [];
-    expect(hashes.length).toBe(codes.length - 1);
+      expect([r1, r2].filter((r) => r.status === 200)).toHaveLength(1);
+      expect([r1, r2].filter((r) => r.status === 401)).toHaveLength(1);
+
+      // Exactly one code was consumed from the stored set.
+      const db = DatabaseService.getInstance();
+      const mfa = db.getUserMfa(db.getUserByUsername(u)!.id)!;
+      const hashes = mfa.backup_codes_json ? (JSON.parse(mfa.backup_codes_json) as string[]) : [];
+      expect(hashes.length).toBe(codes.length - 1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('exhausts all backup codes: each works once, then none remain', async () => {
