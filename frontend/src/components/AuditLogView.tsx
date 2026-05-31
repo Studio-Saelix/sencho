@@ -151,9 +151,13 @@ export function AuditLogView() {
                 const data = await res.json();
                 setEntries(data.entries);
                 setTotal(data.total);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err?.error || err?.message || 'Failed to load audit log.');
             }
         } catch (err) {
             console.error('[AuditLog] Failed to fetch:', err);
+            toast.error('Failed to load audit log.');
         } finally {
             setLoading(false);
         }
@@ -164,9 +168,13 @@ export function AuditLogView() {
             const res = await apiFetch('/audit-log/stats', { localOnly: true });
             if (res.ok) {
                 setStats(await res.json());
+            } else {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err?.error || err?.message || 'Failed to load audit stats.');
             }
         } catch (err) {
             console.error('[AuditLog] Failed to fetch stats:', err);
+            toast.error('Failed to load audit stats.');
         }
     }, []);
 

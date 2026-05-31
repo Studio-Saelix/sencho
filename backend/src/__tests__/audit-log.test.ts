@@ -260,6 +260,34 @@ describe('DatabaseService audit methods', () => {
     const page2Ids = page2.entries.map(e => e.id);
     expect(page1Ids.some(id => page2Ids.includes(id))).toBe(false);
   });
+
+  it('getAuditLogsInRange caps to the most-recent rows and returns ascending order', () => {
+    const db = DatabaseService.getInstance();
+    // Old, isolated window: keeps these rows out of the "most recent" DESC
+    // queries other tests rely on, while staying easy to range-query here.
+    const base = 1_000_000_000_000; // 2001, far from any now()-based entry
+    for (let i = 0; i < 10; i++) {
+      db.insertAuditLog({
+        timestamp: base + i,
+        username: 'rangecapuser',
+        method: 'POST',
+        path: `/api/stacks/cap${i}`,
+        status_code: 200,
+        node_id: null,
+        ip_address: '127.0.0.1',
+        summary: `cap entry ${i}`,
+      });
+    }
+
+    const capped = db.getAuditLogsInRange(base, base + 100, 3);
+    expect(capped.length).toBe(3);
+    // Most-recent three (timestamps base+7, +8, +9), returned ascending.
+    expect(capped.map(e => e.timestamp)).toEqual([base + 7, base + 8, base + 9]);
+
+    const uncapped = db.getAuditLogsInRange(base, base + 100);
+    expect(uncapped.length).toBe(10);
+    expect(uncapped[0].timestamp).toBe(base);
+  });
 });
 
 // ---- API endpoint tests ----
@@ -318,6 +346,111 @@ describe('GET /api/audit-log', () => {
     expect(res.status).toBe(200);
     expect(res.body.entries.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('clamps a negative limit to a single row instead of returning the whole table', async () => {
+    // A negative LIMIT reaches SQLite as "unlimited" without the clamp.
+    const res = await request(app)
+      .get('/api/audit-log?limit=-1')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeLessThanOrEqual(1);
+    expect(res.body.total).toBeGreaterThan(1);
+  });
+
+  it('clamps an oversized limit to the 200 cap', async () => {
+    const res = await request(app)
+      .get('/api/audit-log?limit=99999')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeLessThanOrEqual(200);
+  });
+
+  it('clamps a non-positive page to page 1', async () => {
+    const res = await request(app)
+      .get('/api/audit-log?page=-5&limit=5')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeGreaterThan(0);
+  });
+
+  it('annotates entries with a flags array when with_anomalies=1', async () => {
+    const res = await request(app)
+      .get('/api/audit-log?with_anomalies=1&limit=5')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeGreaterThan(0);
+    for (const entry of res.body.entries) {
+      expect(Array.isArray(entry.flags)).toBe(true);
+    }
+  });
+
+  it('flags a never-before-seen actor as first_seen_actor', async () => {
+    const db = DatabaseService.getInstance();
+    db.insertAuditLog({
+      timestamp: Date.now(),
+      username: 'brandnewactor_unique',
+      method: 'POST',
+      path: '/api/stacks/firstseen',
+      status_code: 200,
+      node_id: null,
+      ip_address: '127.0.0.1',
+      summary: 'Deployed stack: firstseen',
+    });
+
+    const res = await request(app)
+      .get('/api/audit-log?with_anomalies=1&search=brandnewactor_unique')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    const entry = res.body.entries.find(
+      (e: { username: string }) => e.username === 'brandnewactor_unique',
+    );
+    expect(entry).toBeDefined();
+    expect(entry.flags).toContain('first_seen_actor');
+  });
+
+  it('treats limit=0 as the default page size, not zero rows', async () => {
+    // parseInt('0') is falsy, so the `|| 50` default applies before the clamp.
+    const res = await request(app)
+      .get('/api/audit-log?limit=0')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeGreaterThan(0);
+    expect(res.body.entries.length).toBeLessThanOrEqual(50);
+  });
+});
+
+describe('GET /api/audit-log/stats', () => {
+  it('returns 403 without Admiral license', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValueOnce(null);
+
+    const res = await request(app)
+      .get('/api/audit-log/stats')
+      .set('Authorization', `Bearer ${adminToken()}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('returns the four-tile stat structure for admin', async () => {
+    const res = await request(app)
+      .get('/api/audit-log/stats')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('events_24h');
+    expect(res.body).toHaveProperty('actors_24h');
+    expect(res.body).toHaveProperty('failure_rate');
+    expect(res.body).toHaveProperty('unusual_hour');
+    expect(Array.isArray(res.body.activity_by_hour)).toBe(true);
+    expect(res.body.activity_by_hour.length).toBe(24);
+    expect(res.body.failures_by_hour.length).toBe(24);
+  });
 });
 
 describe('GET /api/audit-log/export', () => {
@@ -367,6 +500,29 @@ describe('GET /api/audit-log/export', () => {
     for (const entry of res.body) {
       expect(entry.method).toBe('DELETE');
     }
+  });
+
+  it('neutralizes a formula-injection payload in the CSV export', async () => {
+    const db = DatabaseService.getInstance();
+    db.insertAuditLog({
+      timestamp: Date.now(),
+      username: 'csvinjectuser',
+      method: 'POST',
+      path: '/api/stacks/csvinject',
+      status_code: 200,
+      node_id: null,
+      ip_address: '127.0.0.1',
+      summary: '=DANGER_FORMULA',
+    });
+
+    const res = await request(app)
+      .get('/api/audit-log/export?format=csv&search=csvinjectuser')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    // The leading '=' must be defused with a single-quote prefix.
+    expect(res.text).toContain("'=DANGER_FORMULA");
+    expect(res.text).not.toMatch(/(^|,)=DANGER_FORMULA/);
   });
 });
 

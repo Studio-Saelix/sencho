@@ -612,6 +612,14 @@ export interface ScanSummary {
 const AUDIT_LOG_FLUSH_INTERVAL_MS = 1_000;
 const AUDIT_LOG_FLUSH_THRESHOLD = 100;
 
+// Upper bound on the rows the anomaly baseline / stats computations pull into
+// memory for a single request. The audit table grows unbounded within the
+// retention window, and the analysis paths run on every list page and every
+// stats refresh, so without a cap a busy fleet would scan the whole window into
+// a JS array each time. When the window holds more than this, the most-recent
+// rows are used and baselines become an approximation over recent activity.
+export const AUDIT_ANOMALY_HISTORY_CAP = 20_000;
+
 export const PILOT_METRICS_COUNTERS_KEY = 'pilot_metrics_counters';
 
 export class DatabaseService {
@@ -2984,8 +2992,18 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM audit_log WHERE timestamp < ?').run(cutoff);
     }
 
-    public getAuditLogsInRange(from: number, to: number): AuditLogEntry[] {
+    public getAuditLogsInRange(from: number, to: number, limit?: number): AuditLogEntry[] {
         this.flushAuditLogBuffer();
+        if (limit !== undefined) {
+            // Cap to the most-recent `limit` rows in the window, then return
+            // them in ascending order to preserve this method's contract.
+            return this.db.prepare(
+                `SELECT * FROM (
+                   SELECT * FROM audit_log WHERE timestamp >= ? AND timestamp < ?
+                   ORDER BY timestamp DESC LIMIT ?
+                 ) ORDER BY timestamp ASC`
+            ).all(from, to, limit) as AuditLogEntry[];
+        }
         return this.db.prepare(
             'SELECT * FROM audit_log WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC'
         ).all(from, to) as AuditLogEntry[];
