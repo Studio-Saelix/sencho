@@ -123,7 +123,10 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
   if (!requirePaid(req, res)) return;
   try {
     let tasks = DatabaseService.getInstance().getScheduledTasks();
-    // Split Auto-Update and Scheduled Operations into distinct views.
+    // The Scheduled Operations view manages every task type, so it lists all of
+    // them. `action` / `exclude_action` exist for the read-only consumers that
+    // want a slice: the Auto-Update readiness card and the sidebar next-run
+    // indicator both request `?action=update`.
     const actionFilter = typeof req.query.action === 'string' ? req.query.action : undefined;
     const excludeAction = typeof req.query.exclude_action === 'string' ? req.query.exclude_action : undefined;
     if (actionFilter) {

@@ -485,7 +485,16 @@ export class FileSystemService {
     const debug = isDebugEnabled();
     const t0 = Date.now();
     const stackDir = this.resolveStackDir(stackName);
-    const backupDir = this.getBackupDir(stackName);
+    // Canonical js/path-injection barrier (mirrors restoreStackFiles): resolve the
+    // backup path against the backup root and confirm containment inline, so the
+    // mkdir/copy/write sinks below operate on a validated path. stackName is
+    // already validated by resolveStackDir above; this re-establishes containment
+    // at the backup sinks themselves so static analysis sees the barrier.
+    const backupRoot = path.resolve(getBackupBaseDir());
+    const backupDir = path.resolve(backupRoot, String(this.nodeId), stackName);
+    if (!backupDir.startsWith(backupRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes backup directory'), { code: 'INVALID_PATH' });
+    }
     await fsPromises.mkdir(backupDir, { recursive: true });
 
     // Clear stale managed files from the backup slot before writing the current
@@ -493,11 +502,9 @@ export class FileSystemService {
     // stack since the last backup (e.g. a deleted .env or a switched compose
     // variant) would otherwise linger here and a later restore would resurrect
     // it, breaking the faithful-revert guarantee. Scope is the protected set
-    // Sencho writes; .timestamp is rewritten below. Containment is re-checked at
-    // the sink, rooted at the backup base, for the same reason restoreStackFiles
-    // does it. A clear failure is logged but not fatal: it only risks a stale
-    // future rollback, so it should not block an otherwise valid deploy.
-    const backupRoot = path.resolve(getBackupBaseDir());
+    // Sencho writes; .timestamp is rewritten below. A clear failure is logged but
+    // not fatal: it only risks a stale future rollback, so it should not block an
+    // otherwise valid deploy.
     for (const file of PROTECTED_STACK_FILES) {
       const stale = path.resolve(backupRoot, path.join(backupDir, file));
       if (!stale.startsWith(backupRoot + path.sep)) continue;
