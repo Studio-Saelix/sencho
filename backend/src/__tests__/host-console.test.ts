@@ -2,10 +2,13 @@
  * Tests for the Host Console feature: environment sanitization, session limits,
  * and console-token RBAC enforcement.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
+import * as path from 'path';
+import { EventEmitter } from 'events';
+import * as pty from 'node-pty';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -160,6 +163,204 @@ describe('HostTerminalService session tracking', () => {
     // Clear any leftover sessions
     HostTerminalService.activeSessions.clear();
     expect(HostTerminalService.activeSessions.size).toBe(0);
+  });
+});
+
+// ─── Stack-Path Resolution ──────────────────────────────────────────────────
+
+describe('HostTerminalService.resolveConsoleDirectory', () => {
+  let resolveConsoleDirectory: (baseDir: string, stackParam: string | null) => string | null;
+
+  beforeAll(async () => {
+    const mod = await import('../services/HostTerminalService');
+    resolveConsoleDirectory = mod.HostTerminalService.resolveConsoleDirectory;
+  });
+
+  it('returns the base directory when no stack is given', () => {
+    expect(resolveConsoleDirectory('/srv/compose', null)).toBe(path.resolve('/srv/compose'));
+  });
+
+  it('resolves a stack subdirectory below the base', () => {
+    expect(resolveConsoleDirectory('/srv/compose', 'my-stack')).toBe(
+      path.resolve('/srv/compose', 'my-stack'),
+    );
+  });
+
+  it('rejects a sibling-prefix escape (../<base>-evil)', () => {
+    // The historical bug: a bare startsWith() matched `/srv/compose-evil`
+    // because it shares the `/srv/compose` prefix. The path.sep boundary
+    // must reject it.
+    expect(resolveConsoleDirectory('/srv/compose', '../compose-evil')).toBeNull();
+  });
+
+  it('rejects a parent-directory escape', () => {
+    expect(resolveConsoleDirectory('/srv/compose', '../..')).toBeNull();
+  });
+
+  it('rejects an absolute path outside the base', () => {
+    const outside = path.resolve('/etc');
+    if (outside !== path.resolve('/srv/compose')) {
+      expect(resolveConsoleDirectory('/srv/compose', outside)).toBeNull();
+    }
+  });
+});
+
+// ─── Session Audit Trail + Resize Validation ────────────────────────────────
+
+interface FakeWs extends EventEmitter {
+  readyState: number;
+  send: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+  ping: ReturnType<typeof vi.fn>;
+  terminate: ReturnType<typeof vi.fn>;
+}
+
+function makeFakeWs(): FakeWs {
+  const ws = new EventEmitter() as FakeWs;
+  ws.readyState = 1; // WebSocket.OPEN
+  ws.send = vi.fn();
+  ws.close = vi.fn();
+  ws.ping = vi.fn();
+  ws.terminate = vi.fn();
+  return ws;
+}
+
+function makeFakePty(pid = 4242) {
+  let exitCb: ((e: { exitCode: number; signal: number }) => void) | undefined;
+  return {
+    pid,
+    onData: vi.fn(),
+    onExit: vi.fn((cb: (e: { exitCode: number; signal: number }) => void) => { exitCb = cb; }),
+    write: vi.fn(),
+    resize: vi.fn(),
+    kill: vi.fn(),
+    triggerExit: (e: { exitCode: number; signal: number }) => exitCb?.(e),
+  };
+}
+
+describe('HostTerminalService.spawnTerminal', () => {
+  let HostTerminalService: typeof import('../services/HostTerminalService').HostTerminalService;
+  let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+  let insertSpy: ReturnType<typeof vi.spyOn>;
+  let spawnSpy: ReturnType<typeof vi.spyOn>;
+  const audit = { username: 'admin', nodeId: 7, ipAddress: '9.9.9.9' };
+
+  beforeAll(async () => {
+    HostTerminalService = (await import('../services/HostTerminalService')).HostTerminalService;
+    DatabaseService = (await import('../services/DatabaseService')).DatabaseService;
+  });
+
+  beforeEach(() => {
+    HostTerminalService.activeSessions.clear();
+    insertSpy = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog').mockImplementation(() => {});
+    spawnSpy = vi.spyOn(pty, 'spawn');
+  });
+
+  afterEach(() => {
+    insertSpy.mockRestore();
+    spawnSpy.mockRestore();
+  });
+
+  it('writes an open audit row when a session starts', () => {
+    spawnSpy.mockReturnValue(makeFakePty() as unknown as pty.IPty);
+    const ws = makeFakeWs();
+    HostTerminalService.spawnTerminal(ws as never, '/tmp', audit);
+
+    expect(insertSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        username: 'admin',
+        method: 'WS',
+        path: '/api/system/host-console',
+        status_code: 101,
+        node_id: 7,
+        ip_address: '9.9.9.9',
+        summary: 'Opened host console session',
+      }),
+    );
+    ws.emit('close'); // clean up the heartbeat interval
+  });
+
+  it('writes a close audit row with duration when the socket closes', () => {
+    spawnSpy.mockReturnValue(makeFakePty() as unknown as pty.IPty);
+    const ws = makeFakeWs();
+    HostTerminalService.spawnTerminal(ws as never, '/tmp', audit);
+    insertSpy.mockClear();
+
+    ws.emit('close');
+
+    expect(insertSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'WS',
+        path: '/api/system/host-console',
+        status_code: 200,
+        summary: expect.stringMatching(/^Closed host console session \(\d+ms\)$/),
+      }),
+    );
+  });
+
+  it('writes exactly one close row when the PTY exits and the socket then closes', () => {
+    const fakePty = makeFakePty();
+    spawnSpy.mockReturnValue(fakePty as unknown as pty.IPty);
+    const ws = makeFakeWs();
+    HostTerminalService.spawnTerminal(ws as never, '/tmp', audit);
+    insertSpy.mockClear();
+
+    // Both cleanup triggers fire (PTY exit, then the WS close it provokes); the
+    // `cleaned` guard must collapse them to a single close audit row.
+    fakePty.triggerExit({ exitCode: 0, signal: 0 });
+    ws.emit('close');
+
+    const closeRows = insertSpy.mock.calls.filter(
+      ([entry]: [{ summary?: string }]) => entry?.summary?.startsWith('Closed host console session'),
+    );
+    expect(closeRows).toHaveLength(1);
+  });
+
+  it('applies a valid resize frame and rejects malformed ones', () => {
+    const fakePty = makeFakePty();
+    spawnSpy.mockReturnValue(fakePty as unknown as pty.IPty);
+    const ws = makeFakeWs();
+    HostTerminalService.spawnTerminal(ws as never, '/tmp', audit);
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: 120, rows: 40 })));
+    expect(fakePty.resize).toHaveBeenCalledWith(120, 40);
+
+    // Boundary: the max dimension is accepted, one above it is rejected.
+    fakePty.resize.mockClear();
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: 1000, rows: 1000 })));
+    expect(fakePty.resize).toHaveBeenCalledWith(1000, 1000);
+
+    fakePty.resize.mockClear();
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: 1001, rows: 40 })));
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: -1, rows: 40 })));
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: 99999, rows: 40 })));
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: '80', rows: 40 })));
+    expect(fakePty.resize).not.toHaveBeenCalled();
+
+    ws.emit('close');
+  });
+
+  it('forwards input frames to the PTY', () => {
+    const fakePty = makeFakePty();
+    spawnSpy.mockReturnValue(fakePty as unknown as pty.IPty);
+    const ws = makeFakeWs();
+    HostTerminalService.spawnTerminal(ws as never, '/tmp', audit);
+
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'input', payload: 'ls -la\n' })));
+    expect(fakePty.write).toHaveBeenCalledWith('ls -la\n');
+
+    ws.emit('close');
+  });
+
+  it('reports a shell-not-found error and closes when spawn throws ENOENT', () => {
+    spawnSpy.mockImplementation(() => { throw new Error('spawn sh ENOENT'); });
+    const ws = makeFakeWs();
+    HostTerminalService.spawnTerminal(ws as never, '/tmp', audit);
+
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('Shell not found'));
+    expect(ws.close).toHaveBeenCalled();
+    expect(HostTerminalService.activeSessions.size).toBe(0);
+    expect(insertSpy).not.toHaveBeenCalled();
   });
 });
 

@@ -1,7 +1,6 @@
 import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import WebSocket, { WebSocketServer } from 'ws';
-import path from 'path';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { HostTerminalService } from '../services/HostTerminalService';
@@ -82,28 +81,41 @@ export function handleHostConsoleWs(
     stack: stackParam || '(root)',
   });
 
+  // Client IP for the audit trail. Express's req.ip is unavailable on a raw
+  // upgrade socket, so take the first x-forwarded-for hop and fall back to the
+  // socket address.
+  const forwarded = req.headers['x-forwarded-for'];
+  const xff = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
+  const auditCtx = {
+    username: consoleUsername,
+    nodeId,
+    ipAddress: xff || req.socket.remoteAddress || '',
+  };
+
   const hostConsoleWss = new WebSocketServer({ noServer: true });
   hostConsoleWss.handleUpgrade(req, socket, head, (ws) => {
     hostConsoleWss.close();
-    let targetDirectory = '';
+    let targetDirectory: string;
     try {
       const baseDir = FileSystemService.getInstance(nodeId).getBaseDir();
-      if (stackParam) {
-        const resolved = path.resolve(baseDir, stackParam);
-        if (!resolved.startsWith(path.resolve(baseDir))) {
-          ws.send('Error: Invalid stack path\r\n');
-          ws.close();
-          return;
-        }
-        targetDirectory = resolved;
-      } else {
-        targetDirectory = baseDir;
+      const resolved = HostTerminalService.resolveConsoleDirectory(baseDir, stackParam);
+      if (resolved === null) {
+        ws.send('Error: Invalid stack path\r\n');
+        ws.close();
+        return;
       }
-    } catch {
+      targetDirectory = resolved;
+    } catch (error) {
+      console.error('[HostConsole] Failed to resolve console directory; falling back to the default node base dir', {
+        user: consoleUsername,
+        nodeId,
+        stack: stackParam || '(root)',
+        error: getErrorMessage(error, 'unknown'),
+      });
       targetDirectory = FileSystemService.getInstance(NodeRegistry.getInstance().getDefaultNodeId()).getBaseDir();
     }
     try {
-      HostTerminalService.spawnTerminal(ws, targetDirectory, consoleUsername);
+      HostTerminalService.spawnTerminal(ws, targetDirectory, auditCtx);
     } catch (error) {
       console.error('[HostConsole] Unhandled spawn error:', { user: consoleUsername, error: getErrorMessage(error, 'unknown') });
       if (ws.readyState === WebSocket.OPEN) {
