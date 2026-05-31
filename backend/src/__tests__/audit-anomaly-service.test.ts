@@ -113,57 +113,65 @@ describe('AuditAnomalyService - annotateEntries', () => {
 });
 
 describe('AuditAnomalyService - computeAuditStats', () => {
-    function buildEntries(now: number): { last24h: AuditLogEntry[]; last7d: AuditLogEntry[]; last30d: AuditLogEntry[] } {
-        const last24h: AuditLogEntry[] = [];
-        for (let i = 0; i < 20; i++) {
-            last24h.push(entry({
-                id: i + 1,
-                timestamp: now - i * HOUR,
-                status_code: i < 3 ? 500 : 200,
-                ip_address: i === 5 ? '45.76.1.2' : '10.0.0.1',
-            }));
-        }
-        const older: AuditLogEntry[] = [];
-        for (let i = 0; i < 60; i++) {
-            older.push(entry({
-                id: 100 + i,
-                timestamp: now - DAY - i * HOUR,
-                ip_address: '10.0.0.1',
-            }));
-        }
-        return {
-            last24h,
-            last7d: [...last24h, ...older.filter(e => e.timestamp >= now - 7 * DAY)],
-            last30d: [...last24h, ...older],
-        };
-    }
+    const baseInput = (over: Partial<Parameters<typeof computeAuditStats>[0]> = {}) => ({
+        events24: 0,
+        events7d: 0,
+        actors24: 0,
+        failures24: 0,
+        activityByHour: Array.from({ length: 24 }, () => 0),
+        failuresByHour: Array.from({ length: 24 }, () => 0),
+        newIpCount: 0,
+        sampleNewIpActor: null as string | null,
+        ...over,
+    });
 
-    it('summarizes events, actors, failures, and peak hour', () => {
-        const now = new Date('2026-04-18T12:00:00Z').getTime();
-        const { last24h, last7d, last30d } = buildEntries(now);
-        const stats = computeAuditStats({ now, last24h, last7d, last30d });
+    it('summarizes events, actors, and failure rate from exact aggregates', () => {
+        const activityByHour = Array.from({ length: 24 }, () => 0);
+        activityByHour[12] = 20;
+        const stats = computeAuditStats(baseInput({
+            events24: 20,
+            events7d: 20,
+            actors24: 1,
+            failures24: 3,
+            activityByHour,
+        }));
         expect(stats.events_24h.value).toBe(20);
         expect(stats.actors_24h.value).toBe(1);
         expect(stats.failure_rate.value).toBe(15);
+        expect(stats.failure_rate.detail).toBe('3 of 20 requests');
         expect(stats.activity_by_hour).toHaveLength(24);
-        expect(stats.activity_by_hour.reduce((a, b) => a + b, 0)).toBe(20);
     });
 
-    it('flags the new_ip detail when an actor uses an ip not seen in prior 29 days', () => {
-        const now = new Date('2026-04-18T12:00:00Z').getTime();
-        const { last24h, last7d, last30d } = buildEntries(now);
-        const stats = computeAuditStats({ now, last24h, last7d, last30d });
-        expect(stats.actors_24h.detail).toMatch(/new ip/);
+    it('flags the new_ip detail when the aggregate reports a new pair', () => {
+        const stats = computeAuditStats(baseInput({
+            events24: 5,
+            events7d: 5,
+            actors24: 1,
+            newIpCount: 2,
+            sampleNewIpActor: 'admin',
+        }));
+        expect(stats.actors_24h.detail).toMatch(/2 new ips/);
+        expect(stats.actors_24h.detail).toMatch(/admin/);
+        expect(stats.actors_24h.severity).toBe('warn');
     });
 
     it('surfaces peak hour when it falls outside working hours', () => {
-        const now = new Date(2026, 3, 18, 12, 0, 0).getTime();
-        const nightBase = new Date(2026, 3, 18, 3, 15, 0).getTime();
-        const nightEntries: AuditLogEntry[] = Array.from({ length: 10 }, (_, i) =>
-            entry({ id: i + 1, timestamp: nightBase - i * 5000 })
-        );
-        const stats = computeAuditStats({ now, last24h: nightEntries, last7d: nightEntries, last30d: nightEntries });
+        const activityByHour = Array.from({ length: 24 }, () => 0);
+        activityByHour[3] = 10;
+        const stats = computeAuditStats(baseInput({
+            events24: 10,
+            events7d: 10,
+            actors24: 1,
+            activityByHour,
+        }));
         expect(stats.unusual_hour.severity).toBe('warn');
         expect(stats.unusual_hour.value).toBe(3);
+    });
+
+    it('keeps peak hour blank inside working hours', () => {
+        const activityByHour = Array.from({ length: 24 }, () => 0);
+        activityByHour[14] = 8;
+        const stats = computeAuditStats(baseInput({ events24: 8, events7d: 8, actors24: 1, activityByHour }));
+        expect(stats.unusual_hour.value).toBeNull();
     });
 });

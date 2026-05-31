@@ -143,6 +143,25 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     expect(result.error).toContain('Failed to inspect local image');
   });
 
+  it('bounds a hung local inspect instead of hanging the scan', async () => {
+    // A wedged Docker socket must not stall the check forever: withTimeout
+    // rejects the inspect, the existing catch turns it into an error result.
+    const docker = {
+      getDocker: () => ({
+        getImage: () => ({ inspect: vi.fn().mockImplementation(() => new Promise(() => { /* never resolves */ })) }),
+      }),
+    } as any;
+    const orig = (ImageUpdateService as any).SOCKET_TIMEOUT_MS;
+    (ImageUpdateService as any).SOCKET_TIMEOUT_MS = 20;
+    try {
+      const result = await service.checkImage(docker, 'nginx:latest');
+      expect(result.hasUpdate).toBe(false);
+      expect(result.error).toContain('Failed to inspect local image');
+    } finally {
+      (ImageUpdateService as any).SOCKET_TIMEOUT_MS = orig;
+    }
+  });
+
   it('returns { hasUpdate: false } when no RepoDigests match', async () => {
     // Empty RepoDigests means locally built image
     const docker = makeMockDocker([]);
@@ -516,21 +535,20 @@ services:
   });
 });
 
-// ── check() timeout ─────────────────────────────────────────────────────
+// ── check() concurrency guard ───────────────────────────────────────────
 
-describe('ImageUpdateService - check() timeout', () => {
+describe('ImageUpdateService - check() concurrency guard', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
     (ImageUpdateService as any).instance = undefined;
   });
 
-  it('releases isRunning lock after CHECK_TIMEOUT_MS', async () => {
-    // Override the module-level DatabaseService mock to return a node
+  async function stubDbWithLocalNode(developerMode: '0' | '1' = '0') {
     const dbModule = await import('../services/DatabaseService');
-    const origGetInstance = dbModule.DatabaseService.getInstance;
+    const orig = dbModule.DatabaseService.getInstance;
     dbModule.DatabaseService.getInstance = (() => ({
-      getGlobalSettings: () => ({ developer_mode: '0' }),
+      getGlobalSettings: () => ({ developer_mode: developerMode }),
       getNodes: () => [{ type: 'local', id: 1, name: 'local', mode: 'proxy', compose_dir: '/tmp/compose', is_default: true, status: 'online', created_at: 1 }],
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
@@ -539,33 +557,120 @@ describe('ImageUpdateService - check() timeout', () => {
       setSystemState: mockSetSystemState,
       addNotificationHistory: mockAddNotificationHistory,
     })) as unknown as typeof dbModule.DatabaseService.getInstance;
+    return () => { dbModule.DatabaseService.getInstance = orig; };
+  }
 
+  it('does not start a second check body while one is in flight', async () => {
+    const restoreDb = await stubDbWithLocalNode();
     const service = ImageUpdateService.getInstance();
-    // Make checkNode hang indefinitely so the timeout fires
-    (service as any).checkNode = vi.fn().mockImplementation(() =>
+    // checkNode never resolves: simulate a scan that overruns / a wedged socket.
+    const checkNodeMock = vi.fn().mockImplementation(() =>
       new Promise(() => { /* never resolves */ })
     );
+    (service as any).checkNode = checkNodeMock;
 
-    // Override timeout to 100ms for fast test
-    const orig = (ImageUpdateService as any).CHECK_TIMEOUT_MS;
-    (ImageUpdateService as any).CHECK_TIMEOUT_MS = 100;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const skipWarn = /running for \d+ minute/;
 
-    // Don't await; this will hang intentionally
-    const checkPromise = (service as any).check();
-
-    // Let microtasks flush so check() enters its body
+    const first = (service as any).check();
     await new Promise(r => setTimeout(r, 10));
     expect(service.isChecking()).toBe(true);
+    expect(checkNodeMock).toHaveBeenCalledTimes(1);
 
-    // Wait for timeout to fire
-    await new Promise(r => setTimeout(r, 200));
+    // A concurrent trigger (e.g. a manual refresh) under the long-run threshold
+    // must be a silent no-op: no second body, no warning.
+    await (service as any).check();
+    expect(checkNodeMock).toHaveBeenCalledTimes(1);
+    expect(service.isChecking()).toBe(true);
+    expect(warnSpy.mock.calls.some(c => skipWarn.test(String(c[0])))).toBe(false);
 
-    expect(service.isChecking()).toBe(false);
+    // Past the long-run threshold the trigger warns (operator signal) but still
+    // must not spawn a concurrent body.
+    const orig = (ImageUpdateService as any).CHECK_TIMEOUT_MS;
+    (ImageUpdateService as any).CHECK_TIMEOUT_MS = 1;
+    await new Promise(r => setTimeout(r, 5));
+    await (service as any).check();
+    expect(checkNodeMock).toHaveBeenCalledTimes(1);
+    expect(service.isChecking()).toBe(true);
+    expect(warnSpy.mock.calls.some(c => skipWarn.test(String(c[0])))).toBe(true);
 
-    // Cleanup
     (ImageUpdateService as any).CHECK_TIMEOUT_MS = orig;
-    dbModule.DatabaseService.getInstance = origGetInstance;
-    checkPromise.catch(() => {});
+    warnSpy.mockRestore();
+    restoreDb();
+    first.catch(() => {});
+  });
+
+  it('treats a manual refresh during an in-flight check as a no-op', async () => {
+    const restoreDb = await stubDbWithLocalNode();
+    const service = ImageUpdateService.getInstance();
+    const checkNodeMock = vi.fn().mockImplementation(() =>
+      new Promise(() => { /* never resolves */ })
+    );
+    (service as any).checkNode = checkNodeMock;
+
+    const first = (service as any).check();
+    await new Promise(r => setTimeout(r, 10));
+    expect(checkNodeMock).toHaveBeenCalledTimes(1);
+
+    // This is the exact regression the guard replaces: a manual refresh firing
+    // while a scan is in flight. It reports it fired (the cooldown is clear) but
+    // the in-check guard prevents a second concurrent scan body.
+    const triggered = service.triggerManualRefresh();
+    await new Promise(r => setTimeout(r, 10));
+    expect(triggered).toBe(true);
+    expect(checkNodeMock).toHaveBeenCalledTimes(1);
+    expect(service.isChecking()).toBe(true);
+
+    restoreDb();
+    first.catch(() => {});
+  });
+
+  it('logs a debug skip line for a mid-scan trigger when developer mode is on', async () => {
+    const restoreDb = await stubDbWithLocalNode('1');
+    // isDebugEnabled short-circuits to false under NODE_ENV=test unless DATA_DIR
+    // is set; set it so the developer_mode flag is actually consulted.
+    const prevDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = prevDataDir ?? '/tmp/image-update-debug-test';
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const service = ImageUpdateService.getInstance();
+      const checkNodeMock = vi.fn().mockImplementation(() =>
+        new Promise(() => { /* never resolves */ })
+      );
+      (service as any).checkNode = checkNodeMock;
+
+      const first = (service as any).check();
+      await new Promise(r => setTimeout(r, 10));
+
+      // Under the long-run threshold with developer mode on, the skipped trigger
+      // takes the debug branch rather than the WARN branch.
+      await (service as any).check();
+      expect(checkNodeMock).toHaveBeenCalledTimes(1);
+      expect(logSpy.mock.calls.some(c => /Check already in progress; skipping/.test(String(c[0])))).toBe(true);
+
+      first.catch(() => {});
+    } finally {
+      logSpy.mockRestore();
+      if (prevDataDir === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = prevDataDir;
+      restoreDb();
+    }
+  });
+
+  it('releases the lock when a check finishes and allows the next run', async () => {
+    const restoreDb = await stubDbWithLocalNode();
+    const service = ImageUpdateService.getInstance();
+    const checkNodeMock = vi.fn().mockResolvedValue(undefined);
+    (service as any).checkNode = checkNodeMock;
+
+    await (service as any).check();
+    expect(service.isChecking()).toBe(false);
+    expect(checkNodeMock).toHaveBeenCalledTimes(1);
+
+    // A fresh trigger after completion runs a new body.
+    await (service as any).check();
+    expect(checkNodeMock).toHaveBeenCalledTimes(2);
+
+    restoreDb();
   });
 });
 

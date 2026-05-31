@@ -94,13 +94,15 @@ export class ImageUpdateService {
     private intervalId: NodeJS.Timeout | null = null;
     private startupTimeoutId: NodeJS.Timeout | null = null;
     private isRunning = false;
+    private checkStartedAt = 0;
     private lastManualRefreshAt = 0;
 
     private static readonly INTERVAL_MS = 6 * 60 * 60 * 1000;    // 6 hours
     private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
     private static readonly MANUAL_COOLDOWN_MS = 2 * 60 * 1000;  // 2 min between manual triggers
     private static readonly INTER_IMAGE_DELAY_MS = 300;           // be polite to registries
-    private static readonly CHECK_TIMEOUT_MS = 5 * 60 * 1000;     // 5 min overall cap per scan
+    private static readonly CHECK_TIMEOUT_MS = 5 * 60 * 1000;     // threshold for the "running long" skip warning
+    private static readonly SOCKET_TIMEOUT_MS = 30 * 1000;        // per-call cap on Docker socket / filesystem reads
 
     public static get manualCooldownMinutes(): number {
         return ImageUpdateService.MANUAL_COOLDOWN_MS / (60 * 1000);
@@ -154,15 +156,27 @@ export class ImageUpdateService {
     // ─── Core check ──────────────────────────────────────────────────────────
 
     private async check() {
-        if (this.isRunning) return;
+        // The finally block is the sole owner of isRunning, so a scan that
+        // overruns can never have its lock released out from under it. A
+        // previous fixed timer cleared the lock after CHECK_TIMEOUT_MS, which
+        // let a manual refresh start a second concurrent check on a healthy but
+        // slow scan, duplicating notifications and racing the status writes.
+        // Registry calls are bounded (10s) and the Docker/filesystem reads are
+        // wrapped in withTimeout, so the scan body always settles and the
+        // finally releases the lock; the only thing the guard below protects
+        // against is a concurrent trigger arriving mid-scan.
+        if (this.isRunning) {
+            const elapsedMs = Date.now() - this.checkStartedAt;
+            if (elapsedMs >= ImageUpdateService.CHECK_TIMEOUT_MS) {
+                console.warn(`[ImageUpdateService] A check has been running for ${Math.round(elapsedMs / 60_000)} minute(s); skipping this trigger. The Docker socket may be unresponsive.`);
+            } else if (isDebugEnabled()) {
+                console.log('[ImageUpdateService:debug] Check already in progress; skipping this trigger.');
+            }
+            return;
+        }
         this.isRunning = true;
+        this.checkStartedAt = Date.now();
         console.log('[ImageUpdateService] Starting image update check...');
-
-        const checkTimeout = setTimeout(() => {
-            console.warn('[ImageUpdateService] Check timed out after ' +
-                `${ImageUpdateService.CHECK_TIMEOUT_MS / 60_000} minutes; releasing lock`);
-            this.isRunning = false;
-        }, ImageUpdateService.CHECK_TIMEOUT_MS);
 
         try {
             const db = DatabaseService.getInstance();
@@ -179,7 +193,6 @@ export class ImageUpdateService {
         } catch (e) {
             console.error('[ImageUpdateService] Check failed:', e);
         } finally {
-            clearTimeout(checkTimeout);
             this.isRunning = false;
         }
     }
@@ -190,7 +203,7 @@ export class ImageUpdateService {
         const composeDir = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
 
         // Phase 1: Filesystem discovery (all stacks with compose files)
-        const stacks = await fs.getStacks();
+        const stacks = await withTimeout(fs.getStacks(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getStacks');
         const stackImages = new Map<string, Set<string>>();
         for (const name of stacks) stackImages.set(name, new Set());
 
@@ -201,14 +214,14 @@ export class ImageUpdateService {
         // Phase 2: Parse compose files for image refs
         for (const stackName of stacks) {
             try {
-                const content = await fs.getStackContent(stackName);
+                const content = await withTimeout(fs.getStackContent(stackName), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getStackContent');
 
                 // Load .env for variable resolution (best-effort)
                 let envVars: Record<string, string> = {};
                 try {
-                    const hasEnv = await fs.envExists(stackName);
+                    const hasEnv = await withTimeout(fs.envExists(stackName), ImageUpdateService.SOCKET_TIMEOUT_MS, 'envExists');
                     if (hasEnv) {
-                        const envContent = await fs.getEnvContent(stackName);
+                        const envContent = await withTimeout(fs.getEnvContent(stackName), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getEnvContent');
                         envVars = loadDotEnv(envContent);
                     }
                 } catch {
@@ -235,7 +248,7 @@ export class ImageUpdateService {
 
         // Phase 3: Container augmentation (captures actual deployed image tags)
         try {
-            const containers = await docker.getAllContainers();
+            const containers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
             for (const c of containers) {
                 const workingDir: string | undefined = c.Labels?.['com.docker.compose.project.working_dir'];
                 if (!workingDir) continue;
@@ -367,7 +380,7 @@ export class ImageUpdateService {
         // Get local digest from RepoDigests
         let localDigest: string | null = null;
         try {
-            const inspect = await docker.getDocker().getImage(imageRef).inspect();
+            const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');
             const repoDigests: string[] = inspect.RepoDigests ?? [];
 
             for (const rd of repoDigests) {
@@ -401,4 +414,22 @@ export class ImageUpdateService {
 
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Reject after `ms` if `p` has not settled. Docker socket and filesystem reads
+ * have no built-in timeout, so without this a wedged daemon would hang a scan
+ * forever and hold the run lock until the process restarts. The rejecting await
+ * lets the scan body unwind so the `finally` releases the lock and the next
+ * interval can retry. Handlers are attached to `p` so a late settle does not
+ * surface as an unhandled rejection.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        p.then(
+            (value) => { clearTimeout(timer); resolve(value); },
+            (err) => { clearTimeout(timer); reject(err); },
+        );
+    });
 }

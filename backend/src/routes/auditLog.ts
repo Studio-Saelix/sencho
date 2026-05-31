@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, AUDIT_ANOMALY_HISTORY_CAP } from '../services/DatabaseService';
 import { annotateEntries, computeAuditStats, HISTORY_WINDOW_MS } from '../services/AuditAnomalyService';
 import { requireAdmiral } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
@@ -14,8 +14,8 @@ auditLogRouter.get('/', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'system:audit')) return;
 
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit as string) || 50), 200);
     const username = req.query.username as string | undefined;
     const method = req.query.method as string | undefined;
     const search = req.query.search as string | undefined;
@@ -36,7 +36,7 @@ auditLogRouter.get('/', async (req: Request, res: Response): Promise<void> => {
         (min, e) => Math.min(min, e.timestamp),
         result.entries[0].timestamp,
       );
-      const history = db.getAuditLogsInRange(historyFrom, oldestInPage);
+      const history = db.getAuditLogsInRange(historyFrom, oldestInPage, AUDIT_ANOMALY_HISTORY_CAP);
       res.json({ ...result, entries: annotateEntries(result.entries, history, now) });
       return;
     }
@@ -52,14 +52,11 @@ auditLogRouter.get('/stats', async (req: Request, res: Response): Promise<void> 
   if (!requirePermission(req, res, 'system:audit')) return;
 
   try {
-    const now = Date.now();
+    if (isDebugEnabled()) {
+      console.log('[Audit:diag] Stats requested');
+    }
     const db = DatabaseService.getInstance();
-    const cutoff24h = now - 24 * 60 * 60 * 1000;
-    const cutoff7d = now - 7 * 24 * 60 * 60 * 1000;
-    const last30d = db.getAuditLogsInRange(now - HISTORY_WINDOW_MS, now);
-    const last7d = last30d.filter(e => e.timestamp >= cutoff7d);
-    const last24h = last7d.filter(e => e.timestamp >= cutoff24h);
-    res.json(computeAuditStats({ now, last24h, last7d, last30d }));
+    res.json(computeAuditStats(db.getAuditStatsInputs(Date.now())));
   } catch (error) {
     console.error('[AuditLog] Failed to compute audit stats:', error);
     res.status(500).json({ error: 'Failed to compute audit stats' });

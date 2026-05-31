@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
+import type { AuditStatsInput } from './AuditAnomalyService';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -611,6 +612,14 @@ export interface ScanSummary {
 // always observe a consistent view.
 const AUDIT_LOG_FLUSH_INTERVAL_MS = 1_000;
 const AUDIT_LOG_FLUSH_THRESHOLD = 100;
+
+// Upper bound on the rows the anomaly baseline / stats computations pull into
+// memory for a single request. The audit table grows unbounded within the
+// retention window, and the analysis paths run on every list page and every
+// stats refresh, so without a cap a busy fleet would scan the whole window into
+// a JS array each time. When the window holds more than this, the most-recent
+// rows are used and baselines become an approximation over recent activity.
+export const AUDIT_ANOMALY_HISTORY_CAP = 20_000;
 
 export const PILOT_METRICS_COUNTERS_KEY = 'pilot_metrics_counters';
 
@@ -2984,11 +2993,83 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM audit_log WHERE timestamp < ?').run(cutoff);
     }
 
-    public getAuditLogsInRange(from: number, to: number): AuditLogEntry[] {
+    public getAuditLogsInRange(from: number, to: number, limit?: number): AuditLogEntry[] {
         this.flushAuditLogBuffer();
+        if (limit !== undefined) {
+            // Cap to the most-recent `limit` rows in the window, then return
+            // them in ascending order to preserve this method's contract.
+            return this.db.prepare(
+                `SELECT * FROM (
+                   SELECT * FROM audit_log WHERE timestamp >= ? AND timestamp < ?
+                   ORDER BY timestamp DESC LIMIT ?
+                 ) ORDER BY timestamp ASC`
+            ).all(from, to, limit) as AuditLogEntry[];
+        }
         return this.db.prepare(
             'SELECT * FROM audit_log WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC'
         ).all(from, to) as AuditLogEntry[];
+    }
+
+    /**
+     * Exact aggregate inputs for the audit signal-rail stats, computed with SQL
+     * COUNT / GROUP BY rather than materializing rows. The counts and hourly
+     * series stay exact regardless of window size (no row cap), while the
+     * new-ip detection works over the small DISTINCT (user, ip) pair sets.
+     */
+    public getAuditStatsInputs(now: number): AuditStatsInput {
+        this.flushAuditLogBuffer();
+        const cutoff24h = now - 24 * 60 * 60 * 1000;
+        const cutoff7d = now - 7 * 24 * 60 * 60 * 1000;
+        const cutoff30d = now - 30 * 24 * 60 * 60 * 1000;
+        // Every current-window query is upper-bounded by `now` so a future-dated
+        // row (clock skew, a test fixture) never inflates the live counts.
+        const countOf = (sql: string, ...params: number[]): number =>
+            (this.db.prepare(sql).get(...params) as { c: number }).c;
+
+        const events24 = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ? AND timestamp < ?', cutoff24h, now);
+        const events7d = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ? AND timestamp < ?', cutoff7d, now);
+        const actors24 = countOf("SELECT COUNT(DISTINCT username) AS c FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND username != ''", cutoff24h, now);
+        const failures24 = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND status_code >= 400', cutoff24h, now);
+
+        const activityByHour = Array.from({ length: 24 }, () => 0);
+        const failuresByHour = Array.from({ length: 24 }, () => 0);
+        const hourRows = this.db.prepare(
+            `SELECT CAST(strftime('%H', timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS failures
+             FROM audit_log WHERE timestamp >= ? AND timestamp < ? GROUP BY hour`,
+        ).all(cutoff24h, now) as { hour: number; total: number; failures: number }[];
+        for (const r of hourRows) {
+            if (r.hour >= 0 && r.hour < 24) {
+                activityByHour[r.hour] = r.total;
+                failuresByHour[r.hour] = r.failures;
+            }
+        }
+
+        // ORDER BY makes both the new-ip scan and the sample actor deterministic.
+        const recentPairs = this.db.prepare(
+            "SELECT DISTINCT username, ip_address FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND username != '' AND ip_address != '' ORDER BY username, ip_address",
+        ).all(cutoff24h, now) as { username: string; ip_address: string }[];
+        const priorPairs = this.db.prepare(
+            "SELECT DISTINCT username, ip_address FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND username != '' AND ip_address != ''",
+        ).all(cutoff30d, cutoff24h) as { username: string; ip_address: string }[];
+        const priorByActor = new Map<string, Set<string>>();
+        for (const p of priorPairs) {
+            let set = priorByActor.get(p.username);
+            if (!set) { set = new Set(); priorByActor.set(p.username, set); }
+            set.add(p.ip_address);
+        }
+        let newIpCount = 0;
+        let sampleNewIpActor: string | null = null;
+        for (const p of recentPairs) {
+            const prior = priorByActor.get(p.username);
+            if (prior && prior.size > 0 && !prior.has(p.ip_address)) {
+                newIpCount++;
+                if (!sampleNewIpActor) sampleNewIpActor = p.username;
+            }
+        }
+
+        return { events24, events7d, actors24, failures24, activityByHour, failuresByHour, newIpCount, sampleNewIpActor };
     }
 
     // --- API Tokens ---
