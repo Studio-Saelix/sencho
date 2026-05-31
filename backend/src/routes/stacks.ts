@@ -62,6 +62,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   start: 'starting',
   update: 'updating',
   rollback: 'rolling back',
+  backup: 'backing up',
 };
 
 function tryAcquireStackOpLock(
@@ -1260,6 +1261,11 @@ stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!requirePaid(req, res)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  // The backup slot is shared with the pre-deploy rollback snapshot, so hold the
+  // stack-op lock to keep a backup from interleaving with a concurrent
+  // deploy/update/rollback on the same stack. All early-returns stay inside the
+  // try so finally always releases.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'backup')) return;
   try {
     await FileSystemService.getInstance(req.nodeId).backupStackFiles(stackName);
     dlog(`[Stacks] Backup completed: ${sanitizeForLog(stackName)}`);
@@ -1267,6 +1273,8 @@ stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Stacks] Backup failed: %s', sanitizeForLog(stackName), error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to back up stack files') });
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 });
 

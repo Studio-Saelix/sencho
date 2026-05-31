@@ -108,4 +108,20 @@ describe('POST /api/stacks/:stackName/backup', () => {
     expect(res.status).toBe(500);
     expect(res.body.error).toContain('disk full');
   });
+
+  it('returns 409 when the stack is busy with another operation', async () => {
+    // The backup shares the rollback slot, so it must not run while a deploy
+    // holds the stack-op lock for the same stack.
+    const { StackOpLockService } = await import('../services/StackOpLockService');
+    const localNodeId = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!.id;
+    StackOpLockService.getInstance().tryAcquire(localNodeId, 'web', 'deploy', 'someone');
+    try {
+      const res = await request(app).post('/api/stacks/web/backup').set('Cookie', adminCookie);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('stack_op_in_progress');
+      expect(mockBackupStackFiles).not.toHaveBeenCalled();
+    } finally {
+      StackOpLockService.getInstance().release(localNodeId, 'web');
+    }
+  });
 });
