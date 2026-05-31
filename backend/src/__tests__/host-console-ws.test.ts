@@ -98,13 +98,19 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     expect(opened).toBe(true);
 
     // The session-open audit row is written server-side just after the PTY
-    // spawns; poll briefly for it.
-    const sawOpenRow = await waitFor(() =>
-      insertSpy.mock.calls.some(([entry]) =>
-        entry?.path === HOST_CONSOLE_PATH && entry?.summary === 'Opened host console session',
-      ),
-    );
-    expect(sawOpenRow).toBe(true);
+    // spawns; poll briefly for it, then assert it captures the real identity.
+    let openRow: Omit<import('../services/DatabaseService').AuditLogEntry, 'id'> | undefined;
+    await waitFor(() => {
+      const call = insertSpy.mock.calls.find(
+        ([entry]) => entry?.path === HOST_CONSOLE_PATH && entry?.summary === 'Opened host console session',
+      );
+      if (call) openRow = call[0];
+      return openRow !== undefined;
+    });
+    expect(openRow).toBeDefined();
+    expect(openRow?.username).toBe(TEST_USERNAME);
+    expect(typeof openRow?.node_id).toBe('number');
+    expect(openRow?.ip_address).toBeTruthy();
 
     ws.close();
     insertSpy.mockRestore();

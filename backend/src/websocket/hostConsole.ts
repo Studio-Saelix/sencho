@@ -86,16 +86,16 @@ export function handleHostConsoleWs(
   // socket address.
   const forwarded = req.headers['x-forwarded-for'];
   const xff = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
-  const auditCtx = {
-    username: consoleUsername,
-    nodeId,
-    ipAddress: xff || req.socket.remoteAddress || '',
-  };
+  const ipAddress = xff || req.socket.remoteAddress || '';
 
   const hostConsoleWss = new WebSocketServer({ noServer: true });
   hostConsoleWss.handleUpgrade(req, socket, head, (ws) => {
     hostConsoleWss.close();
     let targetDirectory: string;
+    // The shell may end up rooted at a different node than requested if the
+    // requested node's directory cannot be resolved; the audit row must name
+    // the node the shell actually runs in, so track it alongside the directory.
+    let auditNodeId: number = nodeId;
     try {
       const baseDir = FileSystemService.getInstance(nodeId).getBaseDir();
       const resolved = HostTerminalService.resolveConsoleDirectory(baseDir, stackParam);
@@ -106,14 +106,18 @@ export function handleHostConsoleWs(
       }
       targetDirectory = resolved;
     } catch (error) {
+      const fallbackNodeId = NodeRegistry.getInstance().getDefaultNodeId();
       console.error('[HostConsole] Failed to resolve console directory; falling back to the default node base dir', {
         user: consoleUsername,
         nodeId,
+        fallbackNodeId,
         stack: stackParam || '(root)',
         error: getErrorMessage(error, 'unknown'),
       });
-      targetDirectory = FileSystemService.getInstance(NodeRegistry.getInstance().getDefaultNodeId()).getBaseDir();
+      targetDirectory = FileSystemService.getInstance(fallbackNodeId).getBaseDir();
+      auditNodeId = fallbackNodeId;
     }
+    const auditCtx = { username: consoleUsername, nodeId: auditNodeId, ipAddress };
     try {
       HostTerminalService.spawnTerminal(ws, targetDirectory, auditCtx);
     } catch (error) {
