@@ -5,8 +5,9 @@
  * highest-severity rollup, duplicate scan prevention, and graceful handling
  * when the binary is not available.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import TrivyService, { parseTrivyOutput } from '../services/TrivyService';
+import TrivyInstaller from '../services/TrivyInstaller';
 import { getActiveCapabilities, enableCapability } from '../services/CapabilityRegistry';
 
 describe('TrivyService', () => {
@@ -58,6 +59,31 @@ describe('TrivyService', () => {
       const result = await svc.detectTrivy();
       const advertised = getActiveCapabilities().includes('vulnerability-scanning');
       expect(advertised).toBe(result.available);
+    });
+
+    it('disables the capability from the enabled state when no binary is found (deterministic)', async () => {
+      // Force every detection candidate to miss regardless of the runner: bogus
+      // managed path, bogus TRIVY_BIN, and an emptied PATH so a bare `trivy`
+      // cannot resolve. This reproduces the boot-without-Trivy case the fix
+      // targets and proves the disable branch fires even starting from enabled.
+      const installerSpy = vi
+        .spyOn(TrivyInstaller.getInstance(), 'binaryPath')
+        .mockReturnValue('/nonexistent/managed/trivy');
+      const prevTrivyBin = process.env.TRIVY_BIN;
+      const prevPath = process.env.PATH;
+      process.env.TRIVY_BIN = '/nonexistent/env/trivy';
+      process.env.PATH = '';
+      enableCapability('vulnerability-scanning');
+      try {
+        const result = await svc.detectTrivy();
+        expect(result.available).toBe(false);
+        expect(getActiveCapabilities()).not.toContain('vulnerability-scanning');
+      } finally {
+        installerSpy.mockRestore();
+        if (prevTrivyBin === undefined) delete process.env.TRIVY_BIN;
+        else process.env.TRIVY_BIN = prevTrivyBin;
+        process.env.PATH = prevPath;
+      }
     });
   });
 

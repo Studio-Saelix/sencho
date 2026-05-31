@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { ReactNode } from 'react';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook, waitFor, act } from '@testing-library/react';
 import { NodeProvider, useNodes } from '../NodeContext';
 
 const apiFetch = vi.fn();
@@ -73,5 +73,39 @@ describe('NodeContext meta fetch error handling', () => {
     await waitFor(() => expect(result.current.activeNode?.id).toBe(1));
     await waitFor(() => expect(result.current.hasCapability('fleet')).toBe(true));
     expect(result.current.hasCapability('vulnerability-scanning')).toBe(false);
+  });
+
+  it('force-refresh bypasses the meta TTL so a connection test reflects immediately', async () => {
+    apiFetch.mockImplementation((path: string) => {
+      if (path === '/nodes') {
+        return Promise.resolve({ ok: true, json: async () => [LOCAL_NODE] });
+      }
+      if (path.startsWith('/nodes/1/meta')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ version: '0.86.6', capabilities: ['stacks'] }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    const { result } = renderHook(() => useNodes(), { wrapper });
+    await waitFor(() => expect(result.current.hasCapability('stacks')).toBe(true));
+
+    const metaCalls = () =>
+      apiFetch.mock.calls.filter((c) => String(c[0]).startsWith('/nodes/1/meta')).length;
+    const before = metaCalls();
+
+    // A normal refresh within the TTL is a no-op (cached).
+    await act(async () => {
+      await result.current.refreshNodeMeta(1);
+    });
+    expect(metaCalls()).toBe(before);
+
+    // A forced refresh (post connection test) re-fetches despite the TTL.
+    await act(async () => {
+      await result.current.refreshNodeMeta(1, true);
+    });
+    expect(metaCalls()).toBe(before + 1);
   });
 });

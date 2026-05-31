@@ -34,7 +34,7 @@ interface NodeContextType {
   activeNodeMeta: NodeMeta | null;
   hasCapability: (cap: Capability) => boolean;
   nodeMeta: Map<number, NodeMeta>;
-  refreshNodeMeta: (nodeId: number) => Promise<void>;
+  refreshNodeMeta: (nodeId: number, force?: boolean) => Promise<void>;
 }
 
 const META_CACHE_TTL = 5 * 60 * 1000;
@@ -54,10 +54,13 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
   const nodeMetaRef = useRef<Map<number, NodeMeta>>(nodeMeta);
   nodeMetaRef.current = nodeMeta;
 
-  const fetchNodeMeta = useCallback(async (nodeId: number) => {
+  const fetchNodeMeta = useCallback(async (nodeId: number, force = false) => {
     const cached = nodeMetaRef.current.get(nodeId);
-    if (cached) {
-      // Use shorter TTL for failed fetches so we retry quickly after transient errors
+    if (cached && !force) {
+      // Use shorter TTL for failed fetches so we retry quickly after transient errors.
+      // `force` bypasses the TTL after an explicit user action (e.g. a connection test)
+      // that just dropped the server-side cache, so the dashboard reflects the new
+      // version and capabilities without waiting out the TTL.
       const ttl = cached.capabilities.length > 0 ? META_CACHE_TTL : META_FAILURE_TTL;
       if (Date.now() - cached.fetchedAt < ttl) return;
     }
