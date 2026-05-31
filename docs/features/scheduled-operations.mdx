@@ -131,7 +131,7 @@ Stop Stack, Take Stack Down, Start Stack, and Backup Stack Files let you schedul
 
 **Backup Stack Files** keeps a single slot per stack under `<DATA_DIR>/backups/<stack>/`. Each run overwrites the previous backup. For a versioned, point-in-time archive across all nodes, use a [Fleet Snapshot](/features/fleet-backups) task instead.
 
-The four lifecycle actions execute against the local Sencho instance. To schedule lifecycle operations for a remote node, switch the active node to that node first and create the schedule from its UI; the schedule then lives on the remote node and runs there.
+Pick any node in your fleet from the schedule's **Node** combobox: the four lifecycle actions run against the node you select, whether it is the hub or a connected remote. The schedule itself is stored on the hub, so you manage every node's lifecycle tasks from one place.
 
 ### Delete after successful run
 
