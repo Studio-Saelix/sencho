@@ -319,6 +319,28 @@ describe('DatabaseService audit methods', () => {
     expect(after.failuresByHour[hour] - before.failuresByHour[hour]).toBe(FAILURES);
   });
 
+  it('getAuditStatsInputs excludes future-dated rows from the current window', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const before = db.getAuditStatsInputs(now);
+    // A row dated after `now` (clock skew / fixture) must not inflate the live counts.
+    db.insertAuditLog({
+      timestamp: now + 60 * 60 * 1000,
+      username: 'futureuser',
+      method: 'POST',
+      path: '/api/stacks/future',
+      status_code: 500,
+      node_id: null,
+      ip_address: '127.0.0.1',
+      summary: 'future entry',
+    });
+    const after = db.getAuditStatsInputs(now);
+
+    expect(after.events24 - before.events24).toBe(0);
+    expect(after.events7d - before.events7d).toBe(0);
+    expect(after.failures24 - before.failures24).toBe(0);
+  });
+
   it('getAuditStatsInputs flags an actor whose recent ip is new versus prior history', () => {
     const db = DatabaseService.getInstance();
     const now = Date.now();
