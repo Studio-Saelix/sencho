@@ -6,7 +6,9 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -87,6 +89,13 @@ describe('GET /api/image-updates/fleet', () => {
     expect(res.status).toBe(401);
   });
 
+  it('rejects non-admin users with 403', async () => {
+    // The cross-node aggregation is part of the admin-only readiness surface;
+    // the single-node GET / endpoint stays open for the sidebar update dot.
+    const res = await request(app).get('/api/image-updates/fleet').set('Cookie', viewerCookie);
+    expect(res.status).toBe(403);
+  });
+
   it('returns the fleet-wide aggregation map', async () => {
     const res = await request(app).get('/api/image-updates/fleet').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
@@ -154,6 +163,69 @@ describe('POST /api/auto-update/execute', () => {
       .set('Cookie', viewerCookie)
       .send({ target: '*' });
     expect(res.status).toBe(403);
+  });
+
+  it('rejects a Community-tier admin with 403 PAID_REQUIRED', async () => {
+    // Auto-update execution is a paid capability; an admin on a Community
+    // license must not be able to drive it directly through the API.
+    const { LicenseService } = await import('../services/LicenseService');
+    const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: '*' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PAID_REQUIRED');
+    } finally {
+      tierSpy.mockRestore();
+      vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+    }
+  });
+
+  it('honors a paid proxy tier header from a node_proxy caller on a Community runtime', async () => {
+    // The scheduler dispatches to a remote's /execute with a node_proxy Bearer
+    // token and the controlling instance's tier header. A Community-licensed
+    // remote runtime must still run the update because the trusted header, not
+    // the local license, decides entitlement.
+    const { LicenseService } = await import('../services/LicenseService');
+    const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+    const proxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '5m' });
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Authorization', `Bearer ${proxyToken}`)
+        .set(PROXY_TIER_HEADER, 'paid')
+        .set(PROXY_VARIANT_HEADER, 'admiral')
+        .send({ target: '*' });
+      // Gate passes: no stacks on the fresh instance, so the handler returns
+      // the "no stacks found" summary rather than a 403.
+      expect(res.status).toBe(200);
+      expect(typeof res.body.result).toBe('string');
+    } finally {
+      tierSpy.mockRestore();
+      vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+    }
+  });
+
+  it('rejects a node_proxy caller whose tier header is community with 403', async () => {
+    // The trusted header, not the local license, decides entitlement: a paid
+    // local runtime must still 403 when the controlling instance is Community.
+    const { LicenseService } = await import('../services/LicenseService');
+    const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+    const proxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '5m' });
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Authorization', `Bearer ${proxyToken}`)
+        .set(PROXY_TIER_HEADER, 'community')
+        .send({ target: '*' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PAID_REQUIRED');
+    } finally {
+      tierSpy.mockRestore();
+      vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+    }
   });
 
   it('rejects missing target with 400', async () => {
