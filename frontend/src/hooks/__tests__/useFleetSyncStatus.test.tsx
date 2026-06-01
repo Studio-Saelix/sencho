@@ -67,6 +67,30 @@ describe('useFleetSyncStatus gate parity', () => {
     expect(fetchStatusesMock).not.toHaveBeenCalled();
   });
 
+  it('ignores rows from a fetch that resolves after the gate flips ineligible', async () => {
+    let resolveFetch!: (rows: Array<{ node_id: number; resource: string }>) => void;
+    const pending = new Promise<Array<{ node_id: number; resource: string }>>((res) => { resolveFetch = res; });
+    fetchStatusesMock.mockReturnValue(pending);
+    mockIsPaid = true;
+    mockIsAdmin = true;
+    const { result, rerender } = renderHook(() => useFleetSyncStatus());
+    expect(fetchStatusesMock).toHaveBeenCalled();
+    expect(result.current.statuses).toEqual([]); // in-flight, not resolved yet
+
+    // Lose admin before the in-flight fetch resolves.
+    mockIsAdmin = false;
+    act(() => { rerender(); });
+    expect(result.current.statuses).toEqual([]);
+
+    // The late resolve must not republish rows to the now-ineligible client.
+    await act(async () => {
+      resolveFetch([{ node_id: 9, resource: 'scan_policies' }]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.statuses).toEqual([]);
+  });
+
   it('starts fetching once the user becomes a paid admin', async () => {
     const { result, rerender } = renderHook(() => useFleetSyncStatus());
     await waitFor(() => expect(result.current.loading).toBe(false));

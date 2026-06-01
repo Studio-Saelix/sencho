@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { visibilityInterval } from '@/lib/utils';
@@ -21,6 +21,12 @@ export function useFleetSyncStatus(): {
   const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
   const canQuery = isPaid && isAdmin;
+  // Reflects the latest gate state so a fetch begun while eligible cannot
+  // publish its rows after the user loses eligibility mid-flight (role or
+  // tier change). Without this, a late resolve would re-populate statuses
+  // that the gate-false path already cleared.
+  const canQueryRef = useRef(canQuery);
+  canQueryRef.current = canQuery;
   const [statuses, setStatuses] = useState<FleetSyncStatus[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -31,12 +37,12 @@ export function useFleetSyncStatus(): {
       return;
     }
     fetchFleetSyncStatuses()
-      .then((rows) => setStatuses(rows))
+      .then((rows) => { if (canQueryRef.current) setStatuses(rows); })
       .catch((err) => {
         // Stale data stays visible to avoid flicker; log so the failure isn't completely silent.
         console.warn('[FleetSync] sync-status fetch failed:', err);
       })
-      .finally(() => setLoading(false));
+      .finally(() => { if (canQueryRef.current) setLoading(false); });
   }, [canQuery]);
 
   useEffect(() => {
