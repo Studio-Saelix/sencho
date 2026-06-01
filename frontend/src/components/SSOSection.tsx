@@ -105,15 +105,23 @@ function ProviderCard({ providerId, type, label, initialConfig, onSave }: {
         setTestResult(null);
         try {
             const res = await apiFetch(`/sso/config/${providerId}/test`, { method: 'POST' });
-            const data = await res.json();
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                const message = data?.error || data?.message || 'Connection test failed';
+                setTestResult({ success: false, error: message });
+                toast.error(message);
+                return;
+            }
             setTestResult(data);
-            if (data.success) {
+            if (data?.success) {
                 toast.success('Connection successful');
             } else {
-                toast.error(data.error || 'Connection failed');
+                toast.error(data?.error || 'Connection failed');
             }
-        } catch {
-            setTestResult({ success: false, error: 'Connection test failed' });
+        } catch (error: unknown) {
+            const message = (error as Error)?.message || 'Connection test failed';
+            setTestResult({ success: false, error: message });
+            toast.error(message);
         } finally {
             setTesting(false);
         }
@@ -127,9 +135,12 @@ function ProviderCard({ providerId, type, label, initialConfig, onSave }: {
                 setConfig({ enabled: false });
                 setExpanded(false);
                 onSave();
+            } else {
+                const data = await res.json().catch(() => null);
+                toast.error(data?.error || data?.message || 'Failed to remove provider');
             }
-        } catch {
-            toast.error('Failed to remove provider');
+        } catch (error: unknown) {
+            toast.error((error as Error)?.message || 'Failed to remove provider');
         }
     };
 
@@ -408,8 +419,15 @@ export function SSOSection() {
     const fetchConfigs = async () => {
         try {
             const res = await apiFetch('/sso/config');
-            if (res.ok) setConfigs(await res.json());
-        } catch { /* ignore fetch errors */ }
+            if (res.ok) {
+                setConfigs(await res.json());
+            } else {
+                const data = await res.json().catch(() => null);
+                toast.error(data?.error || data?.message || 'Failed to load SSO configuration');
+            }
+        } catch (error: unknown) {
+            toast.error((error as Error)?.message || 'Failed to load SSO configuration');
+        }
     };
 
     // eslint-disable-next-line react-hooks/set-state-in-effect
