@@ -23,14 +23,18 @@ export function isProxyExemptPath(path: string): boolean {
   return false;
 }
 
-// Path prefixes that are hub-only: they manage or expose state owned by the
-// local hub (centralized audit, fleet schedules, notification routing rules,
-// the admin-only aggregated logs feed and its stream counters). Routed to the
-// local hub when nodeId resolves to local, but rejected when nodeId resolves
-// to a remote node so a script/curl call cannot trick the proxy into
-// forwarding hub-only authority across a node boundary. This matters for the
-// logs feed in particular: its admin gate lives in the local route handler,
-// which the proxy would skip entirely when forwarding a remote nodeId.
+// Path prefixes that are hub-only: they must be served on the instance you are
+// signed into and never proxied to a remote node. This covers state owned by
+// the local hub (centralized audit, fleet schedules, notification routing
+// rules, the admin-only aggregated logs feed and its stream counters) and
+// private registry credentials, which are stored and managed per instance.
+// Routed to the local hub when nodeId resolves to local, but rejected when
+// nodeId resolves to a remote node so a script/curl call cannot trick the proxy
+// into forwarding the request across a node boundary. This matters for the logs
+// feed (its admin gate lives in the local route handler, which the proxy would
+// skip when forwarding a remote nodeId) and for registries (a proxied registry
+// request would otherwise carry a plaintext secret to, or read stored
+// credentials from, the remote).
 //
 // Entries are stored with a trailing slash; the matcher accepts the exact
 // collection path (without the trailing slash) AND any sub-path under it,
@@ -42,13 +46,14 @@ export function isProxyExemptPath(path: string): boolean {
 // useViewNavigationState.ts; this list is the backend defense-in-depth.
 //
 // Consumed by:
-//   - middleware/hubOnlyGuard.ts → 409 when nodeId is remote
+//   - middleware/hubOnlyGuard.ts → 403 when nodeId is remote
 export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/scheduled-tasks/',
   '/api/audit-log/',
   '/api/notification-routes/',
   '/api/logs/global/',
   '/api/system/log-stream-metrics/',
+  '/api/registries/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

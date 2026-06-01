@@ -105,7 +105,7 @@ The password fields change subtly in edit mode:
 - The **Password** label becomes **New Password (optional)** with the placeholder `Leave blank to keep`. Submit without filling them in and the current password is preserved.
 - If the user was provisioned via SSO, the password fields are replaced with an inline line that reads `Password is managed by the identity provider (<provider>).` Sencho never stores or rotates passwords for SSO accounts.
 
-Click **Update user** to save. Changing the role takes effect on the next API request from any of that user's active sessions; see [Session security](#session-security) below.
+Click **Update user** to save. Changing the role takes effect on the next API request from any of that user's active sessions; see [Session security](#session-security) below. Promoting a user to **Admin** consumes an admin seat, so it is subject to the same per-tier limit as creating an admin: at your cap, the change is rejected until you free a seat or upgrade.
 
 ## Scoped permissions
 
@@ -224,8 +224,8 @@ Entries include the acting user, IP address, HTTP method and path, response stat
   <Accordion title="The role I want is greyed out in the role combobox">
     The combobox only shows roles available on your tier. On Skipper, the combobox lists Admin and Viewer only. **Deployer**, **Node Admin**, and **Auditor** are Admiral-only roles and do not appear on Skipper. Upgrade to Admiral, or use scoped permissions equivalents once you do.
   </Accordion>
-  <Accordion title="Creating a user fails with `Your license allows a maximum of N account(s)`">
-    You have hit the seat limit for your tier. Skipper allows one admin and three non-admin users; Admiral has no cap. Either delete an unused account or upgrade. The exact remaining capacity is visible on the OPERATORS counter in the panel header.
+  <Accordion title="Creating a user or promoting one to Admin fails with `Your license allows a maximum of N account(s)`">
+    You have hit the seat limit for your tier. Skipper allows one admin and three non-admin users; Admiral has no cap. Promoting an existing user to Admin counts against the admin limit the same way creating one does. Either delete an unused account or upgrade. The exact remaining capacity is visible on the OPERATORS counter in the panel header.
   </Accordion>
   <Accordion title="A user complains they were signed out unexpectedly">
     Token-version bumps invalidate sessions. Two events do this: an admin changed the user's password, or an admin reset their 2FA. Both rotate the user's token version, so every JWT issued before the rotation is rejected on the next request. The user can sign in again with their (possibly new) password. Role changes do **not** sign the user out; they take effect on the next request without rotating the token version.
