@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import type { NodeUpdateStatus } from './types';
@@ -18,6 +19,10 @@ interface NodeUpdatesSheetProps {
     checkingUpdates: boolean;
     updateStatuses: NodeUpdateStatus[];
     updatingNodeId: number | null;
+    /** Mutating affordances (update, update-all, retry, dismiss, recheck) render
+     *  only for admins, matching the requireAdmin guard on the fleet routes they
+     *  call. Non-admins still see the read-only status table. */
+    isAdmin: boolean;
     fetchUpdateStatus: () => Promise<void>;
     triggerNodeUpdate: (nodeId: number) => void;
     retryNodeUpdate: (nodeId: number) => void;
@@ -26,7 +31,7 @@ interface NodeUpdatesSheetProps {
 }
 
 export function NodeUpdatesSheet({
-    open, onOpenChange, checkingUpdates, updateStatuses, updatingNodeId,
+    open, onOpenChange, checkingUpdates, updateStatuses, updatingNodeId, isAdmin,
     fetchUpdateStatus, triggerNodeUpdate, retryNodeUpdate, dismissNodeUpdate, triggerUpdateAll,
 }: NodeUpdatesSheetProps) {
     const [search, setSearch] = useState('');
@@ -40,7 +45,20 @@ export function NodeUpdatesSheet({
     const handleRecheck = async () => {
         setRecheckingUpdates(true);
         try {
-            await apiFetch('/fleet/update-status?recheck=true', { method: 'DELETE', localOnly: true });
+            const res = await apiFetch('/fleet/update-status?recheck=true', { method: 'DELETE', localOnly: true });
+            if (res.ok) {
+                // The server throttles the upstream version lookup; `rechecked:false`
+                // means a forced refresh ran too recently and the cached value stands.
+                const data = await res.json().catch(() => ({}));
+                if (data?.rechecked === false) {
+                    toast.info('Already checked for the latest version recently.');
+                }
+            } else {
+                // apiFetch only throws on 401/network, so HTTP errors (e.g. a 500
+                // from the upstream lookup) land here, not in the catch below.
+                console.warn('[Fleet] Recheck returned HTTP', res.status);
+                toast.error('Could not recheck for updates. Try again shortly.');
+            }
             await fetchUpdateStatus();
         } catch (err) {
             console.warn('[Fleet] Recheck failed:', err);
@@ -69,7 +87,7 @@ export function NodeUpdatesSheet({
         ? undefined
         : (gatewayLabel ? `Latest version ${gatewayLabel}` : `${available} update${available === 1 ? '' : 's'} available`);
 
-    const secondaryActions = updatableRemoteCount > 0
+    const secondaryActions = isAdmin && updatableRemoteCount > 0
         ? [{
             label: `Update all (${updatableRemoteCount})`,
             icon: Download,
@@ -84,12 +102,12 @@ export function NodeUpdatesSheet({
             crumb={['Fleet', 'Updates']}
             name="Node updates"
             meta={meta}
-            primaryAction={{
+            primaryAction={isAdmin ? {
                 label: 'Recheck',
                 icon: recheckingUpdates ? Loader2 : RefreshCw,
                 onClick: () => { void handleRecheck(); },
                 disabled: recheckingUpdates || checkingUpdates,
-            }}
+            } : undefined}
             secondaryActions={secondaryActions}
             footerContext={footerContext}
             size="lg"
@@ -179,8 +197,8 @@ export function NodeUpdatesSheet({
                                             <UpdateStatusBadge
                                                 status={s.updateStatus}
                                                 error={s.error}
-                                                onRetry={() => retryNodeUpdate(s.nodeId)}
-                                                onDismiss={() => dismissNodeUpdate(s.nodeId)}
+                                                onRetry={isAdmin ? () => retryNodeUpdate(s.nodeId) : undefined}
+                                                onDismiss={isAdmin ? () => dismissNodeUpdate(s.nodeId) : undefined}
                                             />
                                         )}
                                         {!s.updateStatus && !s.updateAvailable && (
@@ -188,7 +206,7 @@ export function NodeUpdatesSheet({
                                                 <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
                                             </Badge>
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && (
+                                        {s.updateAvailable && !s.updateStatus && isAdmin && (
                                             <Button
                                                 variant="outline"
                                                 size="sm"
@@ -202,6 +220,11 @@ export function NodeUpdatesSheet({
                                                     <><Download className="w-3 h-3 mr-1" strokeWidth={1.5} />Update</>
                                                 )}
                                             </Button>
+                                        )}
+                                        {s.updateAvailable && !s.updateStatus && !isAdmin && (
+                                            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-warning/15 text-warning border-warning/30">
+                                                <CircleAlert className="w-2.5 h-2.5 mr-0.5" /> Available
+                                            </Badge>
                                         )}
                                     </div>
                                 </div>

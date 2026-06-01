@@ -66,4 +66,22 @@ describe('NodeCard', () => {
     // The actions menu only renders when cordon (admiral-only here) is available.
     expect(screen.getByRole('button', { name: 'Node actions' })).toBeInTheDocument();
   });
+
+  const updateAvailableStatus = {
+    nodeId: 2, name: 'Edge', type: 'remote' as const, version: '1.0.0', latestVersion: '1.1.0',
+    updateAvailable: true, updateStatus: null,
+  };
+
+  it('renders the update button for an admin when an update is available', () => {
+    useAuthMock.mockReturnValue({ isAdmin: true });
+    render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+    expect(screen.getByRole('button', { name: /Update/ })).toBeInTheDocument();
+  });
+
+  it('hides the update button for a non-admin but still shows the read-only badge', () => {
+    useAuthMock.mockReturnValue({ isAdmin: false });
+    render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /Update/ })).not.toBeInTheDocument();
+    expect(screen.getByText('Update available')).toBeInTheDocument();
+  });
 });

@@ -211,8 +211,8 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                     <UpdateStatusBadge
                                         status={updateStatus.updateStatus}
                                         error={updateStatus.error}
-                                        onRetry={onRetryUpdate ? () => onRetryUpdate(node.id) : undefined}
-                                        onDismiss={onDismissUpdate ? () => onDismissUpdate(node.id) : undefined}
+                                        onRetry={isAdmin && onRetryUpdate ? () => onRetryUpdate(node.id) : undefined}
+                                        onDismiss={isAdmin && onDismissUpdate ? () => onDismissUpdate(node.id) : undefined}
                                     />
                                 )}
                                 {updateStatus?.updateAvailable && !updateStatus.updateStatus && (
@@ -292,8 +292,8 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                     </div>
                 )}
 
-                {/* Update button */}
-                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && onUpdate && (
+                {/* Update button (mutating action: admin only, matches the requireAdmin route guard) */}
+                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && onUpdate && isAdmin && (
                     <div className="mt-3 pt-3 border-t border-border/50">
                         <Button
                             variant="outline"

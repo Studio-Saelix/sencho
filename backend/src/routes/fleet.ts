@@ -6,7 +6,7 @@ import type Dockerode from 'dockerode';
 import { DatabaseService, type Node } from '../services/DatabaseService';
 import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
-import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
+import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPDATE_TIMEOUT_MS, UPDATE_TIMEOUT_MSG, TERMINAL_TTL_MS } from '../services/FleetUpdateTrackerService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
@@ -41,9 +41,39 @@ import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-hea
 import { LicenseService } from '../services/LicenseService';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
-const UPDATE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const UPDATE_TIMEOUT_MSG = 'Node did not come back online within 5 minutes.';
 const EARLY_FAIL_MS = 180 * 1000; // 3 minutes before declaring a probable pull failure
+// Throttle the forced latest-version refresh so a caller cannot loop the recheck
+// endpoint to hammer GitHub / Docker Hub. The 30-minute cache still serves reads
+// between forced refreshes; this only bounds how often we bypass it.
+const FORCED_RECHECK_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+let lastForcedRecheckAt = 0;
+
+/** Test-only: reset the forced-recheck throttle clock so suites do not depend
+ *  on cross-test ordering of the module-scope timestamp. */
+export function _resetForcedRecheckThrottleForTests(): void {
+  lastForcedRecheckAt = 0;
+}
+
+/**
+ * Resolve an in-flight update tracker to a terminal state. For failure-class
+ * outcomes (failed / timeout) emit a single operator-visible WARN so a failed
+ * fleet update is observable without enabling developer mode. Scalars only, no
+ * tokens or meta dumps; fires once because the resolved tracker leaves the
+ * 'updating' state and is not re-evaluated by the next poll.
+ */
+function resolveTerminal(
+  node: { id: number; name: string },
+  tracker: UpdateTracker,
+  status: TerminalStatus,
+  error?: string,
+): UpdateTracker {
+  if (status !== 'completed') {
+    const elapsedSec = Math.round((Date.now() - tracker.startedAt) / 1000);
+    const detail = error ? `: ${sanitizeForLog(error)}` : '';
+    console.warn(`[Fleet] Node update ${status} for "${sanitizeForLog(node.name)}" (id ${node.id}) after ${elapsedSec}s${detail}`);
+  }
+  return updateTracker.resolve(tracker, status, error);
+}
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 
@@ -727,11 +757,11 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
           if (elapsed > UPDATE_TIMEOUT_MS) {
             if (debug) console.debug('[Fleet:debug] Node', node.id, 'timed out after', Math.round(elapsed / 1000) + 's');
-            updateTracker.set(node.id, updateTracker.resolve(tracker, 'timeout', UPDATE_TIMEOUT_MSG));
+            updateTracker.set(node.id, resolveTerminal(node, tracker, 'timeout', UPDATE_TIMEOUT_MSG));
           } else if (node.type === 'remote') {
             if (remoteUpdateError) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'reported pull failure:', remoteUpdateError);
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'failed', remoteUpdateError));
+              updateTracker.set(node.id, resolveTerminal(node, tracker, 'failed', remoteUpdateError));
             } else if (!remoteOnline) {
               if (!tracker.wasOffline) {
                 if (debug) console.debug('[Fleet:debug] Node', node.id, 'went offline (restarting)');
@@ -747,8 +777,18 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
             ) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 2 (process restarted):', tracker.previousProcessStart, '->', remoteStartedAt);
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
-            } else if (tracker.wasOffline && remoteOnline) {
-              if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 3 (offline then online)');
+            } else if (
+              tracker.wasOffline &&
+              remoteOnline &&
+              (remoteStartedAt === null || tracker.previousProcessStart === null)
+            ) {
+              // Signal 3: offline-then-online is only trustworthy as a completion
+              // signal when we cannot read the remote process start time. When
+              // startedAt IS known and unchanged (signal 2 above did not fire),
+              // the process never restarted, so a brief unreachable blip on the
+              // same version must not be reported as a completed update; it falls
+              // through to the early-fail / timeout heuristics instead.
+              if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 3 (offline then online, startedAt unavailable)');
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (
               elapsed > 15_000 &&
@@ -764,7 +804,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (elapsed > EARLY_FAIL_MS) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's - no signals detected');
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'failed', 'Update may have failed. The node is still running and its version has not changed.'));
+              updateTracker.set(node.id, resolveTerminal(node, tracker, 'failed', 'Update may have failed. The node is still running and its version has not changed.'));
             }
           } else if (node.type === 'local') {
             // Local node has only two failure signals: an explicit pull/spawn
@@ -776,18 +816,18 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
             const localError = selfUpdate.getLastError();
             if (localError) {
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'update failed:', localError);
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'failed', localError));
+              updateTracker.set(node.id, resolveTerminal(node, tracker, 'failed', localError));
               selfUpdate.clearLastError();
             } else if (elapsed > EARLY_FAIL_MS) {
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's');
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'failed', 'Local update did not complete. The container may not have restarted; check Docker logs on the host.'));
+              updateTracker.set(node.id, resolveTerminal(node, tracker, 'failed', 'Local update did not complete. The container may not have restarted; check Docker logs on the host.'));
             }
           }
         }
 
-        // Auto-expire completed entries 60s after they resolved so the badge
-        // is visible briefly after completion.
-        if (tracker?.status === 'completed' && tracker.resolvedAt && Date.now() - tracker.resolvedAt > 60_000) {
+        // Auto-expire completed entries after their visibility window so the
+        // badge is visible briefly after completion.
+        if (tracker?.status === 'completed' && tracker.resolvedAt && Date.now() - tracker.resolvedAt > TERMINAL_TTL_MS) {
           updateTracker.delete(node.id);
         }
 
@@ -1012,6 +1052,7 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
 });
 
 fleetRouter.delete('/nodes/:nodeId/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
   try {
     const nodeId = parseIntParam(req, res, 'nodeId', 'node ID');
     if (nodeId === null) return;
@@ -1029,16 +1070,25 @@ fleetRouter.delete('/nodes/:nodeId/update-status', authMiddleware, async (req: R
 });
 
 fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  // Pre-fetch fresh latest version so the next GET has up-to-date data.
+  if (!requireAdmin(req, res)) return;
+  // Optionally pre-fetch a fresh latest version so the next GET compares against
+  // it. Throttled so a caller cannot loop this to hammer the upstream registries;
+  // `rechecked` tells the client whether the forced refresh actually ran.
+  let rechecked = false;
   if (req.query.recheck === 'true') {
-    await getLatestVersion(true);
+    const now = Date.now();
+    if (now - lastForcedRecheckAt >= FORCED_RECHECK_COOLDOWN_MS) {
+      lastForcedRecheckAt = now;
+      await getLatestVersion(true);
+      rechecked = true;
+    }
   }
   for (const [nodeId, tracker] of updateTracker.entries()) {
     if (tracker.status === 'timeout' || tracker.status === 'failed' || tracker.status === 'completed') {
       updateTracker.delete(nodeId);
     }
   }
-  res.status(204).send();
+  res.status(200).json({ rechecked });
 });
 
 // ─── Fleet Actions: gateway-orchestrated endpoints (multi-node) ───
