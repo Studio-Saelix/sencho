@@ -8,6 +8,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { resolveAllEnvFilePaths } from '../routes/stacks';
 import { getErrorMessage } from '../utils/errors';
 import { formatNoTargetError } from '../utils/remoteTarget';
+import { isDebugEnabled } from '../utils/debug';
 
 export type SecretKv = Record<string, string>;
 export type DiffStatus = 'added' | 'changed' | 'removed' | 'unchanged';
@@ -427,6 +428,7 @@ export class SecretsService {
         const db = DatabaseService.getInstance();
         const overlay = this.getDecryptedKv(id);
         const matched = NodeLabelService.getInstance().matchSelector(selector, db.getNodes());
+        if (isDebugEnabled()) console.log(`[Secrets:diag] preview id=${id} targets=${matched.length}`);
 
         // Preview is read-only and per-node; fan out in parallel for snappier wizard UX.
         return Promise.all(matched.map(async (node): Promise<SecretPushPlanEntry> => {
@@ -472,6 +474,7 @@ export class SecretsService {
         const overlay = decryptKv(versionRow.encrypted_payload);
         const matched = NodeLabelService.getInstance().matchSelector(selector, db.getNodes());
         const pushId = crypto.randomUUID();
+        if (isDebugEnabled()) console.log(`[Secrets:diag] push id=${id} v${versionRow.version} targets=${matched.length}`);
         const results: SecretPushResultEntry[] = [];
         const rows: Array<Parameters<typeof db.insertSecretPushes>[0][number]> = [];
         const pushedAt = Date.now();
@@ -525,6 +528,10 @@ export class SecretsService {
             db.insertSecretPushes(rows);
         } finally {
             activePushes.delete(id);
+        }
+        if (isDebugEnabled()) {
+            const okCount = results.filter(r => r.status === 'ok').length;
+            console.log(`[Secrets:diag] push id=${id} done in ${Date.now() - pushedAt}ms ok=${okCount} failed=${results.length - okCount}`);
         }
         return { pushId, results };
     }

@@ -5,16 +5,20 @@
  *  - encrypt round-trip via CryptoService
  *  - DatabaseService secret + version + push CRUD
  *  - SecretsService versioning, importFromStack, executePush aggregation
- *  - Route guards (requirePaid 403, push lock 409)
+ *  - Route guards (requirePaid 403, requireAdmin 403, push lock 409)
+ *  - Hub-only enforcement is covered in hub-only-guard.test.ts
+ *  - developer_mode diagnostics gating (and that diagnostics never log the secret value)
  *  - getAuditSummary patterns for /secrets routes
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { getAuditSummary } from '../utils/audit-summaries';
+import { generateApiToken } from '../utils/apiTokenFormat';
 import { parseEnv, serializeEnv, applyOverlay, computeDiff } from '../services/SecretsService';
 
 let tmpDir: string;
@@ -397,5 +401,139 @@ describe('Routes /api/secrets tier gating and lock', () => {
             .set('Authorization', `Bearer ${adminToken()}`)
             .send({ name: 'x', kv: 'not-an-object' });
         expect(res.status).toBe(400);
+    });
+});
+
+// ---- Admin-role gating: secrets reveal decrypted values, so every route is admin-only ----
+
+describe('Routes /api/secrets admin-role gating', () => {
+    // One representative call per endpoint. requireAdmin runs before requireBody
+    // and param parsing, so a bodyless request still surfaces ADMIN_REQUIRED.
+    const SECRET_ENDPOINTS: Array<[string, string]> = [
+        ['get', '/api/secrets'],
+        ['post', '/api/secrets'],
+        ['get', '/api/secrets/1'],
+        ['put', '/api/secrets/1'],
+        ['delete', '/api/secrets/1'],
+        ['get', '/api/secrets/1/versions'],
+        ['post', '/api/secrets/1/import-from-stack'],
+        ['post', '/api/secrets/1/push/preview'],
+        ['post', '/api/secrets/1/push'],
+    ];
+
+    // authMiddleware resolves the role from the DB (not the JWT), so a real
+    // non-admin user must exist for the gate to see a non-admin role.
+    function viewerToken(): string {
+        const db = DatabaseService.getInstance();
+        let user = db.getUserByUsername('sec-viewer');
+        if (!user) {
+            db.addUser({ username: 'sec-viewer', password_hash: 'x', role: 'viewer' });
+            user = db.getUserByUsername('sec-viewer')!;
+        }
+        return authToken('sec-viewer', 'viewer', user.token_version);
+    }
+
+    function call(method: string, p: string, token: string) {
+        const agent = request(app);
+        const r = method === 'get' ? agent.get(p)
+            : method === 'post' ? agent.post(p)
+            : method === 'put' ? agent.put(p)
+            : agent.delete(p);
+        return r.set('Authorization', `Bearer ${token}`);
+    }
+
+    it.each(SECRET_ENDPOINTS)('403s a non-admin paid user on %s %s', async (method, p) => {
+        const res = await call(method, p, viewerToken());
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('ADMIN_REQUIRED');
+    });
+
+    it('lets an admin paid user list (200)', async () => {
+        const res = await request(app)
+            .get('/api/secrets')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+    });
+});
+
+// ---- API-token rejection: secrets are a session-admin surface, not a token surface ----
+
+describe('Routes /api/secrets API-token rejection', () => {
+    // A full-admin API token resolves to role 'admin' and would otherwise pass
+    // requireAdmin and reach the decrypted-value GET; rejectApiTokenScope runs
+    // first and blocks every API token, mirroring registry credentials.
+    function fullAdminApiToken(): string {
+        const db = DatabaseService.getInstance();
+        const rawToken = generateApiToken();
+        db.addApiToken({
+            token_hash: crypto.createHash('sha256').update(rawToken).digest('hex'),
+            name: `secrets-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            scope: 'full-admin',
+            user_id: db.getUserByUsername(TEST_USERNAME)!.id,
+            created_at: Date.now(),
+            expires_at: null,
+        });
+        return rawToken;
+    }
+
+    it('403s a full-admin API token on the list route with SCOPE_DENIED', async () => {
+        const res = await request(app)
+            .get('/api/secrets')
+            .set('Authorization', `Bearer ${fullAdminApiToken()}`);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('SCOPE_DENIED');
+    });
+
+    it('403s a full-admin API token on the decrypted-value GET with SCOPE_DENIED', async () => {
+        const res = await request(app)
+            .get('/api/secrets/1')
+            .set('Authorization', `Bearer ${fullAdminApiToken()}`);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('SCOPE_DENIED');
+    });
+});
+
+// ---- developer_mode diagnostics gating ----
+
+describe('SecretsService.executePush developer_mode diagnostics', () => {
+    beforeEach(() => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'devmodestack');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), 'EXISTING=keep\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+    });
+
+    afterEach(() => {
+        DatabaseService.getInstance().updateGlobalSetting('developer_mode', '0');
+    });
+
+    async function runPush(name: string): Promise<void> {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getNodes().find(n => n.type === 'local')!;
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name, kv: { TOKEN: 'supersecretvalue' }, user: TEST_USERNAME });
+        await svc.executePush(id, { type: 'nodes', ids: [localNode.id] }, 'devmodestack', '.env', TEST_USERNAME);
+    }
+
+    it('emits [Secrets:diag] only when developer_mode is on, and never the secret value', async () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        try {
+            DatabaseService.getInstance().updateGlobalSetting('developer_mode', '0');
+            await runPush('devmode-off');
+            const offLogs = logSpy.mock.calls.map(c => c.join(' '));
+            expect(offLogs.some(l => l.includes('[Secrets:diag]'))).toBe(false);
+
+            logSpy.mockClear();
+            DatabaseService.getInstance().updateGlobalSetting('developer_mode', '1');
+            await runPush('devmode-on');
+            const onLogs = logSpy.mock.calls.map(c => c.join(' '));
+            expect(onLogs.some(l => l.includes('[Secrets:diag]'))).toBe(true);
+
+            // Diagnostics summarize counts only; the decrypted value must never appear.
+            expect([...offLogs, ...onLogs].some(l => l.includes('supersecretvalue'))).toBe(false);
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 });

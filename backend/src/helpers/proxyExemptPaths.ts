@@ -32,9 +32,10 @@ export function isProxyExemptPath(path: string): boolean {
 // nodeId resolves to a remote node so a script/curl call cannot trick the proxy
 // into forwarding the request across a node boundary. This matters for the logs
 // feed (its admin gate lives in the local route handler, which the proxy would
-// skip when forwarding a remote nodeId) and for registries (a proxied registry
-// request would otherwise carry a plaintext secret to, or read stored
-// credentials from, the remote).
+// skip when forwarding a remote nodeId) and for registries and Fleet Secrets (a
+// proxied request would otherwise carry a plaintext secret to, or read stored
+// secret values from, the remote; the secrets routes' admin gate also lives in
+// the local route handler, which the proxy would skip).
 //
 // Entries are stored with a trailing slash; the matcher accepts the exact
 // collection path (without the trailing slash) AND any sub-path under it,
@@ -54,6 +55,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/logs/global/',
   '/api/system/log-stream-metrics/',
   '/api/registries/',
+  '/api/secrets/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */
