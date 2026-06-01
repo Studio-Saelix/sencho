@@ -1133,8 +1133,17 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
             stackResults: failAllStacks(stackNames, message),
           };
         }
+        // Trust the remote's own matched flag over the control's mirror: a
+        // mirror-skewed control could believe the label exists while the remote
+        // has no such label, which the remote reports as matched:false. Guard
+        // results as an array so a malformed 200 body degrades to empty rather
+        // than flowing a non-array into the per-stack renderers.
         const remote = (await response.json()) as Partial<LabelLocalStopResponse>;
-        return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: remote.results ?? [] };
+        return {
+          nodeId: node.id, nodeName: node.name,
+          matched: remote.matched ?? true,
+          stackResults: Array.isArray(remote.results) ? remote.results : [],
+        };
       } catch (err) {
         const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
         return {
