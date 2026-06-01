@@ -46,10 +46,9 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
   const load = useCallback(async () => {
     try {
       const res = await apiFetch('/security/misconfig-acks', { localOnly: true });
-      if (res.ok) {
-        const data = await res.json();
-        setRows(Array.isArray(data) ? data : []);
-      }
+      if (!res.ok) throw new Error('Failed to load acknowledgements');
+      const data = await res.json();
+      setRows(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to load misconfig acknowledgements:', err);
       toast.error('Failed to load acknowledgements');

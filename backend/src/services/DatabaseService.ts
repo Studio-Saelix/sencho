@@ -1248,6 +1248,7 @@ export class DatabaseService {
         stmt.run('scan_history_per_image_limit', '50');
         stmt.run('trivy_auto_update', '0');
         stmt.run('trivy_last_notified_version', '');
+        stmt.run('deploy_block_honor_suppressions', '0');
         stmt.run('mesh_auto_recreate', '0');
 
         // Seed the default local node if none exists
@@ -2622,6 +2623,38 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     }
 
+    /**
+     * Atomically apply `updates` unless doing so would demote the last remaining
+     * admin. Returns false (nothing written) when the change would leave zero
+     * admins, true otherwise. The current-role read, the admin count, and the
+     * write run in a single transaction so a concurrent demote or delete of the
+     * other admin cannot race the count to zero.
+     */
+    public updateUserIfNotLastAdmin(id: number, updates: Partial<{ username: string; password_hash: string; role: string; email: string }>): boolean {
+        return this.transaction(() => {
+            if (updates.role !== undefined && updates.role !== 'admin') {
+                const current = this.db.prepare('SELECT role FROM users WHERE id = ?').get(id) as { role: string } | undefined;
+                if (current?.role === 'admin' && this.getAdminCount() <= 1) return false;
+            }
+            this.updateUser(id, updates);
+            return true;
+        });
+    }
+
+    /**
+     * Atomically delete the user unless it is the last remaining admin. Returns
+     * false (nothing deleted) in that case, true otherwise. Same single-
+     * transaction guard as {@link updateUserIfNotLastAdmin}.
+     */
+    public deleteUserIfNotLastAdmin(id: number): boolean {
+        return this.transaction(() => {
+            const current = this.db.prepare('SELECT role FROM users WHERE id = ?').get(id) as { role: string } | undefined;
+            if (current?.role === 'admin' && this.getAdminCount() <= 1) return false;
+            this.deleteUser(id);
+            return true;
+        });
+    }
+
     public getUserCount(): number {
         return (this.db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number })?.count || 0;
     }
@@ -3776,6 +3809,17 @@ export class DatabaseService {
             )
             .all(...(params as never[]), limit, offset) as VulnerabilityDetail[];
         return { items, total };
+    }
+
+    /**
+     * All findings for a scan, unpaginated. Used by the pre-deploy policy gate
+     * to re-derive severity from suppression-filtered findings, where every row
+     * must be considered rather than a single display page.
+     */
+    public getAllVulnerabilityDetails(scanId: number): VulnerabilityDetail[] {
+        return this.db
+            .prepare('SELECT * FROM vulnerability_details WHERE scan_id = ?')
+            .all(scanId) as VulnerabilityDetail[];
     }
 
     public insertSecretFindings(

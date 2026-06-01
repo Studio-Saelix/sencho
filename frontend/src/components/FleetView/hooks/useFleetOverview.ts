@@ -34,7 +34,7 @@ export function useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses }:
     const [labelFilters, setLabelFilters] = useState<Set<string>>(new Set());
     const abortRef = useRef<AbortController | null>(null);
 
-    const { fleetPalette, fleetStackLabelMap } = useFleetLabels({ isPaid, nodes });
+    const { fleetPalette, fleetStackLabelMap } = useFleetLabels({ nodes });
     const { labelsByNodeId, distinctLabels, isAvailable: nodeLabelsAvailable } = useNodeLabels({ isPaid, nodes });
 
     const fetchOverview = useCallback(async (showRefresh = false) => {

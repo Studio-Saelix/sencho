@@ -26,8 +26,18 @@ export function useFleetUpdateStatus() {
                 setUpdateStatuses(prev =>
                     JSON.stringify(prev) === JSON.stringify(next) ? prev : next
                 );
+            } else {
+                // apiFetch only throws on 401/network, so an HTTP error (500/403/
+                // 502) lands here, not in the catch. Log it so the breadcrumb
+                // covers backend failures too; keep last-known statuses.
+                console.warn('[Fleet] update-status returned HTTP', res.status);
             }
-        } catch { /* non-critical */ }
+        } catch (error) {
+            // Polled call (every 5s while updating, 2m otherwise): log for
+            // diagnosis but stay silent in the UI so a transient failure does
+            // not toast on every tick. The view keeps its last-known statuses.
+            console.warn('[Fleet] Failed to fetch update status:', error);
+        }
     }, []);
 
     const triggerNodeUpdate = useCallback(async (nodeId: number) => {

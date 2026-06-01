@@ -16,6 +16,7 @@ export interface TrivyStatus {
   version: string | null;
   source: TrivySource;
   autoUpdate: boolean;
+  honorSuppressionsOnDeploy: boolean;
   busy: boolean;
 }
 
