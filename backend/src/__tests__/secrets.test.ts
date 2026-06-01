@@ -14,11 +14,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import request from 'supertest';
 import path from 'path';
 import fs from 'fs';
-import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { getAuditSummary } from '../utils/audit-summaries';
-import { generateApiToken } from '../utils/apiTokenFormat';
 import { parseEnv, serializeEnv, applyOverlay, computeDiff } from '../services/SecretsService';
 
 let tmpDir: string;
@@ -462,20 +460,16 @@ describe('Routes /api/secrets admin-role gating', () => {
 describe('Routes /api/secrets machine-credential rejection', () => {
     // A full-admin API token resolves to role 'admin' and would otherwise pass
     // requireAdmin and reach the decrypted-value GET. requireUserSession runs
-    // first and blocks it.
-    function fullAdminApiToken(): string {
-        const db = DatabaseService.getInstance();
-        const rawToken = generateApiToken();
-        db.addApiToken({
-            token_hash: crypto.createHash('sha256').update(rawToken).digest('hex'),
-            name: `secrets-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            scope: 'full-admin',
-            user_id: db.getUserByUsername(TEST_USERNAME)!.id,
-            created_at: Date.now(),
-            expires_at: null,
-        });
-        return rawToken;
-    }
+    // first and blocks it. Mint the token through the real endpoint so the test
+    // exercises the production creation path and carries no hashing of its own.
+    let fullAdminToken: string;
+    beforeAll(async () => {
+        const res = await request(app)
+            .post('/api/api-tokens')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ name: `secrets-rejection-${Date.now()}`, scope: 'full-admin' });
+        fullAdminToken = res.body.token as string;
+    });
 
     // node_proxy / pilot_tunnel JWTs are signed with this instance's secret and
     // map to { username: 'node-proxy', role: 'admin', userId: 0 } in authMiddleware.
@@ -485,7 +479,7 @@ describe('Routes /api/secrets machine-credential rejection', () => {
     }
 
     it.each(SECRET_ENDPOINTS)('403s a full-admin API token on %s %s with SESSION_REQUIRED', async (method, p) => {
-        const res = await callWithToken(method, p, fullAdminApiToken());
+        const res = await callWithToken(method, p, fullAdminToken);
         expect(res.status).toBe(403);
         expect(res.body.code).toBe('SESSION_REQUIRED');
     });
