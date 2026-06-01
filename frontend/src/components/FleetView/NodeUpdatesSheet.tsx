@@ -61,7 +61,10 @@ export function NodeUpdatesSheet({
             }
             await fetchUpdateStatus();
         } catch (err) {
+            // Recheck is an explicit user click, so a thrown network/auth failure
+            // gets a toast, not just a console breadcrumb.
             console.warn('[Fleet] Recheck failed:', err);
+            toast.error('Could not recheck for updates. Try again shortly.');
         } finally {
             setRecheckingUpdates(false);
         }

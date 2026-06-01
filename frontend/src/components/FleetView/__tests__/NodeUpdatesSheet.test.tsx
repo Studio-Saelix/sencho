@@ -88,8 +88,13 @@ describe('NodeUpdatesSheet', () => {
     );
   });
 
-  it('surfaces an error when the recheck endpoint returns a non-ok status', async () => {
-    // apiFetch only throws on 401/network, so a 500 lands as res.ok === false.
+  it('surfaces an error when the recheck fails (non-ok response, and by symmetry a thrown failure)', async () => {
+    // apiFetch only throws on 401/network; HTTP errors land as res.ok === false.
+    // Both the else branch (this case) and the catch branch raise the same
+    // toast.error, so this exercises the user-facing failure toast. The thrown
+    // path is not driven through the click here because this repo's test harness
+    // re-surfaces a rejected Error flowing through a React event handler as a
+    // test failure even when the handler catches it.
     apiFetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
     render(<NodeUpdatesSheet {...baseProps({ isAdmin: true })} />);
     fireEvent.click(screen.getByRole('button', { name: 'Recheck' }));

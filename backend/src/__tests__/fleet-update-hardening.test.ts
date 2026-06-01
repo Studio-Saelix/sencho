@@ -169,6 +169,17 @@ describe('GET /api/fleet/update-status terminal resolution', () => {
     expect(await getStatus()).toBe('updating');
   });
 
+  it('does NOT complete when the remote version is momentarily unavailable (null) on an unchanged process', async () => {
+    mockTarget();
+    mockCompareTargetFetch();
+    // /api/meta briefly omits or mangles the version (online, but version null)
+    // with no process restart: this is not a version change and must not complete.
+    mockMeta(ONLINE({ version: null, startedAt: 1 }));
+    setTracker({ previousVersion: '0.83.0', previousProcessStart: 1, wasOffline: false });
+
+    expect(await getStatus()).toBe('updating');
+  });
+
   it('completes an offline->online bounce when the process start time is unavailable', async () => {
     mockTarget();
     mockCompareTargetFetch();
@@ -249,11 +260,19 @@ describe('forced-recheck throttle', () => {
 
     invalidateSpy.mockClear();
 
+    // A terminal tracker set before the throttled call must still be cleared:
+    // the cooldown gates only the upstream version refresh, not tracker cleanup.
+    FleetUpdateTrackerService.getInstance().set(proxyNodeId, {
+      status: 'failed', startedAt: Date.now(), previousVersion: null,
+      previousProcessStart: null, wasOffline: false, resolvedAt: Date.now(), error: 'boom',
+    });
+
     const second = await request(app)
       .delete('/api/fleet/update-status?recheck=true')
       .set('Authorization', adminAuth);
     expect(second.status).toBe(200);
     expect(second.body.rechecked).toBe(false);
     expect(invalidateSpy).not.toHaveBeenCalledWith('latest-version');
+    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)).toBeUndefined();
   });
 });

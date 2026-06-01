@@ -29,7 +29,7 @@ import { withTimeout, TimeoutError } from '../utils/withTimeout';
 // paths cap the slow `docker system df` call at the same 8s budget (F-6).
 const FLEET_DF_TIMEOUT_MS = 8_000;
 import { POLICY_SEVERITIES } from '../utils/severity';
-import { sanitizeForLog } from '../utils/safeLog';
+import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
@@ -55,24 +55,29 @@ export function _resetForcedRecheckThrottleForTests(): void {
 }
 
 /**
- * Resolve an in-flight update tracker to a terminal state. For failure-class
- * outcomes (failed / timeout) emit a single operator-visible WARN so a failed
- * fleet update is observable without enabling developer mode. Scalars only, no
- * tokens or meta dumps; fires once because the resolved tracker leaves the
- * 'updating' state and is not re-evaluated by the next poll.
+ * Atomically resolve an in-flight update tracker to a terminal state and store
+ * it. Re-reads the live entry and transitions only if it is still 'updating'
+ * with the same startedAt; because there is no await between the read and the
+ * set, a concurrent /update-status poll that already resolved this node cannot
+ * be clobbered or cause a duplicate WARN. For failure-class outcomes (failed /
+ * timeout) it emits one operator-visible WARN so a failed fleet update is
+ * observable without enabling developer mode. The error text is secret-redacted
+ * and control-stripped before logging; no tokens or meta dumps.
  */
 function resolveTerminal(
   node: { id: number; name: string },
   tracker: UpdateTracker,
   status: TerminalStatus,
   error?: string,
-): UpdateTracker {
+): void {
+  const live = updateTracker.get(node.id);
+  if (!live || live.status !== 'updating' || live.startedAt !== tracker.startedAt) return;
   if (status !== 'completed') {
-    const elapsedSec = Math.round((Date.now() - tracker.startedAt) / 1000);
-    const detail = error ? `: ${sanitizeForLog(error)}` : '';
+    const elapsedSec = Math.round((Date.now() - live.startedAt) / 1000);
+    const detail = error ? `: ${sanitizeForLog(redactSensitiveText(error))}` : '';
     console.warn(`[Fleet] Node update ${status} for "${sanitizeForLog(node.name)}" (id ${node.id}) after ${elapsedSec}s${detail}`);
   }
-  return updateTracker.resolve(tracker, status, error);
+  updateTracker.set(node.id, updateTracker.resolve(live, status, error));
 }
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
@@ -757,17 +762,20 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
           if (elapsed > UPDATE_TIMEOUT_MS) {
             if (debug) console.debug('[Fleet:debug] Node', node.id, 'timed out after', Math.round(elapsed / 1000) + 's');
-            updateTracker.set(node.id, resolveTerminal(node, tracker, 'timeout', UPDATE_TIMEOUT_MSG));
+            resolveTerminal(node, tracker, 'timeout', UPDATE_TIMEOUT_MSG);
           } else if (node.type === 'remote') {
             if (remoteUpdateError) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'reported pull failure:', remoteUpdateError);
-              updateTracker.set(node.id, resolveTerminal(node, tracker, 'failed', remoteUpdateError));
+              resolveTerminal(node, tracker, 'failed', remoteUpdateError);
             } else if (!remoteOnline) {
               if (!tracker.wasOffline) {
                 if (debug) console.debug('[Fleet:debug] Node', node.id, 'went offline (restarting)');
                 updateTracker.set(node.id, { ...tracker, wasOffline: true });
               }
-            } else if (version !== tracker.previousVersion) {
+            } else if (isValidVersion(version) && version !== tracker.previousVersion) {
+              // Signal 1: a valid, different version. A null/unparseable version
+              // from a transient /api/meta blip is NOT a version change, so it
+              // must not complete a still-running, same-process node here.
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 1 (version changed):', tracker.previousVersion, '->', version);
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (
@@ -804,7 +812,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (elapsed > EARLY_FAIL_MS) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's - no signals detected');
-              updateTracker.set(node.id, resolveTerminal(node, tracker, 'failed', 'Update may have failed. The node is still running and its version has not changed.'));
+              resolveTerminal(node, tracker, 'failed', 'Update may have failed. The node is still running and its version has not changed.');
             }
           } else if (node.type === 'local') {
             // Local node has only two failure signals: an explicit pull/spawn
@@ -816,11 +824,11 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
             const localError = selfUpdate.getLastError();
             if (localError) {
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'update failed:', localError);
-              updateTracker.set(node.id, resolveTerminal(node, tracker, 'failed', localError));
+              resolveTerminal(node, tracker, 'failed', localError);
               selfUpdate.clearLastError();
             } else if (elapsed > EARLY_FAIL_MS) {
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's');
-              updateTracker.set(node.id, resolveTerminal(node, tracker, 'failed', 'Local update did not complete. The container may not have restarted; check Docker logs on the host.'));
+              resolveTerminal(node, tracker, 'failed', 'Local update did not complete. The container may not have restarted; check Docker logs on the host.');
             }
           }
         }
