@@ -34,8 +34,8 @@ import { formatNoTargetError } from '../utils/remoteTarget';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
 import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
-import { containerActionForStack } from './stacks';
 import { activeBulkActions } from './labels';
+import { runLocalLabelStop, type LabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
@@ -1047,6 +1047,12 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
 // in `routes/fleetActions.ts`. The endpoint below is gateway-orchestrated and
 // lives here so it sits behind the `/api/fleet/` proxy-exempt prefix.
 
+// Attribute one error to every stack a node was supposed to act on. Used for
+// the fleet-stop failure paths (no proxy target, non-ok remote, transport
+// error, local exception) so each stack carries the same node-level cause.
+const failAllStacks = (stacks: string[], error: string): StackStopResult[] =>
+  stacks.map(stackName => ({ stackName, success: false, error }));
+
 // Fleet-wide stop by label name. Matches each node's labels by name and runs
 // container stops on each matching stack.
 // Tier: requireAdmin (admin-only fleet plumbing; available on every license).
@@ -1067,7 +1073,36 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
+    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-stop:', { labelName: trimmed, dryRun: isDryRun, nodes: nodes.length });
     const results = await Promise.all(nodes.map(async (node) => {
+      if (node.type === 'local') {
+        // Match + stop runs in-process against the control's own Docker. The
+        // helper shares the per-node `bulk:<id>` lock with the per-label action
+        // route so the two cannot double-stop the same containers. A control-side
+        // failure (e.g. the compose dir is unreadable) degrades to a per-stack
+        // error for this node only, the same way the remote leg does, so one bad
+        // node never discards the rest of the fleet's results.
+        try {
+          const outcome = await runLocalLabelStop(node.id, trimmed, isDryRun);
+          return { nodeId: node.id, nodeName: node.name, matched: outcome.matched, stackResults: outcome.stackResults };
+        } catch (err) {
+          const errorMsg = getErrorMessage(err, 'Failed to stop local stacks');
+          const localLabel = db.getLabels(node.id).find(l => l.name === trimmed);
+          const localStacks = localLabel ? db.getStacksForLabel(localLabel.id, node.id) : [];
+          return {
+            nodeId: node.id, nodeName: node.name, matched: !!localLabel,
+            stackResults: failAllStacks(localStacks, errorMsg),
+          };
+        }
+      }
+
+      // Remote node. The control's mirror tells us which stacks *should* match
+      // so transport errors can be attributed per stack; the authoritative stop
+      // runs on the remote via its admin-only local-stop receiver, which reuses
+      // the same name-matched helper under the remote's own bulk lock. This
+      // replaces the previous fan-out to `POST /api/labels/:id/action`, a
+      // paid-tier route that 403'd on Community remotes even though fleet-stop
+      // itself is available on every license.
       const label = db.getLabels(node.id).find(l => l.name === trimmed);
       if (!label) {
         return { nodeId: node.id, nodeName: node.name, matched: false, stackResults: [] };
@@ -1077,56 +1112,21 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: [] };
       }
 
-      if (node.type === 'local') {
-        // Share the per-node bulk lock with `POST /api/labels/:id/action` so
-        // a fleet-stop and a per-label action cannot double-stop the same
-        // containers concurrently on the same local node. Dry run acquires
-        // the same lock so the rehearsal exercises the same contention path.
-        const lockKey = `bulk:${node.id}`;
-        if (activeBulkActions.has(lockKey)) {
-          return {
-            nodeId: node.id, nodeName: node.name, matched: true,
-            stackResults: stackNames.map(stackName => ({ stackName, success: false, error: 'A bulk action is already running on this node' })),
-          };
-        }
-        activeBulkActions.add(lockKey);
-        try {
-          const fsStacks = await FileSystemService.getInstance(node.id).getStacks();
-          const fsStackSet = new Set(fsStacks);
-          const validStacks = stackNames.filter(name => fsStackSet.has(name));
-          const stackResults: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] = [];
-          for (const stackName of validStacks) {
-            if (isDryRun) {
-              stackResults.push({ stackName, success: true, dryRun: true });
-              continue;
-            }
-            const outcome = await containerActionForStack(node.id, stackName, 'stop');
-            if (outcome.kind === 'ok') stackResults.push({ stackName, success: true });
-            else if (outcome.kind === 'no-containers') stackResults.push({ stackName, success: false, error: 'No containers found for this stack' });
-            else stackResults.push({ stackName, success: false, error: outcome.message });
-          }
-          if (!isDryRun && stackResults.some(r => r.success)) invalidateNodeCaches(node.id);
-          return { nodeId: node.id, nodeName: node.name, matched: true, stackResults };
-        } finally {
-          activeBulkActions.delete(lockKey);
-        }
-      }
-
       const target = NodeRegistry.getInstance().getProxyTarget(node.id);
       if (!target) {
         const error = formatNoTargetError(node);
         return {
           nodeId: node.id, nodeName: node.name, matched: true,
-          stackResults: stackNames.map(stackName => ({ stackName, success: false, error })),
+          stackResults: failAllStacks(stackNames, error),
         };
       }
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
-        const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/labels/${label.id}/action`, {
+        const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/fleet-actions/labels/local-stop`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ action: 'stop', dryRun: isDryRun }),
+          body: JSON.stringify({ labelName: trimmed, dryRun: isDryRun }),
           signal: AbortSignal.timeout(60000),
         });
         if (!response.ok) {
@@ -1134,19 +1134,34 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
           const message = err.error || `Remote returned ${response.status}`;
           return {
             nodeId: node.id, nodeName: node.name, matched: true,
-            stackResults: stackNames.map(stackName => ({ stackName, success: false, error: message })),
+            stackResults: failAllStacks(stackNames, message),
           };
         }
-        const remote = (await response.json()) as { results?: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] };
-        return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: remote.results ?? [] };
+        // Trust the remote's own matched flag over the control's mirror: a
+        // mirror-skewed control could believe the label exists while the remote
+        // has no such label, which the remote reports as matched:false. Guard
+        // results as an array so a malformed 200 body degrades to empty rather
+        // than flowing a non-array into the per-stack renderers.
+        const remote = (await response.json()) as Partial<LabelLocalStopResponse>;
+        return {
+          nodeId: node.id, nodeName: node.name,
+          matched: remote.matched ?? true,
+          stackResults: Array.isArray(remote.results) ? remote.results : [],
+        };
       } catch (err) {
         const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
         return {
           nodeId: node.id, nodeName: node.name, matched: true,
-          stackResults: stackNames.map(stackName => ({ stackName, success: false, error: errorMsg })),
+          stackResults: failAllStacks(stackNames, errorMsg),
         };
       }
     }));
+    if (isDebugEnabled()) {
+      const matched = results.filter(r => r.matched).length;
+      const stopped = results.reduce((n, r) => n + r.stackResults.filter(s => s.success).length, 0);
+      const failed = results.reduce((n, r) => n + r.stackResults.filter(s => !s.success).length, 0);
+      console.debug('[Fleet:debug] fleet-stop complete:', { matched, stopped, failed });
+    }
     res.json({ results });
   } catch (error) {
     console.error('[Fleet] fleet-stop error:', error);
@@ -1199,6 +1214,7 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
+    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-prune:', { targets, scope, dryRun: isDryRun, nodes: nodes.length });
 
     const results: NodeResult[] = await Promise.all(nodes.map(async (node): Promise<NodeResult> => {
       if (node.type === 'local') {
@@ -1307,6 +1323,11 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
       };
     }));
 
+    if (isDebugEnabled()) {
+      const reachable = results.filter(r => r.reachable).length;
+      const reclaimed = results.reduce((n, r) => n + r.targets.reduce((m, t) => m + t.reclaimedBytes, 0), 0);
+      console.debug('[Fleet:debug] fleet-prune complete:', { reachable, unreachable: results.length - reachable, reclaimedBytes: reclaimed });
+    }
     res.json({ results });
   } catch (error) {
     console.error('[Fleet] fleet-prune error:', error);
