@@ -29,6 +29,7 @@ interface FleetSnapshot {
     node_count: number;
     stack_count: number;
     skipped_nodes: string; // JSON string
+    skipped_stacks: string; // JSON string
     created_at: number;
 }
 
@@ -55,6 +56,13 @@ interface FleetSnapshotDetail extends FleetSnapshot {
 interface SkippedNode {
     nodeId: number;
     nodeName: string;
+    reason: string;
+}
+
+interface SkippedStack {
+    nodeId: number;
+    nodeName: string;
+    stackName: string;
     reason: string;
 }
 
@@ -294,12 +302,12 @@ export default function FleetSnapshots() {
         });
     };
 
-    // --- Parse skipped nodes safely ---
+    // --- Parse JSON-array warning columns safely ---
 
-    function parseSkippedNodes(raw: string): SkippedNode[] {
+    function parseJsonArray<T>(raw: string): T[] {
         try {
             const parsed: unknown = JSON.parse(raw);
-            if (Array.isArray(parsed)) return parsed as SkippedNode[];
+            if (Array.isArray(parsed)) return parsed as T[];
         } catch { /* invalid JSON */ }
         return [];
     }
@@ -353,7 +361,7 @@ export default function FleetSnapshots() {
 
                         {/* Skipped nodes warning */}
                         {(() => {
-                            const skipped = parseSkippedNodes(selectedSnapshot.skipped_nodes);
+                            const skipped = parseJsonArray<SkippedNode>(selectedSnapshot.skipped_nodes);
                             if (skipped.length === 0) return null;
                             return (
                                 <div className="rounded-xl border border-warning/30 bg-warning/5 p-4">
@@ -369,6 +377,33 @@ export default function FleetSnapshots() {
                                                 <span className="font-medium">{node.nodeName}</span>
                                                 {' - '}
                                                 {node.reason}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            );
+                        })()}
+
+                        {/* Partially captured stacks warning */}
+                        {(() => {
+                            const skipped = parseJsonArray<SkippedStack>(selectedSnapshot.skipped_stacks);
+                            if (skipped.length === 0) return null;
+                            return (
+                                <div className="rounded-xl border border-warning/30 bg-warning/5 p-4">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <AlertTriangle className="w-4 h-4 text-warning shrink-0" />
+                                        <span className="text-sm font-medium text-warning">
+                                            Some stacks were not fully captured:
+                                        </span>
+                                    </div>
+                                    <ul className="ml-6 space-y-1">
+                                        {skipped.map((stack, i) => (
+                                            <li key={`${stack.nodeId}:${stack.stackName}:${i}`} className="text-sm text-muted-foreground">
+                                                <span className="font-medium">{stack.nodeName}</span>
+                                                {' / '}
+                                                <span className="font-mono">{stack.stackName}</span>
+                                                {' - '}
+                                                {stack.reason}
                                             </li>
                                         ))}
                                     </ul>
@@ -580,8 +615,13 @@ export default function FleetSnapshots() {
                         </TableHeader>
                         <TableBody>
                             {pagedSnapshots.map(snapshot => {
-                                const skipped = parseSkippedNodes(snapshot.skipped_nodes);
-                                const skippedNames = skipped.map(s => s.nodeName).join(', ');
+                                const skippedNodes = parseJsonArray<SkippedNode>(snapshot.skipped_nodes);
+                                const skippedStacks = parseJsonArray<SkippedStack>(snapshot.skipped_stacks);
+                                const warningCount = skippedNodes.length + skippedStacks.length;
+                                const warningTitle = [
+                                    skippedNodes.length > 0 ? `Nodes: ${skippedNodes.map(s => s.nodeName).join(', ')}` : '',
+                                    skippedStacks.length > 0 ? `Stacks: ${skippedStacks.map(s => `${s.nodeName}/${s.stackName}`).join(', ')}` : '',
+                                ].filter(Boolean).join(' · ');
                                 return (
                                     <TableRow key={snapshot.id}>
                                         <TableCell className="text-xs font-mono tabular-nums whitespace-nowrap">
@@ -609,13 +649,13 @@ export default function FleetSnapshots() {
                                             {snapshot.stack_count} stack{snapshot.stack_count !== 1 ? 's' : ''}
                                         </TableCell>
                                         <TableCell>
-                                            {skipped.length > 0 ? (
+                                            {warningCount > 0 ? (
                                                 <span
                                                     className="flex items-center gap-1 text-warning"
-                                                    title={`Skipped: ${skippedNames}`}
+                                                    title={warningTitle}
                                                 >
                                                     <AlertTriangle className="w-3.5 h-3.5" />
-                                                    <span className="text-xs font-mono tabular-nums">{skipped.length}</span>
+                                                    <span className="text-xs font-mono tabular-nums">{warningCount}</span>
                                                 </span>
                                             ) : (
                                                 <span className="text-xs text-muted-foreground">None</span>

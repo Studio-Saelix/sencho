@@ -11,7 +11,7 @@ import type { ImageCheckResult } from './ImageUpdateService';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { captureLocalNodeFiles, captureRemoteNodeFiles } from '../utils/snapshot-capture';
+import { captureLocalNodeFiles, captureRemoteNodeFiles, type SnapshotNodeData } from '../utils/snapshot-capture';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import TrivyService from './TrivyService';
@@ -562,7 +562,7 @@ export class SchedulerService {
             })
         );
 
-        const capturedNodes: Array<{ nodeId: number; nodeName: string; stacks: Array<{ stackName: string; files: Array<{ filename: string; content: string }> }> }> = [];
+        const capturedNodes: SnapshotNodeData[] = [];
         const skippedNodes: Array<{ nodeId: number; nodeName: string; reason: string }> = [];
 
         results.forEach((result, i) => {
@@ -579,6 +579,7 @@ export class SchedulerService {
 
         let totalStacks = 0;
         const allFiles: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }> = [];
+        const skippedStacks: Array<{ nodeId: number; nodeName: string; stackName: string; reason: string }> = [];
 
         for (const nodeData of capturedNodes) {
             totalStacks += nodeData.stacks.length;
@@ -593,6 +594,14 @@ export class SchedulerService {
                     });
                 }
             }
+            for (const warning of nodeData.warnings) {
+                skippedStacks.push({
+                    nodeId: nodeData.nodeId,
+                    nodeName: nodeData.nodeName,
+                    stackName: warning.stackName,
+                    reason: warning.reason,
+                });
+            }
         }
 
         const description = `Scheduled snapshot: ${task.name}`;
@@ -602,6 +611,7 @@ export class SchedulerService {
             capturedNodes.length,
             totalStacks,
             JSON.stringify(skippedNodes),
+            JSON.stringify(skippedStacks),
         );
 
         if (allFiles.length > 0) {
@@ -622,11 +632,18 @@ export class SchedulerService {
             }
         }
 
+        if (skippedNodes.length > 0 || skippedStacks.length > 0) {
+            console.warn(`[SchedulerService] Snapshot task ${task.id} partial: skipped ${skippedNodes.length} node(s), ${skippedStacks.length} stack(s)`);
+        }
         if (isDebugEnabled()) {
-            console.debug(`[SchedulerService:debug] Snapshot task ${task.id}: captured ${capturedNodes.length} node(s), ${totalStacks} stack(s), ${allFiles.length} file(s), skipped ${skippedNodes.length}${cloudUploadNote}`);
+            console.debug(`[SchedulerService:debug] Snapshot task ${task.id}: captured ${capturedNodes.length} node(s), ${totalStacks} stack(s), ${allFiles.length} file(s), skipped ${skippedNodes.length} node(s)/${skippedStacks.length} stack(s)${cloudUploadNote}`);
         }
 
-        return `Fleet snapshot created (id=${snapshotId}, ${capturedNodes.length} node(s), ${totalStacks} stack(s)${skippedNodes.length > 0 ? `, ${skippedNodes.length} skipped` : ''}${cloudUploadNote})`;
+        const skippedNote = [
+            skippedNodes.length > 0 ? `${skippedNodes.length} node(s)` : '',
+            skippedStacks.length > 0 ? `${skippedStacks.length} stack(s)` : '',
+        ].filter(Boolean).join(', ');
+        return `Fleet snapshot created (id=${snapshotId}, ${capturedNodes.length} node(s), ${totalStacks} stack(s)${skippedNote ? `, skipped ${skippedNote}` : ''}${cloudUploadNote})`;
     }
 
     private async executePrune(task: ScheduledTask): Promise<string> {

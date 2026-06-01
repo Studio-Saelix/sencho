@@ -186,6 +186,7 @@ cloudBackupRouter.get('/usage', async (req: Request, res: Response): Promise<voi
 
 cloudBackupRouter.get('/snapshots', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
+    if (!requireAdmin(req, res)) return;
     if (!gateForCurrentProvider(req, res)) return;
     try {
         const entries = await CloudBackupService.getInstance().listCloudSnapshots();
@@ -218,6 +219,7 @@ cloudBackupRouter.post('/upload/:id', async (req: Request, res: Response): Promi
 
 cloudBackupRouter.get('/status/:id', (req: Request, res: Response): void => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
+    if (!requireAdmin(req, res)) return;
     if (!gateForCurrentProvider(req, res)) return;
     const id = parseSnapshotIdParam(req, res);
     if (id == null) return;
@@ -226,6 +228,7 @@ cloudBackupRouter.get('/status/:id', (req: Request, res: Response): void => {
 
 cloudBackupRouter.get('/object/:keyB64/download', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
+    if (!requireAdmin(req, res)) return;
     if (!gateForCurrentProvider(req, res)) return;
     const objectKey = decodeObjectKey(req, res);
     if (!objectKey) return;

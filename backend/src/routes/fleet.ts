@@ -1597,6 +1597,7 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
 
     let totalStacks = 0;
     const allFiles: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }> = [];
+    const skippedStacks: Array<{ nodeId: number; nodeName: string; stackName: string; reason: string }> = [];
 
     for (const nodeData of capturedNodes) {
       totalStacks += nodeData.stacks.length;
@@ -1611,6 +1612,14 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
           });
         }
       }
+      for (const warning of nodeData.warnings) {
+        skippedStacks.push({
+          nodeId: nodeData.nodeId,
+          nodeName: nodeData.nodeName,
+          stackName: warning.stackName,
+          reason: warning.reason,
+        });
+      }
     }
 
     const snapshotId = db.createSnapshot(
@@ -1619,6 +1628,7 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
       capturedNodes.length,
       totalStacks,
       JSON.stringify(skippedNodes),
+      JSON.stringify(skippedStacks),
     );
 
     if (allFiles.length > 0) {
@@ -1627,20 +1637,29 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
 
     const cloudSvc = CloudBackupService.getInstance();
     if (cloudSvc.isEnabled() && cloudSvc.isAutoUploadOn()) {
-      void cloudSvc.uploadSnapshot(snapshotId).catch(uploadErr => {
-        const message = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
-        console.error('[Fleet Snapshot] Cloud upload failed:', message);
-        void NotificationService.getInstance()
-          .dispatchAlert('error', 'system', `Cloud backup upload failed for snapshot ${snapshotId}: ${message}`)
-          .catch(() => { /* notification dispatch is best-effort */ });
-      });
+      void cloudSvc.uploadSnapshot(snapshotId)
+        .then(() => console.log(`[Fleet Snapshot] Cloud auto-upload OK for snapshot ${snapshotId}`))
+        .catch(uploadErr => {
+          const message = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+          console.error('[Fleet Snapshot] Cloud upload failed:', message);
+          void NotificationService.getInstance()
+            .dispatchAlert('error', 'system', `Cloud backup upload failed for snapshot ${snapshotId}: ${message}`)
+            .catch(() => { /* notification dispatch is best-effort */ });
+        });
     }
 
-    console.log('[Fleet] Snapshot created:', capturedNodes.length, 'nodes,', totalStacks, 'stacks');
+    if (skippedNodes.length > 0 || skippedStacks.length > 0) {
+      console.warn(`[Fleet] Snapshot ${snapshotId} partial: ${capturedNodes.length} node(s), ${totalStacks} stack(s); skipped ${skippedNodes.length} node(s), ${skippedStacks.length} stack(s)`);
+    } else {
+      console.log('[Fleet] Snapshot created:', capturedNodes.length, 'nodes,', totalStacks, 'stacks');
+    }
     if (isDebugEnabled()) {
       console.debug(`[Fleet:debug] Snapshot ${snapshotId} capture completed in ${Date.now() - captureStart}ms, ${allFiles.length} file(s) stored`);
       for (const skip of skippedNodes) {
         console.debug(`[Fleet:debug] Skipped node "${skip.nodeName}" (id=${skip.nodeId}): ${skip.reason}`);
+      }
+      for (const skip of skippedStacks) {
+        console.debug(`[Fleet:debug] Skipped stack "${skip.stackName}" on "${skip.nodeName}" (id=${skip.nodeId}): ${skip.reason}`);
       }
     }
     const snapshot = db.getSnapshot(snapshotId);
@@ -1652,6 +1671,8 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
 });
 
 fleetRouter.get('/snapshots', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+
   try {
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
     const offset = parseInt(req.query.offset as string, 10) || 0;
@@ -1667,6 +1688,8 @@ fleetRouter.get('/snapshots', authMiddleware, async (req: Request, res: Response
 });
 
 fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+
   try {
     const id = parseIntParam(req, res, 'id', 'snapshot ID');
     if (id === null) return;

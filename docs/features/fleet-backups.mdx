@@ -24,7 +24,7 @@ During creation, Sencho connects to each node in parallel:
 - **Local nodes** are read directly from the compose directory
 - **Remote nodes** are fetched via the Distributed API proxy using the node's API token
 
-If a remote node is offline or unreachable, it is **skipped gracefully**. The snapshot still captures data from all reachable nodes, and skipped nodes are recorded with the reason for the failure.
+If a remote node is offline or unreachable, it is **skipped gracefully**. The snapshot still captures data from all reachable nodes, and skipped nodes are recorded with the reason for the failure. Individual stacks that could not be captured (for example, a compose file that failed to read, or a file too large to store) are recorded the same way, so a snapshot is never silently incomplete.
 
 ### Scheduled snapshots
 
@@ -37,7 +37,7 @@ The snapshot list shows each snapshot in a table with the following columns:
 - **Date** - when the snapshot was taken
 - **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Cloud Backup is configured, an upload icon in this column marks snapshots that have been mirrored off-site.
 - **Scope** - how many nodes and stacks were captured (e.g. "3 nodes, 21 stacks")
-- **Warnings** - a warning icon with a count if any nodes were skipped, or "None"
+- **Warnings** - a warning icon with a count if any nodes or stacks were skipped, or "None"
 - **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored to a configured Cloud Backup target, and a delete button for admins
 
 <Frame>
@@ -56,7 +56,7 @@ Below the header, each node appears as a collapsible card. Expand a node to see 
   <img src="/images/fleet-backups/snapshot-detail.png" alt="Snapshot detail view with a node expanded, showing a stack expanded with a compose file, Preview button, and Restore button" />
 </Frame>
 
-If any nodes were unreachable during snapshot creation, a warning banner appears at the top of the detail view listing each skipped node and the reason it was skipped.
+If any nodes were unreachable during snapshot creation, a warning banner appears at the top of the detail view listing each skipped node and the reason it was skipped. A second banner lists any individual stacks that were only partially captured, naming the node, the stack, and the reason.
 
 ## Restoring from a snapshot
 
@@ -135,23 +135,13 @@ For in-place rollback, use the **Restore** action on the snapshot detail view as
 
 ## Access control
 
-| Action | Admin | Node Admin | Deployer | Auditor | Viewer |
-|--------|-------|------------|----------|---------|--------|
-| View snapshot list | Yes | Yes | Yes | Yes | Yes |
-| Browse snapshot contents | Yes | Yes | Yes | Yes | Yes |
-| Create snapshot | Yes | No | No | No | No |
-| Restore from snapshot | Yes | No | No | No | No |
-| Delete snapshot | Yes | No | No | No | No |
-| Upload snapshot to cloud | Yes | No | No | No | No |
-| Delete cloud snapshot | Yes | No | No | No | No |
+Every fleet snapshot action requires the **admin** role: viewing the snapshot list, browsing snapshot contents, creating, restoring, deleting, and uploading to the cloud. Because a snapshot captures the `.env` file of every stack, the snapshot list and detail views are restricted to administrators rather than read-only roles.
 
-<Note>
-  Cloud backup actions to Sencho Cloud Backup require an Admiral license. Cloud backup actions to a Custom S3-compatible target work on every tier.
-</Note>
+Cloud Backup configuration is also admin-only. Mirroring to Sencho Cloud Backup additionally requires an Admiral license; a Custom S3-compatible target works on every tier.
 
 ## Storage
 
-Snapshots are stored in Sencho's SQLite database. Compose files are typically small (under 10 KB each), so even hundreds of snapshots consume minimal disk space. For very large fleets, consider periodically deleting old snapshots to keep the database lean.
+Snapshots are stored in Sencho's SQLite database. Captured file contents, including `.env` files, are encrypted at rest with the instance key, so a database copy never exposes stack secrets in plaintext. Compose files are typically small (under 10 KB each), so even hundreds of snapshots consume minimal disk space. Individual files larger than 1 MB are skipped and recorded as a warning to keep snapshots bounded. For very large fleets, consider periodically deleting old snapshots to keep the database lean.
 
 ## Troubleshooting
 

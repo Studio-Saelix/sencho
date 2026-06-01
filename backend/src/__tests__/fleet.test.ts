@@ -504,12 +504,22 @@ describe('Fleet snapshot admin enforcement', () => {
     expect(res.body.code).toBe('ADMIN_REQUIRED');
   });
 
-  it('GET /api/fleet/snapshots succeeds for viewer (read-only)', async () => {
+  it('GET /api/fleet/snapshots returns 403 for viewer', async () => {
     mockTier('paid');
     const res = await request(app)
       .get('/api/fleet/snapshots')
       .set('Authorization', viewerHeader);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
+  });
+
+  it('GET /api/fleet/snapshots/1 returns 403 for viewer', async () => {
+    mockTier('paid');
+    const res = await request(app)
+      .get('/api/fleet/snapshots/1')
+      .set('Authorization', viewerHeader);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
   });
 });
 

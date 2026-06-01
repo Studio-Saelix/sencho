@@ -1412,6 +1412,7 @@ describe('SchedulerService - executeSnapshot', () => {
       1,
       1,
       expect.any(String),
+      expect.any(String),
     );
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
