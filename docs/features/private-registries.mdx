@@ -4,7 +4,7 @@ description: Store credentials for private Docker registries so Sencho can authe
 ---
 
 <Note>
-  Private Registries is an **Admiral** tier, admin-only feature. Credentials are managed centrally on the control instance and applied fleet-wide; the Registries section is hidden when you are viewing a remote node.
+  Private Registries is an **Admiral** tier, admin-only feature. Each Sencho instance stores its own registry credentials; the Registries section is hidden when you are viewing another node through the node switcher.
 </Note>
 
 Sencho stores credentials for your private Docker registries and injects them automatically whenever it runs `docker compose pull` or `docker compose up`. Stacks can reference private images without anyone having to run `docker login` on the host.
@@ -24,7 +24,7 @@ Sencho stores credentials for your private Docker registries and injects them au
 
 ## Where to find it
 
-Open **Settings → System → Registries**. The section appears only on the control instance and only to admin operators on an Admiral tier license.
+Open **Settings → System → Registries** on the Sencho instance you are signed into directly. The section is hidden when you are viewing another node through the node switcher.
 
 ## Adding a registry
 
@@ -158,11 +158,11 @@ AWS ECR uses short-lived authentication tokens (valid for 12 hours) derived from
 - **API tokens cannot manage registries.** Registry credentials can only be created, edited, or deleted from an admin browser session. Automation tokens are scoped away from this surface so a leaked CI key cannot rewrite pull credentials.
 - **Audit trail.** Registry create, update, and delete operations are recorded in the [Audit Log](/features/audit-log).
 
-## Fleet-wide application
+## Registries in a multi-node fleet
 
-Registry credentials live on the control instance and are applied to every node it manages. When the control deploys to a remote node, the resolved Docker config is injected through the same secure channel used for the deploy itself; remote nodes never store registry credentials locally, and the Registries section is hidden from their own Settings pane.
+Registry credentials are stored on the Sencho instance where you enter them, and each instance resolves its own credentials at deploy time. Sencho does not automatically share credentials between instances: a remote node authenticates its pulls with the registries configured on that node, not with the ones on the instance you happen to be signed into.
 
-That means you configure each private registry once on the control instance and every stack across the fleet picks up the credentials automatically.
+Because the Registries section is hidden when you view another node through the node switcher, manage a remote node's registries by signing into that node's own Sencho instance directly. Configure each private registry on every instance that deploys images from it, so a stack keeps pulling no matter which node it runs on.
 
 ## Troubleshooting
 
@@ -184,11 +184,11 @@ That means you configure each private registry once on the control instance and 
   </Accordion>
 
   <Accordion title="The Registries section is not visible">
-    The section is shown only on the control instance, and only when the control's license is Admiral and the signed-in operator has the admin role. On a remote node viewed through the node switcher, the section is hidden by design; manage registries on the control instead. If a non-admin operator should be able to manage registries, change their role under **Settings → Identity → Users** first.
+    The section is shown on the instance you are signed into directly, and only when that instance's license is Admiral and the signed-in operator has the admin role. On a remote node viewed through the node switcher, the section is hidden by design; sign into that node's own Sencho instance to manage its registries. If a non-admin operator should be able to manage registries, change their role under **Settings → Identity → Users** first.
   </Accordion>
 
   <Accordion title="A node displays a 'Private Registries is not available on this node' lock card">
-    The selected node is on a Sencho version too old to surface this feature. Upgrade the node to a current Sencho release. Until then, credentials configured on the control still apply to that node's deploys through the injection path; only the management UI is hidden.
+    The selected node is on a Sencho version too old to surface this feature. Upgrade the node to a current Sencho release, then sign into that node's own Sencho instance to configure its registry credentials. Only the management UI depends on the node's version; once upgraded, that node's deploys use the registries configured on it.
   </Accordion>
 
   <Accordion title="An API token cannot create or update registries">
