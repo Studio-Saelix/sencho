@@ -30,6 +30,24 @@ function validateUsername(value: unknown): string | null {
   return null;
 }
 
+// Returns a seat-limit error message if adding an account of `role` would
+// exceed the current license seat caps, or null when within limits. Counts are
+// read at call time so the check reflects live state. Used by both user
+// creation and admin promotion so the cap cannot be bypassed via role change.
+// Seat caps gate new seat acquisition only (creation, and promotion to admin);
+// reducing privilege by demoting an admin is never blocked on the viewer cap.
+function seatLimitError(role: UserRole, db: DatabaseService): string | null {
+  const seatLimits = LicenseService.getInstance().getSeatLimits();
+  if (role === 'admin') {
+    if (seatLimits.maxAdmins !== null && db.getAdminCount() >= seatLimits.maxAdmins) {
+      return `Your license allows a maximum of ${seatLimits.maxAdmins} admin account${seatLimits.maxAdmins === 1 ? '' : 's'}. Upgrade to Admiral for unlimited accounts.`;
+    }
+  } else if (seatLimits.maxViewers !== null && db.getNonAdminCount() >= seatLimits.maxViewers) {
+    return `Your license allows a maximum of ${seatLimits.maxViewers} viewer account${seatLimits.maxViewers === 1 ? '' : 's'}. Upgrade to Admiral for unlimited accounts.`;
+  }
+  return null;
+}
+
 export const usersRouter = Router();
 
 usersRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -84,13 +102,9 @@ usersRouter.post('/', authMiddleware, async (req: Request, res: Response): Promi
     }
 
     // Enforce seat limits based on license variant.
-    const seatLimits = LicenseService.getInstance().getSeatLimits();
-    if (role === 'admin' && seatLimits.maxAdmins !== null && db.getAdminCount() >= seatLimits.maxAdmins) {
-      res.status(403).json({ error: `Your license allows a maximum of ${seatLimits.maxAdmins} admin account${seatLimits.maxAdmins === 1 ? '' : 's'}. Upgrade to Admiral for unlimited accounts.` });
-      return;
-    }
-    if (role !== 'admin' && seatLimits.maxViewers !== null && db.getNonAdminCount() >= seatLimits.maxViewers) {
-      res.status(403).json({ error: `Your license allows a maximum of ${seatLimits.maxViewers} viewer account${seatLimits.maxViewers === 1 ? '' : 's'}. Upgrade to Admiral for unlimited accounts.` });
+    const seatError = seatLimitError(role, db);
+    if (seatError) {
+      res.status(403).json({ error: seatError });
       return;
     }
 
@@ -145,9 +159,17 @@ usersRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Pro
         res.status(400).json({ error: 'Cannot change your own role' });
         return;
       }
-      if (user.role === 'admin' && role !== 'admin' && db.getAdminCount() <= 1) {
-        res.status(400).json({ error: 'Cannot demote the only admin user' });
-        return;
+      // Promoting a non-admin to admin consumes an admin seat; enforce the cap
+      // here the same way user creation does, so a role change cannot exceed it.
+      if (role === 'admin' && user.role !== 'admin') {
+        const seatError = seatLimitError('admin', db);
+        if (isDebugEnabled()) {
+          console.log('[Users:diag] admin-promotion id=', id, 'blocked=', seatError !== null, 'actor=', sanitizeForLog(req.user!.username));
+        }
+        if (seatError) {
+          res.status(403).json({ error: seatError });
+          return;
+        }
       }
       updates.role = role;
     }
@@ -166,7 +188,13 @@ usersRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Pro
       updates.password_hash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
     }
 
-    db.updateUser(id, updates);
+    // updateUserIfNotLastAdmin returns false only when this update would demote
+    // the last remaining admin; map that single case to the guard message.
+    const applied = db.updateUserIfNotLastAdmin(id, updates);
+    if (!applied) {
+      res.status(400).json({ error: 'Cannot demote the only admin user' });
+      return;
+    }
     // Invalidate the user's active sessions when their role or password changes.
     if (updates.role || updates.password_hash) {
       db.bumpTokenVersion(id);
@@ -196,12 +224,11 @@ usersRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): 
       return;
     }
 
-    if (user.role === 'admin' && db.getAdminCount() <= 1) {
+    const deleted = db.deleteUserIfNotLastAdmin(id);
+    if (!deleted) {
       res.status(400).json({ error: 'Cannot delete the only admin user' });
       return;
     }
-
-    db.deleteUser(id);
     console.log('[Users] Deleted:', user.username, '(id:', id, ') by:', req.user!.username);
     res.json({ success: true });
   } catch (error) {
@@ -230,20 +257,9 @@ usersRouter.post('/:id/mfa/reset', authMiddleware, (req: Request, res: Response)
     }
     db.deleteUserMfa(id);
     db.bumpTokenVersion(id);
-    try {
-      db.insertAuditLog({
-        timestamp: Date.now(),
-        username: req.user!.username,
-        method: 'POST',
-        path: req.originalUrl,
-        status_code: 200,
-        node_id: null,
-        ip_address: req.ip || 'unknown',
-        summary: `Admin reset two-factor authentication for ${target.username}`,
-      });
-    } catch (err) {
-      console.warn('[MFA] Admin reset audit log write failed:', getErrorMessage(err, 'unknown'));
-    }
+    // The audit-log middleware records this POST automatically (summary
+    // "Reset two-factor authentication: <id>", keyed on the target user id);
+    // no explicit write is needed here.
     console.log('[MFA] Admin reset: target=', target.username, 'by=', req.user!.username);
     if (isDebugEnabled()) {
       console.log('[MFA:diag] admin-reset target=', target.username, 'actor=', req.user!.username);

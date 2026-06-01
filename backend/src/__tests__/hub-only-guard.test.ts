@@ -4,7 +4,7 @@
  * Hub-only paths (e.g. /api/scheduled-tasks, /api/audit-log,
  * /api/notification-routes) manage state owned by the local hub. When a
  * request carries `x-node-id` for a remote node, the guard must reject
- * with 409 before the remote proxy forwards it. Without this guard, a
+ * with 403 before the remote proxy forwards it. Without this guard, a
  * scripted client could trick the proxy into running hub-level operations
  * on a remote instance, crossing a node-authority boundary that the UI
  * promises will not happen.
@@ -163,6 +163,42 @@ describe('hubOnlyGuard', () => {
 
     expect(res.status).toBe(403);
     expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  // Regression: registry credentials are stored and managed per instance.
+  // Without the guard, a scripted `x-node-id: <remote>` request would be
+  // forwarded by the proxy and carry a plaintext secret to the remote. Cover
+  // the collection (no trailing slash, the form a bare startsWith would leak)
+  // and a sub-path, plus the local pass-through so a future over-broadening of
+  // the prefix that 403s legitimate local registry management is caught.
+  it('rejects /api/registries with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/registries')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects a registry sub-path (/api/registries/1/test) with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .post('/api/registries/1/test')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('lets /api/registries through to the local handler when no nodeId is set', async () => {
+    const res = await request(app)
+      .get('/api/registries')
+      .set('Authorization', authHeader);
+
+    // The local handler may return 200 or a tier/role gate 403; what matters is
+    // the guard did not reject with HUB_ONLY_ENDPOINT.
+    expect(res.body?.code).not.toBe('HUB_ONLY_ENDPOINT');
   });
 
   it('does not interfere with non-hub paths even when nodeId targets a remote node', async () => {

@@ -8,16 +8,19 @@ export function labelPaletteKey(name: string, color: LabelColor): string {
 }
 
 interface UseFleetLabelsOptions {
-    isPaid: boolean;
     nodes: FleetNode[];
 }
 
-export function useFleetLabels({ isPaid, nodes }: UseFleetLabelsOptions) {
+// Stack labels are a Community feature (the per-node `/labels` and
+// `/labels/assignments` reads are open to any authenticated user), so the
+// fleet-wide palette and per-stack chips render on every tier. Node-level tag
+// aggregation stays paid and lives in useNodeLabels.
+export function useFleetLabels({ nodes }: UseFleetLabelsOptions) {
     const [fleetPalette, setFleetPalette] = useState<FleetPaletteEntry[]>([]);
     const [fleetStackLabelMap, setFleetStackLabelMap] = useState<Record<number, Record<string, StackLabel[]>>>({});
 
     const fetchLabelsForNodes = useCallback(async (fleetNodes: FleetNode[]) => {
-        if (!isPaid || fleetNodes.length === 0) return;
+        if (fleetNodes.length === 0) return;
 
         const paletteMap = new Map<string, FleetPaletteEntry>();
         const stackLabelMap: Record<number, Record<string, StackLabel[]>> = {};
@@ -48,7 +51,7 @@ export function useFleetLabels({ isPaid, nodes }: UseFleetLabelsOptions) {
 
         setFleetPalette(Array.from(paletteMap.values()).sort((a, b) => a.name.localeCompare(b.name)));
         setFleetStackLabelMap(stackLabelMap);
-    }, [isPaid]);
+    }, []);
 
     // Refetch labels only when the set of online nodes actually changes,
     // not on every fetchOverview tick (which mints a new nodes ref).
@@ -62,10 +65,10 @@ export function useFleetLabels({ isPaid, nodes }: UseFleetLabelsOptions) {
     );
 
     useEffect(() => {
-        if (!isPaid || nodes.length === 0) return;
+        if (nodes.length === 0) return;
         fetchLabelsForNodes(nodes);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isPaid, onlineNodeKey, fetchLabelsForNodes]);
+    }, [onlineNodeKey, fetchLabelsForNodes]);
 
     return { fleetPalette, fleetStackLabelMap };
 }
