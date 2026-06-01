@@ -48,10 +48,9 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
   const load = useCallback(async () => {
     try {
       const res = await apiFetch('/security/suppressions', { localOnly: true });
-      if (res.ok) {
-        const data = await res.json();
-        setRows(Array.isArray(data) ? data : []);
-      }
+      if (!res.ok) throw new Error('Failed to load suppressions');
+      const data = await res.json();
+      setRows(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to load suppressions:', err);
       toast.error('Failed to load suppressions');
