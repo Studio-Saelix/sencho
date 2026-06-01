@@ -420,6 +420,21 @@ describe('POST /api/users/:id/mfa/reset', () => {
     expect(db.getUserMfa(userId)).toBeUndefined();
     expect(db.getUser(userId)!.token_version).toBeGreaterThan(before);
   });
+
+  it('writes exactly one audit row, labeled as a reset and never as user creation', async () => {
+    const db = DatabaseService.getInstance();
+    const { userId } = await seedMfaUser('victim3', 'victim3pass123');
+    const res = await request(app)
+      .post(`/api/users/${userId}/mfa/reset`)
+      .set('Authorization', `Bearer ${adminToken()}`);
+    expect(res.status).toBe(200);
+
+    // The route no longer writes its own audit row; the middleware writes one.
+    const { entries } = db.getAuditLogs({ search: `/users/${userId}/mfa/reset` });
+    const resetRows = entries.filter((e) => e.path === `/api/users/${userId}/mfa/reset`);
+    expect(resetRows).toHaveLength(1);
+    expect(resetRows[0].summary).toBe(`Reset two-factor authentication: ${userId}`);
+  });
 });
 
 // ─── SSO bypass toggle ────────────────────────────────────────────────────────

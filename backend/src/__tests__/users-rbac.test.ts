@@ -563,6 +563,85 @@ describe('Last-admin protection', () => {
   });
 });
 
+// ---- Seat Limit Enforcement On Promotion ----
+
+describe('Seat limit enforcement on role promotion', () => {
+  it('rejects promoting a viewer to admin when the admin seat limit is reached', async () => {
+    const db = DatabaseService.getInstance();
+    const hash = await bcrypt.hash('password123', 1);
+    const viewerId = db.addUser({ username: 'promoteme', password_hash: hash, role: 'viewer' });
+
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: 1, maxViewers: null });
+
+    const res = await request(app)
+      .put(`/api/users/${viewerId}`)
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({ role: 'admin' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('maximum');
+    // The role must remain unchanged when the cap blocks the promotion.
+    expect(db.getUser(viewerId)!.role).toBe('viewer');
+
+    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
+    db.deleteUser(viewerId);
+  });
+
+  it('allows promoting a viewer to admin when admin seats are unlimited', async () => {
+    const db = DatabaseService.getInstance();
+    const hash = await bcrypt.hash('password123', 1);
+    const viewerId = db.addUser({ username: 'promoteok', password_hash: hash, role: 'viewer' });
+    // Global beforeAll mock already returns unlimited seats; the gate must not over-block.
+    const res = await request(app)
+      .put(`/api/users/${viewerId}`)
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({ role: 'admin' });
+    expect(res.status).toBe(200);
+    expect(db.getUser(viewerId)!.role).toBe('admin');
+    db.deleteUser(viewerId);
+  });
+});
+
+// ---- Atomic Last-Admin Guard (TOCTOU protection) ----
+
+describe('Atomic last-admin guard', () => {
+  // These lock the guard contract: the admin-count re-check and the mutation run
+  // in one transaction, so a refusal writes nothing (no partial state) and the
+  // count is unchanged. That re-check inside the transaction is what closes the
+  // TOCTOU window a route-level pre-check left open.
+  it('updateUserIfNotLastAdmin refuses to demote the sole admin and applies otherwise', async () => {
+    const db = DatabaseService.getInstance();
+    expect(db.getAdminCount()).toBe(1);
+    const sole = db.getUserByUsername(TEST_USERNAME)!;
+    expect(db.updateUserIfNotLastAdmin(sole.id, { role: 'viewer' })).toBe(false);
+    // Refusal is side-effect free: role intact and count unchanged.
+    expect(db.getUser(sole.id)!.role).toBe('admin');
+    expect(db.getAdminCount()).toBe(1);
+
+    const hash = await bcrypt.hash('password123', 1);
+    const extra = db.addUser({ username: 'raceadmin', password_hash: hash, role: 'admin' });
+    expect(db.updateUserIfNotLastAdmin(extra, { role: 'viewer' })).toBe(true);
+    expect(db.getUser(extra)!.role).toBe('viewer');
+    expect(db.getAdminCount()).toBe(1);
+    db.deleteUser(extra);
+  });
+
+  it('deleteUserIfNotLastAdmin refuses to delete the sole admin and applies otherwise', async () => {
+    const db = DatabaseService.getInstance();
+    expect(db.getAdminCount()).toBe(1);
+    const sole = db.getUserByUsername(TEST_USERNAME)!;
+    expect(db.deleteUserIfNotLastAdmin(sole.id)).toBe(false);
+    // Refusal is side-effect free: row intact and count unchanged.
+    expect(db.getUser(sole.id)).toBeTruthy();
+    expect(db.getAdminCount()).toBe(1);
+
+    const hash = await bcrypt.hash('password123', 1);
+    const extra = db.addUser({ username: 'raceadmin2', password_hash: hash, role: 'admin' });
+    expect(db.deleteUserIfNotLastAdmin(extra)).toBe(true);
+    expect(db.getAdminCount()).toBe(1);
+  });
+});
+
 // ---- Orphaned Role Assignment Cleanup ----
 
 describe('Orphaned role assignment cleanup', () => {
