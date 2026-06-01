@@ -294,6 +294,7 @@ export class FleetSyncService {
         controlIdentity?: string,
     ): void {
         const db = DatabaseService.getInstance();
+        let promotedToReplica = false;
         db.transaction(() => {
             if (controlIdentity && controlIdentity.length > 0) {
                 // The cached fingerprint has three possible states:
@@ -319,6 +320,7 @@ export class FleetSyncService {
                 }
                 db.setSystemState(watermarkKey, String(pushedAt));
             }
+            promotedToReplica = db.getSystemState(SYNC_STATE_KEYS.fleetRole) !== 'replica';
             db.setSystemState(SYNC_STATE_KEYS.fleetRole, 'replica');
             if (targetIdentity) {
                 const cachedSelf = db.getSystemState(SYNC_STATE_KEYS.fleetSelfIdentity);
@@ -364,6 +366,14 @@ export class FleetSyncService {
                 summary: `Replicated ${resource} from ${controlIdentity || 'legacy control'}: replaced ${rows.length} row(s)`,
             });
         });
+        // Log the control -> replica transition once, only when it actually
+        // flips. The transaction sets fleet_role on every apply, so guarding on
+        // the prior role keeps this off the steady-state per-push path.
+        if (promotedToReplica) {
+            console.info(
+                `[FleetSync] Instance is now a replica, anchored to control ${controlIdentity || 'legacy control'}.`,
+            );
+        }
     }
 
     /**

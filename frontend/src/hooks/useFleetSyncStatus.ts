@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLicense } from '@/context/LicenseContext';
+import { useAuth } from '@/context/AuthContext';
 import { visibilityInterval } from '@/lib/utils';
 import { fetchFleetSyncStatuses, type FleetSyncStatus } from '@/lib/fleetSyncApi';
 
@@ -7,9 +8,10 @@ const REFRESH_INTERVAL_MS = 30_000;
 
 /**
  * Polls `/api/fleet/sync-status` and exposes the rows plus a manual
- * `refresh()`. Skips fetching for community-tier users since the endpoint is
- * paid-tier-gated; the hook returns an empty array in that case so consumers
- * can render the `!isPaid` branch without conditionals.
+ * `refresh()`. The endpoint requires a paid admin, so the hook only fetches
+ * for paid admins and returns an empty array otherwise. This mirrors the
+ * route guard exactly: gating on tier alone would leave a paid non-admin
+ * polling an endpoint that always 403s.
  */
 export function useFleetSyncStatus(): {
   statuses: FleetSyncStatus[];
@@ -17,11 +19,13 @@ export function useFleetSyncStatus(): {
   refresh: () => void;
 } {
   const { isPaid } = useLicense();
+  const { isAdmin } = useAuth();
+  const canQuery = isPaid && isAdmin;
   const [statuses, setStatuses] = useState<FleetSyncStatus[]>([]);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(() => {
-    if (!isPaid) {
+    if (!canQuery) {
       setStatuses([]);
       setLoading(false);
       return;
@@ -33,13 +37,13 @@ export function useFleetSyncStatus(): {
         console.warn('[FleetSync] sync-status fetch failed:', err);
       })
       .finally(() => setLoading(false));
-  }, [isPaid]);
+  }, [canQuery]);
 
   useEffect(() => {
     refresh();
-    if (!isPaid) return undefined;
+    if (!canQuery) return undefined;
     return visibilityInterval(refresh, REFRESH_INTERVAL_MS);
-  }, [isPaid, refresh]);
+  }, [canQuery, refresh]);
 
   return { statuses, loading, refresh };
 }
