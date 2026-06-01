@@ -126,6 +126,19 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('DELETE', '/nodes/5')).toBe('Deleted node: 5');
     expect(getAuditSummary('DELETE', 'nodes/5')).toBe('Deleted node: 5');
   });
+
+  it('matches user management routes', () => {
+    expect(getAuditSummary('POST', '/users')).toBe('Created user');
+    expect(getAuditSummary('PUT', '/users/42')).toBe('Updated user: 42');
+    expect(getAuditSummary('DELETE', '/users/42')).toBe('Deleted user: 42');
+    expect(getAuditSummary('POST', '/users/42/roles')).toBe('Assigned role: 42');
+    expect(getAuditSummary('DELETE', '/users/42/roles/7')).toBe('Removed role assignment: 42');
+  });
+
+  it('labels an MFA reset distinctly and never as user creation', () => {
+    expect(getAuditSummary('POST', '/users/42/mfa/reset')).toBe('Reset two-factor authentication: 42');
+    expect(getAuditSummary('POST', '/users/42/mfa/reset')).not.toBe('Created user: 42');
+  });
 });
 
 // ---- DatabaseService audit methods ----
