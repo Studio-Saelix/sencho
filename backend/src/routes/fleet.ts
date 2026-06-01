@@ -826,6 +826,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
     const nodeStatuses = results.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
+      console.warn(`[Fleet] Update-status poll failed for node ${nodes[i].name}:`, r.reason);
       return {
         nodeId: nodes[i].id,
         name: nodes[i].name,
@@ -995,6 +996,9 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
     const skipped = nodes.filter(n => !candidates.includes(n)).map(n => n.name);
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
+      if (r.status === 'rejected') {
+        console.warn(`[Fleet] Update-all failed for node ${candidates[i].name}:`, r.reason);
+      }
       const val = r.status === 'fulfilled' ? r.value : { name: candidates[i].name, triggered: false };
       (val.triggered ? updating : skipped).push(val.name);
     }
