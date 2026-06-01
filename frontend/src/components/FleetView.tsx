@@ -241,6 +241,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 checkingUpdates={updateStatus.checkingUpdates}
                 updateStatuses={updateStatus.updateStatuses}
                 updatingNodeId={updateStatus.updatingNodeId}
+                isAdmin={isAdmin}
                 fetchUpdateStatus={updateStatus.fetchUpdateStatus}
                 triggerNodeUpdate={updateStatus.triggerNodeUpdate}
                 retryNodeUpdate={updateStatus.retryNodeUpdate}

@@ -79,7 +79,7 @@ The gateway tracks each in-flight update in memory and watches the target node f
 
 - The remote reports a *new* `version` value over its `/api/meta` endpoint.
 - The remote's process `startedAt` timestamp moves forward, indicating a fresh container start.
-- The remote went offline at any point during the watch window and has come back online.
+- The remote went offline during the watch window and has come back online, used as a fallback only for nodes that do not report a process start timestamp. A node that simply blips offline and returns on the *same* version with an unchanged start time is treated as still updating, not done, so a momentary network glitch is never mistaken for a successful update.
 - More than 15 seconds have elapsed and the remote's reported version is at or above the comparison target (the gateway's own version, or the published latest, whichever is appropriate).
 
 When any signal fires, the row flips from **Updating** to a green **Updated** badge. The **Updated** state stays visible for 60 seconds, then auto-clears so the row settles back to **Up to date**.
@@ -100,7 +100,7 @@ Both **Failed** and **Timed out** badges expose two inline actions:
 
 Hovering either badge reveals the underlying error message reported by the remote (or by the helper container, for the gateway itself).
 
-The header of the sheet exposes a **Recheck** button that does three things in one click: it flushes the cached "latest published version" lookup (resolved against the GitHub Releases API, with a Docker Hub fallback), it clears every terminal `Failed` and `Timed out` badge across the fleet, and it re-fetches the version metadata from every node.
+The header of the sheet exposes a **Recheck** button that does three things in one click: it flushes the cached "latest published version" lookup (resolved against the GitHub Releases API, with a Docker Hub fallback), it clears every terminal `Failed` and `Timed out` badge across the fleet, and it re-fetches the version metadata from every node. The published-version lookup is rate-limited to one refresh every couple of minutes, so clicking **Recheck** again right away reuses the recent result and shows a brief "checked recently" note rather than hitting the registry on every click.
 
 <Note>
   Update tracking is held entirely in the gateway's memory. Restarting the gateway clears all in-flight, failed, and timed-out states automatically, so a stuck row always resolves itself on the next gateway restart even without a manual **Dismiss**.
