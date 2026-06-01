@@ -7,9 +7,15 @@ interface ReconnectingOverlayProps {
     preUpdateStartedAt: number | null;
 }
 
+// Mirrors the backend UPDATE_TIMEOUT_MS (5 minutes) in routes/fleet.ts. Past
+// this point we stop asserting the update is in flight and hand control back to
+// the operator, but we do not claim failure: a large image pull can legitimately
+// run longer than the auto-reload budget.
+const RECONNECT_TIMEOUT_SECONDS = 5 * 60;
+
 export function ReconnectingOverlay({ preUpdateStartedAt }: ReconnectingOverlayProps) {
     const [elapsed, setElapsed] = useState(0);
-    const timedOut = elapsed >= 300; // 5 minutes
+    const timedOut = elapsed >= RECONNECT_TIMEOUT_SECONDS;
 
     useEffect(() => {
         const timer = setInterval(() => setElapsed(s => s + 1), 1000);
@@ -54,12 +60,12 @@ export function ReconnectingOverlay({ preUpdateStartedAt }: ReconnectingOverlayP
                 {timedOut ? (
                     <>
                         <AlertTriangle className="w-10 h-10 text-warning mx-auto" strokeWidth={1.5} />
-                        <h2 className="text-lg font-medium">Update timed out</h2>
+                        <h2 className="text-lg font-medium">Taking longer than expected</h2>
                         <p className="text-sm text-muted-foreground max-w-sm">
-                            The server has not come back within 5 minutes. Check the Docker host directly.
+                            Sencho has not come back online yet. A large image pull can take a while, so the update may still be finishing. Reload to check, or inspect the Docker host if it persists.
                         </p>
                         <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
-                            Try Reloading
+                            Reload to check
                         </Button>
                     </>
                 ) : (
