@@ -78,11 +78,13 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             <TabsHighlightItem value="overview">
                                 <TabsTrigger value="overview">Overview</TabsTrigger>
                             </TabsHighlightItem>
-                            <TabsHighlightItem value="snapshots">
-                                <TabsTrigger value="snapshots">
-                                    <Camera className="w-4 h-4 mr-1.5" />Snapshots
-                                </TabsTrigger>
-                            </TabsHighlightItem>
+                            {isAdmin && (
+                                <TabsHighlightItem value="snapshots">
+                                    <TabsTrigger value="snapshots">
+                                        <Camera className="w-4 h-4 mr-1.5" />Snapshots
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
+                            )}
                             <TabsHighlightItem value="configuration">
                                 <TabsTrigger value="configuration">
                                     <SlidersHorizontal className="w-4 h-4 mr-1.5" />Status
@@ -192,9 +194,11 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                     />
                 </TabsContent>
 
-                <TabsContent value="snapshots">
-                    <FleetSnapshots />
-                </TabsContent>
+                {isAdmin && (
+                    <TabsContent value="snapshots">
+                        <FleetSnapshots />
+                    </TabsContent>
+                )}
                 <TabsContent value="configuration">
                     <FleetConfiguration />
                 </TabsContent>

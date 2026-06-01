@@ -232,7 +232,8 @@ export interface FleetSnapshot {
     created_by: string;
     node_count: number;
     stack_count: number;
-    skipped_nodes: string;
+    skipped_nodes: string; // JSON: Array<{ nodeId; nodeName; reason }>
+    skipped_stacks: string; // JSON: Array<{ nodeId; nodeName; stackName; reason }>
     created_at: number;
 }
 
@@ -821,6 +822,7 @@ export class DatabaseService {
         node_count INTEGER NOT NULL,
         stack_count INTEGER NOT NULL,
         skipped_nodes TEXT NOT NULL DEFAULT '[]',
+        skipped_stacks TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL
       );
 
@@ -1195,6 +1197,9 @@ export class DatabaseService {
         maybeAddCol('nodes', 'mode', "TEXT NOT NULL DEFAULT 'proxy'");
         maybeAddCol('nodes', 'pilot_last_seen', 'INTEGER');
         maybeAddCol('nodes', 'pilot_agent_version', 'TEXT');
+
+        // Fleet snapshot per-stack capture warnings (partial-capture surfacing)
+        maybeAddCol('fleet_snapshots', 'skipped_stacks', "TEXT NOT NULL DEFAULT '[]'");
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -2882,20 +2887,25 @@ export class DatabaseService {
 
     // --- Fleet Snapshots ---
 
-    public createSnapshot(description: string, createdBy: string, nodeCount: number, stackCount: number, skippedNodes: string): number {
+    public createSnapshot(description: string, createdBy: string, nodeCount: number, stackCount: number, skippedNodes: string, skippedStacks = '[]'): number {
         const result = this.db.prepare(
-            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-        ).run(description, createdBy, nodeCount, stackCount, skippedNodes, Date.now());
+            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).run(description, createdBy, nodeCount, stackCount, skippedNodes, skippedStacks, Date.now());
         return result.lastInsertRowid as number;
     }
 
     public insertSnapshotFiles(snapshotId: number, files: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }>): void {
+        // Snapshot file bodies are compose.yaml and .env captures, so they carry
+        // the same secrets as the live stack. Encrypt content at rest with the
+        // instance key; getSnapshotFiles/getSnapshotStackFiles decrypt on read,
+        // so restore and cloud-archive paths see plaintext and stay portable.
+        const crypto = CryptoService.getInstance();
         const insert = this.db.prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)'
         );
         const insertMany = this.db.transaction((rows: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }>) => {
             for (const row of rows) {
-                insert.run(snapshotId, row.nodeId, row.nodeName, row.stackName, row.filename, row.content);
+                insert.run(snapshotId, row.nodeId, row.nodeName, row.stackName, row.filename, crypto.encrypt(row.content));
             }
         });
         insertMany(files);
@@ -2912,15 +2922,21 @@ export class DatabaseService {
     }
 
     public getSnapshotFiles(snapshotId: number): FleetSnapshotFile[] {
-        return this.db.prepare(
+        const crypto = CryptoService.getInstance();
+        const rows = this.db.prepare(
             'SELECT * FROM fleet_snapshot_files WHERE snapshot_id = ? ORDER BY node_name, stack_name'
         ).all(snapshotId) as FleetSnapshotFile[];
+        // decrypt() returns non-ciphertext input unchanged, so rows written
+        // before content-at-rest encryption still read back as plaintext.
+        return rows.map(row => ({ ...row, content: crypto.decrypt(row.content) }));
     }
 
     public getSnapshotStackFiles(snapshotId: number, nodeId: number, stackName: string): FleetSnapshotFile[] {
-        return this.db.prepare(
+        const crypto = CryptoService.getInstance();
+        const rows = this.db.prepare(
             'SELECT * FROM fleet_snapshot_files WHERE snapshot_id = ? AND node_id = ? AND stack_name = ?'
         ).all(snapshotId, nodeId, stackName) as FleetSnapshotFile[];
+        return rows.map(row => ({ ...row, content: crypto.decrypt(row.content) }));
     }
 
     public deleteSnapshot(id: number): void {

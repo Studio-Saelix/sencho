@@ -192,8 +192,12 @@ describe('CloudBackupService — uploadSnapshot', () => {
         expect(parsed.instance_id).toBe('test-instance-id');
         expect(parsed.archive_version).toBe(1);
 
-        expect(entries.find(e => e.name === 'nodes/1_gateway/web/compose.yaml')).toBeDefined();
-        expect(entries.find(e => e.name === 'nodes/1_gateway/web/.env')).toBeDefined();
+        // Content is encrypted at rest but the archive must carry plaintext so a
+        // downloaded snapshot restores on any instance (portability contract).
+        const composeEntry = entries.find(e => e.name === 'nodes/1_gateway/web/compose.yaml');
+        expect(composeEntry?.content).toBe('services: {}\n');
+        const envEntry = entries.find(e => e.name === 'nodes/1_gateway/web/.env');
+        expect(envEntry?.content).toBe('KEY=value\n');
 
         expect(CloudBackupService.getInstance().getUploadStatus(snapshotId).status).toBe('success');
     });

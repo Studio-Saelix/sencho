@@ -16,7 +16,26 @@ export interface SnapshotNodeData {
     stackName: string;
     files: Array<{ filename: string; content: string }>;
   }>;
+  /**
+   * Per-stack capture problems that did not fail the whole node: a stack whose
+   * compose file could not be read (so it is absent from `stacks`), a `.env`
+   * dropped on a read error, or a file skipped for exceeding the size cap.
+   * Surfaced on the snapshot so an operator never mistakes a partial capture
+   * for a complete backup.
+   */
+  warnings: Array<{ stackName: string; reason: string }>;
 }
+
+/**
+ * Per-file capture ceiling. compose.yaml and .env are normally a few KB; this
+ * generous 1 MB bound stops a pathological or hostile file from bloating the
+ * snapshot DB and the GET-detail payload. An oversize compose.yaml skips the
+ * whole stack; an oversize .env drops only that file and keeps the stack. Both
+ * are recorded as a warning, never silently dropped.
+ */
+export const MAX_SNAPSHOT_FILE_BYTES = 1_000_000;
+/** The cap rendered in MB for operator-facing warning text. */
+const MAX_SNAPSHOT_FILE_MB = MAX_SNAPSHOT_FILE_BYTES / 1_000_000;
 
 /**
  * Minimal node shape accepted by capture functions.
@@ -31,44 +50,66 @@ export interface CaptureNode {
 
 /**
  * Read compose.yaml and .env files for every stack on a local node.
- * Stacks whose compose file cannot be read are silently skipped.
+ * A stack whose compose file cannot be read is omitted from `stacks` and
+ * recorded in `warnings`, so a partial capture is never mistaken for complete.
  */
 export async function captureLocalNodeFiles(node: CaptureNode): Promise<SnapshotNodeData> {
   const start = Date.now();
   const fsService = FileSystemService.getInstance(node.id);
   const stackNames = await fsService.getStacks();
   const stacks: SnapshotNodeData['stacks'] = [];
+  const warnings: SnapshotNodeData['warnings'] = [];
 
   for (const stackName of stackNames) {
     const files: Array<{ filename: string; content: string }> = [];
+
+    let composeContent: string;
     try {
-      const composeContent = await fsService.getStackContent(stackName);
-      files.push({ filename: 'compose.yaml', content: composeContent });
+      composeContent = await fsService.getStackContent(stackName);
     } catch (e) {
-      console.warn(`[Fleet Snapshot] Could not read compose file for stack "${stackName}", skipping:`, (e as Error).message);
+      const reason = `compose.yaml could not be read: ${(e as Error).message}`;
+      console.warn(`[Fleet Snapshot] Skipping stack "${stackName}" on "${node.name}": ${reason}`);
+      warnings.push({ stackName, reason });
       continue;
     }
+    if (Buffer.byteLength(composeContent, 'utf-8') > MAX_SNAPSHOT_FILE_BYTES) {
+      const reason = `compose.yaml exceeds the ${MAX_SNAPSHOT_FILE_MB} MB capture limit; stack skipped`;
+      console.warn(`[Fleet Snapshot] ${reason} ("${stackName}" on "${node.name}")`);
+      warnings.push({ stackName, reason });
+      continue;
+    }
+    files.push({ filename: 'compose.yaml', content: composeContent });
+
     try {
       const envContent = await fsService.getEnvContent(stackName);
-      files.push({ filename: '.env', content: envContent });
-    } catch {
-      // No .env file - that's fine
+      if (Buffer.byteLength(envContent, 'utf-8') > MAX_SNAPSHOT_FILE_BYTES) {
+        warnings.push({ stackName, reason: `.env exceeds the ${MAX_SNAPSHOT_FILE_MB} MB capture limit; captured without it` });
+      } else {
+        files.push({ filename: '.env', content: envContent });
+      }
+    } catch (e) {
+      // A missing .env is normal; surface only genuine read errors so a stack
+      // is not silently restored without its secrets.
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+        warnings.push({ stackName, reason: `.env could not be read: ${(e as Error).message}; captured without it` });
+      }
     }
     stacks.push({ stackName, files });
   }
 
   if (isDebugEnabled()) {
     const fileCount = stacks.reduce((sum, s) => sum + s.files.length, 0);
-    console.debug(`[Fleet:debug] Local capture "${node.name}": ${stacks.length} stack(s), ${fileCount} file(s) in ${Date.now() - start}ms`);
+    console.debug(`[Fleet:debug] Local capture "${node.name}": ${stacks.length} stack(s), ${fileCount} file(s), ${warnings.length} warning(s) in ${Date.now() - start}ms`);
   }
 
-  return { nodeId: node.id, nodeName: node.name, stacks };
+  return { nodeId: node.id, nodeName: node.name, stacks, warnings };
 }
 
 /**
  * Fetch compose.yaml and .env files for every stack on a remote node
- * via the Distributed API proxy. Stacks whose compose file cannot be
- * fetched are silently skipped.
+ * via the Distributed API proxy. A stack whose compose file cannot be
+ * fetched is omitted from `stacks` and recorded in `warnings`, so a partial
+ * capture is never mistaken for complete.
  */
 export async function captureRemoteNodeFiles(node: CaptureNode): Promise<SnapshotNodeData> {
   const target = NodeRegistry.getInstance().getProxyTarget(node.id);
@@ -89,22 +130,36 @@ export async function captureRemoteNodeFiles(node: CaptureNode): Promise<Snapsho
   const stackNames = await stacksRes.json() as string[];
 
   const stacks: SnapshotNodeData['stacks'] = [];
+  const warnings: SnapshotNodeData['warnings'] = [];
 
   for (const stackName of stackNames) {
     const files: Array<{ filename: string; content: string }> = [];
+
+    let composeContent: string;
     try {
       const composeRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}`, {
         headers,
         signal: AbortSignal.timeout(15000),
       });
-      if (composeRes.ok) {
-        const content = await composeRes.text();
-        files.push({ filename: 'compose.yaml', content });
+      if (!composeRes.ok) {
+        const reason = `compose.yaml fetch failed (HTTP ${composeRes.status}); stack skipped`;
+        console.warn(`[Fleet Snapshot] ${reason} ("${stackName}" on "${node.name}")`);
+        warnings.push({ stackName, reason });
+        continue;
       }
+      composeContent = await composeRes.text();
     } catch (e) {
-      console.warn(`[Fleet Snapshot] Failed to fetch remote compose for stack "${stackName}":`, (e as Error).message);
+      const reason = `compose.yaml fetch error: ${(e as Error).message}; stack skipped`;
+      console.warn(`[Fleet Snapshot] ${reason} ("${stackName}" on "${node.name}")`);
+      warnings.push({ stackName, reason });
       continue;
     }
+    if (Buffer.byteLength(composeContent, 'utf-8') > MAX_SNAPSHOT_FILE_BYTES) {
+      warnings.push({ stackName, reason: `compose.yaml exceeds the ${MAX_SNAPSHOT_FILE_MB} MB capture limit; stack skipped` });
+      continue;
+    }
+    files.push({ filename: 'compose.yaml', content: composeContent });
+
     try {
       const envRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`, {
         headers,
@@ -112,20 +167,26 @@ export async function captureRemoteNodeFiles(node: CaptureNode): Promise<Snapsho
       });
       if (envRes.ok) {
         const content = await envRes.text();
-        files.push({ filename: '.env', content });
+        if (Buffer.byteLength(content, 'utf-8') > MAX_SNAPSHOT_FILE_BYTES) {
+          warnings.push({ stackName, reason: `.env exceeds the ${MAX_SNAPSHOT_FILE_MB} MB capture limit; captured without it` });
+        } else {
+          files.push({ filename: '.env', content });
+        }
+      } else if (envRes.status !== 404) {
+        // The remote returns 200 with an empty body when a stack has no .env,
+        // so any other non-ok status is a genuine read failure worth surfacing.
+        warnings.push({ stackName, reason: `.env fetch failed (HTTP ${envRes.status}); captured without it` });
       }
-    } catch {
-      // No .env - skip
+    } catch (e) {
+      warnings.push({ stackName, reason: `.env fetch error: ${(e as Error).message}; captured without it` });
     }
-    if (files.length > 0) {
-      stacks.push({ stackName, files });
-    }
+    stacks.push({ stackName, files });
   }
 
   if (isDebugEnabled()) {
     const fileCount = stacks.reduce((sum, s) => sum + s.files.length, 0);
-    console.debug(`[Fleet:debug] Remote capture "${node.name}": ${stacks.length} stack(s), ${fileCount} file(s) in ${Date.now() - start}ms`);
+    console.debug(`[Fleet:debug] Remote capture "${node.name}": ${stacks.length} stack(s), ${fileCount} file(s), ${warnings.length} warning(s) in ${Date.now() - start}ms`);
   }
 
-  return { nodeId: node.id, nodeName: node.name, stacks };
+  return { nodeId: node.id, nodeName: node.name, stacks, warnings };
 }
