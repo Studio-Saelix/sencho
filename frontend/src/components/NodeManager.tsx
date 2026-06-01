@@ -37,7 +37,7 @@ export function NodeManager() {
   const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
   const canEditLabels = isPaid && isAdmin;
-  const { nodes } = useNodes();
+  const { nodes, refreshNodeMeta } = useNodes();
   useMastheadStats([
     { label: 'NODES', value: `${nodes.length}` },
     {
@@ -128,6 +128,10 @@ export function NodeManager() {
       if (result.success) {
         toast.success(`Connected to "${node.name}" successfully`);
         setTestResult({ nodeId: node.id, info: result.info });
+        // The test dropped the server-side metadata cache; force a client refresh
+        // so the version pill and capability gates reflect the node's current state
+        // now, instead of waiting out the dashboard's metadata TTL.
+        void refreshNodeMeta(node.id, true);
       } else {
         toast.error(`Failed to connect: ${result.error}`);
       }

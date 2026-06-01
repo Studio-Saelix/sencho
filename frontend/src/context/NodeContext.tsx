@@ -34,7 +34,7 @@ interface NodeContextType {
   activeNodeMeta: NodeMeta | null;
   hasCapability: (cap: Capability) => boolean;
   nodeMeta: Map<number, NodeMeta>;
-  refreshNodeMeta: (nodeId: number) => Promise<void>;
+  refreshNodeMeta: (nodeId: number, force?: boolean) => Promise<void>;
 }
 
 const META_CACHE_TTL = 5 * 60 * 1000;
@@ -54,34 +54,41 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
   const nodeMetaRef = useRef<Map<number, NodeMeta>>(nodeMeta);
   nodeMetaRef.current = nodeMeta;
 
-  const fetchNodeMeta = useCallback(async (nodeId: number) => {
+  const fetchNodeMeta = useCallback(async (nodeId: number, force = false) => {
     const cached = nodeMetaRef.current.get(nodeId);
-    if (cached) {
-      // Use shorter TTL for failed fetches so we retry quickly after transient errors
+    if (cached && !force) {
+      // Use shorter TTL for failed fetches so we retry quickly after transient errors.
+      // `force` bypasses the TTL after an explicit user action (e.g. a connection test)
+      // that just dropped the server-side cache, so the dashboard reflects the new
+      // version and capabilities without waiting out the TTL.
       const ttl = cached.capabilities.length > 0 ? META_CACHE_TTL : META_FAILURE_TTL;
       if (Date.now() - cached.fetchedAt < ttl) return;
     }
+
+    const setMeta = (meta: NodeMeta) =>
+      setNodeMeta(prev => {
+        const next = new Map(prev);
+        next.set(nodeId, meta);
+        return next;
+      });
 
     try {
       const res = await apiFetch(`/nodes/${nodeId}/meta`, { localOnly: true });
       if (res.ok) {
         const data = await res.json();
-        setNodeMeta(prev => {
-          const next = new Map(prev);
-          next.set(nodeId, {
-            version: data.version ?? null,
-            capabilities: Array.isArray(data.capabilities) ? data.capabilities : [],
-            fetchedAt: Date.now(),
-          });
-          return next;
+        setMeta({
+          version: data.version ?? null,
+          capabilities: Array.isArray(data.capabilities) ? data.capabilities : [],
+          fetchedAt: Date.now(),
         });
+      } else {
+        // A non-OK response (proxy error, auth, 5xx) is a resolved failure: record an
+        // offline meta so gates fail closed to the lock card and the short failure TTL
+        // throttles retries, instead of leaving hasCapability optimistically open.
+        setMeta({ version: null, capabilities: [], fetchedAt: Date.now() });
       }
     } catch {
-      setNodeMeta(prev => {
-        const next = new Map(prev);
-        next.set(nodeId, { version: null, capabilities: [], fetchedAt: Date.now() });
-        return next;
-      });
+      setMeta({ version: null, capabilities: [], fetchedAt: Date.now() });
     }
   }, []);
 
