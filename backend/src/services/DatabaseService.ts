@@ -1248,6 +1248,7 @@ export class DatabaseService {
         stmt.run('scan_history_per_image_limit', '50');
         stmt.run('trivy_auto_update', '0');
         stmt.run('trivy_last_notified_version', '');
+        stmt.run('deploy_block_honor_suppressions', '0');
         stmt.run('mesh_auto_recreate', '0');
 
         // Seed the default local node if none exists
@@ -3776,6 +3777,17 @@ export class DatabaseService {
             )
             .all(...(params as never[]), limit, offset) as VulnerabilityDetail[];
         return { items, total };
+    }
+
+    /**
+     * All findings for a scan, unpaginated. Used by the pre-deploy policy gate
+     * to re-derive severity from suppression-filtered findings, where every row
+     * must be considered rather than a single display page.
+     */
+    public getAllVulnerabilityDetails(scanId: number): VulnerabilityDetail[] {
+        return this.db
+            .prepare('SELECT * FROM vulnerability_details WHERE scan_id = ?')
+            .all(scanId) as VulnerabilityDetail[];
     }
 
     public insertSecretFindings(

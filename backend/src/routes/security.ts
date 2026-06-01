@@ -124,6 +124,7 @@ securityRouter.get('/trivy-status', authMiddleware, (_req: Request, res: Respons
     version: svc.getVersion(),
     source: svc.getSource(),
     autoUpdate: settings.trivy_auto_update === '1',
+    honorSuppressionsOnDeploy: settings.deploy_block_honor_suppressions === '1',
     busy: installer.isBusy(),
   });
 });
@@ -212,6 +213,30 @@ securityRouter.put('/trivy-auto-update', authMiddleware, (req: Request, res: Res
   } catch (err) {
     const msg = getErrorMessage(err, 'Failed to update setting');
     console.error('[Security] Trivy auto-update toggle failed:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// When enabled, the pre-deploy block policy re-derives image severity from
+// suppression-filtered findings, so an accepted CVE no longer blocks a deploy.
+// Per-instance setting (not fleet-replicated): the gate runs on the node that
+// deploys, against that node's own replicated suppression copy. Default off.
+securityRouter.put('/deploy-block-honor-suppressions', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  if (!requirePaid(req, res)) return;
+  // Require an explicit boolean so a stringy `"1"` cannot silently disable the
+  // gate (this toggle weakens a deploy block, so intent must be unambiguous).
+  if (typeof req.body?.enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled must be a boolean' });
+    return;
+  }
+  const enabled = req.body.enabled;
+  try {
+    DatabaseService.getInstance().updateGlobalSetting('deploy_block_honor_suppressions', enabled ? '1' : '0');
+    res.json({ honorSuppressionsOnDeploy: enabled });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to update setting');
+    console.error('[Security] Deploy-block honor-suppressions toggle failed:', msg);
     res.status(500).json({ error: msg });
   }
 });

@@ -74,7 +74,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
   const { status: trivy, updateCheck, refresh: refreshTrivy, refreshUpdateCheck } = useTrivyStatus();
-  const [trivyBusy, setTrivyBusy] = useState<null | 'install' | 'update' | 'uninstall' | 'auto-update'>(null);
+  const [trivyBusy, setTrivyBusy] = useState<null | 'install' | 'update' | 'uninstall' | 'auto-update' | 'honor-suppressions'>(null);
   const [uninstallConfirm, setUninstallConfirm] = useState(false);
   const [fleetRole, setFleetRole] = useState<FleetRole>('control');
   const [fleetRoleProbeFailed, setFleetRoleProbeFailed] = useState(false);
@@ -117,6 +117,25 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
     setTrivyBusy('auto-update');
     try {
       const res = await apiFetch('/security/trivy-auto-update', {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to update setting');
+      }
+      await refreshTrivy();
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Failed to update setting');
+    } finally {
+      setTrivyBusy(null);
+    }
+  };
+
+  const handleHonorSuppressionsToggle = async (enabled: boolean) => {
+    setTrivyBusy('honor-suppressions');
+    try {
+      const res = await apiFetch('/security/deploy-block-honor-suppressions', {
         method: 'PUT',
         body: JSON.stringify({ enabled }),
       });
@@ -500,6 +519,22 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
             </div>
           </div>
         ))}
+
+      {isPaid && isAdmin && !isRemote && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-4 py-3">
+          <div className="min-w-0">
+            <Label className="text-sm">Honor suppressions in deploy blocks</Label>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              When on, a suppressed CVE no longer counts toward a block-on-deploy policy, so an accepted finding will not stop a deploy on this instance. Off by default: policies block on the raw scan result.
+            </p>
+          </div>
+          <TogglePill
+            checked={trivy.honorSuppressionsOnDeploy}
+            onChange={handleHonorSuppressionsToggle}
+            disabled={trivyBusy !== null}
+          />
+        </div>
+      )}
 
       {!isRemote && <SuppressionsPanel isReplica={isReplica} />}
 
