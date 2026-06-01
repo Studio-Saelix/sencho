@@ -447,7 +447,7 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
   });
 
   it('allows the deploy and audits when a suppression covers the sole blocking CVE', async () => {
-    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 7, highest_severity: 'CRITICAL', critical_count: 1 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 7, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
     dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-0001', severity: 'CRITICAL' })]);
     dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-0001' })]);
 
@@ -465,7 +465,7 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
   });
 
   it('still blocks when only some of the blocking findings are suppressed, with recomputed counts', async () => {
-    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 8, highest_severity: 'CRITICAL', critical_count: 1, high_count: 1 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 8, highest_severity: 'CRITICAL', critical_count: 1, high_count: 1, total_vulnerabilities: 2 }));
     dbStub.getAllVulnerabilityDetails.mockReturnValue([
       mkFinding({ vulnerability_id: 'CVE-2026-0001', pkg_name: 'openssl', severity: 'CRITICAL' }),
       mkFinding({ vulnerability_id: 'CVE-2026-0002', pkg_name: 'zlib', severity: 'HIGH' }),
@@ -482,7 +482,7 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
 
   it('does not audit when the raw scan was already below the threshold', async () => {
     dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ max_severity: 'HIGH' }));
-    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 9, highest_severity: 'LOW' }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 9, highest_severity: 'LOW', total_vulnerabilities: 1 }));
     dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-0003', severity: 'LOW' })]);
     dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-0003' })]);
 
@@ -494,7 +494,7 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
   });
 
   it('still blocks when the matching suppression has expired', async () => {
-    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 10, highest_severity: 'CRITICAL', critical_count: 1 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 10, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
     dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-0001', severity: 'CRITICAL' })]);
     dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-0001', expires_at: Date.now() - 1000 })]);
 
@@ -506,7 +506,7 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
   });
 
   it('honors an image-pattern-scoped suppression that matches the deployed image', async () => {
-    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 11, highest_severity: 'CRITICAL', critical_count: 1 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 11, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
     dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-0001', severity: 'CRITICAL' })]);
     dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-0001', image_pattern: '*nginx*' })]);
 
@@ -519,8 +519,8 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
 
   it('aggregates a suppression-driven pass across multiple images and de-dupes CVEs in the audit', async () => {
     trivyStub.scanImagePreflight
-      .mockResolvedValueOnce(mkScan({ id: 20, highest_severity: 'CRITICAL', critical_count: 1 }))
-      .mockResolvedValueOnce(mkScan({ id: 21, highest_severity: 'CRITICAL', critical_count: 1 }));
+      .mockResolvedValueOnce(mkScan({ id: 20, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }))
+      .mockResolvedValueOnce(mkScan({ id: 21, highest_severity: 'CRITICAL', critical_count: 2, total_vulnerabilities: 2 }));
     dbStub.getAllVulnerabilityDetails
       .mockReturnValueOnce([mkFinding({ vulnerability_id: 'CVE-2026-0001', severity: 'CRITICAL' })])
       .mockReturnValueOnce([
@@ -547,8 +547,8 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
 
   it('does not audit a suppression pass when another image still violates the policy', async () => {
     trivyStub.scanImagePreflight
-      .mockResolvedValueOnce(mkScan({ id: 22, highest_severity: 'CRITICAL', critical_count: 1 }))
-      .mockResolvedValueOnce(mkScan({ id: 23, highest_severity: 'CRITICAL', critical_count: 1 }));
+      .mockResolvedValueOnce(mkScan({ id: 22, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }))
+      .mockResolvedValueOnce(mkScan({ id: 23, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
     dbStub.getAllVulnerabilityDetails
       .mockReturnValueOnce([mkFinding({ vulnerability_id: 'CVE-2026-0001', severity: 'CRITICAL' })])
       .mockReturnValueOnce([mkFinding({ vulnerability_id: 'CVE-2026-0099', severity: 'CRITICAL' })]);
@@ -573,7 +573,7 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
   });
 
   it('still blocks when a suppression is scoped to a non-matching image pattern', async () => {
-    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 24, highest_severity: 'CRITICAL', critical_count: 1 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 24, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
     dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-0001', severity: 'CRITICAL' })]);
     dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-0001', image_pattern: 'registry.internal/*' })]);
 
@@ -582,6 +582,35 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
     expect(result.ok).toBe(false);
     expect(result.violations[0]).toMatchObject({ severity: 'CRITICAL', scanId: 24 });
     expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('gates on raw severity when stored detail rows are incomplete (cache-truncated scan)', async () => {
+    // The scan aggregate reports 1500 findings but only one detail row is
+    // present (a cache hit copies a bounded slice). The lone loaded finding is
+    // suppressed, but the recompute must not trust the truncated set: a
+    // blocking CVE could live in the rows that were not copied, so gate on raw.
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 30, highest_severity: 'CRITICAL', critical_count: 5, total_vulnerabilities: 1500 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-0001', severity: 'CRITICAL' })]);
+    dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-0001' })]);
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({ severity: 'CRITICAL', criticalCount: 5, scanId: 30 });
+    expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('still allows the deploy when the suppression-pass audit write fails', async () => {
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 31, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-0001', severity: 'CRITICAL' })]);
+    dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-0001' })]);
+    dbStub.insertAuditLog.mockImplementation(() => { throw new Error('audit buffer full'); });
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(true);
+    expect(result.violations).toEqual([]);
+    expect(dbStub.insertAuditLog).toHaveBeenCalledTimes(1);
   });
 
   it('ignores suppressions entirely when the toggle is off (identical to raw blocking)', async () => {

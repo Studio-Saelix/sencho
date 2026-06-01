@@ -76,7 +76,7 @@ export function _resetTrivyMissingNotificationStateForTests(): void {
     trivyMissingNotifiedAt.clear();
 }
 
-type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count'>;
+type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count' | 'total_vulnerabilities'>;
 
 interface ImageSeverityEvaluation {
     /** Highest non-suppressed severity; UNKNOWN means no severity remains. */
@@ -125,11 +125,18 @@ function evaluateImageSeverity(
         console.error('[Policy] Suppression re-derivation failed for %s; gating on raw scan severity:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(err, 'db read failed')));
         return raw;
     }
-    if (findings.length === 0) {
-        // Stored aggregate says there are findings but the detail table is empty:
-        // a data mismatch worth surfacing. Raw severity still gates.
-        if (scan.critical_count + scan.high_count > 0) {
-            console.warn('[Policy] Scan %d reports findings but has no detail rows; gating on raw scan severity', scan.id);
+    // The stored detail rows must reproduce the scan's full finding set before a
+    // recompute can be trusted. A cache-hit preflight scan keeps the complete
+    // aggregate counts but copies only the first N detail rows, so recomputing
+    // from a truncated set could drop an unsuppressed blocking CVE below the
+    // threshold. When the counts disagree (including an empty detail table for a
+    // non-empty scan), gate on the raw scan severity, which never drops severity.
+    if (findings.length !== scan.total_vulnerabilities) {
+        if (scan.total_vulnerabilities > 0) {
+            console.warn(
+                '[Policy] Scan %d detail rows (%d) do not match its total (%d); gating on raw scan severity',
+                scan.id, findings.length, scan.total_vulnerabilities,
+            );
         }
         return raw;
     }
