@@ -4,6 +4,7 @@ import { CveSuppression, DatabaseService, MisconfigAcknowledgement, Node, ScanPo
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { isDebugEnabled } from '../utils/debug';
+import { sanitizeForLog } from '../utils/safeLog';
 import {
     FleetResource,
     MAX_SYNC_ROWS,
@@ -371,7 +372,7 @@ export class FleetSyncService {
         // the prior role keeps this off the steady-state per-push path.
         if (promotedToReplica) {
             console.info(
-                `[FleetSync] Instance is now a replica, anchored to control ${controlIdentity || 'legacy control'}.`,
+                `[FleetSync] Instance is now a replica, anchored to control ${sanitizeForLog(controlIdentity || 'legacy control')}.`,
             );
         }
     }
