@@ -2752,6 +2752,33 @@ export class DatabaseService {
         return result.changes;
     }
 
+    /**
+     * Atomically consume a single backup-code hash. Re-reads the stored set,
+     * removes `matchedHash` if still present, and persists the shrunk set in
+     * one synchronous transaction. Returns true when the hash was present (and
+     * is now consumed), false when it was already gone (e.g. a concurrent
+     * /login/mfa request carrying the same code consumed it first). This is the
+     * single-use enforcement point: callers verify the code, then gate success
+     * on this returning true, so two concurrent verifications of the same code
+     * cannot both succeed.
+     */
+    public consumeBackupCodeHash(userId: number, matchedHash: string): boolean {
+        const consume = this.db.transaction((): boolean => {
+            const row = this.db
+                .prepare('SELECT backup_codes_json FROM user_mfa WHERE user_id = ?')
+                .get(userId) as { backup_codes_json: string | null } | undefined;
+            const hashes: string[] = row?.backup_codes_json ? JSON.parse(row.backup_codes_json) : [];
+            const idx = hashes.indexOf(matchedHash);
+            if (idx === -1) return false;
+            hashes.splice(idx, 1);
+            this.db
+                .prepare('UPDATE user_mfa SET backup_codes_json = ?, updated_at = ? WHERE user_id = ?')
+                .run(JSON.stringify(hashes), Date.now(), userId);
+            return true;
+        });
+        return consume();
+    }
+
     // --- Role Assignments ---
 
     public getRoleAssignments(userId: number, resourceType: ResourceType, resourceId: string): RoleAssignment[] {

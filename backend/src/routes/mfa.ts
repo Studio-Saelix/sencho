@@ -129,8 +129,15 @@ mfaRouter.post('/login/mfa', authRateLimiter, async (req: Request, res: Response
       if (isDebugEnabled()) console.log('[MFA:diag] login/mfa: branch=backup user=', user.username, 'matched=', result.matched, 'bcryptMs=', bcryptMs, 'hashesChecked=', hashes.length);
       if (bcryptMs > 500) console.warn('[MFA] Slow backup-code verify for user=', user.username, 'durationMs=', bcryptMs);
       if (result.matched) {
-        db.upsertUserMfa(decoded.user_id, { backup_codes_json: JSON.stringify(result.remainingHashes) });
-        verified = true;
+        // Consume the matched hash atomically. A concurrent request carrying
+        // the same code that already consumed it makes this return false, so
+        // exactly one login wins: single-use is enforced at the write, not from
+        // the in-memory snapshot read above.
+        if (db.consumeBackupCodeHash(decoded.user_id, result.matchedHash)) {
+          verified = true;
+        } else if (isDebugEnabled()) {
+          console.log('[MFA:diag] login/mfa: backup code already consumed (concurrent use) user=', user.username);
+        }
       }
     } else {
       const trimmed = rawCode.trim().replace(/\s+/g, '');
