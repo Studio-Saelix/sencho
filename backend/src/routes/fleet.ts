@@ -33,7 +33,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
-import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { containerActionForStack } from './stacks';
 import { activeBulkActions } from './labels';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
@@ -702,6 +702,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
     const results = await Promise.allSettled(
       nodes.map(async (node) => {
         const tracker = updateTracker.get(node.id);
+        const statusBeforeResolve = tracker?.status;
 
         let version: string | null = null;
         let remoteStartedAt: number | null = null;
@@ -799,6 +800,17 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         }
 
         const currentTracker = updateTracker.get(node.id);
+        // A node that just finished updating runs new code with a possibly
+        // different version and capability set. Drop its cached /api/meta on
+        // the completion transition so the dashboard reflects the new state
+        // immediately instead of waiting out the remote-meta TTL.
+        if (
+          node.type === 'remote' &&
+          statusBeforeResolve !== 'completed' &&
+          currentTracker?.status === 'completed'
+        ) {
+          invalidateRemoteMetaCache(node.id);
+        }
         return {
           nodeId: node.id,
           name: node.name,

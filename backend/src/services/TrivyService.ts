@@ -409,13 +409,20 @@ class TrivyService {
                 this.detectionTimestamp - started
             }`,
         );
-        if (isAvailable && !wasAvailable) {
+        // Sync the capability unconditionally so a node that boots without Trivy
+        // (the common case) stops advertising vulnerability-scanning. A transition-only
+        // toggle missed this: source starts at 'none', so wasAvailable is false on the
+        // first detection and the disable branch never fired. Set add/delete is idempotent.
+        if (isAvailable) {
             enableCapability('vulnerability-scanning');
+        } else {
+            disableCapability('vulnerability-scanning');
+        }
+        if (isAvailable && !wasAvailable) {
             console.log(
                 `[Trivy] Binary detected (source=${this.source}); vulnerability scanning enabled (version ${this.version})`,
             );
         } else if (!isAvailable && wasAvailable) {
-            disableCapability('vulnerability-scanning');
             console.warn('[Trivy] Binary no longer detected; vulnerability scanning disabled');
         }
         return { available: isAvailable, version: this.version, source: this.source };

@@ -2622,6 +2622,38 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     }
 
+    /**
+     * Atomically apply `updates` unless doing so would demote the last remaining
+     * admin. Returns false (nothing written) when the change would leave zero
+     * admins, true otherwise. The current-role read, the admin count, and the
+     * write run in a single transaction so a concurrent demote or delete of the
+     * other admin cannot race the count to zero.
+     */
+    public updateUserIfNotLastAdmin(id: number, updates: Partial<{ username: string; password_hash: string; role: string; email: string }>): boolean {
+        return this.transaction(() => {
+            if (updates.role !== undefined && updates.role !== 'admin') {
+                const current = this.db.prepare('SELECT role FROM users WHERE id = ?').get(id) as { role: string } | undefined;
+                if (current?.role === 'admin' && this.getAdminCount() <= 1) return false;
+            }
+            this.updateUser(id, updates);
+            return true;
+        });
+    }
+
+    /**
+     * Atomically delete the user unless it is the last remaining admin. Returns
+     * false (nothing deleted) in that case, true otherwise. Same single-
+     * transaction guard as {@link updateUserIfNotLastAdmin}.
+     */
+    public deleteUserIfNotLastAdmin(id: number): boolean {
+        return this.transaction(() => {
+            const current = this.db.prepare('SELECT role FROM users WHERE id = ?').get(id) as { role: string } | undefined;
+            if (current?.role === 'admin' && this.getAdminCount() <= 1) return false;
+            this.deleteUser(id);
+            return true;
+        });
+    }
+
     public getUserCount(): number {
         return (this.db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number })?.count || 0;
     }
@@ -2750,6 +2782,33 @@ export class DatabaseService {
     public purgeOldMfaCodes(olderThanMs: number): number {
         const result = this.db.prepare('DELETE FROM mfa_used_tokens WHERE used_at < ?').run(olderThanMs);
         return result.changes;
+    }
+
+    /**
+     * Atomically consume a single backup-code hash. Re-reads the stored set,
+     * removes `matchedHash` if still present, and persists the shrunk set in
+     * one synchronous transaction. Returns true when the hash was present (and
+     * is now consumed), false when it was already gone (e.g. a concurrent
+     * /login/mfa request carrying the same code consumed it first). This is the
+     * single-use enforcement point: callers verify the code, then gate success
+     * on this returning true, so two concurrent verifications of the same code
+     * cannot both succeed.
+     */
+    public consumeBackupCodeHash(userId: number, matchedHash: string): boolean {
+        const consume = this.db.transaction((): boolean => {
+            const row = this.db
+                .prepare('SELECT backup_codes_json FROM user_mfa WHERE user_id = ?')
+                .get(userId) as { backup_codes_json: string | null } | undefined;
+            const hashes: string[] = row?.backup_codes_json ? JSON.parse(row.backup_codes_json) : [];
+            const idx = hashes.indexOf(matchedHash);
+            if (idx === -1) return false;
+            hashes.splice(idx, 1);
+            this.db
+                .prepare('UPDATE user_mfa SET backup_codes_json = ?, updated_at = ? WHERE user_id = ?')
+                .run(JSON.stringify(hashes), Date.now(), userId);
+            return true;
+        });
+        return consume();
     }
 
     // --- Role Assignments ---
