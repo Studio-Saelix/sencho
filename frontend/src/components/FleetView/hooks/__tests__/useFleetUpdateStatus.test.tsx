@@ -68,6 +68,25 @@ describe('useFleetUpdateStatus', () => {
     warnSpy.mockRestore();
   });
 
+  it('preserves the last-known statuses when a later poll fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // First poll succeeds and seeds two statuses.
+    apiFetchMock.mockResolvedValueOnce(okJson({ nodes: STATUSES }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+    expect(result.current.updateStatuses).toHaveLength(2);
+
+    // A subsequent poll fails; the table must keep the seeded statuses.
+    apiFetchMock.mockRejectedValueOnce(new Error('network down'));
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+
+    expect(result.current.updateStatuses).toHaveLength(2);
+    expect(result.current.updateStatuses[0].name).toBe('Local');
+    expect(warnSpy).toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it('triggerNodeUpdate on a local node opens the confirm dialog instead of POSTing', async () => {
     apiFetchMock.mockResolvedValue(okJson({ nodes: STATUSES }));
     const { result } = renderHook(() => useFleetUpdateStatus());
