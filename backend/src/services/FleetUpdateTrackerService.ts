@@ -13,6 +13,13 @@ export interface UpdateTracker {
 
 export type TerminalStatus = 'completed' | 'failed' | 'timeout';
 
+/** Hard ceiling for an in-flight update before it is declared timed out. */
+export const UPDATE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+export const UPDATE_TIMEOUT_MSG = 'Node did not come back online within 5 minutes.';
+/** How long a resolved `completed` tracker lingers before it is reaped, so the
+ *  badge stays briefly visible after the update lands. */
+export const TERMINAL_TTL_MS = 60 * 1000;
+
 /**
  * In-memory tracker for in-flight fleet node updates. Keyed by node id.
  *
@@ -74,5 +81,32 @@ export class FleetUpdateTrackerService {
   /** Return a copy of `tracker` transitioned to a terminal state, with resolvedAt=now. */
   public resolve(tracker: UpdateTracker, status: TerminalStatus, error?: string): UpdateTracker {
     return { ...tracker, status, resolvedAt: Date.now(), error };
+  }
+
+  /**
+   * Safety-net sweep driven off the monitor tick rather than the frontend poll.
+   * The `/api/fleet/update-status` poll is the primary resolver, but it only
+   * runs while a client is watching; this bounds trackers when nothing polls:
+   * an in-flight tracker past the ceiling is timed out, and a resolved
+   * `completed` badge past its visibility window is reaped (mirroring the
+   * poll's auto-expire). Failed/timeout trackers persist until the operator
+   * dismisses them, matching the poll's behaviour. Returns counts for logging.
+   */
+  public sweepStale(): { timedOut: number; reaped: number } {
+    const now = Date.now();
+    let timedOut = 0;
+    let reaped = 0;
+    for (const [nodeId, tracker] of this.trackers) {
+      if (tracker.status === 'updating') {
+        if (now - tracker.startedAt > UPDATE_TIMEOUT_MS) {
+          this.trackers.set(nodeId, this.resolve(tracker, 'timeout', UPDATE_TIMEOUT_MSG));
+          timedOut++;
+        }
+      } else if (tracker.status === 'completed' && tracker.resolvedAt && now - tracker.resolvedAt > TERMINAL_TTL_MS) {
+        this.trackers.delete(nodeId);
+        reaped++;
+      }
+    }
+    return { timedOut, reaped };
   }
 }

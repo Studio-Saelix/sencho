@@ -1,5 +1,22 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
+import {
+  FleetUpdateTrackerService,
+  UPDATE_TIMEOUT_MS,
+  TERMINAL_TTL_MS,
+  type UpdateTracker,
+} from '../services/FleetUpdateTrackerService';
+
+/** Build a tracker literal with sane defaults so tests set only what matters. */
+function mk(over: Partial<UpdateTracker>): UpdateTracker {
+  return {
+    status: 'updating',
+    startedAt: Date.now(),
+    previousVersion: null,
+    previousProcessStart: null,
+    wasOffline: false,
+    ...over,
+  };
+}
 
 // The service is a process-local singleton. Each test clears any entries left
 // by a prior test so assertions on size() are deterministic.
@@ -91,5 +108,48 @@ describe('FleetUpdateTrackerService', () => {
     svc.set(5, completed);
     expect(svc.get(5)?.status).toBe('completed');
     expect(svc.get(5)?.resolvedAt).toBeTypeOf('number');
+  });
+
+  describe('sweepStale()', () => {
+    it('times out an updating tracker past the ceiling and leaves a fresh one alone', () => {
+      svc.set(1, mk({ status: 'updating', startedAt: Date.now() - (UPDATE_TIMEOUT_MS + 1_000) }));
+      svc.set(2, mk({ status: 'updating', startedAt: Date.now() }));
+
+      const result = svc.sweepStale();
+
+      expect(result.timedOut).toBe(1);
+      expect(svc.get(1)?.status).toBe('timeout');
+      expect(svc.get(2)?.status).toBe('updating');
+    });
+
+    it('reaps a completed tracker past its TTL but keeps a recent one', () => {
+      svc.set(1, mk({ status: 'completed', resolvedAt: Date.now() - (TERMINAL_TTL_MS + 1_000) }));
+      svc.set(2, mk({ status: 'completed', resolvedAt: Date.now() }));
+
+      const result = svc.sweepStale();
+
+      expect(result.reaped).toBe(1);
+      expect(svc.get(1)).toBeUndefined();
+      expect(svc.get(2)?.status).toBe('completed');
+    });
+
+    it('never sweeps failed or timeout trackers (the operator must dismiss them)', () => {
+      const old = Date.now() - (TERMINAL_TTL_MS + 60_000);
+      svc.set(1, mk({ status: 'failed', resolvedAt: old }));
+      svc.set(2, mk({ status: 'timeout', resolvedAt: old }));
+
+      const result = svc.sweepStale();
+
+      expect(result).toEqual({ timedOut: 0, reaped: 0 });
+      expect(svc.get(1)?.status).toBe('failed');
+      expect(svc.get(2)?.status).toBe('timeout');
+    });
+
+    it('does not reap a completed tracker that has no resolvedAt', () => {
+      svc.set(1, mk({ status: 'completed', resolvedAt: undefined }));
+
+      expect(svc.sweepStale().reaped).toBe(0);
+      expect(svc.get(1)?.status).toBe('completed');
+    });
   });
 });

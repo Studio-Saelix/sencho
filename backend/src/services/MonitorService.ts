@@ -4,6 +4,7 @@ import DockerController from './DockerController';
 import { DatabaseService, Node, StackAlert } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
+import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
 import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
 import { getLatestVersion } from '../utils/version-check';
 import { isDebugEnabled } from '../utils/debug';
@@ -235,6 +236,7 @@ export class MonitorService {
 
             await this.evaluateGlobalSettings(settings);
             await this.evaluateStackAlerts(db);
+            this.sweepStaleUpdateTrackers();
 
             const elapsed = Date.now() - cycleStart;
             if (elapsed > 25_000) {
@@ -247,6 +249,23 @@ export class MonitorService {
             console.error('MonitorService Evaluation Error:', error);
         } finally {
             this.isProcessing = false;
+        }
+    }
+
+    /**
+     * Safety net for the in-memory fleet update trackers. The
+     * /api/fleet/update-status poll is the primary resolver, but it only runs
+     * while a client is watching; this sweep bounds in-flight trackers (to
+     * timeout) and reaps stale completed badges even when nothing is polling.
+     * Cheap, synchronous, in-memory.
+     */
+    private sweepStaleUpdateTrackers(): void {
+        const { timedOut, reaped } = FleetUpdateTrackerService.getInstance().sweepStale();
+        if (timedOut > 0) {
+            console.warn(`[Monitor] Timed out ${timedOut} stale fleet update tracker(s) (no status poll within the update window)`);
+        }
+        if (isDebugEnabled() && reaped > 0) {
+            console.debug(`[Monitor:diag] Reaped ${reaped} resolved fleet update tracker(s)`);
         }
     }
 
