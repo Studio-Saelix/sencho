@@ -1,8 +1,29 @@
 import * as os from 'os';
+import * as path from 'path';
 import * as pty from 'node-pty';
 import { WebSocket } from 'ws';
 import { execSync } from 'child_process';
 import { isDebugEnabled } from '../utils/debug';
+import { isPathWithinBase } from '../utils/validation';
+import { DatabaseService } from './DatabaseService';
+
+/**
+ * Identity recorded against a console session in the audit log. Built by the
+ * upgrade handler once the RBAC and tier gates have passed, so every spawned
+ * host shell leaves a durable open/close trail (not just an ephemeral log).
+ */
+export interface ConsoleAuditContext {
+    readonly username: string;
+    // null marks the local node (matching AuditLogEntry.node_id); the console
+    // path always supplies a concrete id.
+    readonly nodeId: number | null;
+    readonly ipAddress: string;
+}
+
+const CONSOLE_AUDIT_PATH = '/api/system/host-console';
+// xterm grids never approach these bounds; the cap rejects malformed or
+// hostile resize frames before they reach node-pty.
+const MAX_TERMINAL_DIMENSION = 1000;
 
 let cachedShell: string | null = null;
 function getUnixShell(): string {
@@ -47,7 +68,43 @@ export class HostTerminalService {
         );
     }
 
-    static spawnTerminal(ws: WebSocket, targetDirectory: string, username: string) {
+    /**
+     * Resolve the working directory for a console session. With no stack the
+     * session opens at the base directory. With a stack, the resolved path must
+     * be the base itself or sit strictly below it: a bare prefix match would let
+     * a sibling like `<base>-evil` (reached via `../<base>-evil`) escape, so the
+     * canonical path-boundary check is used. Returns null when the stack escapes.
+     */
+    static resolveConsoleDirectory(baseDir: string, stackParam: string | null): string | null {
+        const resolvedBase = path.resolve(baseDir);
+        if (!stackParam) return resolvedBase;
+        const resolved = path.resolve(resolvedBase, stackParam);
+        return isPathWithinBase(resolved, resolvedBase) ? resolved : null;
+    }
+
+    /**
+     * Record a console session lifecycle event in the audit log. Failures here
+     * must never tear down a live shell, so the write is best-effort.
+     */
+    private static recordAudit(audit: ConsoleAuditContext, statusCode: number, summary: string): void {
+        try {
+            DatabaseService.getInstance().insertAuditLog({
+                timestamp: Date.now(),
+                username: audit.username,
+                method: 'WS',
+                path: CONSOLE_AUDIT_PATH,
+                status_code: statusCode,
+                node_id: audit.nodeId,
+                ip_address: audit.ipAddress,
+                summary,
+            });
+        } catch (err) {
+            console.error('[HostConsole] Failed to write session audit log:', err);
+        }
+    }
+
+    static spawnTerminal(ws: WebSocket, targetDirectory: string, audit: ConsoleAuditContext) {
+        const { username } = audit;
         // Enforce concurrent session limit
         if (HostTerminalService.activeSessions.size >= MAX_CONSOLE_SESSIONS) {
             console.warn('[HostConsole] Session rejected: max concurrent sessions reached', {
@@ -92,6 +149,8 @@ export class HostTerminalService {
         const pid = ptyProcess.pid;
         HostTerminalService.activeSessions.set(pid, { username, startedAt });
         console.log('[HostConsole] Session opened', { user: username, directory: targetDirectory, shell, pid });
+        HostTerminalService.recordAudit(audit, 101, 'Opened host console session');
+        if (isDebugEnabled()) console.debug('[HostConsole:diag] Session-open audit recorded', { user: username, node: audit.nodeId, pid });
 
         // Guard against duplicate cleanup when both WS close and PTY exit fire
         let cleaned = false;
@@ -102,6 +161,7 @@ export class HostTerminalService {
             HostTerminalService.activeSessions.delete(pid);
             const durationMs = Date.now() - startedAt;
             console.log(`[HostConsole] Session closed (${source})`, { user: username, pid, durationMs, ...extra });
+            HostTerminalService.recordAudit(audit, 200, `Closed host console session (${durationMs}ms)`);
         };
 
         // Heartbeat: detect dead connections and clean up orphaned PTY processes
@@ -131,8 +191,17 @@ export class HostTerminalService {
                 if (parsed.type === 'input') {
                     ptyProcess.write(parsed.payload);
                 } else if (parsed.type === 'resize') {
-                    ptyProcess.resize(parsed.cols, parsed.rows);
-                    if (isDebugEnabled()) console.debug('[HostConsole:diag] Terminal resized', { cols: parsed.cols, rows: parsed.rows, pid });
+                    const { cols, rows } = parsed;
+                    if (
+                        Number.isInteger(cols) && Number.isInteger(rows) &&
+                        cols > 0 && rows > 0 &&
+                        cols <= MAX_TERMINAL_DIMENSION && rows <= MAX_TERMINAL_DIMENSION
+                    ) {
+                        ptyProcess.resize(cols, rows);
+                        if (isDebugEnabled()) console.debug('[HostConsole:diag] Terminal resized', { cols, rows, pid });
+                    } else if (isDebugEnabled()) {
+                        console.debug('[HostConsole:diag] Ignored invalid resize frame', { cols, rows, pid });
+                    }
                 }
             } catch (e) {
                 console.error('[HostConsole] Failed to parse terminal message:', { pid, error: (e as Error).message });

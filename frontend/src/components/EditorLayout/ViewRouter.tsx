@@ -1,5 +1,6 @@
 import { Suspense, lazy, type ReactNode } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useAuth } from '@/context/AuthContext';
 import { AdmiralGate } from '../AdmiralGate';
 import { CapabilityGate } from '../CapabilityGate';
 import { HubOnlyGate } from '../HubOnlyGate';
@@ -105,6 +106,7 @@ export function ViewRouter({
     onClearNotifications,
     renderEditor,
 }: ViewRouterProps): ReactNode {
+    const { can } = useAuth();
     if (activeView === 'settings') {
         return (
             <SettingsPage
@@ -120,6 +122,10 @@ export function ViewRouter({
         return <ResourcesView />;
     }
     if (activeView === 'host-console') {
+        // Mirror the backend RBAC gate (system:console, admin-only). The nav
+        // item is already admin-gated; this stops a non-admin who reaches the
+        // view another way from mounting a console that the server will 403.
+        if (!can('system:console')) return null;
         return (
             <AdmiralGate>
                 <CapabilityGate capability="host-console" featureName="Host Console">

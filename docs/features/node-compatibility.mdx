@@ -7,7 +7,7 @@ When you manage [multiple nodes](/features/multi-node), each running its own Sen
 
 ## How it works
 
-Every Sencho instance exposes a public `GET /api/meta` endpoint that advertises its version and a list of **capabilities**, one flag per feature it implements. When you switch to a node, your control instance fetches that node's metadata and caches it for 5 minutes on success or 30 seconds on failure, so the version pill and the per-feature gates stay in sync without re-hitting the remote on every navigation.
+Every Sencho instance exposes a public `GET /api/meta` endpoint that advertises its version and a list of **capabilities**, one flag per feature it implements. When you switch to a node, your control instance fetches that node's metadata and caches it (briefly on the server, and for 5 minutes on success or 30 seconds on failure in the dashboard), so the version pill and the per-feature gates stay in sync without re-hitting the remote on every navigation. Testing a node from **Settings · Nodes**, or a node finishing an update, refreshes its metadata right away rather than waiting for the cache to expire.
 
 Features whose capability is missing from the active node's list are replaced by a lock card naming the missing feature and prompting you to upgrade the node. Core features (stack management, containers, resources, logs) work on every Sencho version and are never gated this way.
 
