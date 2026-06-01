@@ -201,6 +201,31 @@ describe('hubOnlyGuard', () => {
     expect(res.body?.code).not.toBe('HUB_ONLY_ENDPOINT');
   });
 
+  // Regression for Fleet Secrets: bundles are stored and decrypted per instance,
+  // and GET /api/secrets/:id returns plaintext values. A proxied secrets request
+  // would read a remote node's decrypted values as the node-proxy admin, and the
+  // routes' own requireAdmin gate lives in the local handler the proxy skips.
+  // Cover the collection (no trailing slash) and a sub-path.
+  it('rejects /api/secrets with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/secrets')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects a secrets sub-path (/api/secrets/5) with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/secrets/5')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
   it('does not interfere with non-hub paths even when nodeId targets a remote node', async () => {
     // /api/stacks is not hub-only and should be forwarded by the proxy.
     // The exact upstream-error status is not the contract here; what
