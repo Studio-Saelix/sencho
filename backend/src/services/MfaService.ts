@@ -15,10 +15,15 @@ const BACKUP_CODE_LENGTH = 10;
 const BACKUP_CODE_COUNT = 10;
 const BACKUP_HASH_COST = 10;
 
-export interface BackupVerifyResult {
-    matched: boolean;
-    remainingHashes: string[];
-}
+/**
+ * Result of checking a backup code. On a match it carries the exact stored
+ * hash so the caller can consume that entry atomically (see
+ * DatabaseService.consumeBackupCodeHash); the discriminated shape makes the
+ * "matched implies a hash to consume" invariant unrepresentable otherwise.
+ */
+export type BackupVerifyResult =
+    | { matched: true; matchedHash: string }
+    | { matched: false };
 
 export class MfaService {
     private static instance: MfaService;
@@ -121,25 +126,25 @@ export class MfaService {
 
     /**
      * Check a user-supplied backup code against the stored hashes. Returns
-     * `{ matched, remainingHashes }`; when matched, the matched hash is
-     * removed so callers can persist the shrunk set and enforce single-use
-     * semantics.
+     * `{ matched, matchedHash }`. The caller must consume `matchedHash`
+     * atomically to enforce single-use; this method does not mutate state, so
+     * two concurrent verifications of the same code cannot both win at the
+     * write (see DatabaseService.consumeBackupCodeHash).
      */
     public static async verifyBackupCode(hashes: string[], code: string): Promise<BackupVerifyResult> {
         const normalized = this.normalizeBackupCode(code);
-        if (!normalized) return { matched: false, remainingHashes: hashes };
+        if (!normalized) return { matched: false };
 
-        for (let i = 0; i < hashes.length; i++) {
-            // bcrypt.compare is constant-time for a given hash. We still check
-            // every hash regardless of an early hit to avoid leaking which
-            // slot matched via timing.
-            const ok = await bcrypt.compare(normalized, hashes[i]);
-            if (ok) {
-                const remaining = hashes.slice(0, i).concat(hashes.slice(i + 1));
-                return { matched: true, remainingHashes: remaining };
+        for (const hash of hashes) {
+            // bcrypt.compare is constant-time per hash; we return on the first
+            // match. The matched slot's position carries no useful signal: the
+            // codes are random and single-use, so leaking "which slot" via an
+            // early return tells an attacker nothing.
+            if (await bcrypt.compare(normalized, hash)) {
+                return { matched: true, matchedHash: hash };
             }
         }
-        return { matched: false, remainingHashes: hashes };
+        return { matched: false };
     }
 
     /**
