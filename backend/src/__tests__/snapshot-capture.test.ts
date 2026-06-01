@@ -112,16 +112,17 @@ describe('captureLocalNodeFiles', () => {
 });
 
 describe('captureRemoteNodeFiles', () => {
-    function mockFetchRoutes(routes: Record<string, Partial<Response> & { jsonValue?: unknown; textValue?: string }>) {
+    function mockFetchRoutes(routes: Record<string, Partial<Response> & { jsonValue?: unknown; textValue?: string; xEnvExists?: string }>) {
         const fetchMock = vi.fn(async (url: string) => {
             const match = Object.keys(routes).find(k => url.endsWith(k));
             const r = match ? routes[match] : { ok: false, status: 404 };
             return {
                 ok: r.ok ?? true,
                 status: r.status ?? 200,
+                headers: { get: (name: string) => name.toLowerCase() === 'x-env-exists' ? ((r as { xEnvExists?: string }).xEnvExists ?? null) : null },
                 json: async () => (r as { jsonValue?: unknown }).jsonValue,
                 text: async () => (r as { textValue?: string }).textValue ?? '',
-            } as Response;
+            } as unknown as Response;
         });
         vi.stubGlobal('fetch', fetchMock);
         return fetchMock;
@@ -151,6 +152,19 @@ describe('captureRemoteNodeFiles', () => {
 
         expect(result.stacks).toHaveLength(0);
         expect(result.warnings[0].reason).toContain('HTTP 500');
+    });
+
+    it('treats a remote .env as absent (no empty file) when X-Env-Exists is false', async () => {
+        mockFetchRoutes({
+            '/api/stacks': { ok: true, jsonValue: ['web'] },
+            '/api/stacks/web': { ok: true, textValue: 'services: {}\n' },
+            '/api/stacks/web/env': { ok: true, textValue: '', xEnvExists: 'false' },
+        });
+
+        const result = await captureRemoteNodeFiles(remoteNode);
+
+        expect(result.stacks[0].files.map(f => f.filename)).toEqual(['compose.yaml']);
+        expect(result.warnings).toHaveLength(0);
     });
 
     it('treats a 404 .env as absent without warning', async () => {

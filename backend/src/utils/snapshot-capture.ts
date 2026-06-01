@@ -165,16 +165,18 @@ export async function captureRemoteNodeFiles(node: CaptureNode): Promise<Snapsho
         headers,
         signal: AbortSignal.timeout(15000),
       });
-      if (envRes.ok) {
+      // The remote replies 200 with an empty body and X-Env-Exists: false when a
+      // stack has no .env. Treat that as absent (matching the local ENOENT path)
+      // so restore does not write a spurious empty .env. An older remote that
+      // predates the header falls back to capturing whatever the 200 returned.
+      if (envRes.ok && envRes.headers.get('X-Env-Exists') !== 'false') {
         const content = await envRes.text();
         if (Buffer.byteLength(content, 'utf-8') > MAX_SNAPSHOT_FILE_BYTES) {
           warnings.push({ stackName, reason: `.env exceeds the ${MAX_SNAPSHOT_FILE_MB} MB capture limit; captured without it` });
         } else {
           files.push({ filename: '.env', content });
         }
-      } else if (envRes.status !== 404) {
-        // The remote returns 200 with an empty body when a stack has no .env,
-        // so any other non-ok status is a genuine read failure worth surfacing.
+      } else if (!envRes.ok && envRes.status !== 404) {
         warnings.push({ stackName, reason: `.env fetch failed (HTTP ${envRes.status}); captured without it` });
       }
     } catch (e) {
