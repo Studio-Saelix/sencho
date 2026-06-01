@@ -34,7 +34,15 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: true }),
 }));
 
-const nodesState: { activeNode: { id: number } | null } = { activeNode: { id: 1 } };
+const nodesState: {
+  activeNode: { id: number; name?: string } | null;
+  hasCapability: (cap: string) => boolean;
+  activeNodeMeta: { version: string | null; capabilities: string[]; fetchedAt: number } | null;
+} = {
+  activeNode: { id: 1 },
+  hasCapability: () => true,
+  activeNodeMeta: null,
+};
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => nodesState,
 }));
@@ -107,6 +115,8 @@ beforeEach(() => {
   compareProps.length = 0;
   licenseState.isPaid = true;
   nodesState.activeNode = { id: 1 };
+  nodesState.hasCapability = () => true;
+  nodesState.activeNodeMeta = null;
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -121,6 +131,23 @@ describe('SecurityHistoryView', () => {
     expect(url).toContain('status=completed');
     expect(url).toContain('offset=0');
     expect(url).toMatch(/limit=\d+/);
+  });
+
+  it('shows a lock card and does not fetch when the node lacks vulnerability-scanning', async () => {
+    nodesState.hasCapability = (cap: string) => cap !== 'vulnerability-scanning';
+    nodesState.activeNodeMeta = { version: '0.80.0', capabilities: [], fetchedAt: 0 };
+    mockedFetch.mockResolvedValue(listResponse([scan()]));
+
+    render(<SecurityHistoryView open onClose={vi.fn()} />);
+
+    expect(
+      await screen.findByText('Vulnerability scanning is not available on this node'),
+    ).toBeInTheDocument();
+    expect(mockedFetch).not.toHaveBeenCalled();
+    // The header actions are gone too, so there is no Refresh button that could
+    // fire the gated fetch from behind the lock card.
+    expect(screen.queryByRole('button', { name: /refresh/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /compare/i })).toBeNull();
   });
 
   it('advances offset when the user pages forward', async () => {
