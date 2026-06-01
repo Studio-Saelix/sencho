@@ -291,6 +291,21 @@ export class SchedulerService {
             triggered_by: triggeredBy,
         });
 
+        // Defense in depth: every entry point that reaches here is already paid-gated
+        // (the route's requirePaid and the tick's tier check), but guard again so a
+        // task can never run on an unpaid licence regardless of the caller. Record the
+        // skip as a failed run so a manual trigger (which already returned 202 to the
+        // operator) shows in run history rather than vanishing silently.
+        if (LicenseService.getInstance().getTier() !== 'paid') {
+            console.warn(`[SchedulerService] Skipping task "${task.name}" (id=${task.id}): licence is not paid`);
+            db.updateScheduledTaskRun(runId, {
+                completed_at: Date.now(),
+                status: 'failure',
+                error: 'Scheduled tasks require a paid licence; task was not run.',
+            });
+            return;
+        }
+
         try {
             // Pre-check: ensure target node exists and is reachable
             if (task.node_id != null && task.action !== 'snapshot') {
@@ -423,6 +438,9 @@ export class SchedulerService {
         if (!task.target_id || task.node_id == null) {
             throw new Error('Stack restart requires target_id and node_id');
         }
+        if (this.isRemoteNode(task.node_id)) {
+            return this.executeRestartRemote(task.node_id, task.target_id, task.target_services);
+        }
         const docker = DockerController.getInstance(task.node_id);
         const containers = await docker.getContainersByStack(task.target_id);
         if (!containers || containers.length === 0) {
@@ -445,32 +463,82 @@ export class SchedulerService {
         return `Restarted ${filtered.length} container(s) in stack "${task.target_id}"${servicesSuffix}`;
     }
 
+    /**
+     * Remote restart. The remote bulk-restart endpoint restarts every container
+     * in the stack, so when the task targets specific services we fan out to the
+     * per-service restart route to preserve the filter.
+     */
+    private async executeRestartRemote(nodeId: number, stackName: string, targetServices: string | null): Promise<string> {
+        const stackSeg = encodeURIComponent(stackName);
+        if (targetServices) {
+            const serviceNames: string[] = JSON.parse(targetServices);
+            // Fail fast, but name the services already restarted so a mid-loop failure
+            // records the partial state of the remote stack in run history.
+            const restarted: string[] = [];
+            for (const svc of serviceNames) {
+                try {
+                    await this.postToRemoteStack(nodeId, `${stackSeg}/services/${encodeURIComponent(svc)}/restart`);
+                    restarted.push(svc);
+                } catch (e) {
+                    const done = restarted.length ? ` (already restarted: ${restarted.join(', ')})` : '';
+                    throw new Error(`Restart of service "${svc}" failed${done}: ${getErrorMessage(e, String(e))}`);
+                }
+            }
+            return `Restarted services [${serviceNames.join(', ')}] in stack "${stackName}" on remote node`;
+        }
+        await this.postToRemoteStack(nodeId, `${stackSeg}/restart`);
+        return `Restarted stack "${stackName}" on remote node`;
+    }
+
     private assertStackTarget(task: ScheduledTask, label: string): asserts task is ScheduledTask & { target_id: string; node_id: number } {
         if (!task.target_id || task.node_id == null) {
             throw new Error(`${label} requires target_id and node_id`);
         }
     }
 
+    private isRemoteNode(nodeId: number): boolean {
+        return NodeRegistry.getInstance().getNode(nodeId)?.type === 'remote';
+    }
+
     private async executeAutoBackup(task: ScheduledTask): Promise<string> {
         this.assertStackTarget(task, 'Auto-backup');
+        if (this.isRemoteNode(task.node_id)) {
+            await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/backup`);
+            return `Backed up stack "${task.target_id}" files on remote node`;
+        }
         await FileSystemService.getInstance(task.node_id).backupStackFiles(task.target_id);
         return `Backed up stack "${task.target_id}" files`;
     }
 
     private async executeAutoStop(task: ScheduledTask): Promise<string> {
         this.assertStackTarget(task, 'Auto-stop');
+        if (this.isRemoteNode(task.node_id)) {
+            await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/stop`);
+            return `Stopped stack "${task.target_id}" (containers preserved) on remote node`;
+        }
         await ComposeService.getInstance(task.node_id).runCommand(task.target_id, 'stop');
         return `Stopped stack "${task.target_id}" (containers preserved)`;
     }
 
     private async executeAutoDown(task: ScheduledTask): Promise<string> {
         this.assertStackTarget(task, 'Auto-down');
+        if (this.isRemoteNode(task.node_id)) {
+            await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/down`);
+            return `Took down stack "${task.target_id}" (containers removed) on remote node`;
+        }
         await ComposeService.getInstance(task.node_id).runCommand(task.target_id, 'down');
         return `Took down stack "${task.target_id}" (containers removed)`;
     }
 
     private async executeAutoStart(task: ScheduledTask): Promise<string> {
         this.assertStackTarget(task, 'Auto-start');
+        // Remote auto-start proxies to the remote's own deploy route, which runs
+        // that node's scan-policy gate against the images it actually holds. The
+        // hub-side enforceSchedulerPolicyGate below is for local nodes only.
+        if (this.isRemoteNode(task.node_id)) {
+            await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/deploy`);
+            return `Started stack "${task.target_id}" on remote node`;
+        }
         await this.enforceSchedulerPolicyGate(
             task.target_id,
             task.node_id,
@@ -682,6 +750,40 @@ export class SchedulerService {
             console.log(`[SchedulerService] executeUpdateRemote: completed in ${Date.now() - startTime}ms`);
         }
         return body.result || 'Remote auto-update completed (no details returned).';
+    }
+
+    /**
+     * Proxy a stack lifecycle action to a remote Sencho instance. ComposeService,
+     * DockerController, and FileSystemService are local-only, so for a remote node
+     * we POST to the remote's own stack-operation endpoint with the node Bearer
+     * token and the licence proxy headers, exactly as executeUpdateRemote does.
+     * `routeSuffix` is the path under `/api/stacks/`; the caller URL-encodes each
+     * segment.
+     */
+    private async postToRemoteStack(nodeId: number, routeSuffix: string): Promise<void> {
+        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!proxyTarget) {
+            throw new Error('Remote node is not configured or missing API credentials');
+        }
+        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        if (isDebugEnabled()) {
+            console.log(`[SchedulerService:debug] postToRemoteStack: node=${nodeId} route=${routeSuffix}`);
+        }
+        const response = await fetch(`${baseUrl}/api/stacks/${routeSuffix}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
+            },
+            signal: AbortSignal.timeout(300_000),
+        });
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+            throw new Error((body as { error?: string }).error || `Remote node returned ${response.status}`);
+        }
     }
 
     private async executeUpdateForStack(

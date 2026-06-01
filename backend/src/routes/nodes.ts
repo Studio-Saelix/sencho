@@ -9,8 +9,8 @@ import { enrollmentLimiter } from '../middleware/rateLimiters';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
-import { REMOTE_META_NAMESPACE } from '../helpers/cacheInvalidation';
-import { CAPABILITIES, getSenchoVersion, type RemoteMeta } from '../services/CapabilityRegistry';
+import { REMOTE_META_NAMESPACE, invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
+import { getActiveCapabilities, getSenchoVersion, type RemoteMeta } from '../services/CapabilityRegistry';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotCloseCode } from '../pilot/protocol';
 import { MeshProxyTunnelDialer } from '../services/MeshProxyTunnelDialer';
@@ -476,6 +476,10 @@ nodesRouter.post('/:id/test', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id as string);
     const result = await NodeRegistry.getInstance().testConnection(id);
+    // An explicit test is the operator asking for fresh truth: drop the cached
+    // /api/meta so the next read rebuilds version and capabilities live rather
+    // than serving a value up to the remote-meta TTL old.
+    invalidateRemoteMetaCache(id);
     res.json(result);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Connection test failed';
@@ -493,7 +497,7 @@ nodesRouter.get('/:id/meta', authMiddleware, async (req: Request, res: Response)
     }
 
     if (node.type === 'local') {
-      res.json({ version: getSenchoVersion(), capabilities: CAPABILITIES });
+      res.json({ version: getSenchoVersion(), capabilities: getActiveCapabilities() });
       return;
     }
 

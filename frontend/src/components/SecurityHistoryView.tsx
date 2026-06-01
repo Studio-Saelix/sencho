@@ -26,6 +26,7 @@ import { cn } from '@/lib/utils';
 import { ScanComparisonSheet } from './ScanComparisonSheet';
 import { SeverityChip } from './VulnerabilityScanSheet';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
+import { CapabilityGate } from './CapabilityGate';
 import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
@@ -62,7 +63,8 @@ interface SecurityHistoryViewProps {
 export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps) {
   const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
-  const { activeNode } = useNodes();
+  const { activeNode, hasCapability } = useNodes();
+  const scanningAvailable = hasCapability('vulnerability-scanning');
   const [scans, setScans] = useState<VulnerabilityScan[]>([]);
   const [total, setTotal] = useState(0);
   const [capInfo, setCapInfo] = useState<{ perImageLimit: number; refs: Set<string> } | null>(null);
@@ -112,11 +114,11 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
   }, [activeNode?.id]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !scanningAvailable) return;
     load(page, search);
     // reloadToken bumps when the active node changes even if page/search
     // happen to match the previous values, so the fetch re-runs exactly once.
-  }, [open, load, page, search, reloadToken]);
+  }, [open, scanningAvailable, load, page, search, reloadToken]);
 
   // Skip the initial mount: the effect fires once with the original
   // searchDraft, and unconditionally resetting page to 0 after 300ms races
@@ -167,21 +169,22 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
       crumb={['Security', 'Scan history']}
       name="Scan history"
       meta={meta}
-      primaryAction={{
+      primaryAction={scanningAvailable ? {
         label: `Compare (${selected.length}/2)`,
         icon: GitCompare,
         onClick: compareSelected,
         disabled: compareDisabled,
-      }}
-      secondaryActions={[{
+      } : undefined}
+      secondaryActions={scanningAvailable ? [{
         label: 'Refresh',
         icon: RefreshCw,
         onClick: () => load(safePage, search),
         disabled: loading,
-      }]}
+      }] : []}
       footerContext={footerContext}
       size="xl"
     >
+      <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning">
       <SheetSection title="Scans" hideHeader>
         <div className="flex items-center gap-3 mb-3 flex-wrap">
           <div className="relative flex-1 min-w-[200px] max-w-sm">
@@ -324,6 +327,7 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
           </ScrollArea>
         )}
       </SheetSection>
+      </CapabilityGate>
 
       <ScanComparisonSheet
         baselineScanId={compareIds?.[0] ?? null}
