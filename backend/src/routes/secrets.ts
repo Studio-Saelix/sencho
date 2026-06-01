@@ -1,7 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
-import { rejectApiTokenScope } from '../middleware/apiTokenScope';
+import { requirePaid, requireAdmin, requireUserSession, requireBody } from '../middleware/tierGates';
 import { SecretsService, PushBusyError, type SecretKv } from '../services/SecretsService';
 import { DatabaseService, type BlueprintSelector } from '../services/DatabaseService';
 import { isValidStackName } from '../utils/validation';
@@ -12,9 +11,9 @@ import { sanitizeForLog } from '../utils/safeLog';
 export const secretsRouter = Router();
 
 // Fleet Secrets reveals decrypted values and writes credentials fleet-wide, so
-// it is a session-admin surface only: long-lived API tokens are rejected outright
-// (same posture as registry credentials), before any tier/role gate.
-const SECRETS_SCOPE_MESSAGE = 'API tokens cannot manage Fleet Secrets.';
+// every route requires a signed-in admin user. requireUserSession rejects API
+// tokens and node_proxy / pilot_tunnel machine credentials (authMiddleware maps
+// the latter to role 'admin'), then requireAdmin enforces the role.
 
 const NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,62}[a-zA-Z0-9]$/;
 
@@ -66,7 +65,7 @@ function parsePushBody(body: unknown): PushBody | { error: string } {
 }
 
 secretsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
@@ -79,7 +78,7 @@ secretsRouter.get('/', authMiddleware, async (req: Request, res: Response): Prom
 });
 
 secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
@@ -121,7 +120,7 @@ secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pro
 });
 
 secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
@@ -141,7 +140,7 @@ secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): P
 });
 
 secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
@@ -181,7 +180,7 @@ secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): P
 });
 
 secretsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
@@ -201,7 +200,7 @@ secretsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response)
 });
 
 secretsRouter.get('/:id/versions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
@@ -219,7 +218,7 @@ secretsRouter.get('/:id/versions', authMiddleware, async (req: Request, res: Res
 });
 
 secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
@@ -249,7 +248,7 @@ secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request
 });
 
 secretsRouter.post('/:id/push/preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
@@ -274,7 +273,7 @@ secretsRouter.post('/:id/push/preview', authMiddleware, async (req: Request, res
 });
 
 secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-    if (rejectApiTokenScope(req, res, SECRETS_SCOPE_MESSAGE)) return;
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;

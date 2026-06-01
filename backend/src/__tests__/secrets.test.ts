@@ -5,7 +5,7 @@
  *  - encrypt round-trip via CryptoService
  *  - DatabaseService secret + version + push CRUD
  *  - SecretsService versioning, importFromStack, executePush aggregation
- *  - Route guards (requirePaid 403, requireAdmin 403, push lock 409)
+ *  - Route guards (requirePaid 403, requireAdmin 403, requireUserSession 403, push lock 409)
  *  - Hub-only enforcement is covered in hub-only-guard.test.ts
  *  - developer_mode diagnostics gating (and that diagnostics never log the secret value)
  *  - getAuditSummary patterns for /secrets routes
@@ -44,6 +44,30 @@ function clearSecretsTables(): void {
     db.prepare('DELETE FROM secret_pushes').run();
     db.prepare('DELETE FROM secret_versions').run();
     db.prepare('DELETE FROM secrets').run();
+}
+
+// Shared by the admin-role and machine-credential matrices: one representative
+// call per secrets endpoint. requireUserSession and requireAdmin both run before
+// requireBody and param parsing, so a bodyless request still surfaces the guard.
+const SECRET_ENDPOINTS: Array<[string, string]> = [
+    ['get', '/api/secrets'],
+    ['post', '/api/secrets'],
+    ['get', '/api/secrets/1'],
+    ['put', '/api/secrets/1'],
+    ['delete', '/api/secrets/1'],
+    ['get', '/api/secrets/1/versions'],
+    ['post', '/api/secrets/1/import-from-stack'],
+    ['post', '/api/secrets/1/push/preview'],
+    ['post', '/api/secrets/1/push'],
+];
+
+function callWithToken(method: string, p: string, token: string) {
+    const agent = request(app);
+    const r = method === 'get' ? agent.get(p)
+        : method === 'post' ? agent.post(p)
+        : method === 'put' ? agent.put(p)
+        : agent.delete(p);
+    return r.set('Authorization', `Bearer ${token}`);
 }
 
 beforeAll(async () => {
@@ -407,20 +431,6 @@ describe('Routes /api/secrets tier gating and lock', () => {
 // ---- Admin-role gating: secrets reveal decrypted values, so every route is admin-only ----
 
 describe('Routes /api/secrets admin-role gating', () => {
-    // One representative call per endpoint. requireAdmin runs before requireBody
-    // and param parsing, so a bodyless request still surfaces ADMIN_REQUIRED.
-    const SECRET_ENDPOINTS: Array<[string, string]> = [
-        ['get', '/api/secrets'],
-        ['post', '/api/secrets'],
-        ['get', '/api/secrets/1'],
-        ['put', '/api/secrets/1'],
-        ['delete', '/api/secrets/1'],
-        ['get', '/api/secrets/1/versions'],
-        ['post', '/api/secrets/1/import-from-stack'],
-        ['post', '/api/secrets/1/push/preview'],
-        ['post', '/api/secrets/1/push'],
-    ];
-
     // authMiddleware resolves the role from the DB (not the JWT), so a real
     // non-admin user must exist for the gate to see a non-admin role.
     function viewerToken(): string {
@@ -433,17 +443,8 @@ describe('Routes /api/secrets admin-role gating', () => {
         return authToken('sec-viewer', 'viewer', user.token_version);
     }
 
-    function call(method: string, p: string, token: string) {
-        const agent = request(app);
-        const r = method === 'get' ? agent.get(p)
-            : method === 'post' ? agent.post(p)
-            : method === 'put' ? agent.put(p)
-            : agent.delete(p);
-        return r.set('Authorization', `Bearer ${token}`);
-    }
-
     it.each(SECRET_ENDPOINTS)('403s a non-admin paid user on %s %s', async (method, p) => {
-        const res = await call(method, p, viewerToken());
+        const res = await callWithToken(method, p, viewerToken());
         expect(res.status).toBe(403);
         expect(res.body.code).toBe('ADMIN_REQUIRED');
     });
@@ -456,12 +457,12 @@ describe('Routes /api/secrets admin-role gating', () => {
     });
 });
 
-// ---- API-token rejection: secrets are a session-admin surface, not a token surface ----
+// ---- Machine-credential rejection: secrets need a real signed-in user session ----
 
-describe('Routes /api/secrets API-token rejection', () => {
+describe('Routes /api/secrets machine-credential rejection', () => {
     // A full-admin API token resolves to role 'admin' and would otherwise pass
-    // requireAdmin and reach the decrypted-value GET; rejectApiTokenScope runs
-    // first and blocks every API token, mirroring registry credentials.
+    // requireAdmin and reach the decrypted-value GET. requireUserSession runs
+    // first and blocks it.
     function fullAdminApiToken(): string {
         const db = DatabaseService.getInstance();
         const rawToken = generateApiToken();
@@ -476,20 +477,29 @@ describe('Routes /api/secrets API-token rejection', () => {
         return rawToken;
     }
 
-    it('403s a full-admin API token on the list route with SCOPE_DENIED', async () => {
-        const res = await request(app)
-            .get('/api/secrets')
-            .set('Authorization', `Bearer ${fullAdminApiToken()}`);
+    // node_proxy / pilot_tunnel JWTs are signed with this instance's secret and
+    // map to { username: 'node-proxy', role: 'admin', userId: 0 } in authMiddleware.
+    // They carry no apiTokenScope, so only the userId-0 check blocks them.
+    function machineJwt(scope: 'node_proxy' | 'pilot_tunnel'): string {
+        return jwt.sign({ scope }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    }
+
+    it.each(SECRET_ENDPOINTS)('403s a full-admin API token on %s %s with SESSION_REQUIRED', async (method, p) => {
+        const res = await callWithToken(method, p, fullAdminApiToken());
         expect(res.status).toBe(403);
-        expect(res.body.code).toBe('SCOPE_DENIED');
+        expect(res.body.code).toBe('SESSION_REQUIRED');
     });
 
-    it('403s a full-admin API token on the decrypted-value GET with SCOPE_DENIED', async () => {
+    it.each([
+        ['node_proxy', '/api/secrets'],
+        ['node_proxy', '/api/secrets/1'],
+        ['pilot_tunnel', '/api/secrets/1'],
+    ] as const)('403s a %s JWT on %s with SESSION_REQUIRED', async (scope, p) => {
         const res = await request(app)
-            .get('/api/secrets/1')
-            .set('Authorization', `Bearer ${fullAdminApiToken()}`);
+            .get(p)
+            .set('Authorization', `Bearer ${machineJwt(scope)}`);
         expect(res.status).toBe(403);
-        expect(res.body.code).toBe('SCOPE_DENIED');
+        expect(res.body.code).toBe('SESSION_REQUIRED');
     });
 });
 
