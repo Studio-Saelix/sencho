@@ -117,7 +117,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     <Wrench className="w-4 h-4 mr-1.5" />Fleet Actions
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {isPaid && (
+                            {isPaid && isAdmin && (
                                 <TabsHighlightItem value="secrets">
                                     <TabsTrigger value="secrets">
                                         <KeyRound className="w-4 h-4 mr-1.5" />Secrets
@@ -224,7 +224,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 <TabsContent value="actions">
                     <FleetActionsTab nodes={overview.allNodes} />
                 </TabsContent>
-                {isPaid && (
+                {isPaid && isAdmin && (
                     <TabsContent value="secrets">
                         <SecretsTab />
                     </TabsContent>
