@@ -55,6 +55,35 @@ function dockerHelper(report: DiagnosticsReport | null): string | undefined {
         : 'Sencho reconnects on its own once Docker is back.';
 }
 
+// Save text content to a file via a transient object URL. Used for both the
+// diagnostics JSON export and the offline command reference.
+function triggerDownload(filename: string, content: string, mime: string) {
+    const url = URL.createObjectURL(new Blob([content], { type: mime }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+}
+
+// Plain-text command reference an operator can save while the app is reachable,
+// so the commands are on hand for exactly the situation where it is not.
+function cliReferenceText(): string {
+    const lines = [
+        'Sencho emergency recovery commands',
+        '',
+        'Run each from a shell on the host running Sencho:',
+        '  docker compose exec sencho <command>',
+        '',
+    ];
+    for (const { cmd, purpose } of CLI_COMMANDS) {
+        lines.push(`# ${purpose}`, `docker compose exec sencho ${cmd}`, '');
+    }
+    return lines.join('\n');
+}
+
 function StatusValue({ health, children }: { health: Health; children: ReactNode }) {
     const Icon = health === 'ok' ? Check : health === 'warn' ? AlertTriangle : X;
     return (
@@ -113,17 +142,17 @@ export function RecoverySection() {
         if (!report) return;
         try {
             const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            anchor.href = url;
-            anchor.download = `sencho-diagnostics-${stamp}.json`;
-            document.body.appendChild(anchor);
-            anchor.click();
-            anchor.remove();
-            URL.revokeObjectURL(url);
+            triggerDownload(`sencho-diagnostics-${stamp}.json`, JSON.stringify(report, null, 2), 'application/json');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Could not export diagnostics.');
+        }
+    };
+
+    const downloadCommands = () => {
+        try {
+            triggerDownload('sencho-recovery-commands.txt', cliReferenceText(), 'text/plain');
+        } catch (e: unknown) {
+            toast.error((e as Error)?.message || 'Could not download the command reference.');
         }
     };
 
@@ -237,6 +266,12 @@ export function RecoverySection() {
                         </div>
                     ))}
                 </div>
+                <SettingsActions hint="save these before you need them">
+                    <SettingsPrimaryButton onClick={downloadCommands}>
+                        <Download className="h-4 w-4" />
+                        Download commands
+                    </SettingsPrimaryButton>
+                </SettingsActions>
             </SettingsSection>
         </div>
     );
