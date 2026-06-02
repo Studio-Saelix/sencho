@@ -44,9 +44,11 @@ export interface RoutingNodeCardProps {
      * When false, the management affordances (enable/disable toggle and the
      * enable-mesh / add-stack empty-state CTAs) are hidden so a viewer without
      * the admin role gets a read-only card. Read-only affordances (diagnostics,
-     * alias probe, retry) stay available. Defaults to true.
+     * alias probe, retry) stay available. Required, with no default: a caller
+     * must state the gate explicitly so a new call site cannot fall open to a
+     * management view it did not intend.
      */
-    canManage?: boolean;
+    canManage: boolean;
 }
 
 const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
@@ -83,7 +85,7 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
         crumb, name, isLocal, nodeState, meta, aliases,
         onToggleEnabled, onShowDiagnostics, onShowAlias, onTestAlias,
         onAddStack, onRetry, footerContext, offlineReason,
-        canManage = true,
+        canManage,
     } = props;
     const [density] = useDensity();
     const compact = density === 'compact';

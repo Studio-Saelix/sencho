@@ -23,6 +23,8 @@ function renderCard(overrides: Partial<RoutingNodeCardProps> = {}) {
         onAddStack: vi.fn(),
         onRetry: vi.fn(),
         footerContext: 'Mesh off',
+        // canManage is required on the primitive; tests override it per case.
+        canManage: true,
         ...overrides,
     };
     return render(<RoutingNodeCard {...props} />);
@@ -67,11 +69,6 @@ describe('routing-node-card canManage gate', () => {
     it('keeps the retry CTA for a non-manager on an offline node', () => {
         renderCard({ nodeState: 'offline', canManage: false });
         expect(screen.getByRole('button', { name: /Retry now/i })).toBeInTheDocument();
-    });
-
-    it('defaults to manageable when canManage is omitted', () => {
-        renderCard({ nodeState: 'idle' });
-        expect(screen.getByRole('switch')).toBeInTheDocument();
     });
 });
 
