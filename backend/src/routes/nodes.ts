@@ -18,6 +18,7 @@ import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService
 import { FleetSyncService } from '../services/FleetSyncService';
 import { isValidRemoteUrl } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
+import { isDebugEnabled } from '../utils/debug';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
@@ -354,6 +355,7 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
       return;
     }
     const updated = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+    if (isDebugEnabled()) console.log('[Federation:diag] cordoned node=%d reasonLen=%d', id, reason?.length ?? 0);
     res.set('cache-control', 'no-store').json(updated);
   } catch (error: unknown) {
     console.error('Failed to cordon node:', error);
