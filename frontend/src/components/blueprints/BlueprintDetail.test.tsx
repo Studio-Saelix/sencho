@@ -57,6 +57,51 @@ beforeEach(() => {
     vi.mocked(getBlueprint).mockResolvedValue(summary());
 });
 
+describe('BlueprintDetail data fetching', () => {
+    it('does not refetch when the parent re-renders with new callback identities', async () => {
+        const { rerender } = render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+
+        // Let the initial load settle so the body content is on screen.
+        expect(await screen.findByText('Show compose source')).toBeInTheDocument();
+        const callsAfterLoad = vi.mocked(getBlueprint).mock.calls.length;
+
+        // A parent re-render (e.g. the Fleet view's polling) hands the open sheet a
+        // brand-new onOpenChange closure every render. Before the fix that closure was
+        // a refresh dependency, so the load effect re-ran on every parent render and
+        // flickered the body through its loading skeleton. It must now keep showing the
+        // data it already has instead of refetching.
+        rerender(
+            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+        rerender(
+            <BlueprintDetail blueprintId={1} open onOpenChange={() => {}} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+        await Promise.resolve();
+
+        expect(vi.mocked(getBlueprint)).toHaveBeenCalledTimes(callsAfterLoad);
+    });
+
+    it('refetches when blueprintId changes while the sheet stays open', async () => {
+        const { rerender } = render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+        expect(await screen.findByText('Show compose source')).toBeInTheDocument();
+        const callsAfterLoad = vi.mocked(getBlueprint).mock.calls.length;
+
+        // Opening a different blueprint without closing the sheet must load the new one,
+        // so blueprintId has to stay a refresh dependency.
+        rerender(
+            <BlueprintDetail blueprintId={2} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+        await screen.findByText('Show compose source');
+
+        expect(vi.mocked(getBlueprint)).toHaveBeenCalledTimes(callsAfterLoad + 1);
+        expect(vi.mocked(getBlueprint)).toHaveBeenLastCalledWith(2);
+    });
+});
+
 describe('BlueprintDetail action gating', () => {
     it('shows the Apply / Edit / Delete actions for an admin (canEdit)', async () => {
         render(
