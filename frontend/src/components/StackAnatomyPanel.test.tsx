@@ -141,7 +141,8 @@ describe('StackAnatomyPanel update banner', () => {
     expect(onApply).not.toHaveBeenCalled();
   });
 
-  it('clears the banner when the post-apply re-check fails', async () => {
+  it('keeps the banner when the post-apply re-check returns a non-OK response', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     let updateCalls = 0;
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -157,12 +158,67 @@ describe('StackAnatomyPanel update banner', () => {
     const { rerender } = render(panel(false, onApply));
     await screen.findByTestId('update-available-banner');
 
+    const before = updatePreviewCalls();
     rerender(panel(true, onApply));
-    rerender(panel(false, onApply)); // re-check returns not-ok -> preview cleared
+    rerender(panel(false, onApply)); // re-check returns not-ok: keep the known banner
 
-    await waitFor(() =>
-      expect(screen.queryByTestId('update-available-banner')).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(updatePreviewCalls()).toBeGreaterThan(before));
+    expect(screen.getByTestId('update-available-banner')).toBeInTheDocument();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it('keeps the banner when the post-apply re-check throws', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let updateCalls = 0;
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        updateCalls += 1;
+        if (updateCalls >= 2) throw new Error('network down');
+        return jsonRes(previewBody(true));
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+
+    const onApply = vi.fn();
+    const { rerender } = render(panel(false, onApply));
+    await screen.findByTestId('update-available-banner');
+
+    const before = updatePreviewCalls();
+    rerender(panel(true, onApply));
+    rerender(panel(false, onApply)); // re-check throws: keep the known banner
+
+    await waitFor(() => expect(updatePreviewCalls()).toBeGreaterThan(before));
+    expect(screen.getByTestId('update-available-banner')).toBeInTheDocument();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it('does not re-check after switching stacks while the first is still applying', async () => {
+    const calls: string[] = [];
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        calls.push(url);
+        return jsonRes(previewBody(!url.includes('/stacks/other/'))); // web has an update, other does not
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    const otherCalls = () => calls.filter((u) => u.includes('/stacks/other/update-preview')).length;
+
+    const onApply = vi.fn();
+    const { rerender } = render(panel(false, onApply, 'web'));
+    await screen.findByTestId('update-available-banner');
+
+    rerender(panel(true, onApply, 'web')); // web applying
+    rerender(panel(false, onApply, 'other')); // switch stacks before web's apply finishes
+
+    await waitFor(() => expect(otherCalls()).toBe(1)); // only the stack-change mount fetch
+    await Promise.resolve();
+    expect(otherCalls()).toBe(1); // the apply-completion re-check must not fire for "other"
   });
 
   it('ignores a stale re-check that resolves after the stack changed', async () => {
