@@ -251,7 +251,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 footerContext={footerContext}
                 size="lg"
             >
-                {loading || !blueprint || !summary ? (
+                {!blueprint || !summary ? (
                     <div className="space-y-3">
                         <Skeleton className="h-12 w-full" />
                         <Skeleton className="h-32 w-full" />

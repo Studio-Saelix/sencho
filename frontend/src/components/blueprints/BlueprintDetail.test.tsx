@@ -7,7 +7,7 @@
  * of them, so the sheet can never issue a request the API answers with 403.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { BlueprintSummary } from '@/lib/blueprintsApi';
 
 vi.mock('@/lib/blueprintsApi', async (importOriginal) => {
@@ -99,6 +99,34 @@ describe('BlueprintDetail data fetching', () => {
 
         expect(vi.mocked(getBlueprint)).toHaveBeenCalledTimes(callsAfterLoad + 1);
         expect(vi.mocked(getBlueprint)).toHaveBeenLastCalledWith(2);
+    });
+
+    it('keeps the loaded body on screen while a refresh is in flight', async () => {
+        let settleRefresh = () => {};
+        vi.mocked(getBlueprint)
+            .mockResolvedValueOnce(summary())
+            .mockImplementationOnce(
+                () => new Promise<BlueprintSummary>((resolve) => { settleRefresh = () => resolve(summary()); }),
+            );
+
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+        expect(await screen.findByText('Show compose source')).toBeInTheDocument();
+        const callsAfterLoad = vi.mocked(getBlueprint).mock.calls.length;
+
+        // Applying reloads the blueprint. The populated body must stay mounted instead
+        // of collapsing to the loading skeleton while that reload is in flight.
+        fireEvent.click(screen.getByRole('button', { name: /apply now/i }));
+        await waitFor(() => expect(vi.mocked(getBlueprint).mock.calls.length).toBe(callsAfterLoad + 1));
+
+        // The deployment table only renders in the loaded body branch, never in the
+        // skeleton, so its presence proves the skeleton did not take over the refresh.
+        expect(screen.getByText('Show compose source')).toBeInTheDocument();
+        expect(screen.getByTestId('deployment-table')).toBeInTheDocument();
+
+        settleRefresh();
+        await screen.findByText('Show compose source');
     });
 });
 
