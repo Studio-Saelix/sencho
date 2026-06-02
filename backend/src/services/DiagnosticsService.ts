@@ -98,9 +98,25 @@ export async function collectDiagnostics(opts: CollectDiagnosticsOptions = {}): 
     const db = DatabaseService.getInstance();
     const handle = db.getDb();
 
+    // A read that may throw if its table is missing or corrupt degrades to
+    // `fallback` instead of failing the whole report, and records that a read
+    // failed so `database.ok` reflects it. This keeps the surface usable on the
+    // broken database it exists to diagnose, without reporting a degraded `0`
+    // (e.g. adminCount) as if the database were healthy.
+    let readFailed = false;
+    const safe = <T>(read: () => T, fallback: T, label: string): T => {
+        try {
+            return read();
+        } catch (err) {
+            readFailed = true;
+            console.warn(`[diagnostics] ${label} failed: ${String((err as Error)?.message ?? err)}`);
+            return fallback;
+        }
+    };
+
     let integrity: string;
     let missingTables: string[];
-    let dbOk: boolean;
+    let integrityOk = false;
     try {
         integrity = String(handle.pragma('integrity_check', { simple: true }));
         const present = new Set(
@@ -108,18 +124,35 @@ export async function collectDiagnostics(opts: CollectDiagnosticsOptions = {}): 
                 .map(row => row.name),
         );
         missingTables = CORE_TABLES.filter(table => !present.has(table));
-        dbOk = integrity === 'ok' && missingTables.length === 0;
+        integrityOk = integrity === 'ok';
     } catch (err) {
         integrity = `error: ${(err as Error).message}`;
         missingTables = [];
-        dbOk = false;
     }
 
-    const settings = db.getGlobalSettings();
-    const config: Record<string, string> = {};
-    for (const key of SAFE_SETTING_KEYS) {
-        if (settings[key] !== undefined) config[key] = settings[key];
-    }
+    const config = safe(() => {
+        const settings = db.getGlobalSettings();
+        const out: Record<string, string> = {};
+        for (const key of SAFE_SETTING_KEYS) {
+            if (settings[key] !== undefined) out[key] = settings[key];
+        }
+        return out;
+    }, {}, 'global_settings read');
+
+    const auth = {
+        adminCount: safe(() => db.getAdminCount(), 0, 'getAdminCount'),
+        userCount: safe(() => db.getUserCount(), 0, 'getUserCount'),
+        mfaEnrolledCount: safe(() => db.getMfaEnrolledCount(), 0, 'getMfaEnrolledCount'),
+        ssoProviders: safe(
+            () => db.getSSOConfigs().map(c => ({ provider: c.provider, enabled: c.enabled === 1 })),
+            [] as Array<{ provider: string; enabled: boolean }>,
+            'getSSOConfigs',
+        ),
+    };
+
+    // Reads run before this so a present-but-unreadable table (which the
+    // integrity check may still call "ok") also marks the database not-ok.
+    const dbOk = integrityOk && missingTables.length === 0 && !readFailed;
 
     let docker: DiagnosticsReport['docker'] = { reachable: false };
     if (opts.checkDocker) {
@@ -135,12 +168,7 @@ export async function collectDiagnostics(opts: CollectDiagnosticsOptions = {}): 
         database: { ok: dbOk, integrity, path: handle.name, missingTables },
         encryptionKey: checkEncryptionKey(),
         docker,
-        auth: {
-            adminCount: db.getAdminCount(),
-            userCount: db.getUserCount(),
-            mfaEnrolledCount: db.getMfaEnrolledCount(),
-            ssoProviders: db.getSSOConfigs().map(c => ({ provider: c.provider, enabled: c.enabled === 1 })),
-        },
+        auth,
         config,
     };
 }

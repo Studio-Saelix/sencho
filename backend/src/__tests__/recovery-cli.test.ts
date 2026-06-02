@@ -5,6 +5,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import bcrypt from 'bcrypt';
+import fs from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -14,6 +16,7 @@ let createEmergencyAdmin: typeof import('../cli/createEmergencyAdmin').createEme
 let clearSessions: typeof import('../cli/clearSessions').clearSessions;
 let disableSso: typeof import('../cli/disableSso').disableSso;
 let validateDb: typeof import('../cli/validateDb').validateDb;
+let backupData: typeof import('../cli/backupData').backupData;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
@@ -23,6 +26,7 @@ beforeAll(async () => {
     ({ clearSessions } = await import('../cli/clearSessions'));
     ({ disableSso } = await import('../cli/disableSso'));
     ({ validateDb } = await import('../cli/validateDb'));
+    ({ backupData } = await import('../cli/backupData'));
 });
 
 afterAll(() => {
@@ -77,6 +81,12 @@ describe('createEmergencyAdmin', () => {
         expect(result.ok).toBe(false);
         expect(result.message).toContain('already exists');
     });
+
+    it('rejects a malformed username', async () => {
+        const result = await createEmergencyAdmin('has space', 'valid-pass-1');
+        expect(result.ok).toBe(false);
+        expect(result.message).toContain('letters, numbers');
+    });
 });
 
 describe('clearSessions', () => {
@@ -115,6 +125,21 @@ describe('disableSso', () => {
         const result = disableSso();
         expect(result.ok).toBe(true);
         expect(db.getEnabledSSOConfigs()).toHaveLength(0);
+    });
+});
+
+describe('backupData', () => {
+    it('refuses a destination that overwrites the live database', async () => {
+        const result = await backupData(process.env.DATA_DIR);
+        expect(result.ok).toBe(false);
+        expect(result.message).toContain('overwrite the live database');
+    });
+
+    it('writes a copy to a separate destination', async () => {
+        const dest = path.join(process.env.DATA_DIR as string, 'cli-backup');
+        const result = await backupData(dest);
+        expect(result.ok).toBe(true);
+        expect(fs.existsSync(path.join(dest, 'sencho.db'))).toBe(true);
     });
 });
 

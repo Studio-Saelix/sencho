@@ -26,9 +26,15 @@ export async function backupData(destArg?: string): Promise<CliResult> {
         ? path.resolve(trimmedDest)
         : path.join(src, 'backups', `sencho-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`);
 
+    const db = DatabaseService.getInstance();
+    // Refuse a destination that would write the copy onto the live database
+    // itself, which would report success while producing no separate backup.
+    if (path.resolve(dest, 'sencho.db') === path.resolve(db.getDb().name)) {
+        return { ok: false, message: 'Destination would overwrite the live database. Choose a different directory.' };
+    }
+
     fs.mkdirSync(dest, { recursive: true });
 
-    const db = DatabaseService.getInstance();
     // Online backup produces a consistent snapshot even while the DB is in use.
     await db.getDb().backup(path.join(dest, 'sencho.db'));
 

@@ -12,13 +12,15 @@
 import bcrypt from 'bcrypt';
 import { DatabaseService } from '../services/DatabaseService';
 import { BCRYPT_SALT_ROUNDS } from '../helpers/constants';
+import { validateUsername } from '../helpers/validateUsername';
 import { auditCli, exitWith, usage, type CliResult } from './_shared';
 
 const MIN_PASSWORD_LENGTH = 8;
 
 export async function createEmergencyAdmin(username: string, password: string): Promise<CliResult> {
-    if (!username || typeof username !== 'string') {
-        return { ok: false, message: 'Username is required' };
+    const usernameError = validateUsername(username);
+    if (usernameError) {
+        return { ok: false, message: usernameError };
     }
     if (!password || password.length < MIN_PASSWORD_LENGTH) {
         return { ok: false, message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` };

@@ -63,7 +63,17 @@ describe('collectDiagnostics', () => {
         expect(Object.values(report.config)).not.toContain('enc:deadbeef');
     });
 
-    // Destructive: dropping a core table must run last in this file.
+    // Destructive: these table drops must run last in this file.
+    it('degrades instead of throwing when a read table is missing', async () => {
+        // sso_config is read by collectDiagnostics; dropping it must not throw,
+        // it must flag the table and fall back to an empty provider list.
+        DatabaseService.getInstance().getDb().exec('DROP TABLE sso_config');
+        const report = await collectDiagnostics();
+        expect(report.database.missingTables).toContain('sso_config');
+        expect(report.database.ok).toBe(false);
+        expect(report.auth.ssoProviders).toEqual([]);
+    });
+
     it('flags a missing core table', async () => {
         DatabaseService.getInstance().getDb().exec('DROP TABLE audit_log');
         const report = await collectDiagnostics();
