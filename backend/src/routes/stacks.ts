@@ -1504,12 +1504,12 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     const encodedFilename = encodeURIComponent(result.filename);
     const safeFilename = result.filename.replace(/[\\"]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
-    // Track normal download completion off the file stream's lifecycle, not
-    // the request lifecycle. Under the in-process supertest transport, request
-    // close events can race ahead of normal stream completion; response close
-    // is handled below only as delayed abort cleanup.
-    // End/error are the durable completion signals, and close can still count
-    // as success only when the stream reports it read the full file.
+    // Track download completion off both the file stream's lifecycle and the
+    // response close. Under the in-process supertest transport, request close
+    // events can race ahead of normal stream completion. End/error are the
+    // durable source signals; a close (source or response) counts as success
+    // only when the stream reports it read the full file, and as an abort
+    // otherwise.
     let downloadRecorded = false;
     const streamWithBytes = result.stream as typeof result.stream & { bytesRead?: number };
     const hasReadFullFile = (): boolean => (
@@ -1541,13 +1541,20 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     result.stream.on('end', () => recordDownloadOnce(hasReadFullFile()));
     result.stream.on('close', () => recordDownloadOnce(hasReadFullFile()));
     res.on('close', () => {
-      if (downloadRecorded || hasReadFullFile()) return;
-      // At this point, response close is treated as an abort signal. It can
-      // beat the source stream's final events in the in-process test transport.
-      // Give a same-turn clean source completion a chance to win before cleanup.
+      if (downloadRecorded) return;
+      // This op measures a server-side file read, so once the source has
+      // streamed the whole file a response close is a successful completion.
+      // Record it here rather than waiting on the source stream's end/close,
+      // which can be dropped once the response consumer is gone, leaving the
+      // op unrecorded.
+      if (hasReadFullFile()) { recordDownloadOnce(true); return; }
+      // Otherwise response close is an abort signal. It can beat the source
+      // stream's final events in the in-process test transport, so give a
+      // same-turn clean source completion a chance to win before cleanup.
       abortCleanupHandle = setImmediate(() => {
         abortCleanupHandle = null;
-        if (downloadRecorded || hasReadFullFile()) return;
+        if (downloadRecorded) return;
+        if (hasReadFullFile()) { recordDownloadOnce(true); return; }
         recordDownloadOnce(false);
         result.stream.destroy();
       });
