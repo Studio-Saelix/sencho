@@ -42,7 +42,7 @@ App-layer authentication is **not** in scope. Postgres still needs a password, R
 
 ## Enable the mesh
 
-Mesh lives under **Fleet → Routing**.
+Mesh lives under **Fleet → Routing**. Managing it (the per-node mesh toggle and stack opt-in or opt-out) requires an administrator; non-admin users see the Routing tab as read-only.
 
 <Frame caption="Fleet → Routing, Table view. Each node card shows mesh stack count, published aliases, per-alias Test probe, and an Add stack to mesh action.">
   <img src="/images/sencho-mesh/routing-tab-overview.png" alt="Sencho Mesh Routing tab Table view with node cards" />
@@ -88,6 +88,8 @@ The sheet shows:
 - **Resolver cache** showing the aliases currently registered on this node and the backend `host:port` they resolve to.
 
 Mesh runs in-process on each node; there is no separate mesh container to inspect with `docker ps`.
+
+Enable **Developer Mode** under **Settings → Developer** to surface `[Mesh:diag]` lines in the container logs covering the forwarder's routing decisions (same-node versus cross-node, and which node-identity resolution won) and the timing of opt-in, opt-out, and alias-refresh operations (`docker logs sencho 2>&1 | grep '\[Mesh:diag\]'`). They are off by default and meant for one-off debugging; turn developer mode back off when you are done to keep log volume manageable.
 
 ## Mesh activity log
 

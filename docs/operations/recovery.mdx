@@ -65,13 +65,14 @@ See [Troubleshooting: containers won't start after deploy](/operations/troublesh
 
 1. **Another admin is still in:** any administrator can reset a locked-out user's two-factor enrolment from **Settings · Users**. The user then signs in with their password alone and re-enrols.
 2. **Every admin has lost 2FA:** reset two-factor for the admin account directly on the host with the emergency command-line reset. It acts on the same database the app uses and records the action in the audit log.
-3. **The admin password itself is forgotten:** Sencho has no password-reset email flow. The recovery path is to reset first-boot setup by removing `sencho.db`, which lets you create a fresh admin account.
+3. **The admin password itself is forgotten:** Sencho has no password-reset email flow, but you do not need to discard your configuration. From a shell on the host, reset the password with the emergency command line, or create a fresh emergency administrator. Both act on the live database and leave your nodes, alert rules, and labels untouched.
+4. **Last resort, the database is unusable:** reset first-boot setup by removing `sencho.db`, which lets you create a fresh admin account from scratch.
 
 <Warning>
-  Removing `sencho.db` resets all Sencho configuration: users, nodes, alert rules, notification settings, and labels. Your Docker stacks and their compose files are not affected, and Sencho re-discovers them on the next scan. Use this only when no administrator can sign in.
+  Removing `sencho.db` resets all Sencho configuration: users, nodes, alert rules, notification settings, and labels. Your Docker stacks and their compose files are not affected, and Sencho re-discovers them on the next scan. Use this only when no administrator can sign in and the command-line recovery above is not enough.
 </Warning>
 
-See [Managing Two-Factor Authentication](/operations/two-factor-admin) for the admin reset and the emergency CLI, and [Troubleshooting: forgotten admin password](/operations/troubleshooting#forgotten-admin-password) for the database-reset path.
+See [Emergency command-line recovery](/operations/emergency-cli) for the full command set, [Managing Two-Factor Authentication](/operations/two-factor-admin) for the admin two-factor reset, and [Troubleshooting: forgotten admin password](/operations/troubleshooting#forgotten-admin-password) for the database-reset path.
 
 ---
 
