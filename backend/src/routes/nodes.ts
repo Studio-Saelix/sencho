@@ -313,6 +313,15 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   try {
     const id = parseInt(nodeIdParam);
+    // Release any live tunnel or mesh bridge before deleting the record so it is
+    // freed immediately rather than lingering until the peer disconnects. Close a
+    // proxy-mode mesh bridge through its dialer FIRST: closeBridge removes the
+    // bridge before closing it, so the dialer does not schedule a reactive redial
+    // against a node that is about to disappear. closeTunnel then closes a
+    // pilot-agent tunnel; both are no-ops when this node has no such bridge (a
+    // local node, or one with no active connection). Mirrors the re-enroll path.
+    MeshProxyTunnelDialer.getInstance().closeBridge(id, 'node deleted');
+    PilotTunnelManager.getInstance().closeTunnel(id, PilotCloseCode.NormalClosure, 'node deleted');
     DatabaseService.getInstance().deleteNode(id);
     NodeRegistry.getInstance().evictConnection(id);
     NodeRegistry.getInstance().notifyNodeRemoved(id);

@@ -308,6 +308,7 @@ export function wsDataToString(data: unknown): string | null {
 // --- Close codes ---
 
 export const PilotCloseCode = {
+    NormalClosure: 1000,
     Replaced: 4000,
     EnrollmentRegenerated: 4001,
     ProtocolError: 1002,
