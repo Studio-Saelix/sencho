@@ -14,7 +14,9 @@ export interface Node {
   status: 'online' | 'offline' | 'unknown';
   created_at: number;
   api_url?: string;
-  api_token?: string;
+  /** True when a node_proxy token is stored server-side. The token value itself
+   *  is never sent to the browser (see backend helpers/publicNode.ts). */
+  has_token?: boolean;
   pilot_last_seen?: number | null;
   pilot_agent_version?: string | null;
 }

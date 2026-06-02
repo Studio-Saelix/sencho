@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { DatabaseService } from '../services/DatabaseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
+import { sanitizeForLog } from '../utils/safeLog';
 
 /**
  * Resolve `req.nodeId` from the `x-node-id` header, `?nodeId=` query param,
@@ -15,13 +16,24 @@ import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 export const nodeContextMiddleware: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
   const nodeIdHeader = req.headers['x-node-id'] as string;
   const nodeIdQuery = req.query.nodeId as string;
-  if (nodeIdHeader) {
-    req.nodeId = parseInt(nodeIdHeader, 10);
-  } else if (nodeIdQuery) {
-    req.nodeId = parseInt(nodeIdQuery, 10);
-  } else {
-    req.nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-  }
+  // A malformed id (parseInt → NaN, or a non-positive value) must fall back to
+  // the default node rather than resolve to NaN and trip the obscure 404 below.
+  // A well-formed id for a node that does not exist still 404s further down;
+  // only malformed input falls through to the default.
+  const parseNodeId = (raw: string | undefined): number | null => {
+    if (!raw) return null;
+    const n = parseInt(raw, 10);
+    if (Number.isInteger(n) && n > 0) return n;
+    // Present but malformed is a client bug: warn so the fall-back to the
+    // default node is observable instead of a request silently landing on the
+    // wrong node during debugging.
+    console.warn(`[NodeContext] Ignoring malformed node id "${sanitizeForLog(raw)}"; using the default node.`);
+    return null;
+  };
+  req.nodeId =
+    parseNodeId(nodeIdHeader) ??
+    parseNodeId(nodeIdQuery) ??
+    NodeRegistry.getInstance().getDefaultNodeId();
 
   if (req.path.startsWith('/api/') && !isProxyExemptPath(req.path)) {
     const node = DatabaseService.getInstance().getNode(req.nodeId);

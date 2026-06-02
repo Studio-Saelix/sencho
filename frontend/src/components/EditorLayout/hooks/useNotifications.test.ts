@@ -12,7 +12,7 @@ vi.mock('@/components/ui/toast-store', () => ({ toast: { error: vi.fn() } }));
 
 import { apiFetch } from '@/lib/api';
 
-const localNode: Node = { id: 1, name: 'Local', type: 'local', api_url: '', api_token: '', compose_dir: '', is_default: true, status: 'online', created_at: 0 };
+const localNode: Node = { id: 1, name: 'Local', type: 'local', api_url: '', compose_dir: '', is_default: true, status: 'online', created_at: 0 };
 
 const makeNotif = (overrides: Partial<NotificationItem> = {}): NotificationItem => ({
   id: 1, level: 'info', message: 'test', timestamp: 1000, is_read: 0, ...overrides,

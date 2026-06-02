@@ -15,6 +15,10 @@ There is no central server. Each Sencho instance manages its own host independen
 
 Remote nodes connect in one of two modes. Pick the one that matches your network topology before you add the node, because the add-node flow branches on the choice.
 
+<Note>
+  Adding, editing, removing, and testing nodes, and generating a node token, require an administrator account.
+</Note>
+
 ## The local node
 
 Your control Sencho instance is always listed as **Local**. It is the default node, marked with a star icon, and cannot be deleted. All operations on the local node run directly against the host's Docker socket.
@@ -212,7 +216,7 @@ This means:
 
 ## Editing and deleting nodes
 
-Click the pencil icon on any row to edit its name, URL, token, or compose directory. For a Pilot Agent row, the Edit modal also surfaces the **Regenerate enrollment token** card described earlier.
+Click the pencil icon on any row to edit its name, URL, token, or compose directory. The API Token field opens blank for security: leave it blank to keep the current token, or paste a new one to rotate it. For a Pilot Agent row, the Edit modal also surfaces the **Regenerate enrollment token** card described earlier.
 
 Click the trash icon to remove a remote node. The local row hides this icon because the default node cannot be deleted. Removing a node only deletes the routing entry on the control instance; the remote Sencho instance and its containers are not touched.
 

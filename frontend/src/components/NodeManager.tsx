@@ -35,8 +35,11 @@ export interface SenchoNavigateDetail {
 
 export function NodeManager() {
   const { isPaid } = useLicense();
-  const { isAdmin } = useAuth();
+  const { isAdmin, can } = useAuth();
   const canEditLabels = isPaid && isAdmin;
+  // Mirrors the backend `node:manage` guard (admin + node-admin) so non-admin
+  // operators never see a management action the API will reject with a 403.
+  const canManageNodes = can('node:manage');
   const { nodes, refreshNodeMeta } = useNodes();
   useMastheadStats([
     { label: 'NODES', value: `${nodes.length}` },
@@ -190,20 +193,25 @@ export function NodeManager() {
   return (
     <div className="space-y-6">
       {/* Actions */}
-      <div className="flex justify-end">
-        <SettingsPrimaryButton
-          size="sm"
-          className="gap-1 shrink-0"
-          onClick={openCreate}
-        >
-          <Plus className="w-4 h-4" />
-          Add node
-        </SettingsPrimaryButton>
-      </div>
+      {canManageNodes && (
+        <div className="flex justify-end">
+          <SettingsPrimaryButton
+            size="sm"
+            className="gap-1 shrink-0"
+            onClick={openCreate}
+          >
+            <Plus className="w-4 h-4" />
+            Add node
+          </SettingsPrimaryButton>
+        </div>
+      )}
 
       <Separator />
 
-      {/* Generate Node Token - for use on THIS instance as a remote target */}
+      {/* Generate Node Token - for use on THIS instance as a remote target.
+          Gated on isAdmin because the mint route (/auth/generate-node-token) is
+          admin-only, unlike the node:manage CRUD routes above. */}
+      {isAdmin && (
       <div className="rounded-md border p-4 space-y-3">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -235,6 +243,7 @@ export function NodeManager() {
           </div>
         )}
       </div>
+      )}
 
       {/* Sync issues: surfaces FleetSync sticky errors (currently CONTROL_IDENTITY_MISMATCH). */}
       {anchorMismatches.length > 0 && (
@@ -433,42 +442,46 @@ export function NodeManager() {
                       </Tooltip>
                     </TooltipProvider>
 
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            onClick={() => testConnection(node)}
-                            disabled={testing === node.id}
-                            aria-label="Test connection"
-                          >
-                            <Wifi className={`w-4 h-4 ${testing === node.id ? 'animate-pulse' : ''}`} />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Test Connection</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                    {canManageNodes && (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => testConnection(node)}
+                              disabled={testing === node.id}
+                              aria-label="Test connection"
+                            >
+                              <Wifi className={`w-4 h-4 ${testing === node.id ? 'animate-pulse' : ''}`} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Test Connection</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
 
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            onClick={() => openEdit(node)}
-                            aria-label="Edit node"
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Edit Node</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                    {canManageNodes && (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => openEdit(node)}
+                              aria-label="Edit node"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Edit Node</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
 
-                    {!node.is_default && (
+                    {canManageNodes && !node.is_default && (
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>

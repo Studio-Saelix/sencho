@@ -138,9 +138,14 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
   const handleEdit = async () => {
     if (editingNodeId === null) return;
     try {
+      // A blank token means "keep the existing credential": the stored token is
+      // never sent to the browser, so an untouched field must not overwrite it.
+      // Only a non-empty value rotates the token on the backend.
+      const { api_token, ...rest } = formData;
+      const payload = api_token.trim() ? formData : rest;
       const res = await apiFetch(`/nodes/${editingNodeId}`, {
         method: 'PUT',
-        body: JSON.stringify(formData),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -222,18 +227,21 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
   }, []);
 
   const openEdit = useCallback((node: Node) => {
+    // The stored api_token is never returned to the browser, so the token field
+    // always opens blank. A blank value on save keeps the existing credential;
+    // typing a new value rotates it.
     setFormData({
       name: node.name,
       type: node.type,
       mode: (node.mode === 'pilot_agent' ? 'pilot_agent' : 'proxy'),
       api_url: node.api_url || '',
-      api_token: node.api_token || '',
+      api_token: '',
       compose_dir: node.compose_dir,
       is_default: node.is_default,
     });
     setOriginalEditValues({
       api_url: node.api_url || '',
-      api_token: node.api_token || '',
+      api_token: '',
     });
     setEditingNodeId(node.id);
     setEditOpen(true);
@@ -244,7 +252,7 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
     setDeleteOpen(true);
   }, []);
 
-  const renderFormFields = () => (
+  const renderFormFields = (isEdit: boolean) => (
     <div className="space-y-4 py-4">
       <div className="space-y-2">
         <Label htmlFor="node-name">Name</Label>
@@ -331,12 +339,18 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
             <Input
               id="node-api-token"
               type="password"
-              placeholder="Paste token from remote Sencho → Settings → Nodes → Generate Token"
+              placeholder={isEdit
+                ? 'Leave blank to keep the current token'
+                : 'Paste token from remote Sencho → Settings → Nodes → Generate Token'}
               value={formData.api_token}
               onChange={(e) => setFormData({ ...formData, api_token: e.target.value })}
             />
             <p className="text-xs text-muted-foreground">
-              Generate this token on the <strong>remote</strong> Sencho instance using the "Generate Node Token" button in its Settings → Nodes panel.
+              {isEdit ? (
+                'Leave blank to keep the existing token. Paste a new one only to rotate it.'
+              ) : (
+                <>Generate this token on the <strong>remote</strong> Sencho instance using the "Generate Node Token" button in its Settings → Nodes panel.</>
+              )}
             </p>
           </div>
         </>
@@ -372,7 +386,7 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
           title={formData.type === 'local' ? 'Add local node' : 'Add remote node'}
           description="Register a Sencho node so you can manage it from this console."
         />
-        <ModalBody>{renderFormFields()}</ModalBody>
+        <ModalBody>{renderFormFields(false)}</ModalBody>
         <ModalFooter
           secondary={
             <Button variant="outline" size="sm" onClick={() => setCreateOpen(false)}>Cancel</Button>
@@ -405,7 +419,7 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
       >
         <ModalHeader kicker="NODES · EDIT" title="Edit node" description="Update the connection details for this node." />
         <ModalBody>
-          {renderFormFields()}
+          {renderFormFields(true)}
           {formData.type === 'remote' && formData.mode === 'pilot_agent' && editingNodeId !== null && (
             <div className="rounded-md border border-card-border bg-card/50 p-3 space-y-2">
               <p className="text-xs text-muted-foreground">

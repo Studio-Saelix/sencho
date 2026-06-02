@@ -18,6 +18,9 @@ import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService
 import { FleetSyncService } from '../services/FleetSyncService';
 import { isValidRemoteUrl } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
+import { toPublicNode } from '../helpers/publicNode';
+import { isDebugEnabled } from '../utils/debug';
+import { sanitizeForLog } from '../utils/safeLog';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
@@ -93,7 +96,7 @@ export const nodesRouter = Router();
 nodesRouter.get('/', async (req: Request, res: Response) => {
   try {
     const nodes = DatabaseService.getInstance().getNodes();
-    res.json(nodes);
+    res.json(nodes.map(toPublicNode));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch nodes' });
   }
@@ -147,7 +150,7 @@ nodesRouter.get('/:id', async (req: Request, res: Response) => {
     if (!node) {
       return res.status(404).json({ error: 'Node not found' });
     }
-    res.json(node);
+    res.json(toPublicNode(node));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch node' });
   }
@@ -189,6 +192,7 @@ nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => 
     });
 
     NodeRegistry.getInstance().notifyNodeAdded(id);
+    console.log(`[Nodes] Created ${type} node "${sanitizeForLog(name)}" (id=${id}, mode=${resolvedMode})`);
 
     // Backfill replicated security state on the new remote so an operator who
     // adds a node mid-life does not have to wait for the next policy edit
@@ -255,6 +259,16 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
     const id = parseInt(nodeId);
     const updates = req.body;
 
+    // Keep the existing credential unless a real new token is supplied: the
+    // stored token is never returned to the client, so an untouched edit form
+    // must not clear it. Anything that is not a non-empty string (blank, null,
+    // missing, wrong type) drops the field here (defense-in-depth alongside the
+    // frontend) so it can never overwrite a configured token; only a non-empty
+    // string rotates it.
+    if (typeof updates.api_token !== 'string' || updates.api_token.trim() === '') {
+      delete updates.api_token;
+    }
+
     const existingNode = DatabaseService.getInstance().getNode(id);
     if (!existingNode) {
       return res.status(404).json({ error: 'Node not found' });
@@ -271,6 +285,7 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
 
     NodeRegistry.getInstance().evictConnection(id);
     NodeRegistry.getInstance().notifyNodeUpdated(id);
+    console.log(`[Nodes] Updated node ${id} ("${sanitizeForLog(existingNode.name)}")`);
 
     // Trigger 2: if the api_token was rotated on a mesh-enabled proxy-mode
     // remote, close the existing callback bridge and re-dial. The next
@@ -311,11 +326,19 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   try {
     const id = parseInt(nodeIdParam);
+    const existing = DatabaseService.getInstance().getNode(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Node not found' });
+    }
+    if (existing.is_default) {
+      return res.status(400).json({ error: 'Cannot delete the default node' });
+    }
     DatabaseService.getInstance().deleteNode(id);
     NodeRegistry.getInstance().evictConnection(id);
     NodeRegistry.getInstance().notifyNodeRemoved(id);
     CacheService.getInstance().invalidate(`${REMOTE_META_NAMESPACE}:${id}`);
     FleetUpdateTrackerService.getInstance().delete(id);
+    console.log(`[Nodes] Deleted node ${id} ("${sanitizeForLog(existing.name)}")`);
     res.json({ success: true });
   } catch (error: unknown) {
     console.error('Failed to delete node:', error);
@@ -473,13 +496,23 @@ nodesRouter.post('/:id/fleet-sync/reset-anchor', async (req: Request, res: Respo
 });
 
 nodesRouter.post('/:id/test', async (req: Request, res: Response) => {
+  if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
+  const nodeIdParam = req.params.id as string;
+  if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   try {
-    const id = parseInt(req.params.id as string);
+    const id = parseInt(nodeIdParam);
+    const startedAt = Date.now();
     const result = await NodeRegistry.getInstance().testConnection(id);
     // An explicit test is the operator asking for fresh truth: drop the cached
     // /api/meta so the next read rebuilds version and capabilities live rather
     // than serving a value up to the remote-meta TTL old.
     invalidateRemoteMetaCache(id);
+    if (!result.success) {
+      console.warn(`[Nodes] Connection test failed for node ${id}: ${sanitizeForLog(result.error ?? 'unknown')}`);
+    }
+    if (isDebugEnabled()) {
+      console.log(`[Nodes:diag] test node=${id} success=${result.success} ms=${Date.now() - startedAt}`);
+    }
     res.json(result);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Connection test failed';
@@ -495,6 +528,7 @@ nodesRouter.get('/:id/meta', authMiddleware, async (req: Request, res: Response)
       res.status(404).json({ error: 'Node not found' });
       return;
     }
+    if (isDebugEnabled()) console.log(`[Nodes:diag] meta node=${id} type=${node.type}`);
 
     if (node.type === 'local') {
       res.json({ version: getSenchoVersion(), capabilities: getActiveCapabilities() });
