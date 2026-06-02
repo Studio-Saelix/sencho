@@ -40,6 +40,15 @@ export interface RoutingNodeCardProps {
     footerContext: string;
     /** Offline-state reason copy; falls back to a generic line. */
     offlineReason?: string | null;
+    /**
+     * When false, the management affordances (enable/disable toggle and the
+     * enable-mesh / add-stack empty-state CTAs) are hidden so a viewer without
+     * the admin role gets a read-only card. Read-only affordances (diagnostics,
+     * alias probe, retry) stay available. Required, with no default: a caller
+     * must state the gate explicitly so a new call site cannot fall open to a
+     * management view it did not intend.
+     */
+    canManage: boolean;
 }
 
 const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
@@ -76,6 +85,7 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
         crumb, name, isLocal, nodeState, meta, aliases,
         onToggleEnabled, onShowDiagnostics, onShowAlias, onTestAlias,
         onAddStack, onRetry, footerContext, offlineReason,
+        canManage,
     } = props;
     const [density] = useDensity();
     const compact = density === 'compact';
@@ -107,6 +117,7 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
                     diagnosticsDisabled={diagnosticsDisabled}
                     onToggleEnabled={onToggleEnabled}
                     onShowDiagnostics={onShowDiagnostics}
+                    canManage={canManage}
                     footerContext={footerContext}
                     aliasesEmpty={aliases.length === 0}
                     onAddStack={onAddStack}
@@ -124,6 +135,7 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
                     diagnosticsDisabled={diagnosticsDisabled}
                     onToggleEnabled={onToggleEnabled}
                     onShowDiagnostics={onShowDiagnostics}
+                    canManage={canManage}
                     aliases={aliases}
                     onShowAlias={onShowAlias}
                     onTestAlias={onTestAlias}
@@ -147,6 +159,7 @@ interface BodyChrome {
     diagnosticsDisabled: boolean;
     onToggleEnabled: (next: boolean) => void;
     onShowDiagnostics: () => void;
+    canManage: boolean;
     footerContext: string;
     onAddStack?: () => void;
     onRetry?: () => void;
@@ -169,6 +182,7 @@ function ComfortableBody(props: ComfortableProps) {
         crumb, name, isLocal, chip, meta, nodeState, isEnabled,
         toggleDisabled, diagnosticsDisabled, onToggleEnabled, onShowDiagnostics,
         aliases, onShowAlias, onTestAlias, onAddStack, onRetry, footerContext, offlineReason,
+        canManage,
     } = props;
     const published = aliases.filter((a) => a.kind === 'alias').length;
     const showAliases = aliases.length > 0;
@@ -207,6 +221,7 @@ function ComfortableBody(props: ComfortableProps) {
                 diagnosticsDisabled={diagnosticsDisabled}
                 onToggleEnabled={onToggleEnabled}
                 onShowDiagnostics={onShowDiagnostics}
+                canManage={canManage}
             />
 
             <div className="px-4 py-3 pl-5">
@@ -224,6 +239,7 @@ function ComfortableBody(props: ComfortableProps) {
                         onAddStack={onAddStack}
                         onRetry={onRetry}
                         onToggleEnabled={onToggleEnabled}
+                        canManage={canManage}
                     />}
             </div>
 
@@ -236,7 +252,7 @@ function CompactBody(props: CompactProps) {
     const {
         name, isLocal, chip, meta, nodeState, isEnabled,
         toggleDisabled, diagnosticsDisabled, onToggleEnabled, onShowDiagnostics,
-        footerContext, aliasesEmpty, onAddStack, onRetry,
+        footerContext, aliasesEmpty, onAddStack, onRetry, canManage,
     } = props;
 
     return (
@@ -254,11 +270,13 @@ function CompactBody(props: CompactProps) {
                     {chip.label}
                 </span>
                 <div className="ml-auto flex items-center gap-1.5">
-                    <TogglePill
-                        checked={isEnabled}
-                        disabled={toggleDisabled}
-                        onChange={onToggleEnabled}
-                    />
+                    {canManage && (
+                        <TogglePill
+                            checked={isEnabled}
+                            disabled={toggleDisabled}
+                            onChange={onToggleEnabled}
+                        />
+                    )}
                     <Button
                         variant="outline"
                         size="sm"
@@ -303,6 +321,7 @@ function CompactBody(props: CompactProps) {
                 onAddStack={onAddStack}
                 onRetry={onRetry}
                 onToggleEnabled={onToggleEnabled}
+                canManage={canManage}
             />
         </>
     );
@@ -335,20 +354,23 @@ interface ToolbarProps {
     diagnosticsDisabled: boolean;
     onToggleEnabled: (next: boolean) => void;
     onShowDiagnostics: () => void;
+    canManage: boolean;
 }
 
-function Toolbar({ chip, isEnabled, toggleDisabled, diagnosticsDisabled, onToggleEnabled, onShowDiagnostics }: ToolbarProps) {
+function Toolbar({ chip, isEnabled, toggleDisabled, diagnosticsDisabled, onToggleEnabled, onShowDiagnostics, canManage }: ToolbarProps) {
     return (
         <div className="flex items-center gap-2 px-4 py-2 pl-5 border-y border-card-border/40 bg-card/60">
             <span className={cn(KICKER, 'inline-flex items-center px-1.5 py-0.5 rounded-sm border', chip.tone)}>
                 {chip.label}
             </span>
             <div className="flex-1" />
-            <TogglePill
-                checked={isEnabled}
-                disabled={toggleDisabled}
-                onChange={onToggleEnabled}
-            />
+            {canManage && (
+                <TogglePill
+                    checked={isEnabled}
+                    disabled={toggleDisabled}
+                    onChange={onToggleEnabled}
+                />
+            )}
             <Button
                 variant="outline"
                 size="sm"
@@ -449,10 +471,15 @@ interface EmptyStateProps {
     onAddStack?: () => void;
     onRetry?: () => void;
     onToggleEnabled: (next: boolean) => void;
+    canManage: boolean;
 }
 
-function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onToggleEnabled }: EmptyStateProps) {
+function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onToggleEnabled, canManage }: EmptyStateProps) {
     const { headline, sub, cta } = emptyStateCopy(nodeState, name, offlineReason);
+    // The idle and meshed CTAs (enable mesh, add stack) are management actions
+    // the backend gates on the admin role, so a non-admin viewer sees a hint
+    // instead. The degraded/offline retry is a read-only refresh and stays.
+    const isManagementState = nodeState === 'idle' || nodeState === 'meshed';
 
     const handleClick = () => {
         if (nodeState === 'idle') onToggleEnabled(true);
@@ -468,14 +495,20 @@ function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onTog
             <div className="font-mono text-[11px] leading-snug text-stat-subtitle">
                 {sub}
             </div>
-            <Button
-                variant="outline"
-                size="sm"
-                onClick={handleClick}
-                className={cn('mt-1', ctaToneFor(nodeState))}
-            >
-                {ctaIconFor(nodeState)}{cta}
-            </Button>
+            {!canManage && isManagementState ? (
+                <div className="font-mono text-[11px] leading-snug text-stat-subtitle">
+                    Managing the mesh requires an administrator.
+                </div>
+            ) : (
+                <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleClick}
+                    className={cn('mt-1', ctaToneFor(nodeState))}
+                >
+                    {ctaIconFor(nodeState)}{cta}
+                </Button>
+            )}
         </div>
     );
 }
@@ -546,10 +579,14 @@ interface CompactFooterProps {
     onAddStack?: () => void;
     onRetry?: () => void;
     onToggleEnabled: (next: boolean) => void;
+    canManage: boolean;
 }
 
-function CompactFooter({ context, nodeState, name, aliasesEmpty, onAddStack, onRetry, onToggleEnabled }: CompactFooterProps) {
-    const showCta = nodeState !== 'meshed' || aliasesEmpty;
+function CompactFooter({ context, nodeState, name, aliasesEmpty, onAddStack, onRetry, onToggleEnabled, canManage }: CompactFooterProps) {
+    // Hide the management CTAs (enable mesh / add stack) for non-admins; the
+    // read-only retry on a degraded/offline node stays available.
+    const isManagementState = nodeState === 'idle' || nodeState === 'meshed';
+    const showCta = (nodeState !== 'meshed' || aliasesEmpty) && (canManage || !isManagementState);
     const { cta } = emptyStateCopy(nodeState, name);
     const handleClick = () => {
         if (nodeState === 'idle') onToggleEnabled(true);

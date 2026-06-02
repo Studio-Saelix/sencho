@@ -45,7 +45,7 @@ function readStoredEdgeMode(): MeshGraphEdgeMode {
     }
 }
 
-export function RoutingTab() {
+export function RoutingTab({ canManage }: { canManage: boolean }) {
     const [status, setStatus] = useState<MeshNodeStatus[]>([]);
     const [localDataPlane, setLocalDataPlane] = useState<MeshDataPlaneStatus | null>(null);
     const [aliases, setAliases] = useState<MeshAlias[]>([]);
@@ -178,11 +178,13 @@ export function RoutingTab() {
                                 onShowAlias={(alias) => setRouteDetailAlias(alias)}
                                 onTestUpstream={testUpstream}
                                 onChanged={() => { void refresh(); }}
+                                canManage={canManage}
                             />
                         ))}
                     </div>
                 </div>
                 <SheetsRoot
+                    canManage={canManage}
                     optInNode={optInNode} setOptInNode={setOptInNode}
                     diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                     routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
@@ -235,6 +237,7 @@ export function RoutingTab() {
                             onShowAlias={(alias) => setRouteDetailAlias(alias)}
                             onTestUpstream={testUpstream}
                             onChanged={() => { void refresh(); }}
+                            canManage={canManage}
                         />
                     ))}
                 </div>
@@ -247,6 +250,7 @@ export function RoutingTab() {
                 />
             )}
             <SheetsRoot
+                canManage={canManage}
                 optInNode={optInNode} setOptInNode={setOptInNode}
                 diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                 routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
@@ -288,6 +292,7 @@ function RoutingMasthead({ meshedNodes, reachableNodes, totalAliases, onShowActi
 }
 
 function SheetsRoot(props: {
+    canManage: boolean;
     optInNode: { id: number; name: string } | null;
     setOptInNode: (v: { id: number; name: string } | null) => void;
     diagnosticsNode: { id: number; name: string } | null;
@@ -311,6 +316,7 @@ function SheetsRoot(props: {
                     onOpenChange={(open) => { if (!open) props.setOptInNode(null); }}
                     nodeId={optInNode.id}
                     nodeName={optInNode.name}
+                    canManage={props.canManage}
                     onChanged={props.onChanged}
                     onViewTopology={(stack) => {
                         props.setTopologyStack({ nodeId: optInNode.id, nodeName: optInNode.name, stack });
