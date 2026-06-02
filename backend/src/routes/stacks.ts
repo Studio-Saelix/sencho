@@ -23,6 +23,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
@@ -252,6 +253,41 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Failed to fetch stack statuses:', error);
     res.status(500).json({ error: 'Failed to fetch stack statuses' });
+  }
+});
+
+// Read-only scan of the compose directory for the guided first-import flow.
+// Surfaces compose files found on disk (loose at the root, already a stack, or
+// one directory too deep) with a dry preview so a new user can land their first
+// stack without reading the docs first. Performs no writes.
+stacksRouter.get('/import/scan', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    const fsSvc = FileSystemService.getInstance(req.nodeId);
+    const raw = await fsSvc.findImportCandidates();
+    const candidates = raw.map((c) => {
+      let preview: ComposePreview;
+      if (c.oversized) {
+        preview = { services: [], warnings: [], parseError: 'Compose file is too large to preview.' };
+      } else if (c.content !== null) {
+        preview = parseComposePreview(c.content);
+      } else {
+        preview = { services: [], warnings: [], parseError: 'Could not read compose file.' };
+      }
+      return {
+        name: c.name,
+        composeFile: c.composeFile,
+        location: c.location,
+        status: c.status,
+        services: preview.services,
+        warnings: preview.warnings,
+        parseError: preview.parseError,
+      };
+    });
+    res.json({ composeDir: fsSvc.getBaseDir(), candidates });
+  } catch (error) {
+    console.error('Failed to scan compose directory:', error);
+    res.status(500).json({ error: 'Failed to scan compose directory' });
   }
 });
 

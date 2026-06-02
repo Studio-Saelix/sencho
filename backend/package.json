@@ -12,7 +12,14 @@
     "dev": "nodemon --watch src --ext ts,json --exec ts-node src/index.ts",
     "test": "vitest run",
     "lint": "eslint src",
-    "reset-mfa": "node dist/cli/resetMfa.js"
+    "reset-mfa": "node dist/cli/resetMfa.js",
+    "reset-password": "node dist/cli/resetPassword.js",
+    "create-emergency-admin": "node dist/cli/createEmergencyAdmin.js",
+    "clear-sessions": "node dist/cli/clearSessions.js",
+    "disable-sso": "node dist/cli/disableSso.js",
+    "diagnostics": "node dist/cli/diagnostics.js",
+    "validate-db": "node dist/cli/validateDb.js",
+    "backup-data": "node dist/cli/backupData.js"
   },
   "keywords": [],
   "author": "",
