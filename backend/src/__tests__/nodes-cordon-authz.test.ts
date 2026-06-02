@@ -178,6 +178,14 @@ describe('POST /api/nodes/:id/cordon authorization', () => {
         expect(res.status).toBe(400);
     });
 
+    it('rejects a numeric-prefix node id with 400', async () => {
+        const res = await request(app)
+            .post('/api/nodes/1abc/cordon')
+            .set('Cookie', adminCookie)
+            .send({});
+        expect(res.status).toBe(400);
+    });
+
     it('returns 404 for a node that does not exist', async () => {
         const res = await request(app)
             .post('/api/nodes/999999/cordon')
@@ -283,6 +291,14 @@ describe('POST /api/nodes/:id/uncordon authorization', () => {
     it('rejects an invalid node id with 400', async () => {
         const res = await request(app)
             .post('/api/nodes/0/uncordon')
+            .set('Cookie', adminCookie)
+            .send({});
+        expect(res.status).toBe(400);
+    });
+
+    it('rejects a numeric-prefix node id with 400', async () => {
+        const res = await request(app)
+            .post('/api/nodes/1abc/uncordon')
             .set('Cookie', adminCookie)
             .send({});
         expect(res.status).toBe(400);

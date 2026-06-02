@@ -329,11 +329,11 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   if (!requireAdmiral(req, res)) return;
-  const id = parseInt(nodeIdParam, 10);
-  if (!Number.isInteger(id) || id <= 0) {
+  if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;
   }
+  const id = parseInt(nodeIdParam, 10);
   const rawReason = (req.body && typeof req.body === 'object') ? (req.body as { reason?: unknown }).reason : undefined;
   let reason: string | null = null;
   if (rawReason !== undefined && rawReason !== null) {
@@ -368,11 +368,11 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   if (!requireAdmiral(req, res)) return;
-  const id = parseInt(nodeIdParam, 10);
-  if (!Number.isInteger(id) || id <= 0) {
+  if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;
   }
+  const id = parseInt(nodeIdParam, 10);
   try {
     const existing = DatabaseService.getInstance().getNode(id);
     if (!existing) {
