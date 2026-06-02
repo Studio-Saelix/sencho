@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { parse as parseYaml } from 'yaml';
 import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
 import { Button } from './ui/button';
@@ -19,6 +19,7 @@ interface StackAnatomyPanelProps {
   onApplyUpdate: () => void;
   onOpenFiles?: () => void;
   canEdit: boolean;
+  applying?: boolean;
   notifications?: NotificationItem[];
 }
 
@@ -236,6 +237,7 @@ export default function StackAnatomyPanel({
   onApplyUpdate,
   onOpenFiles,
   canEdit,
+  applying = false,
   notifications,
 }: StackAnatomyPanelProps) {
   const anatomy = useMemo(() => parseAnatomy(content), [content]);
@@ -294,6 +296,35 @@ export default function StackAnatomyPanel({
     void run();
     return () => { cancelled = true; };
   }, [stackName]);
+
+  // Re-check the preview when an in-flight apply finishes (applying true -> false).
+  // A successful update clears has_update so the banner unmounts; a failed one
+  // leaves it in place, since an update is still pending.
+  const prevApplyingRef = useRef(applying);
+  useEffect(() => {
+    const finishedApplying = prevApplyingRef.current && !applying;
+    prevApplyingRef.current = applying;
+    if (!finishedApplying) return;
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const res = await apiFetch(`/stacks/${stackName}/update-preview`);
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          setUpdatePreview(data);
+        } else {
+          setUpdatePreview(null);
+        }
+      } catch {
+        // Advisory background read: on failure show no banner rather than a stale one.
+        // The apply action reports its own success or failure; this refresh does not.
+        if (!cancelled) setUpdatePreview(null);
+      }
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [applying, stackName]);
 
   useEffect(() => {
     let cancelled = false;
@@ -494,7 +525,7 @@ export default function StackAnatomyPanel({
           </>
         )}
         {hasUpdate && updatePreview && (
-          <div className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
+          <div data-testid="update-available-banner" className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="font-mono text-[11px] uppercase tracking-wide">
@@ -524,11 +555,12 @@ export default function StackAnatomyPanel({
                   type="button"
                   size="sm"
                   variant="outline"
+                  disabled={applying}
                   className={cn('shrink-0 h-7 gap-1', applyBtnTone)}
                   onClick={onApplyUpdate}
                 >
-                  <Rocket className="h-3 w-3" strokeWidth={1.5} />
-                  apply
+                  <Rocket className={cn('h-3 w-3', applying && 'animate-pulse')} strokeWidth={1.5} />
+                  {applying ? 'applying...' : 'apply'}
                 </Button>
               )}
             </div>
