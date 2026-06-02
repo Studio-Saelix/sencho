@@ -186,6 +186,7 @@ Sencho does not emit telemetry, analytics, or crash reports. The only outbound t
 ## Documentation, community, and license
 
 - **Documentation:** [docs.sencho.io](https://docs.sencho.io)
+- **If something breaks:** the [Recovery guide](https://docs.sencho.io/operations/recovery) covers getting back to a working state when Sencho, a deploy, sign-in, Docker, or a node fails.
 - **Community:** [GitHub Discussions](https://github.com/studio-saelix/sencho/discussions)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
 - **Security:** [SECURITY.md](SECURITY.md). Do not open public issues for security vulnerabilities.

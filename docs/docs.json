@@ -179,6 +179,7 @@
               "operations/self-hosting",
               "operations/upgrade",
               "operations/backup",
+              "operations/recovery",
               "operations/troubleshooting",
               "operations/verifying-images",
               "operations/trivy-setup",
