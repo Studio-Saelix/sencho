@@ -11,13 +11,14 @@
  * bridge (loopback server, ping timer, open streams) is released immediately
  * instead of lingering until the agent happens to disconnect.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { EventEmitter } from 'events';
 import { WebSocket } from 'ws';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
+import { MeshProxyTunnelDialer } from '../services/MeshProxyTunnelDialer';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -147,7 +148,7 @@ describe('node-management write routes require node:manage', () => {
   });
 });
 
-describe('deleting a node tears down its pilot tunnel', () => {
+describe('deleting a node tears down its tunnel or mesh bridge', () => {
   it('closes the active tunnel socket and removes the node row', async () => {
     const db = DatabaseService.getInstance();
     const mgr = PilotTunnelManager.getInstance();
@@ -180,5 +181,51 @@ describe('deleting a node tears down its pilot tunnel', () => {
 
     expect(res.status).toBe(200);
     expect(db.getNode(id)).toBeUndefined();
+  });
+
+  it('closes a live proxy-mode mesh bridge on delete without scheduling a redial', async () => {
+    const db = DatabaseService.getInstance();
+    const dialer = MeshProxyTunnelDialer.resetForTest();
+    const redialSpy = vi.spyOn(
+      dialer as unknown as { scheduleReactiveRedial: (id: number) => void },
+      'scheduleReactiveRedial',
+    ).mockImplementation(() => {});
+
+    const id = db.addNode({
+      name: `nm-proxy-del-${Date.now()}`,
+      type: 'remote',
+      mode: 'proxy',
+      api_url: 'http://proxy-peer:1852',
+      api_token: 'tok',
+      compose_dir: '/tmp/x',
+      is_default: false,
+    });
+
+    // Prime a live proxy bridge the way dial() does: in the dialer's map with a
+    // close listener wired. A real bridge emits 'closed' when closed, so the
+    // fake does too. If the delete path closed it via the manager instead of the
+    // dialer's intentional path, that 'closed' event would drive tearDownBridge
+    // -> proxy-bridge-down -> a reactive redial against the deleted node.
+    const fakeBridge = new EventEmitter() as EventEmitter & {
+      close: ReturnType<typeof vi.fn>;
+      getActiveStreamCount: () => number;
+    };
+    fakeBridge.close = vi.fn(() => { fakeBridge.emit('closed', { code: 1000 }); });
+    fakeBridge.getActiveStreamCount = () => 0;
+    (dialer as unknown as { bridges: Map<number, unknown> }).bridges.set(id, fakeBridge);
+    (dialer as unknown as { attachBridgeCloseListener: (id: number, b: EventEmitter) => void })
+      .attachBridgeCloseListener(id, fakeBridge);
+
+    const res = await request(app)
+      .delete(`/api/nodes/${id}`)
+      .set('Authorization', `Bearer ${tokenForRole('admin')}`);
+
+    expect(res.status).toBe(200);
+    expect(fakeBridge.close).toHaveBeenCalled();
+    expect(dialer.hasBridge(id)).toBe(false);
+    expect(redialSpy).not.toHaveBeenCalled();
+    expect(db.getNode(id)).toBeUndefined();
+
+    redialSpy.mockRestore();
   });
 });
