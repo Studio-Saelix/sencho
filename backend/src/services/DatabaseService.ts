@@ -2680,10 +2680,26 @@ export class DatabaseService {
         this.db.prepare('UPDATE users SET token_version = token_version + 1, updated_at = ? WHERE id = ?').run(Date.now(), userId);
     }
 
+    /**
+     * Invalidate every active session by bumping every user's token_version in
+     * one statement. Returns the number of users affected. Used by the
+     * emergency `clear-sessions` CLI when a stolen cookie or a wedged login
+     * state needs a clean sign-out of every user on this node.
+     */
+    public bumpAllTokenVersions(): number {
+        const result = this.db.prepare('UPDATE users SET token_version = token_version + 1, updated_at = ?').run(Date.now());
+        return result.changes;
+    }
+
     // --- User MFA ---
 
     public getUserMfa(userId: number): UserMfa | undefined {
         return this.db.prepare('SELECT * FROM user_mfa WHERE user_id = ?').get(userId) as UserMfa | undefined;
+    }
+
+    /** Count of users with a completed (enabled) two-factor enrolment. */
+    public getMfaEnrolledCount(): number {
+        return (this.db.prepare('SELECT COUNT(*) as count FROM user_mfa WHERE enabled = 1').get() as { count: number })?.count || 0;
     }
 
     /**
