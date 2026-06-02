@@ -45,6 +45,8 @@ Replace `<username>` with the admin's account name. On success the command print
 
 The command respects the container's `DATA_DIR`, so it always acts on the same SQLite database the application uses. It writes an audit-log entry attributed to `cli` so the action is auditable after the fact.
 
+This is one of several host-level recovery commands. See [Emergency command-line recovery](/operations/emergency-cli) for the full set, including password reset, creating an emergency admin, and disabling a broken SSO provider.
+
 <Note>
   Enabling **Developer Mode** under **Settings · Developer** surfaces additional `[MFA:diag]` lines in the backend logs. They are helpful when investigating a 2FA support ticket and can be turned off again once the issue is resolved.
 </Note>
