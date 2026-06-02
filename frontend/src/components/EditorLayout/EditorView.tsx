@@ -876,6 +876,7 @@ export function EditorView({
                         onOpenFiles={canRead ? () => { setEditingCompose(true); setActiveTab('files'); } : undefined}
                         onOpenGitSource={() => setGitSourceOpen(true)}
                         onApplyUpdate={() => { void updateStack(); }}
+                        applying={loadingAction === 'update'}
                         canEdit={can('stack:edit', 'stack', stackName)}
                         notifications={notifications}
                     />

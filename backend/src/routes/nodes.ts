@@ -18,6 +18,8 @@ import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService
 import { FleetSyncService } from '../services/FleetSyncService';
 import { isValidRemoteUrl } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
+import { isDebugEnabled } from '../utils/debug';
+import { sanitizeForLog } from '../utils/safeLog';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
@@ -337,11 +339,11 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   if (!requireAdmiral(req, res)) return;
-  const id = parseInt(nodeIdParam, 10);
-  if (!Number.isInteger(id) || id <= 0) {
+  if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;
   }
+  const id = parseInt(nodeIdParam, 10);
   const rawReason = (req.body && typeof req.body === 'object') ? (req.body as { reason?: unknown }).reason : undefined;
   let reason: string | null = null;
   if (rawReason !== undefined && rawReason !== null) {
@@ -363,6 +365,7 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
       return;
     }
     const updated = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+    if (isDebugEnabled()) console.log('[Federation:diag] cordoned node=%s reasonLen=%s', sanitizeForLog(id), sanitizeForLog(reason?.length ?? 0));
     res.set('cache-control', 'no-store').json(updated);
   } catch (error: unknown) {
     console.error('Failed to cordon node:', error);
@@ -375,11 +378,11 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   if (!requireAdmiral(req, res)) return;
-  const id = parseInt(nodeIdParam, 10);
-  if (!Number.isInteger(id) || id <= 0) {
+  if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;
   }
+  const id = parseInt(nodeIdParam, 10);
   try {
     const existing = DatabaseService.getInstance().getNode(id);
     if (!existing) {
