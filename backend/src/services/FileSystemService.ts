@@ -462,21 +462,32 @@ export class FileSystemService {
 
   private async readComposeCandidate(filePath: string): Promise<{ content: string | null; oversized: boolean }> {
     this.assertWithinBase(filePath);
-    // Stat and read share a single descriptor so the size check and the read
-    // observe the same inode even if the file is replaced between the two calls
-    // (mirrors getStackContentWithMtime). Re-resolving the path for each would
-    // be a time-of-check/time-of-use race.
     let fh: import('fs/promises').FileHandle | null = null;
     try {
-      fh = await fsPromises.open(filePath, 'r');
+      // Resolve symlinks and confirm the real target is still inside the compose
+      // directory before reading (matches resolveSafeStackPath). A symlinked
+      // compose file or symlinked parent must not expose a file outside the
+      // compose dir through the preview.
+      const realPath = await fsPromises.realpath(filePath);
+      if (!isPathWithinBase(realPath, this.baseDir)) {
+        console.warn('[FileSystemService] Skipping import candidate that escapes the compose directory:', sanitizeForLog(filePath));
+        return { content: null, oversized: false };
+      }
+      // Open the canonical path once and stat/read on the same descriptor so the
+      // size check and the read observe the same inode (no time-of-check/use race).
+      fh = await fsPromises.open(realPath, 'r');
       const stat = await fh.stat();
+      if (!stat.isFile()) return { content: null, oversized: false };
       if (stat.size > IMPORT_MAX_PREVIEW_BYTES) return { content: null, oversized: true };
-      const content = await fh.readFile('utf-8');
-      return { content, oversized: false };
+      // Read at most stat.size (<= cap) bytes so a file that grows after the
+      // stat cannot push this buffer past the cap.
+      const buffer = Buffer.alloc(stat.size);
+      const { bytesRead } = await fh.read(buffer, 0, stat.size, 0);
+      return { content: buffer.subarray(0, bytesRead).toString('utf-8'), oversized: false };
     } catch (error) {
-      // The file existed at probe time, so a failure here (permission, I/O,
-      // it was replaced by a directory) is worth a server-side line even though
-      // the scan degrades gracefully and the route reports it to the user.
+      // The file existed at probe time, so a failure here (permission, I/O) is
+      // worth a server-side line even though the scan degrades gracefully and the
+      // route reports it to the user.
       console.warn('[FileSystemService] Failed to read import candidate:', sanitizeForLog((error as Error)?.message ?? String(error)));
       return { content: null, oversized: false };
     } finally {
@@ -495,7 +506,11 @@ export class FileSystemService {
     let entries: Dirent[];
     try {
       entries = await fsPromises.readdir(this.baseDir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      // The compose dir itself is unreadable (missing, permissions). The scan
+      // degrades to an empty list, so log it rather than report "no files found"
+      // for what is really an access failure.
+      console.warn('[FileSystemService] Failed to scan compose directory for import:', sanitizeForLog((error as Error)?.message ?? String(error)));
       return candidates;
     }
 
@@ -524,7 +539,8 @@ export class FileSystemService {
       let children: Dirent[];
       try {
         children = await fsPromises.readdir(dir, { withFileTypes: true });
-      } catch {
+      } catch (error) {
+        console.warn('[FileSystemService] Failed to read subdirectory during import scan:', sanitizeForLog((error as Error)?.message ?? String(error)));
         continue;
       }
       for (const child of children) {

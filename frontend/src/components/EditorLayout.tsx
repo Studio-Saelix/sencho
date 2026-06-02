@@ -394,6 +394,7 @@ export default function EditorLayout() {
             const node = nodes.find(n => n.id === nodeId);
             if (node) void stackActions.loadFileOnNode(node, file);
           },
+          filterChip,
           onOpenCreate: can('stack:create') ? openCreateDialog : undefined,
         }}
         activitySummary={activitySummary}

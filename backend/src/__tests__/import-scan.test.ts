@@ -82,22 +82,48 @@ describe('FileSystemService.findImportCandidates', () => {
     }
   });
 
-  it('reports content: null (not oversized) and logs when a candidate cannot be read', async () => {
-    // A directory named compose.yaml passes the access() probe but fails the
-    // readFile (EISDIR), exercising the read-error branch deterministically.
+  it('skips a non-regular file (a directory named compose.yaml) without reading it', async () => {
+    // A directory named compose.yaml passes the access() probe; the isFile()
+    // guard means it is reported as unreadable rather than read as content.
     const weirdDir = path.join(tmpRoot, 'weird');
     fs.mkdirSync(path.join(weirdDir, 'compose.yaml'), { recursive: true });
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       const candidates = await FileSystemService.getInstance().findImportCandidates();
       const weird = candidates.find((c) => c.name === 'weird');
       expect(weird).toBeDefined();
       expect(weird?.content).toBeNull();
       expect(weird?.oversized).toBe(false);
+    } finally {
+      fs.rmSync(weirdDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not read a compose file that symlinks outside the compose directory', async () => {
+    // Sibling of the temp compose root, i.e. outside the base dir.
+    const outside = path.join(path.dirname(tmpRoot), `sencho-outside-${Date.now()}.yaml`);
+    fs.writeFileSync(outside, COMPOSE);
+    const escDir = path.join(tmpRoot, 'escape');
+    fs.mkdirSync(escDir, { recursive: true });
+    let linked = true;
+    try {
+      fs.symlinkSync(outside, path.join(escDir, 'compose.yaml'));
+    } catch {
+      // Creating symlinks needs privilege on some platforms; the assertion below
+      // runs for real on the Linux CI runners.
+      linked = false;
+    }
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      if (!linked) return;
+      const candidates = await FileSystemService.getInstance().findImportCandidates();
+      const esc = candidates.find((c) => c.name === 'escape');
+      expect(esc).toBeDefined();
+      expect(esc?.content).toBeNull();
       expect(warnSpy).toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
-      fs.rmSync(weirdDir, { recursive: true, force: true });
+      fs.rmSync(escDir, { recursive: true, force: true });
+      fs.rmSync(outside, { force: true });
     }
   });
 
