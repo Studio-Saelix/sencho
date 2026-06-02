@@ -14,9 +14,11 @@ interface Props {
     nodeName: string;
     onChanged: () => void;
     onViewTopology?: (stack: string) => void;
+    /** Opt-in/out is admin-only on the backend; non-admins see the list read-only. */
+    canManage: boolean;
 }
 
-export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged, onViewTopology }: Props) {
+export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged, onViewTopology, canManage }: Props) {
     const [stacks, setStacks] = useState<MeshStackEntry[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -93,6 +95,7 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                     <p className="text-sm text-stat-subtitle leading-snug">
                         Adding a stack lets its services be reached from other meshed stacks by hostname.
                         Toggling a stack triggers a redeploy on its node so the routing override applies.
+                        {!canManage && ' Changing mesh membership requires an administrator.'}
                     </p>
 
                     {loading && (
@@ -132,13 +135,15 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                                                 <Workflow className="w-3 h-3 mr-1" /> Topology
                                             </Button>
                                         )}
-                                        <Button
-                                            size="sm"
-                                            variant={stack.optedIn ? 'outline' : 'default'}
-                                            onClick={() => setConfirmStack(stack)}
-                                        >
-                                            {stack.optedIn ? 'Remove from mesh' : 'Add to mesh'}
-                                        </Button>
+                                        {canManage && (
+                                            <Button
+                                                size="sm"
+                                                variant={stack.optedIn ? 'outline' : 'default'}
+                                                onClick={() => setConfirmStack(stack)}
+                                            >
+                                                {stack.optedIn ? 'Remove from mesh' : 'Add to mesh'}
+                                            </Button>
+                                        )}
                                     </div>
                                 )}
                             </div>

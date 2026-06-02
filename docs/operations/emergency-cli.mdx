@@ -1,0 +1,110 @@
+---
+title: Emergency command-line recovery
+description: Host-level commands that recover access when the Sencho UI is unreachable, plus the in-app Recovery surface for everyday health checks.
+---
+
+When the dashboard is unreachable, an identity provider blocks the login screen, or every administrator is locked out, Sencho ships a set of emergency commands you run from a shell on the host. Each one acts on the same SQLite database the application uses (it respects the container's `DATA_DIR`), and each writes an audit-log entry attributed to `cli` where it changes state, so the action is traceable afterwards.
+
+All commands run through the Sencho container:
+
+```bash
+docker compose exec sencho node dist/cli/<command>.js [arguments]
+```
+
+Each command prints what it did and exits with code `0` on success or non-zero on failure, so it can gate a script.
+
+<Note>
+  Before you rely on Sencho in earnest, back up `DATA_DIR` and `COMPOSE_DIR`. The [Recovery guide](/operations/recovery) explains why most recovery is file-level, and [Backup & Restore](/operations/backup) gives a copy-and-restore routine.
+</Note>
+
+## In-app Recovery surface
+
+For everyday checks you do not need a shell. An administrator can open **Settings · Recovery** for a read-only health snapshot: app version, database integrity, encryption-key status, Docker reachability, administrator and two-factor counts, and the non-secret configuration. The page loads without Docker or live metrics, so it stays available when the rest of the dashboard does not. From there you can export the snapshot as JSON, reset this browser's interface preferences to defaults, and see the same command reference printed below.
+
+The command line is the fallback for when even that surface cannot be reached.
+
+## Sign-in and account recovery
+
+### Reset a forgotten password
+
+Resets a local user's password and signs out their existing sessions.
+
+```bash
+docker compose exec sencho node dist/cli/resetPassword.js <username> <new-password>
+```
+
+Applies to local accounts only. Users who sign in through SSO are managed by their identity provider.
+
+### Create an emergency administrator
+
+Creates a fresh local administrator when every existing admin is locked out but the database is otherwise intact, so you avoid discarding configuration with a full setup reset.
+
+```bash
+docker compose exec sencho node dist/cli/createEmergencyAdmin.js <username> <password>
+```
+
+It refuses to overwrite an existing user; use the password reset above for an account that already exists. Sign in afterwards and review your other accounts.
+
+### Clear the existing two-factor enrolment
+
+Removes a user's second factor so they can sign in with their password alone and re-enrol.
+
+```bash
+docker compose exec sencho node dist/cli/resetMfa.js <username>
+```
+
+See [Managing Two-Factor Authentication](/operations/two-factor-admin) for the full two-factor workflow, including the in-app reset another admin can perform without a shell.
+
+### Sign every user out
+
+Invalidates every active session at once, for example after a suspected stolen session cookie.
+
+```bash
+docker compose exec sencho node dist/cli/clearSessions.js
+```
+
+Everyone signs in again on their next request; nothing else changes.
+
+### Disable a broken single sign-on provider
+
+Re-enables local password sign-in when a misconfigured identity provider blocks the login screen.
+
+```bash
+docker compose exec sencho node dist/cli/disableSso.js [provider]
+```
+
+With no argument it disables every enabled provider. The stored configuration is preserved (only the enabled flag is cleared), so you can correct it and turn it back on from **Settings · SSO**.
+
+## Inspecting and protecting your data
+
+### Print a diagnostic summary
+
+Prints the same snapshot the in-app Recovery surface shows, as JSON. Read-only and free of secrets, so it is safe to paste into a bug report.
+
+```bash
+docker compose exec sencho node dist/cli/diagnostics.js
+```
+
+### Validate the database and encryption key
+
+Runs a database integrity check, confirms the core tables exist, confirms the encryption key is present and usable, and confirms at least one administrator exists. Exits non-zero if any check fails.
+
+```bash
+docker compose exec sencho node dist/cli/validateDb.js
+```
+
+Use this to decide whether a restore is needed before you start the application against a questionable data directory.
+
+### Back up the data directory
+
+Writes a consistent copy of `sencho.db` (using SQLite's online backup, safe while Sencho is running) and `encryption.key` to a target directory.
+
+```bash
+docker compose exec sencho node dist/cli/backupData.js [destination-dir]
+```
+
+With no argument it writes a timestamped folder under `DATA_DIR/backups`. The copy contains your encryption key, so store it as carefully as the original.
+
+<Warning>
+  These commands act directly on live data. Read the description of each before running it, and prefer the least disruptive option that solves your problem. None of them touches your Docker stacks or their compose files; those are independent of Sencho.
+</Warning>

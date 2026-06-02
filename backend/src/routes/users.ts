@@ -10,6 +10,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage, isSqliteUniqueViolation } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 import { sanitizeForLog } from '../utils/safeLog';
+import { validateUsername } from '../helpers/validateUsername';
 
 const USERS_SCOPE_MESSAGE = 'API tokens cannot access user management.';
 const VALID_USER_ROLES: UserRole[] = ['admin', 'viewer', 'deployer', 'node-admin', 'auditor'];
@@ -21,13 +22,6 @@ const VALID_RESOURCE_TYPES: ResourceType[] = ['stack', 'node'];
 // be meaningful.
 function roleRequiresAdmiral(role: UserRole): boolean {
   return role === 'deployer' || role === 'node-admin' || role === 'auditor';
-}
-
-function validateUsername(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length < 3 || !/^[a-zA-Z0-9_-]+$/.test(value)) {
-    return 'Username must be at least 3 characters (letters, numbers, underscore, hyphen)';
-  }
-  return null;
 }
 
 // Returns a seat-limit error message if adding an account of `role` would

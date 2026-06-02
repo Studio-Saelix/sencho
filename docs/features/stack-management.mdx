@@ -13,9 +13,12 @@ A **stack** in Sencho is a Docker Compose project: a directory inside your `COMP
 
 Click **Create Stack** in the left sidebar to open the **New stack** dialog. Pick a source from the tabs at the top:
 
+- **Import**: scan the compose directory for compose files you already have on disk and preview what they contain before you bring them in. See [Import existing files](#import-existing-files) below.
 - **Empty**: start with a minimal `compose.yaml` skeleton. The default service uses `nginx:latest` with the host port binding commented out, so a fresh deploy never collides with an existing service on the host. Uncomment and adjust the `ports:` block when you're ready to expose the container.
 - **From Git**: clone a Git repository so its compose file becomes the stack source. Future webhook pulls keep it in sync. See [Git Sources](/features/git-sources) for the full sync flow.
 - **From Docker Run**: paste a `docker run` command and let Sencho convert it to compose YAML.
+
+When you have no stacks yet, the sidebar shows a short prompt with **Import existing** and **New stack** buttons that open this dialog on the matching tab.
 
 <Frame>
   <img src="/images/stack-management/create-stack-dialog.png" alt="New stack dialog on the Empty tab with a stack name field" />
@@ -27,6 +30,19 @@ Click **Create Stack** in the left sidebar to open the **New stack** dialog. Pic
 - Must be unique; duplicates are rejected
 
 Sencho creates a new directory inside `COMPOSE_DIR` with the chosen seed file. You land in the editor for the new stack and can deploy it from there.
+
+### Import existing files
+
+If you already have compose files on disk, the **Import** tab helps you land your first stack without reading the rest of this page. It scans your compose directory and lists every compose file it finds, with a dry preview of each file's services, ports, volumes, and env files. The scan is read only: it never moves, writes, or changes any of your files.
+
+Each result shows where the file sits:
+
+- **In sidebar**: the file is in its own subfolder inside the compose directory, so it is already a stack. Expand it to preview its services, or open it directly in the sidebar.
+- **Needs move**: the file is loose at the root of the compose directory, or one folder too deep, so it will not show up as a stack on its own. Sencho shows the exact path to move it to (its own subfolder inside the compose directory) and a **Rescan** button. Move the file there, click **Rescan**, and it appears.
+
+The top of the panel shows the directory Sencho is scanning and a reminder of the path rule: each stack lives in its own subfolder, and the host mount path must match the path inside the container so relative volume paths resolve. See [Configuration](/getting-started/configuration) for the full explanation.
+
+If a preview shows a relative volume path (for example `./data:/app/data`), Sencho flags it so you can double check your mount before deploying.
 
 ### From Git
 
@@ -354,7 +370,7 @@ Items are disabled while another operation is in progress on that stack.
 
 ## Scanning for stacks
 
-If you place Docker Compose files directly into the stacks directory (for example, via `scp`, a file manager, or the command line), you can import them without going through the full **Create Stack** flow.
+If you place Docker Compose files directly into the stacks directory (for example, via `scp`, a file manager, or the command line), you can import them without going through the full **Create Stack** flow. For a guided version that previews each file and points out anything placed where it will not register, use the [Import tab](#import-existing-files) of the **Create Stack** dialog.
 
 <Frame>
   <img src="/images/stack-management/sidebar-actions.png" alt="Sidebar action row with Create Stack button, bulk mode toggle, and scan stacks folder icon button" />

@@ -180,6 +180,7 @@
               "operations/upgrade",
               "operations/backup",
               "operations/recovery",
+              "operations/emergency-cli",
               "operations/troubleshooting",
               "operations/verifying-images",
               "operations/trivy-setup",

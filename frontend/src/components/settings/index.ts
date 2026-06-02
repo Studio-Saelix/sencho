@@ -9,6 +9,7 @@ export { DeveloperSection } from './DeveloperSection';
 export { AppStoreSection } from './AppStoreSection';
 export { SupportSection } from './SupportSection';
 export { AboutSection } from './AboutSection';
+export { RecoverySection } from './RecoverySection';
 
 // Paid-tier sections (UsersSection, WebhooksSection, SecuritySection,
 // LabelsSection, CloudBackupSection, NotificationRoutingSection) are NOT
