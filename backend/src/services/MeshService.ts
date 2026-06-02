@@ -16,7 +16,7 @@ import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDi
 import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
 import { lookupContainerIp } from '../mesh/containerLookup';
 import { STREAM_PENDING_DATA_MAX_BYTES } from '../pilot/protocol';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
@@ -1464,16 +1464,17 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     /**
      * Developer-mode diagnostic log for the mesh data plane. Off in production
      * by default; gated on the shared `developer_mode` setting via
-     * isDebugEnabled(). Each value is run through sanitizeForLog so a node name
-     * or error string cannot smuggle CR/LF or other control characters into the
-     * log surface. Safe at per-operation, per-accept (once per new TCP
-     * connection), and per-60s-tick cadences; never call it from the per-frame
-     * relay loops in openSameNode / openCrossNode.
+     * isDebugEnabled(). Each value is run through redactSensitiveText and then
+     * sanitizeForLog, so a secret-shaped value (Bearer token, JWT, credentialed
+     * URL) is redacted and control characters are stripped before it reaches the
+     * log surface, even if a future caller passes one. Safe at per-operation,
+     * per-accept (once per new TCP connection), and per-60s-tick cadences; never
+     * call it from the per-frame relay loops in openSameNode / openCrossNode.
      */
     private logDiag(message: string, details: Record<string, unknown> = {}): void {
         if (!isDebugEnabled()) return;
         const cleaned = Object.fromEntries(
-            Object.entries(details).map(([key, value]) => [key, sanitizeForLog(value)]),
+            Object.entries(details).map(([key, value]) => [key, sanitizeForLog(redactSensitiveText(value))]),
         );
         console.debug(`[Mesh:diag] ${message}`, cleaned);
     }

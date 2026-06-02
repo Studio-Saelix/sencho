@@ -76,7 +76,9 @@ describe('mesh developer-mode diagnostics', () => {
     });
 
     it('never leaks a remote node api token through diagnostics or logs', async () => {
-        const SECRET = 'SUPERSECRET_TOKEN_abc123';
+        // A JWT-shaped credential canary, so the assertion guards the actual
+        // class of secret (a Bearer/JWT node token) rather than an opaque string.
+        const SECRET = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJtZXNoLWNhbmFyeSJ9.bWVzaC1jYW5hcnlfc2ln';
         const db = DatabaseService.getInstance();
         const remoteId = db.addNode({
             name: 'obs-remote',
