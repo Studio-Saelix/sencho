@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { Plus, GitBranch, FileCode2, Loader2, type LucideIcon } from 'lucide-react';
+import { Plus, GitBranch, FileCode2, FolderSearch, Loader2, type LucideIcon } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/modal';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -7,6 +7,7 @@ import { Label } from '../ui/label';
 import { ScrollArea } from '../ui/scroll-area';
 import { Checkbox } from '../ui/checkbox';
 import { GitSourceFields, type ApplyMode } from '../stack/GitSourceFields';
+import { ImportStackPanel } from './ImportStackPanel';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
@@ -20,11 +21,15 @@ export interface CreateStackDialogProps {
     // so a mid-flight node switch does not land the user on a 404.
     onStackCreated: (stackName: string, sourceNodeId: number | null | undefined) => void | Promise<void>;
     onStacksChanged: () => void | Promise<void>;
+    // Mode the dialog opens on. The empty-state entry opens directly on 'import';
+    // the toolbar Create button opens on 'empty'.
+    initialMode?: CreateMode;
 }
 
-type CreateMode = 'empty' | 'git' | 'docker-run';
+export type CreateMode = 'import' | 'empty' | 'git' | 'docker-run';
 
 const MODES: ReadonlyArray<{ id: CreateMode; label: string; icon: LucideIcon }> = [
+    { id: 'import', label: 'Import', icon: FolderSearch },
     { id: 'empty', label: 'Empty', icon: Plus },
     { id: 'git', label: 'From Git', icon: GitBranch },
     { id: 'docker-run', label: 'From Docker Run', icon: FileCode2 },
@@ -33,9 +38,18 @@ const MODES: ReadonlyArray<{ id: CreateMode; label: string; icon: LucideIcon }> 
 const tabId = (m: CreateMode) => `create-stack-tab-${m}`;
 const panelId = (m: CreateMode) => `create-stack-panel-${m}`;
 
-export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacksChanged }: CreateStackDialogProps) {
+export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacksChanged, initialMode = 'empty' }: CreateStackDialogProps) {
     const { activeNode } = useNodes();
-    const [createMode, setCreateMode] = useState<CreateMode>('empty');
+    const [createMode, setCreateMode] = useState<CreateMode>(initialMode);
+    // Reset to the requested starting mode each time the dialog opens (empty for
+    // the toolbar button, import for the empty-state entry). Tracked during render
+    // via a previous-open sentinel rather than an effect, the pattern React
+    // recommends for resetting state in response to a prop change.
+    const [prevOpen, setPrevOpen] = useState(open);
+    if (open !== prevOpen) {
+        setPrevOpen(open);
+        if (open) setCreateMode(initialMode);
+    }
     const [newStackName, setNewStackName] = useState('');
     // Synchronous guard. The disabled-button + setState pair can race a rapid
     // second click that lands before React has committed the disabled state,
@@ -308,7 +322,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             onOpenChange={(o) => {
                 onOpenChange(o);
                 if (!o) {
-                    setCreateMode('empty');
+                    setCreateMode(initialMode);
                     resetCreateFromGitForm();
                     resetCreateFromDockerRunForm();
                     // Intentionally NOT resetting creatingEmptyRef / creatingEmpty
@@ -322,9 +336,18 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             <ModalHeader
                 kicker="STACKS · NEW"
                 title="New stack"
-                description="Create a new stack: empty, cloned from a Git repository, or converted from a docker run command."
+                description="Import a compose file you already have, or create one: empty, cloned from a Git repository, or converted from a docker run command."
             />
             <ModeRail mode={createMode} onModeChange={setCreateMode} disabled={busy} />
+
+            {createMode === 'import' && (
+                <div role="tabpanel" id={panelId('import')} aria-labelledby={tabId('import')}>
+                    <ImportStackPanel
+                        onClose={() => onOpenChange(false)}
+                        onOpenStack={(name) => { void onStackCreated(name, activeNode?.id); }}
+                    />
+                </div>
+            )}
 
             {createMode === 'empty' && (
                 <div role="tabpanel" id={panelId('empty')} aria-labelledby={tabId('empty')}>
@@ -559,7 +582,7 @@ function ModeRail({
         <div
             role="tablist"
             aria-label="Stack source"
-            className="grid grid-cols-3 border-b border-card-border/60"
+            className="grid grid-cols-4 border-b border-card-border/60"
             onKeyDown={handleKeyDown}
         >
             {MODES.map((m, i) => {
