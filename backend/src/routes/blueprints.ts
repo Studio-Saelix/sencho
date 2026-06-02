@@ -13,6 +13,7 @@ import { NodeLabelService } from '../services/NodeLabelService';
 import { isValidStackName } from '../utils/validation';
 import { parseIntParam } from '../utils/parseIntParam';
 import { isDebugEnabled } from '../utils/debug';
+import { sanitizeForLog } from '../utils/safeLog';
 import { isSqliteUniqueViolation, getErrorMessage } from '../utils/errors';
 
 export const blueprintsRouter = Router();
@@ -478,7 +479,7 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
         }
         const updated = DatabaseService.getInstance().setBlueprintPinnedNode(id, nodeId);
         if (!updated) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        if (isDebugEnabled()) console.log('[Federation:diag] pinned blueprint=%d node=%s', id, nodeId === null ? 'null' : String(nodeId));
+        if (isDebugEnabled()) console.log('[Federation:diag] pinned blueprint=%s node=%s', sanitizeForLog(id), sanitizeForLog(nodeId));
         // Trigger immediate reconciliation so the pin takes effect without
         // waiting for the next 60s tick. Errors here are logged but do not
         // fail the request: the pin is already persisted.
