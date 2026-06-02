@@ -333,6 +333,15 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
     if (existing.is_default) {
       return res.status(400).json({ error: 'Cannot delete the default node' });
     }
+    // Release any live tunnel or mesh bridge before deleting the record so it is
+    // freed immediately rather than lingering until the peer disconnects. Close a
+    // proxy-mode mesh bridge through its dialer FIRST: closeBridge removes the
+    // bridge before closing it, so the dialer does not schedule a reactive redial
+    // against a node that is about to disappear. closeTunnel then closes a
+    // pilot-agent tunnel; both are no-ops when this node has no such bridge (a
+    // local node, or one with no active connection). Mirrors the re-enroll path.
+    MeshProxyTunnelDialer.getInstance().closeBridge(id, 'node deleted');
+    PilotTunnelManager.getInstance().closeTunnel(id, PilotCloseCode.NormalClosure, 'node deleted');
     DatabaseService.getInstance().deleteNode(id);
     NodeRegistry.getInstance().evictConnection(id);
     NodeRegistry.getInstance().notifyNodeRemoved(id);
@@ -351,11 +360,11 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   if (!requireAdmiral(req, res)) return;
-  const id = parseInt(nodeIdParam, 10);
-  if (!Number.isInteger(id) || id <= 0) {
+  if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;
   }
+  const id = parseInt(nodeIdParam, 10);
   const rawReason = (req.body && typeof req.body === 'object') ? (req.body as { reason?: unknown }).reason : undefined;
   let reason: string | null = null;
   if (rawReason !== undefined && rawReason !== null) {
@@ -377,6 +386,7 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
       return;
     }
     const updated = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+    if (isDebugEnabled()) console.log('[Federation:diag] cordoned node=%s reasonLen=%s', sanitizeForLog(id), sanitizeForLog(reason?.length ?? 0));
     res.set('cache-control', 'no-store').json(updated);
   } catch (error: unknown) {
     console.error('Failed to cordon node:', error);
@@ -389,11 +399,11 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
   if (!requireAdmiral(req, res)) return;
-  const id = parseInt(nodeIdParam, 10);
-  if (!Number.isInteger(id) || id <= 0) {
+  if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;
   }
+  const id = parseInt(nodeIdParam, 10);
   try {
     const existing = DatabaseService.getInstance().getNode(id);
     if (!existing) {

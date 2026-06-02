@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { parse as parseYaml } from 'yaml';
 import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
 import { Button } from './ui/button';
@@ -19,6 +19,7 @@ interface StackAnatomyPanelProps {
   onApplyUpdate: () => void;
   onOpenFiles?: () => void;
   canEdit: boolean;
+  applying?: boolean;
   notifications?: NotificationItem[];
 }
 
@@ -236,6 +237,7 @@ export default function StackAnatomyPanel({
   onApplyUpdate,
   onOpenFiles,
   canEdit,
+  applying = false,
   notifications,
 }: StackAnatomyPanelProps) {
   const anatomy = useMemo(() => parseAnatomy(content), [content]);
@@ -294,6 +296,38 @@ export default function StackAnatomyPanel({
     void run();
     return () => { cancelled = true; };
   }, [stackName]);
+
+  // When an apply for the current stack finishes (applying true -> false on the same
+  // stackName), re-check the preview: a landed update clears has_update so the banner
+  // unmounts; if it did not land, or the re-check itself fails, the banner stays.
+  // Tracking stackName alongside applying avoids treating a stack switch made while the
+  // first stack is still applying as a completion for the newly selected stack.
+  const prevApplyRef = useRef({ applying, stackName });
+  useEffect(() => {
+    const prev = prevApplyRef.current;
+    const finishedApplying = prev.applying && !applying && prev.stackName === stackName;
+    prevApplyRef.current = { applying, stackName };
+    if (!finishedApplying) return;
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const res = await apiFetch(`/stacks/${stackName}/update-preview`);
+        if (cancelled) return;
+        if (!res.ok) {
+          // Re-check failed: keep the banner already shown rather than hiding a
+          // possibly-still-pending update. The apply action reports its own outcome.
+          console.error(`[StackAnatomyPanel] update-preview re-check returned ${res.status}; keeping the existing banner`);
+          return;
+        }
+        const data = await res.json();
+        if (!cancelled) setUpdatePreview(data);
+      } catch (err) {
+        console.error('[StackAnatomyPanel] update-preview re-check failed:', err);
+      }
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [applying, stackName]);
 
   useEffect(() => {
     let cancelled = false;
@@ -494,7 +528,7 @@ export default function StackAnatomyPanel({
           </>
         )}
         {hasUpdate && updatePreview && (
-          <div className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
+          <div data-testid="update-available-banner" className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="font-mono text-[11px] uppercase tracking-wide">
@@ -524,11 +558,12 @@ export default function StackAnatomyPanel({
                   type="button"
                   size="sm"
                   variant="outline"
+                  disabled={applying}
                   className={cn('shrink-0 h-7 gap-1', applyBtnTone)}
                   onClick={onApplyUpdate}
                 >
-                  <Rocket className="h-3 w-3" strokeWidth={1.5} />
-                  apply
+                  <Rocket className={cn('h-3 w-3', applying && 'animate-pulse')} strokeWidth={1.5} />
+                  {applying ? 'applying...' : 'apply'}
                 </Button>
               )}
             </div>

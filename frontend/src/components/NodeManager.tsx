@@ -37,9 +37,13 @@ export function NodeManager() {
   const { isPaid } = useLicense();
   const { isAdmin, can } = useAuth();
   const canEditLabels = isPaid && isAdmin;
-  // Mirrors the backend `node:manage` guard (admin + node-admin) so non-admin
-  // operators never see a management action the API will reject with a 403.
-  const canManageNodes = can('node:manage');
+  // Mirror the backend node:manage guard. This top-level flag checks the global
+  // role only (admin or global node-admin); the per-row Test/Edit/Delete buttons
+  // below additionally honor scoped per-node grants via can('node:manage', 'node', id).
+  // Admins resolve immediately via isAdmin; node-admins once /permissions/me lands.
+  // Generate-token and reset-anchor below stay admin-only to match their stricter
+  // backend guards (requireAdmin, and requireAdmin + requirePaid).
+  const canManageNodes = isAdmin || can('node:manage');
   const { nodes, refreshNodeMeta } = useNodes();
   useMastheadStats([
     { label: 'NODES', value: `${nodes.length}` },
@@ -192,25 +196,28 @@ export function NodeManager() {
 
   return (
     <div className="space-y-6">
-      {/* Actions */}
+      {/* Actions (node management is admin / node-admin only, mirroring the
+          node:manage backend guard). The read-only table below stays visible to
+          every role with node:read. */}
       {canManageNodes && (
-        <div className="flex justify-end">
-          <SettingsPrimaryButton
-            size="sm"
-            className="gap-1 shrink-0"
-            onClick={openCreate}
-          >
-            <Plus className="w-4 h-4" />
-            Add node
-          </SettingsPrimaryButton>
-        </div>
+        <>
+          <div className="flex justify-end">
+            <SettingsPrimaryButton
+              size="sm"
+              className="gap-1 shrink-0"
+              onClick={openCreate}
+            >
+              <Plus className="w-4 h-4" />
+              Add node
+            </SettingsPrimaryButton>
+          </div>
+
+          <Separator />
+        </>
       )}
 
-      <Separator />
-
-      {/* Generate Node Token - for use on THIS instance as a remote target.
-          Gated on isAdmin because the mint route (/auth/generate-node-token) is
-          admin-only, unlike the node:manage CRUD routes above. */}
+      {/* Generate a node token so THIS instance can serve as a remote target.
+          Admin-only, matching the requireAdmin guard on /auth/generate-node-token. */}
       {isAdmin && (
       <div className="rounded-md border p-4 space-y-3">
         <div className="flex items-start justify-between gap-4">
@@ -266,15 +273,17 @@ export function NodeManager() {
                   {' '}Reset the anchor on the peer to resume sync, or remove the node from this fleet.
                 </div>
                 <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => handleResetAnchor(nodeId)}
-                    disabled={resettingAnchor === nodeId}
-                  >
-                    {resettingAnchor === nodeId ? 'Resetting...' : 'Reset anchor on peer'}
-                  </Button>
-                  {node && !node.is_default && (
+                  {isAdmin && isPaid && (
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => handleResetAnchor(nodeId)}
+                      disabled={resettingAnchor === nodeId}
+                    >
+                      {resettingAnchor === nodeId ? 'Resetting...' : 'Reset anchor on peer'}
+                    </Button>
+                  )}
+                  {node && !node.is_default && (isAdmin || can('node:manage', 'node', String(nodeId))) && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -308,7 +317,9 @@ export function NodeManager() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {nodes.map((node) => (
+            {nodes.map((node) => {
+              const canManageThis = isAdmin || can('node:manage', 'node', String(node.id));
+              return (
               <TableRow key={node.id}>
                 <TableCell>
                   {node.is_default && (
@@ -442,7 +453,7 @@ export function NodeManager() {
                       </Tooltip>
                     </TooltipProvider>
 
-                    {canManageNodes && (
+                    {canManageThis && (
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -462,7 +473,7 @@ export function NodeManager() {
                       </TooltipProvider>
                     )}
 
-                    {canManageNodes && (
+                    {canManageThis && (
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -481,7 +492,7 @@ export function NodeManager() {
                       </TooltipProvider>
                     )}
 
-                    {canManageNodes && !node.is_default && (
+                    {!node.is_default && canManageThis && (
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -502,7 +513,8 @@ export function NodeManager() {
                   </div>
                 </TableCell>
               </TableRow>
-            ))}
+              );
+            })}
           </TableBody>
         </Table>
       </div>

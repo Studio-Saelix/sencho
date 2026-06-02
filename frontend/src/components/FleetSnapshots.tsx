@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
     Camera, ArrowLeft, Server, Layers, FileText, AlertTriangle, Trash2,
     Eye, ChevronDown, ChevronLeft, ChevronRight, Plus, Loader2, RotateCcw,
-    Cloud, CloudUpload,
+    Cloud, CloudUpload, Download,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,7 +14,6 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
 import { ConfirmModal } from '@/components/ui/modal';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
@@ -93,6 +92,7 @@ export default function FleetSnapshots() {
     const [expandedStacks, setExpandedStacks] = useState<Set<string>>(new Set());
     const [previewFiles, setPreviewFiles] = useState<Set<string>>(new Set());
     const [restoringStack, setRestoringStack] = useState<string | null>(null);
+    const [restoringAll, setRestoringAll] = useState(false);
     const [deletingId, setDeletingId] = useState<number | null>(null);
     const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
     const [page, setPage] = useState(0);
@@ -273,6 +273,65 @@ export default function FleetSnapshots() {
         }
     };
 
+    const handleDownloadFile = (stackName: string, file: SnapshotStackFile) => {
+        try {
+            const blob = new Blob([file.content], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${stackName}-${file.filename}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+        } catch (error: unknown) {
+            const err = error as Record<string, unknown> | null;
+            toast.error((err?.message as string) || 'Download failed.');
+        }
+    };
+
+    const handleRestoreAll = async (redeploy: boolean) => {
+        if (!selectedSnapshot) return;
+        setRestoringAll(true);
+        try {
+            const res = await apiFetch(`/fleet/snapshots/${selectedSnapshot.id}/restore-all`, {
+                method: 'POST',
+                localOnly: true,
+                body: JSON.stringify({ redeploy }),
+            });
+            if (res.ok) {
+                const data: {
+                    restored: number;
+                    failed: number;
+                    redeploy: boolean;
+                    results: Array<{ stackName: string; success: boolean; error?: string }>;
+                } = await res.json();
+                const noun = (n: number) => `${n} stack${n === 1 ? '' : 's'}`;
+                const firstFailed = data.results?.find(r => !r.success);
+                const failDetail = firstFailed
+                    ? ` First failure: ${firstFailed.stackName} · ${firstFailed.error || 'unknown error'}`
+                    : '';
+                if (data.failed === 0) {
+                    toast.success(data.redeploy
+                        ? `Restored and redeployed ${noun(data.restored)}.`
+                        : `Restored ${noun(data.restored)}.`);
+                } else if (data.restored === 0) {
+                    toast.error(`Restore failed for ${noun(data.failed)}.${failDetail}`);
+                } else {
+                    toast.warning(`${data.restored} restored, ${data.failed} failed.${failDetail}`);
+                }
+            } else {
+                const err = await res.json().catch(() => null);
+                toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore snapshot.');
+            }
+        } catch (error: unknown) {
+            const err = error as Record<string, unknown> | null;
+            toast.error(err?.message as string || err?.error as string || 'Something went wrong.');
+        } finally {
+            setRestoringAll(false);
+        }
+    };
+
     // --- Toggle helpers ---
 
     const toggleNode = (nodeId: number) => {
@@ -342,13 +401,20 @@ export default function FleetSnapshots() {
                     <>
                         {/* Header card */}
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel p-4 space-y-3">
-                            <h2 className="text-lg font-semibold">
-                                {selectedSnapshot.description || 'Untitled Snapshot'}
-                            </h2>
-                            <p className="text-sm text-muted-foreground">
-                                Created by {selectedSnapshot.created_by} on{' '}
-                                {new Date(selectedSnapshot.created_at).toLocaleString()}
-                            </p>
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="space-y-1 min-w-0">
+                                    <h2 className="text-lg font-semibold">
+                                        {selectedSnapshot.description || 'Untitled Snapshot'}
+                                    </h2>
+                                    <p className="text-sm text-muted-foreground">
+                                        Created by {selectedSnapshot.created_by} on{' '}
+                                        {new Date(selectedSnapshot.created_at).toLocaleString()}
+                                    </p>
+                                </div>
+                                {isAdmin && selectedSnapshot.nodes.length > 0 && (
+                                    <RestoreAllButton restoring={restoringAll} onRestoreAll={handleRestoreAll} />
+                                )}
+                            </div>
                             <div className="flex items-center gap-2">
                                 <Badge variant="secondary" className="font-mono tabular-nums">
                                     {selectedSnapshot.node_count} node{selectedSnapshot.node_count !== 1 ? 's' : ''}
@@ -478,13 +544,22 @@ export default function FleetSnapshots() {
                                                                                         <Eye className="w-3 h-3 mr-1" strokeWidth={1.5} />
                                                                                         {showPreview ? 'Hide' : 'Preview'}
                                                                                     </Button>
+                                                                                    <Button
+                                                                                        variant="ghost"
+                                                                                        size="sm"
+                                                                                        className="h-6 px-2 text-xs"
+                                                                                        onClick={() => handleDownloadFile(stack.stackName, file)}
+                                                                                    >
+                                                                                        <Download className="w-3 h-3 mr-1" strokeWidth={1.5} />
+                                                                                        Download
+                                                                                    </Button>
                                                                                 </div>
                                                                                 {showPreview && (
-                                                                                    <ScrollArea className="mx-3 mt-1 mb-2 max-h-64 rounded-lg bg-background shadow-[inset_0_2px_4px_0_oklch(0_0_0/0.4)]">
+                                                                                    <div className="mx-3 mt-1 mb-2 max-h-[480px] overflow-y-auto rounded-lg bg-background shadow-[inset_0_2px_4px_0_oklch(0_0_0/0.4)]">
                                                                                         <pre className="p-3 text-xs font-mono text-foreground whitespace-pre-wrap break-words">
                                                                                             {file.content}
                                                                                         </pre>
-                                                                                    </ScrollArea>
+                                                                                    </div>
                                                                                 )}
                                                                             </div>
                                                                         );
@@ -793,6 +868,65 @@ function RestoreButton({ nodeId, nodeName, stackName, restoring, onRestore }: {
                         className="text-sm cursor-pointer"
                     >
                         Redeploy stack after restore
+                    </Label>
+                </div>
+            </ConfirmModal>
+        </>
+    );
+}
+
+// --- Restore All Button Sub-Component ---
+
+function RestoreAllButton({ restoring, onRestoreAll }: {
+    restoring: boolean;
+    onRestoreAll: (redeploy: boolean) => Promise<void>;
+}) {
+    const [redeploy, setRedeploy] = useState(false);
+    const [open, setOpen] = useState(false);
+
+    return (
+        <>
+            <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 shrink-0"
+                disabled={restoring}
+                onClick={() => setOpen(true)}
+            >
+                {restoring ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                    <RotateCcw className="w-3.5 h-3.5" strokeWidth={1.5} />
+                )}
+                Restore all
+            </Button>
+            <ConfirmModal
+                open={open}
+                onOpenChange={setOpen}
+                variant="destructive"
+                kicker="SNAPSHOTS · RESTORE ALL"
+                title="Restore all stacks"
+                confirmLabel={restoring ? 'Restoring...' : 'Restore all'}
+                confirming={restoring}
+                onConfirm={async () => {
+                    try {
+                        await onRestoreAll(redeploy);
+                    } finally {
+                        setOpen(false);
+                    }
+                }}
+            >
+                <p className="text-sm text-stat-subtitle">
+                    Overwrites the current compose and environment files for every stack on every node in this snapshot.
+                </p>
+                <div className="flex items-center space-x-2 pt-1">
+                    <Checkbox
+                        id="redeploy-all"
+                        checked={redeploy}
+                        onCheckedChange={(checked) => setRedeploy(checked === true)}
+                    />
+                    <Label htmlFor="redeploy-all" className="text-sm cursor-pointer">
+                        Redeploy all stacks after restore
                     </Label>
                 </div>
             </ConfirmModal>
