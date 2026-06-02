@@ -210,7 +210,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 {isAdmiral && (
                     <TabsContent value="routing">
                         <AdmiralGate>
-                            <RoutingTab />
+                            <RoutingTab canManage={isAdmin} />
                         </AdmiralGate>
                     </TabsContent>
                 )}
