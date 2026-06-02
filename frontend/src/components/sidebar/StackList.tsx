@@ -10,6 +10,7 @@ import type { StackRowStatus } from './stack-status-utils';
 import { StackGroup } from './StackGroup';
 import { StackContextMenu } from './StackContextMenu';
 import { StackKebabMenu } from './StackKebabMenu';
+import { EmptyStackState } from './EmptyStackState';
 import type { StackMenuCtx } from './sidebar-types';
 
 interface RemoteNodeResult {
@@ -45,6 +46,9 @@ export interface StackListProps {
   remoteLoading: boolean;
   remoteFailedNodes: RemoteSearchFailure[];
   onSelectRemoteFile: (nodeId: number, file: string) => void;
+  // Open the create dialog on a starting mode. Present only when the user can
+  // create stacks; drives the zero-stacks empty state.
+  onOpenCreate?: (mode: 'import' | 'empty') => void;
 }
 
 interface BuiltGroup {
@@ -115,6 +119,7 @@ export function StackList(props: StackListProps & StackListBulkProps) {
     isBusy, getDisplayName, onSelectFile, buildMenuCtx,
     bulkMode, selectedFiles, onToggleSelect,
     remoteResults, remoteLoading, remoteFailedNodes, onSelectRemoteFile,
+    onOpenCreate,
   } = props;
 
   const [failedNodesExpanded, setFailedNodesExpanded] = useState(false);
@@ -134,6 +139,10 @@ export function StackList(props: StackListProps & StackListBulkProps) {
         <Skeleton className="h-8 w-full" />
       </div>
     );
+  }
+
+  if (files.length === 0 && !searchQuery.trim()) {
+    return <EmptyStackState onOpenCreate={onOpenCreate} />;
   }
 
   return (
