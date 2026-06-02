@@ -502,6 +502,35 @@ describe('GET /api/stacks/:stackName/files/download', () => {
     }
   }
 
+  class ResponseCloseAfterFullReadStream extends Readable {
+    public bytesRead = 0;
+    public destroyCalls = 0;
+    public emittedResponseClose = false;
+
+    constructor(private readonly payload: Buffer) {
+      super();
+    }
+
+    _read(): void {}
+
+    override destroy(error?: Error): this {
+      this.destroyCalls += 1;
+      return super.destroy(error);
+    }
+
+    override pipe<T extends NodeJS.WritableStream>(destination: T): T {
+      destination.write(this.payload);
+      this.bytesRead = this.payload.length;
+      // The response closes after the whole body was received, and the source
+      // stream never emits its own end/close because the consumer is already
+      // gone. Mirrors the real fs.ReadStream path under load that previously
+      // left the download metric unrecorded.
+      this.emittedResponseClose = destination.emit('close');
+      destination.end();
+      return destination;
+    }
+  }
+
   class ErrorThenCloseStream extends Readable {
     _read(): void {}
 
@@ -676,6 +705,24 @@ describe('GET /api/stacks/:stackName/files/download', () => {
       .set('Cookie', adminCookie);
 
     expect(res.status).toBe(200);
+    expect(stream.emittedResponseClose).toBe(true);
+    expect(stream.destroyCalls).toBe(0);
+    await expectDownloadMetricCounts(1, 1, 0);
+  });
+
+  it('records a success when the response closes after a full read and the source emits no end/close', async () => {
+    await resetFileExplorerMetrics();
+    const payload = Buffer.from('services: {}\n');
+    const stream = new ResponseCloseAfterFullReadStream(payload);
+    await mockDownloadStream(stream, payload.length);
+
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/download`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.text).toBe(payload.toString('utf-8'));
     expect(stream.emittedResponseClose).toBe(true);
     expect(stream.destroyCalls).toBe(0);
     await expectDownloadMetricCounts(1, 1, 0);
