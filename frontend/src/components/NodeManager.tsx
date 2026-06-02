@@ -38,8 +38,8 @@ export function NodeManager() {
   const { isAdmin, can } = useAuth();
   const canEditLabels = isPaid && isAdmin;
   // Mirror the backend node:manage guard. This top-level flag checks the global
-  // role only (admin or global node-admin); the per-row Edit/Delete buttons below
-  // additionally honor scoped per-node grants via can('node:manage', 'node', id).
+  // role only (admin or global node-admin); the per-row Test/Edit/Delete buttons
+  // below additionally honor scoped per-node grants via can('node:manage', 'node', id).
   // Admins resolve immediately via isAdmin; node-admins once /permissions/me lands.
   // Generate-token and reset-anchor below stay admin-only to match their stricter
   // backend guards (requireAdmin, and requireAdmin + requirePaid).
@@ -453,23 +453,25 @@ export function NodeManager() {
                       </Tooltip>
                     </TooltipProvider>
 
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            onClick={() => testConnection(node)}
-                            disabled={testing === node.id}
-                            aria-label="Test connection"
-                          >
-                            <Wifi className={`w-4 h-4 ${testing === node.id ? 'animate-pulse' : ''}`} />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Test Connection</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                    {canManageThis && (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => testConnection(node)}
+                              disabled={testing === node.id}
+                              aria-label="Test connection"
+                            >
+                              <Wifi className={`w-4 h-4 ${testing === node.id ? 'animate-pulse' : ''}`} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Test Connection</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
 
                     {canManageThis && (
                       <TooltipProvider>
