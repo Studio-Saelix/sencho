@@ -462,10 +462,16 @@ export class FileSystemService {
 
   private async readComposeCandidate(filePath: string): Promise<{ content: string | null; oversized: boolean }> {
     this.assertWithinBase(filePath);
+    // Stat and read share a single descriptor so the size check and the read
+    // observe the same inode even if the file is replaced between the two calls
+    // (mirrors getStackContentWithMtime). Re-resolving the path for each would
+    // be a time-of-check/time-of-use race.
+    let fh: import('fs/promises').FileHandle | null = null;
     try {
-      const stat = await fsPromises.stat(filePath);
+      fh = await fsPromises.open(filePath, 'r');
+      const stat = await fh.stat();
       if (stat.size > IMPORT_MAX_PREVIEW_BYTES) return { content: null, oversized: true };
-      const content = await fsPromises.readFile(filePath, 'utf-8');
+      const content = await fh.readFile('utf-8');
       return { content, oversized: false };
     } catch (error) {
       // The file existed at probe time, so a failure here (permission, I/O,
@@ -473,6 +479,8 @@ export class FileSystemService {
       // the scan degrades gracefully and the route reports it to the user.
       console.warn('[FileSystemService] Failed to read import candidate:', sanitizeForLog((error as Error)?.message ?? String(error)));
       return { content: null, oversized: false };
+    } finally {
+      if (fh) await fh.close();
     }
   }
 
