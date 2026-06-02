@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireBody } from '../middleware/tierGates';
+import { requirePaid, requireAdmin, requireUserSession, requireBody } from '../middleware/tierGates';
 import { SecretsService, PushBusyError, type SecretKv } from '../services/SecretsService';
 import { DatabaseService, type BlueprintSelector } from '../services/DatabaseService';
 import { isValidStackName } from '../utils/validation';
@@ -9,6 +9,11 @@ import { parseIntParam } from '../utils/parseIntParam';
 import { sanitizeForLog } from '../utils/safeLog';
 
 export const secretsRouter = Router();
+
+// Fleet Secrets reveals decrypted values and writes credentials fleet-wide, so
+// every route requires a signed-in admin user. requireUserSession rejects API
+// tokens and node_proxy / pilot_tunnel machine credentials (authMiddleware maps
+// the latter to role 'admin'), then requireAdmin enforces the role.
 
 const NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,62}[a-zA-Z0-9]$/;
 
@@ -60,7 +65,9 @@ function parsePushBody(body: unknown): PushBody | { error: string } {
 }
 
 secretsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     try {
         const items = SecretsService.getInstance().list();
         res.json(items);
@@ -71,7 +78,9 @@ secretsRouter.get('/', authMiddleware, async (req: Request, res: Response): Prom
 });
 
 secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
         const { name, description, kv, note } = req.body as { name?: unknown; description?: unknown; kv?: unknown; note?: unknown };
@@ -98,6 +107,7 @@ secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pro
             user: getActor(req),
             note: typeof note === 'string' ? note : undefined,
         });
+        console.log(`[Secrets] Created bundle ${sanitizeForLog(name)} (v${result.version}) by ${sanitizeForLog(getActor(req))}`);
         res.status(201).json(result);
     } catch (err) {
         if (isSqliteUniqueViolation(err)) {
@@ -110,7 +120,9 @@ secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pro
 });
 
 secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
         if (id === null) return;
@@ -128,7 +140,9 @@ secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): P
 });
 
 secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
@@ -157,6 +171,7 @@ secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): P
             user: getActor(req),
             note: typeof note === 'string' ? note : undefined,
         });
+        console.log(`[Secrets] Updated bundle ${sanitizeForLog(existing.name)} to v${result.version} by ${sanitizeForLog(getActor(req))}`);
         res.json(result);
     } catch (err) {
         console.error('[Secrets] Update error:', err);
@@ -165,7 +180,9 @@ secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): P
 });
 
 secretsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
         if (id === null) return;
@@ -174,6 +191,7 @@ secretsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response)
             res.status(404).json({ error: 'Secret not found' });
             return;
         }
+        console.log(`[Secrets] Deleted bundle id=${id} by ${sanitizeForLog(getActor(req))}`);
         res.json({ ok: true });
     } catch (err) {
         console.error('[Secrets] Delete error:', err);
@@ -182,7 +200,9 @@ secretsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response)
 });
 
 secretsRouter.get('/:id/versions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
         if (id === null) return;
@@ -198,7 +218,9 @@ secretsRouter.get('/:id/versions', authMiddleware, async (req: Request, res: Res
 });
 
 secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
@@ -226,7 +248,9 @@ secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request
 });
 
 secretsRouter.post('/:id/push/preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
@@ -249,7 +273,9 @@ secretsRouter.post('/:id/push/preview', authMiddleware, async (req: Request, res
 });
 
 secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
     if (!requirePaid(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
@@ -266,7 +292,9 @@ secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Respon
         }
         try {
             const result = await SecretsService.getInstance().executePush(id, parsed.selector, parsed.stackName, parsed.envFileBasename, getActor(req));
-            console.log(`[Secrets] Push ${sanitizeForLog(secret.name)} v${secret.current_version}: ${result.results.length} nodes`);
+            const failedCount = result.results.filter(r => r.status === 'failed').length;
+            console.log(`[Secrets] Push ${sanitizeForLog(secret.name)} v${secret.current_version}: ${result.results.length} node(s), ${failedCount} failed (by ${sanitizeForLog(getActor(req))})`);
+            if (failedCount > 0) console.warn(`[Secrets] Push ${sanitizeForLog(secret.name)} v${secret.current_version}: ${failedCount} node(s) failed`);
             res.json(result);
         } catch (err) {
             if (err instanceof PushBusyError) {
