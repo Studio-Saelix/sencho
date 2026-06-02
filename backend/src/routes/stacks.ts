@@ -618,7 +618,7 @@ stacksRouter.post('/', async (req: Request, res: Response) => {
   try {
     const { stackName } = req.body;
     if (!stackName || typeof stackName !== 'string') {
-      return res.status(400).json({ error: 'Stack name is required and must be a string' });
+      return res.status(400).json({ error: "Field 'stackName' is required and must be a string" });
     }
     if (!isValidStackName(stackName)) {
       return res.status(400).json({ error: 'Stack name can only contain alphanumeric characters, hyphens, and underscores' });
