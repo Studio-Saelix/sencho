@@ -15,7 +15,7 @@
  * Community-tier success, input validation, upload size limit, and happy-path
  * 204/200 responses.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
 import { promises as fs } from 'fs';
@@ -406,6 +406,26 @@ describe('GET /api/stacks/:stackName/files/content', () => {
 // ── GET /:stackName/files/download ────────────────────────────────────────────
 
 describe('GET /api/stacks/:stackName/files/download', () => {
+  // The download metric is recorded asynchronously, on the file stream's
+  // end/close and the response's close event, so it can land after a test's
+  // request has already resolved. Drain any such pending record before the next
+  // test runs: a prior download must not leak a count across the next test's
+  // resetFileExplorerMetrics() and inflate its "exactly once" assertion. Poll
+  // until the download count holds steady across several reads (bounded).
+  afterEach(async () => {
+    let prev = -1;
+    let stableReads = 0;
+    for (let i = 0; i < 50 && stableReads < 3; i++) {
+      const current = (await getDownloadMetric())?.count ?? 0;
+      stableReads = current === prev ? stableReads + 1 : 0;
+      prev = current;
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    // If the count never settled, a record is firing repeatedly (a real bug);
+    // surface it here rather than letting the bound silently swallow it.
+    expect(stableReads).toBeGreaterThanOrEqual(3);
+  });
+
   class CloseBeforeEndStream extends Readable {
     public bytesRead: number;
 
