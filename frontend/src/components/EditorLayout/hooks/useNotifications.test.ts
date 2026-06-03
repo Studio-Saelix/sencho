@@ -10,9 +10,13 @@ vi.mock('@/lib/api', () => ({
 }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { error: vi.fn() } }));
 
-import { apiFetch } from '@/lib/api';
+import { apiFetch, fetchForNode } from '@/lib/api';
 
 const localNode: Node = { id: 1, name: 'Local', type: 'local', api_url: '', compose_dir: '', is_default: true, status: 'online', created_at: 0 };
+
+const makeRemoteNode = (status: Node['status'], overrides: Partial<Node> = {}): Node => ({
+  id: 2, name: 'Remote', type: 'remote', mode: 'proxy', api_url: '', compose_dir: '', is_default: false, status, created_at: 0, ...overrides,
+});
 
 const makeNotif = (overrides: Partial<NotificationItem> = {}): NotificationItem => ({
   id: 1, level: 'info', message: 'test', timestamp: 1000, is_read: 0, ...overrides,
@@ -20,6 +24,10 @@ const makeNotif = (overrides: Partial<NotificationItem> = {}): NotificationItem 
 
 class MockWS {
   static instances: MockWS[] = [];
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
   onclose: ((e: { code: number }) => void) | null = null;
@@ -35,6 +43,7 @@ beforeEach(() => {
   MockWS.reset();
   vi.stubGlobal('WebSocket', MockWS);
   (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, json: async () => [] });
+  (fetchForNode as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, json: async () => [] });
 });
 afterEach(() => { 
   vi.unstubAllGlobals(); 
@@ -162,5 +171,63 @@ describe('useNotifications', () => {
     });
     act(() => { result.current.deleteNotification({ ...notif, nodeId: localNode.id }); });
     await waitFor(() => expect(result.current.notifications).toHaveLength(0));
+  });
+
+  it('does not open a WS or poll an offline remote node', async () => {
+    renderHook(() =>
+      useNotifications({ nodes: [localNode, makeRemoteNode('offline')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+    );
+    // Only the local notification socket is created; the offline node is skipped.
+    expect(MockWS.instances).toHaveLength(1);
+    // The mount poll never targets the offline node either.
+    await waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    expect(fetchForNode).not.toHaveBeenCalled();
+  });
+
+  it('opens a WS and polls an online remote node', async () => {
+    renderHook(() =>
+      useNotifications({ nodes: [localNode, makeRemoteNode('online')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+    );
+    // Local socket plus a per-node socket for the online remote.
+    expect(MockWS.instances).toHaveLength(2);
+    await waitFor(() => expect(fetchForNode).toHaveBeenCalledWith('/notifications', 2));
+  });
+
+  it('subscribes to the online node and skips the offline one in a mixed fleet', async () => {
+    renderHook(() =>
+      useNotifications({
+        nodes: [localNode, makeRemoteNode('online', { id: 2 }), makeRemoteNode('offline', { id: 3, name: 'Dead' })],
+        onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(),
+      }),
+    );
+    // Local + online remote only; the offline node gets no socket.
+    expect(MockWS.instances).toHaveLength(2);
+    await waitFor(() => expect(fetchForNode).toHaveBeenCalledWith('/notifications', 2));
+    expect(fetchForNode).not.toHaveBeenCalledWith('/notifications', 3);
+  });
+
+  it('closes the socket when a subscribed node transitions to offline', () => {
+    const { rerender } = renderHook(
+      ({ nodes }) => useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      { initialProps: { nodes: [localNode, makeRemoteNode('online')] } },
+    );
+    // instances[0] is the local socket; instances[1] is the online remote's socket.
+    expect(MockWS.instances).toHaveLength(2);
+    const remoteWs = MockWS.instances[1];
+
+    // Flip the node to offline: it leaves the active set, so the cleanup loop
+    // must close its socket rather than reconnect to a dead node forever.
+    act(() => { rerender({ nodes: [localNode, makeRemoteNode('offline')] }); });
+    expect(remoteWs.close).toHaveBeenCalled();
+  });
+
+  it('still subscribes to and polls a remote node with unknown status', async () => {
+    renderHook(() =>
+      useNotifications({ nodes: [localNode, makeRemoteNode('unknown')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+    );
+    // 'unknown' is not yet probed, so it is treated as reachable (not filtered out)
+    // on both the WS and the REST-poll surfaces.
+    expect(MockWS.instances).toHaveLength(2);
+    await waitFor(() => expect(fetchForNode).toHaveBeenCalledWith('/notifications', 2));
   });
 });
