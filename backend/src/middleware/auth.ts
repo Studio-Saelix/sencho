@@ -1,6 +1,5 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
 import {
   DatabaseService,
   API_TOKEN_SCOPE_TO_ROLE,
@@ -23,7 +22,8 @@ import {
   MFA_PENDING_TTL_MS,
 } from '../helpers/constants';
 import { getCookieOptions } from '../helpers/cookies';
-import { looksLikeApiToken, verifyApiTokenChecksum } from '../utils/apiTokenFormat';
+import { looksLikeApiToken } from '../utils/apiTokenFormat';
+import { validateApiToken, touchApiTokenLastUsed, type ApiTokenValidation } from '../utils/apiTokenAuth';
 
 /**
  * Authenticate a request via cookie session or Bearer token.
@@ -48,30 +48,25 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
   try {
     // Opaque sen_sk_ API tokens: scope-based programmatic access. Routed
     // before jwt.verify so the JWT path stays focused on session, mfa_pending,
-    // node_proxy, and pilot_tunnel. Steps 1-3 (prefix, length, checksum)
-    // reject malformed/typoed keys without touching SQLite.
+    // node_proxy, and pilot_tunnel. validateApiToken rejects malformed/typoed
+    // keys (prefix, length, checksum) without touching SQLite.
     if (looksLikeApiToken(token)) {
-      // Uniform 401 message across malformed-checksum, unknown-hash, and
-      // expired/revoked paths so the response body is not a token-existence
-      // oracle. Debug logs still capture the specific reason.
-      if (!verifyApiTokenChecksum(token)) {
-        if (isDebugEnabled()) console.log('[Auth:diag] API token rejected: checksum');
+      // The rate limiter's key generator runs before this middleware and, for
+      // this same bearer, memoizes the validated row on req._apiToken. Reuse it
+      // when present so the token costs one DB lookup per request, not two;
+      // otherwise validate now (e.g. a path the limiter skipped).
+      const validation: ApiTokenValidation = req._apiToken
+        ? { ok: true, token: req._apiToken }
+        : validateApiToken(token);
+      if (!validation.ok) {
+        // Uniform 401 across checksum/unknown/expired/revoked so the response
+        // body is not a token-existence oracle; the debug log keeps the reason.
+        if (isDebugEnabled()) console.log('[Auth:diag] API token rejected:', validation.reason);
         res.status(401).json({ error: 'Invalid or expired token' });
         return;
       }
-      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-      const apiToken = DatabaseService.getInstance().getApiTokenByHash(tokenHash);
-      if (!apiToken || apiToken.revoked_at) {
-        if (isDebugEnabled()) console.log('[Auth:diag] API token rejected: not found or revoked');
-        res.status(401).json({ error: 'Invalid or expired token' });
-        return;
-      }
-      if (apiToken.expires_at && apiToken.expires_at < Date.now()) {
-        if (isDebugEnabled()) console.log('[Auth:diag] API token rejected: expired');
-        res.status(401).json({ error: 'Invalid or expired token' });
-        return;
-      }
-      DatabaseService.getInstance().updateApiTokenLastUsed(apiToken.id);
+      const apiToken = validation.token;
+      touchApiTokenLastUsed(apiToken);
       const creator = DatabaseService.getInstance().getUserById(apiToken.user_id);
       req.user = {
         username: creator?.username || `api-token:${apiToken.name}`,

@@ -1,10 +1,10 @@
 import type { Request } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
-import { createHash } from 'crypto';
 import { COOKIE_NAME } from '../helpers/constants';
 import { WEBHOOK_TRIGGER_RE } from '../helpers/routePatterns';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
+import { validateApiToken } from '../utils/apiTokenAuth';
 
 // ── Rate Limiting ─────────────────────────────────────────────────────────────
 //
@@ -67,7 +67,7 @@ function isNodeProxyRequest(req: Request): boolean {
  * (per-user budgets), IP otherwise. `jwt.decode()` avoids double-verification;
  * `authMiddleware` handles signature checks downstream.
  */
-function rateLimitKeyGenerator(req: Request): string {
+export function rateLimitKeyGenerator(req: Request): string {
   const cookie = req.cookies?.[COOKIE_NAME];
   if (cookie) {
     try {
@@ -78,12 +78,27 @@ function rateLimitKeyGenerator(req: Request): string {
   const auth = req.headers.authorization;
   if (auth?.startsWith('Bearer ')) {
     const bearer = auth.slice(7);
-    // Opaque API tokens key by a non-reversible hash slice of the token
-    // itself: each token gets its own rate-limit budget without a DB hit on
-    // the hot path (this runs before authMiddleware).
+    // Opaque API tokens get a per-token rate-limit budget, but ONLY when the
+    // bearer resolves to a real, active token. This runs before authMiddleware,
+    // so keying any token-shaped string by its own hash would let one source
+    // mint a fresh budget per forged value and fragment the limiter; anything
+    // that is not a live token therefore falls through to per-IP keying. The
+    // validated row is memoized on the request so authMiddleware reuses it
+    // without a second lookup (and a request crossing two limiters reuses it
+    // here too). Like the jwt.decode branches below, a lookup failure degrades
+    // to per-IP keying rather than throwing out of the key generator.
     if (looksLikeApiToken(bearer)) {
-      const slice = createHash('sha256').update(bearer).digest('hex').slice(0, 16);
-      return `user:sk:${slice}`;
+      if (req._apiToken) return `user:sk:${req._apiToken.token_hash.slice(0, 16)}`;
+      try {
+        const validation = validateApiToken(bearer);
+        if (validation.ok) {
+          // Only ever memoize the row matching this request's bearer;
+          // authMiddleware trusts req._apiToken without re-checking the hash.
+          req._apiToken = validation.token;
+          return `user:sk:${validation.token.token_hash.slice(0, 16)}`;
+        }
+      } catch { /* fall through to IP */ }
+      return ipKeyGenerator(req.ip || 'unknown');
     }
     try {
       const decoded = jwt.decode(bearer) as { username?: string; sub?: string } | null;

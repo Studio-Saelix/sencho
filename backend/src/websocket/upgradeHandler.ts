@@ -2,7 +2,6 @@ import type http from 'http';
 import type { IncomingMessage } from 'http';
 import type { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
 import { DatabaseService, type UserRole } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -15,7 +14,9 @@ import { handleLogsWs } from './logs';
 import { handleHostConsoleWs } from './hostConsole';
 import { handleGenericWs, attachGenericConnectionHandlers } from './generic';
 import { rejectUpgrade as reject } from './reject';
-import { looksLikeApiToken, verifyApiTokenChecksum } from '../utils/apiTokenFormat';
+import { looksLikeApiToken } from '../utils/apiTokenFormat';
+import { validateApiToken, touchApiTokenLastUsed } from '../utils/apiTokenAuth';
+import { isDebugEnabled } from '../utils/debug';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
 import { isLicenseTier, normalizeTier, isLicenseVariant, normalizeVariant } from '../services/license-normalize';
 
@@ -84,13 +85,13 @@ export function attachUpgrade(
       let decoded: { username?: string; scope?: string; role?: string; tv?: number };
       let wsApiTokenScope: string | null = null;
       if (looksLikeApiToken(token)) {
-        if (!verifyApiTokenChecksum(token)) return reject(socket, 401, 'Unauthorized');
-        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-        const apiToken = DatabaseService.getInstance().getApiTokenByHash(tokenHash);
-        if (!apiToken || apiToken.revoked_at) return reject(socket, 401, 'Unauthorized');
-        if (apiToken.expires_at && apiToken.expires_at < Date.now()) return reject(socket, 401, 'Unauthorized');
-        DatabaseService.getInstance().updateApiTokenLastUsed(apiToken.id);
-        wsApiTokenScope = apiToken.scope;
+        const validation = validateApiToken(token);
+        if (!validation.ok) {
+          if (isDebugEnabled()) console.log('[Auth:diag] WS API token rejected:', validation.reason);
+          return reject(socket, 401, 'Unauthorized');
+        }
+        touchApiTokenLastUsed(validation.token);
+        wsApiTokenScope = validation.token.scope;
         decoded = { scope: 'api_token' };
       } else {
         const settings = DatabaseService.getInstance().getGlobalSettings();
