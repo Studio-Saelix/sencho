@@ -111,7 +111,10 @@ beforeEach(() => {
   mockGetBulkStackStatuses.mockResolvedValue({});
   mockGetStacks.mockResolvedValue([]);
   mockCurrentLoad.mockResolvedValue({ currentLoad: 42.5, cpus: [{}, {}] });
-  mockMem.mockResolvedValue({ total: 1000, used: 500, free: 500 });
+  // active/available exclude reclaimable cache; used/free include it. The route
+  // reports the cache-excluded figures, so the mock supplies the full shape:
+  // active(400) + available(600) = total; used(500) = active + 100 cache.
+  mockMem.mockResolvedValue({ total: 1000, used: 500, active: 400, free: 500, available: 600, buffcache: 100 });
   mockFsSize.mockResolvedValue([{ fs: '/dev/sda1', mount: '/', size: 1000, used: 500, available: 500, use: 50 }]);
 });
 
@@ -168,6 +171,19 @@ describe('GET /api/system/stats caching', () => {
     expect(res2.body).toHaveProperty('network');
     // CPU/mem/disk sample is cached; network is fresh per request.
     expect(mockCurrentLoad).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports memory from the active working set, excluding reclaimable cache', async () => {
+    const res = await request(app).get('/api/system/stats').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    // Figures come from mem.active / mem.available (cache-excluded), not the
+    // cache-inclusive mem.used / mem.free, so a busy host does not read ~100%.
+    expect(res.body.memory).toMatchObject({
+      total: 1000,
+      used: 400,            // mem.active, not mem.used (500)
+      free: 600,            // mem.available, not mem.free (500)
+      usagePercent: '40.0', // 400 / 1000, not 500 / 1000
+    });
   });
 });
 
