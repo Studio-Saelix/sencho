@@ -76,29 +76,38 @@ export function GitSourcePanel({
   const { runWithLog } = useDeployFeedback();
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
+  const resetToUnlinked = useCallback(() => {
+    setSource(null);
+    setRepoUrl('');
+    setBranch('main');
+    setComposePath('compose.yaml');
+    setSyncEnv(false);
+    setAuthType('none');
+    setToken('');
+    setApplyModeOverride(null);
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`);
       if (res.ok) {
-        const data: GitSource = await res.json();
-        setSource(data);
-        setRepoUrl(data.repo_url);
-        setBranch(data.branch);
-        setComposePath(data.compose_path);
-        setSyncEnv(data.sync_env);
-        setAuthType(data.auth_type);
-        setToken('');
-        setApplyModeOverride(null);
+        const data: GitSource | { linked: false } = await res.json();
+        // An existing stack with no Git source attached answers 200 { linked: false }.
+        if ('linked' in data) {
+          resetToUnlinked();
+        } else {
+          setSource(data);
+          setRepoUrl(data.repo_url);
+          setBranch(data.branch);
+          setComposePath(data.compose_path);
+          setSyncEnv(data.sync_env);
+          setAuthType(data.auth_type);
+          setToken('');
+          setApplyModeOverride(null);
+        }
       } else if (res.status === 404) {
-        setSource(null);
-        setRepoUrl('');
-        setBranch('main');
-        setComposePath('compose.yaml');
-        setSyncEnv(false);
-        setAuthType('none');
-        setToken('');
-        setApplyModeOverride(null);
+        resetToUnlinked();
       } else if (res.status === 403) {
         setSource(null);
         toast.error('You do not have permission to view this stack\'s Git source.');
@@ -111,7 +120,7 @@ export function GitSourcePanel({
     } finally {
       setLoading(false);
     }
-  }, [stackName]);
+  }, [stackName, resetToUnlinked]);
 
   useEffect(() => {
     if (open) {
