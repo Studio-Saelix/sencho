@@ -233,9 +233,12 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
         cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: currentLoad.cpus.length },
         memory: {
           total: mem.total,
-          used: mem.used,
-          free: mem.free,
-          usagePercent: ((mem.used / mem.total) * 100).toFixed(1),
+          // Percentage is keyed off mem.active (the real working set), not mem.used:
+          // on Linux/BSD/macOS mem.used counts reclaimable page cache and reads ~99%
+          // on a busy host. mem.available is total - active, so used + free = total.
+          used: mem.active,
+          free: mem.available,
+          usagePercent: ((mem.active / mem.total) * 100).toFixed(1),
         },
         disk: mainDisk ? {
           total: mainDisk.size,

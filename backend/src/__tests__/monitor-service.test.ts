@@ -38,7 +38,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   }),
   mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
   mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10 }),
-  mockMem: vi.fn().mockResolvedValue({ used: 4e9, total: 16e9 }),
+  mockMem: vi.fn().mockResolvedValue({ total: 16e9, used: 4e9, active: 4e9, available: 12e9, free: 12e9, buffcache: 0 }),
   mockFsSize: vi.fn().mockResolvedValue([{ mount: '/', use: 30 }]),
   mockExecAsync: vi.fn().mockResolvedValue({ stdout: '' }),
   mockFetchLatestSenchoVersion: vi.fn().mockRejectedValue(new Error('not configured')),
@@ -129,6 +129,15 @@ beforeEach(() => {
   (MonitorService as any).instance = undefined;
   _resetHostAlertSuppressionStateForTests();
   mockGetSystemState.mockReturnValue(null);
+});
+
+// si.mem() returns active/available alongside used (used counts reclaimable page
+// cache, active/available exclude it). The host-RAM percentage is derived from the
+// cache-excluded figures, so mocks must supply a realistic shape. `realUsed` is the
+// active working set; available/free are the remainder.
+const memSample = (realUsed: number, total = 16e9) => ({
+  total, used: realUsed, active: realUsed,
+  available: total - realUsed, free: total - realUsed, buffcache: 0,
 });
 
 // ── Pure calculation helpers (accessed via private method reflection) ───
@@ -303,7 +312,36 @@ describe('MonitorService - evaluateGlobalSettings', () => {
   });
 
   it('dispatches RAM warning when over threshold', async () => {
-    mockMem.mockResolvedValue({ used: 15e9, total: 16e9 }); // ~94%
+    mockMem.mockResolvedValue(memSample(15e9)); // ~94%
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
+  });
+
+  it('does not alert when most RAM is reclaimable page cache, not real usage', async () => {
+    // Busy host: 15.8G "used" including cache, but only 1.6G actively in use and
+    // 14.4G available. The naive used/total formula reads ~99% and would breach an
+    // 80% threshold; the active/total figure is 10% and must stay silent.
+    mockMem.mockResolvedValue({
+      total: 16e9, used: 15.8e9, active: 1.6e9, available: 14.4e9, free: 14.4e9, buffcache: 14.2e9,
+    });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
+  });
+
+  it('alerts when the active working set is genuinely over threshold', async () => {
+    // Cache-heavy and genuinely busy: 14G active of 16G (87.5%) with 15.8G "used"
+    // including cache. active/total exceeds 80%, so the alert must still fire. This
+    // is the two-sided partner to the page-cache case above: keying off active must
+    // not suppress real breaches.
+    mockMem.mockResolvedValue({
+      total: 16e9, used: 15.8e9, active: 14e9, available: 2e9, free: 2e9, buffcache: 1.8e9,
+    });
 
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
@@ -342,7 +380,7 @@ describe('MonitorService - host alert suppression (F-11)', () => {
   // independently controlled per-test so a single mockMem set-up covers the
   // common "I want a breach happening" case without test repetition.
   beforeEach(() => {
-    mockMem.mockResolvedValue({ used: 15e9, total: 16e9 }); // ~94%
+    mockMem.mockResolvedValue(memSample(15e9)); // ~94%
   });
 
   it('first breach dispatches immediately', async () => {
@@ -467,7 +505,7 @@ describe('MonitorService - host alert suppression (F-11)', () => {
     const svc = MonitorService.getInstance();
     mockFsSize.mockResolvedValue([{ mount: '/', use: 95 }]);
     // Set RAM below threshold so it does not interfere with the disk-only assertions.
-    mockMem.mockResolvedValue({ used: 4e9, total: 16e9 });
+    mockMem.mockResolvedValue(memSample(4e9));
     const baseTime = 1_700_000_000_000;
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
 
@@ -503,7 +541,7 @@ describe('MonitorService - host alert suppression (F-11)', () => {
     expect(persistedRamTs).not.toBe('0');
 
     // Drop RAM back under threshold.
-    mockMem.mockResolvedValue({ used: 4e9, total: 16e9 }); // 25%
+    mockMem.mockResolvedValue(memSample(4e9)); // 25%
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
 
     // Recovery branch resets the persisted timestamp to '0'.
@@ -518,11 +556,11 @@ describe('MonitorService - host alert suppression (F-11)', () => {
     expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
 
     // Recovery.
-    mockMem.mockResolvedValue({ used: 4e9, total: 16e9 });
+    mockMem.mockResolvedValue(memSample(4e9));
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
 
     // Re-breach.
-    mockMem.mockResolvedValue({ used: 15e9, total: 16e9 });
+    mockMem.mockResolvedValue(memSample(15e9));
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
 
     expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
@@ -605,7 +643,7 @@ describe('MonitorService - host alert suppression (F-11)', () => {
     });
 
     // T2: post-restart cycle finds metric BELOW threshold (recovered).
-    mockMem.mockResolvedValue({ used: 4e9, total: 16e9 });
+    mockMem.mockResolvedValue(memSample(4e9));
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
     // No dispatch on a non-breach cycle.
@@ -616,7 +654,7 @@ describe('MonitorService - host alert suppression (F-11)', () => {
 
     // T3: re-breach 10 minutes later (well inside the original 60-min window).
     nowSpy.mockReturnValue(baseTime + 15 * 60 * 1000);
-    mockMem.mockResolvedValue({ used: 15e9, total: 16e9 });
+    mockMem.mockResolvedValue(memSample(15e9));
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
 
     expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
