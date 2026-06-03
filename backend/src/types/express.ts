@@ -1,4 +1,4 @@
-import type { UserRole, ApiTokenScope } from '../services/DatabaseService';
+import type { UserRole, ApiTokenScope, ApiToken } from '../services/DatabaseService';
 import type { LicenseTier, LicenseVariant } from '../services/license-types';
 
 // Extend Express Request type for user and node context.
@@ -10,6 +10,8 @@ declare global {
       user?: { username: string; role: UserRole; userId: number };
       nodeId: number;
       apiTokenScope?: ApiTokenScope;
+      /** Active API token resolved by the rate limiter's key generator (which runs before auth), memoized so `authMiddleware` reuses it without a second DB lookup. Set only for a request bearing a real, non-revoked, non-expired API token. */
+      _apiToken?: ApiToken;
       rawBody?: Buffer;
       /** License tier asserted by the main instance on proxied requests. Only set for trusted node_proxy tokens. */
       proxyTier?: LicenseTier;

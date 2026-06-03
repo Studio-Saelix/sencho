@@ -23,9 +23,10 @@ import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
-import { getTerminalWs } from '../websocket/generic';
+import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -61,6 +62,8 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   stop: 'stopping',
   start: 'starting',
   update: 'updating',
+  rollback: 'rolling back',
+  backup: 'backing up',
 };
 
 function tryAcquireStackOpLock(
@@ -253,6 +256,41 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
   }
 });
 
+// Read-only scan of the compose directory for the guided first-import flow.
+// Surfaces compose files found on disk (loose at the root, already a stack, or
+// one directory too deep) with a dry preview so a new user can land their first
+// stack without reading the docs first. Performs no writes.
+stacksRouter.get('/import/scan', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    const fsSvc = FileSystemService.getInstance(req.nodeId);
+    const raw = await fsSvc.findImportCandidates();
+    const candidates = raw.map((c) => {
+      let preview: ComposePreview;
+      if (c.oversized) {
+        preview = { services: [], warnings: [], parseError: 'Compose file is too large to preview.' };
+      } else if (c.content !== null) {
+        preview = parseComposePreview(c.content);
+      } else {
+        preview = { services: [], warnings: [], parseError: 'Could not read compose file.' };
+      }
+      return {
+        name: c.name,
+        composeFile: c.composeFile,
+        location: c.location,
+        status: c.status,
+        services: preview.services,
+        warnings: preview.warnings,
+        parseError: preview.parseError,
+      };
+    });
+    res.json({ composeDir: fsSvc.getBaseDir(), candidates });
+  } catch (error) {
+    console.error('Failed to scan compose directory:', error);
+    res.status(500).json({ error: 'Failed to scan compose directory' });
+  }
+});
+
 type BulkLifecycleAction = 'start' | 'stop' | 'restart' | 'update';
 const VALID_BULK_ACTIONS: ReadonlySet<BulkLifecycleAction> = new Set(['start', 'stop', 'restart', 'update']);
 const BULK_PARALLELISM = 4;
@@ -311,7 +349,7 @@ async function runStackBulkOp(
         };
       }
       const atomic = effectiveTier(req) === 'paid';
-      await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
+      await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
       DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
       NotificationService.getInstance().broadcastEvent({
         type: 'state-invalidate',
@@ -580,7 +618,7 @@ stacksRouter.post('/', async (req: Request, res: Response) => {
   try {
     const { stackName } = req.body;
     if (!stackName || typeof stackName !== 'string') {
-      return res.status(400).json({ error: 'Stack name is required and must be a string' });
+      return res.status(400).json({ error: "Field 'stackName' is required and must be a string" });
     }
     if (!isValidStackName(stackName)) {
       return res.status(400).json({ error: 'Stack name can only contain alphanumeric characters, hyphens, and underscores' });
@@ -892,7 +930,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
+    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
@@ -938,7 +976,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   let ok = false;
   try {
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs());
+    await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
     ok = true;
@@ -1152,7 +1190,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = effectiveTier(req) === 'paid';
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(), atomic);
+    await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     invalidateNodeCaches(req.nodeId);
     NotificationService.getInstance().broadcastEvent({
@@ -1200,27 +1238,44 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!requirePaid(req, res)) return;
+  // Rollback restores files and re-deploys, so it must hold the same per-stack
+  // lock deploy/update use. Without it a rollback racing an in-flight deploy
+  // would mutate the compose files and run a second `docker compose up` against
+  // the same project. Lock held below: all early-returns stay inside the try so
+  // finally fires.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'rollback')) return;
   try {
     const fsSvc = FileSystemService.getInstance(req.nodeId);
     const backupInfo = await fsSvc.getBackupInfo(stackName);
     if (!backupInfo.exists) {
-      return res.status(404).json({ error: 'No backup available for this stack.' });
+      res.status(404).json({ error: 'No backup available for this stack.' });
+      return;
     }
     dlog(`[Stacks] Rollback initiated: ${sanitizeForLog(stackName)}`);
     await fsSvc.restoreStackFiles(stackName);
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
-    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), false);
+    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), false);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
     res.json({ message: 'Stack rolled back successfully.' });
+    notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
     const message = getErrorMessage(error, 'Rollback failed.');
-    res.status(500).json({ error: message });
+    notifyActionFailure('rollback', stackName, error, req.user?.username ?? 'system');
+    if (!res.headersSent) {
+      res.status(500).json({ error: message });
+    }
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 });
 
 stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
+  // Backup metadata exists only to drive the paid-only Rollback affordance, so
+  // the read is gated to paid to match the frontend, which only fetches it when
+  // the instance is licensed.
+  if (!requirePaid(req, res)) return;
   try {
     const stackName = req.params.stackName as string;
     const fsSvc = FileSystemService.getInstance(req.nodeId);
@@ -1230,6 +1285,32 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
     console.error('Failed to get backup info:', error);
     const message = getErrorMessage(error, 'Failed to get backup info.');
     res.status(500).json({ error: message });
+  }
+});
+
+stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
+  // Triggers a server-side backup of the stack's managed files: the same
+  // rollback snapshot a deploy takes. Exposed so a scheduled backup can run on
+  // a remote node through the proxy path, and so an operator can capture an
+  // on-demand snapshot. Paid-gated to match the rollback feature it feeds.
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!requirePaid(req, res)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  // The backup slot is shared with the pre-deploy rollback snapshot, so hold the
+  // stack-op lock to keep a backup from interleaving with a concurrent
+  // deploy/update/rollback on the same stack. All early-returns stay inside the
+  // try so finally always releases.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'backup')) return;
+  try {
+    await FileSystemService.getInstance(req.nodeId).backupStackFiles(stackName);
+    dlog(`[Stacks] Backup completed: ${sanitizeForLog(stackName)}`);
+    res.json({ success: true });
+  } catch (error: unknown) {
+    console.error('[Stacks] Backup failed: %s', sanitizeForLog(stackName), error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to back up stack files') });
+  } finally {
+    releaseStackOpLock(req, stackName);
   }
 });
 
@@ -1459,33 +1540,61 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
     const encodedFilename = encodeURIComponent(result.filename);
     const safeFilename = result.filename.replace(/[\\"]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
-    // Track download completion off the file stream's lifecycle, not the
-    // response's. Node's `res.on('finish')` and `res.on('close')` fire in
-    // platform-dependent order under the in-process supertest transport
-    // (close occasionally precedes finish, which made the success-vs-error
-    // recorder racy in CI). The file stream's `end`, `error`, and `close`
-    // events ARE deterministic: a clean read emits `end` then `close`; a
-    // destroy emits `close` without `end`; a disk error emits `error` then
-    // `close`. Hanging the recorder off these signals removes the race.
+    // Track download completion off both the file stream's lifecycle and the
+    // response close. Under the in-process supertest transport, request close
+    // events can race ahead of normal stream completion. End/error are the
+    // durable source signals; a close (source or response) counts as success
+    // only when the stream reports it read the full file, and as an abort
+    // otherwise.
     let downloadRecorded = false;
+    const streamWithBytes = result.stream as typeof result.stream & { bytesRead?: number };
+    const hasReadFullFile = (): boolean => (
+      result.size === 0 ||
+      (typeof streamWithBytes.bytesRead === 'number' && streamWithBytes.bytesRead >= result.size)
+    );
+    let abortCleanupHandle: NodeJS.Immediate | null = null;
+    const clearAbortCleanup = (): void => {
+      if (!abortCleanupHandle) return;
+      clearImmediate(abortCleanupHandle);
+      abortCleanupHandle = null;
+    };
     const recordDownloadOnce = (ok: boolean): void => {
       if (downloadRecorded) return;
       downloadRecorded = true;
+      clearAbortCleanup();
       recordFileOp(req.nodeId, 'download', startedAt, ok);
     };
     result.stream.on('error', (streamErr) => {
       console.error('[files] stream error:', sanitizeForLog(getErrorMessage(streamErr, 'unknown')));
-      if (!res.headersSent) res.status(500).end();
-      else res.destroy();
+      if (!res.headersSent) {
+        res.removeHeader('Content-Length');
+        res.status(500).end();
+      } else {
+        res.destroy();
+      }
       recordDownloadOnce(false);
     });
-    result.stream.on('end', () => recordDownloadOnce(true));
-    result.stream.on('close', () => {
-      if (res.writableEnded) recordDownloadOnce(true);
-      else recordDownloadOnce(false);
-    });
-    req.on('close', () => {
-      if (!res.writableEnded) result.stream.destroy();
+    result.stream.on('end', () => recordDownloadOnce(hasReadFullFile()));
+    result.stream.on('close', () => recordDownloadOnce(hasReadFullFile()));
+    res.on('close', () => {
+      if (downloadRecorded) return;
+      // This op measures a server-side file read, so once the source has
+      // streamed the whole file a response close is a successful completion.
+      // Record it here rather than waiting on the source stream's end/close,
+      // which can be dropped once the response consumer is gone, leaving the
+      // op unrecorded.
+      if (hasReadFullFile()) { recordDownloadOnce(true); return; }
+      // Otherwise response close is an abort signal. It can beat the source
+      // stream's final events in the in-process test transport, so give a
+      // same-turn clean source completion a chance to win before cleanup.
+      abortCleanupHandle = setImmediate(() => {
+        abortCleanupHandle = null;
+        if (downloadRecorded) return;
+        if (hasReadFullFile()) { recordDownloadOnce(true); return; }
+        recordDownloadOnce(false);
+        result.stream.destroy();
+      });
+      abortCleanupHandle.unref?.();
     });
     logFileDiag('download stream opened', { stackName, relPath, nodeId: req.nodeId, size: result.size, elapsedMs: Date.now() - startedAt });
     result.stream.pipe(res);

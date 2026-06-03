@@ -8,19 +8,28 @@ import { isDebugEnabled } from '../utils/debug';
 import { rejectUpgrade as reject } from './reject';
 
 /**
- * Module-scope singleton: the most recent WebSocket to send
- * `{action: 'connectTerminal'}` receives streaming output from any subsequent
- * compose deploy/down/update. Routes that want to echo compose progress read
- * the current value via `getTerminalWs()`.
- *
- * Intentionally single-instance. If multiple clients connect, the last one
- * wins. This matches pre-refactor behavior; race-hardening is a separate
- * concern.
+ * Header the deploy/update/down routes carry the per-deploy correlation id on,
+ * mirroring the `sessionId` the frontend sends in `{action:'connectTerminal'}`.
+ * Must stay in sync with `DEPLOY_SESSION_HEADER` in `frontend/src/lib/api.ts`.
  */
-let terminalWs: WebSocket | undefined;
+export const DEPLOY_SESSION_HEADER = 'x-deploy-session-id';
 
-export function getTerminalWs(): WebSocket | undefined {
-  return terminalWs;
+/**
+ * Registry of compose-progress sockets keyed by the per-deploy correlation id
+ * the frontend sends on `{action:'connectTerminal', sessionId}` and echoes on
+ * the deploy/update/down POST via {@link DEPLOY_SESSION_HEADER}. A route resolves
+ * the socket for its own deploy with `getTerminalWs(sessionId)`, so concurrent
+ * deploys from different tabs or users never cross-stream output to each other.
+ *
+ * `lastTerminalWs` is the fallback for callers that connect or stream without a
+ * session id (bulk operations, legacy clients): the most recent such socket wins.
+ */
+const terminalRegistry = new Map<string, WebSocket>();
+let lastTerminalWs: WebSocket | undefined;
+
+export function getTerminalWs(sessionId?: string): WebSocket | undefined {
+  const ws = sessionId ? terminalRegistry.get(sessionId) : lastTerminalWs;
+  return ws && ws.readyState === WebSocket.OPEN ? ws : undefined;
 }
 
 interface GenericContext {
@@ -85,6 +94,7 @@ export function handleGenericWs(
 export function attachGenericConnectionHandlers(wss: WebSocketServer): void {
   wss.on('connection', (ws) => {
     console.log('WebSocket connected');
+    let registeredSessionId: string | undefined;
 
     ws.on('message', (message) => {
       try {
@@ -92,7 +102,24 @@ export function attachGenericConnectionHandlers(wss: WebSocketServer): void {
         if (!data.action) return;
 
         if (data.action === 'connectTerminal') {
-          terminalWs = ws;
+          const sessionId = typeof data.sessionId === 'string' && data.sessionId ? data.sessionId : undefined;
+          // Rebind this socket to the new id, dropping any prior mapping it held.
+          if (registeredSessionId && registeredSessionId !== sessionId && terminalRegistry.get(registeredSessionId) === ws) {
+            terminalRegistry.delete(registeredSessionId);
+          }
+          registeredSessionId = sessionId;
+          if (sessionId) {
+            terminalRegistry.set(sessionId, ws);
+            // A keyed socket must never be the id-less fallback, or a headerless
+            // operation (bulk / rollback / legacy) would stream into this user's
+            // keyed deploy modal.
+            if (lastTerminalWs === ws) lastTerminalWs = undefined;
+          } else {
+            lastTerminalWs = ws;
+          }
+          if (isDebugEnabled()) {
+            console.debug('[Deploy:diag] progress stream registered', { session: sessionId ? `${sessionId.slice(0, 8)}…` : '(none)' });
+          }
         } else if (data.action === 'streamStats') {
           const requestedId = data.nodeId ? parseInt(data.nodeId, 10) : NodeRegistry.getInstance().getDefaultNodeId();
           // When a WS is proxied from a gateway to this remote instance, the
@@ -116,6 +143,13 @@ export function attachGenericConnectionHandlers(wss: WebSocketServer): void {
       } catch {
         // Malformed JSON - ignore silently
       }
+    });
+
+    ws.on('close', () => {
+      if (registeredSessionId && terminalRegistry.get(registeredSessionId) === ws) {
+        terminalRegistry.delete(registeredSessionId);
+      }
+      if (lastTerminalWs === ws) lastTerminalWs = undefined;
     });
   });
 }

@@ -72,7 +72,7 @@ A few quirks worth knowing:
 
 - The endpoint always returns 200 with a `results` array. Partial failures live inside that array; the HTTP status is not the place to look.
 - Each remote node call carries a 60-second timeout. A slow remote with many stacks can produce a clean per-stack list or a timeout row, depending on whether the remote streamed before the timeout fired.
-- Local nodes share a per-node bulk-action lock with the per-label action endpoint, so a fleet stop and a per-label stop initiated against the same node serialize cleanly instead of double-stopping the same containers.
+- Every node, local or remote, runs the stop under a per-node bulk-action lock shared with the per-label action endpoint, so a fleet stop and a per-label stop aimed at the same node serialize cleanly instead of double-stopping the same containers. On a remote, the lock is held on that remote while it runs its share of the stop.
 
 ## Bulk label assign
 

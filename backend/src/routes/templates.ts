@@ -14,7 +14,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
-import { getTerminalWs } from '../websocket/generic';
+import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
 export const templatesRouter = Router();
 
@@ -53,7 +53,7 @@ templatesRouter.get('/', authMiddleware, async (req: Request, res: Response) => 
     res.json(enriched);
   } catch (error) {
     console.error('[Templates] Failed to fetch:', error);
-    res.status(500).json({ error: 'Failed to fetch templates' });
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to fetch templates') });
   }
 });
 
@@ -101,8 +101,18 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
     }
 
     const debug = isDebugEnabled();
+    const deployStartedAt = Date.now();
     console.log(`[Templates] Deploy started: ${stackName}`);
-    if (debug) console.debug('[Templates:debug] Deploy payload', { stackName, templateTitle: template.title, envVarCount: envVars ? Object.keys(envVars).length : 0 });
+    if (debug) console.debug('[Templates:debug] Deploy payload', {
+      stackName,
+      // title/source are registry/client-supplied; bound the title so a long
+      // value cannot bloat the log line. No env values or YAML are logged.
+      templateTitle: String(template.title ?? '').slice(0, 80),
+      source: String(template.source ?? '').slice(0, 40),
+      portCount: Array.isArray(template.ports) ? template.ports.length : 0,
+      volumeCount: Array.isArray(template.volumes) ? template.volumes.length : 0,
+      envVarCount: envVars ? Object.keys(envVars).length : 0,
+    });
 
     await fsService.createStack(stackName);
 
@@ -125,9 +135,10 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         return;
       }
       const atomic = effectiveTier(req) === 'paid';
-      await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(), atomic);
+      await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
       invalidateNodeCaches(req.nodeId);
       console.log(`[Templates] Deploy completed: ${stackName}`);
+      if (debug) console.debug(`[Templates:debug] Deploy timing: ${stackName} took ${Date.now() - deployStartedAt}ms`);
       res.json({ success: true, message: 'Template deployed successfully' });
       if (!skip_scan) {
         triggerPostDeployScan(stackName, req.nodeId).catch(err =>

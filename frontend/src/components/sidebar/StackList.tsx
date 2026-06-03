@@ -10,7 +10,8 @@ import type { StackRowStatus } from './stack-status-utils';
 import { StackGroup } from './StackGroup';
 import { StackContextMenu } from './StackContextMenu';
 import { StackKebabMenu } from './StackKebabMenu';
-import type { StackMenuCtx } from './sidebar-types';
+import { EmptyStackState } from './EmptyStackState';
+import type { StackMenuCtx, FilterChip } from './sidebar-types';
 
 interface RemoteNodeResult {
   nodeId: number;
@@ -45,6 +46,13 @@ export interface StackListProps {
   remoteLoading: boolean;
   remoteFailedNodes: RemoteSearchFailure[];
   onSelectRemoteFile: (nodeId: number, file: string) => void;
+  // Active filter chip. The first-run empty state only renders when no chip is
+  // applied ('all'), so a filter that matches nothing is not mistaken for "no
+  // stacks yet".
+  filterChip: FilterChip;
+  // Open the create dialog on a starting mode. Present only when the user can
+  // create stacks; drives the zero-stacks empty state.
+  onOpenCreate?: (mode: 'import' | 'empty') => void;
 }
 
 interface BuiltGroup {
@@ -115,6 +123,7 @@ export function StackList(props: StackListProps & StackListBulkProps) {
     isBusy, getDisplayName, onSelectFile, buildMenuCtx,
     bulkMode, selectedFiles, onToggleSelect,
     remoteResults, remoteLoading, remoteFailedNodes, onSelectRemoteFile,
+    filterChip, onOpenCreate,
   } = props;
 
   const [failedNodesExpanded, setFailedNodesExpanded] = useState(false);
@@ -134,6 +143,13 @@ export function StackList(props: StackListProps & StackListBulkProps) {
         <Skeleton className="h-8 w-full" />
       </div>
     );
+  }
+
+  // First-run prompt only when the node has no stacks at all: no search text and
+  // no active filter chip, so a filter that happens to match nothing does not
+  // masquerade as an empty fleet.
+  if (files.length === 0 && !searchQuery.trim() && filterChip === 'all') {
+    return <EmptyStackState onOpenCreate={onOpenCreate} />;
   }
 
   return (

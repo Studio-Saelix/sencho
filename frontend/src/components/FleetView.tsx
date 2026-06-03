@@ -78,11 +78,13 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             <TabsHighlightItem value="overview">
                                 <TabsTrigger value="overview">Overview</TabsTrigger>
                             </TabsHighlightItem>
-                            <TabsHighlightItem value="snapshots">
-                                <TabsTrigger value="snapshots">
-                                    <Camera className="w-4 h-4 mr-1.5" />Snapshots
-                                </TabsTrigger>
-                            </TabsHighlightItem>
+                            {isAdmin && (
+                                <TabsHighlightItem value="snapshots">
+                                    <TabsTrigger value="snapshots">
+                                        <Camera className="w-4 h-4 mr-1.5" />Snapshots
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
+                            )}
                             <TabsHighlightItem value="configuration">
                                 <TabsTrigger value="configuration">
                                     <SlidersHorizontal className="w-4 h-4 mr-1.5" />Status
@@ -115,7 +117,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     <Wrench className="w-4 h-4 mr-1.5" />Fleet Actions
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {isPaid && (
+                            {isPaid && isAdmin && (
                                 <TabsHighlightItem value="secrets">
                                     <TabsTrigger value="secrets">
                                         <KeyRound className="w-4 h-4 mr-1.5" />Secrets
@@ -192,9 +194,11 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                     />
                 </TabsContent>
 
-                <TabsContent value="snapshots">
-                    <FleetSnapshots />
-                </TabsContent>
+                {isAdmin && (
+                    <TabsContent value="snapshots">
+                        <FleetSnapshots />
+                    </TabsContent>
+                )}
                 <TabsContent value="configuration">
                     <FleetConfiguration />
                 </TabsContent>
@@ -206,21 +210,21 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 {isAdmiral && (
                     <TabsContent value="routing">
                         <AdmiralGate>
-                            <RoutingTab />
+                            <RoutingTab canManage={isAdmin} />
                         </AdmiralGate>
                     </TabsContent>
                 )}
                 {isAdmiral && (
                     <TabsContent value="federation">
                         <AdmiralGate>
-                            <FederationTab />
+                            <FederationTab canManage={isAdmin} />
                         </AdmiralGate>
                     </TabsContent>
                 )}
                 <TabsContent value="actions">
                     <FleetActionsTab nodes={overview.allNodes} />
                 </TabsContent>
-                {isPaid && (
+                {isPaid && isAdmin && (
                     <TabsContent value="secrets">
                         <SecretsTab />
                     </TabsContent>
@@ -237,6 +241,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 checkingUpdates={updateStatus.checkingUpdates}
                 updateStatuses={updateStatus.updateStatuses}
                 updatingNodeId={updateStatus.updatingNodeId}
+                isAdmin={isAdmin}
                 fetchUpdateStatus={updateStatus.fetchUpdateStatus}
                 triggerNodeUpdate={updateStatus.triggerNodeUpdate}
                 retryNodeUpdate={updateStatus.retryNodeUpdate}

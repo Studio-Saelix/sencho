@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
+import type { AuditStatsInput } from './AuditAnomalyService';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -231,7 +232,8 @@ export interface FleetSnapshot {
     created_by: string;
     node_count: number;
     stack_count: number;
-    skipped_nodes: string;
+    skipped_nodes: string; // JSON: Array<{ nodeId; nodeName; reason }>
+    skipped_stacks: string; // JSON: Array<{ nodeId; nodeName; stackName; reason }>
     created_at: number;
 }
 
@@ -612,6 +614,14 @@ export interface ScanSummary {
 const AUDIT_LOG_FLUSH_INTERVAL_MS = 1_000;
 const AUDIT_LOG_FLUSH_THRESHOLD = 100;
 
+// Upper bound on the rows the anomaly baseline / stats computations pull into
+// memory for a single request. The audit table grows unbounded within the
+// retention window, and the analysis paths run on every list page and every
+// stats refresh, so without a cap a busy fleet would scan the whole window into
+// a JS array each time. When the window holds more than this, the most-recent
+// rows are used and baselines become an approximation over recent activity.
+export const AUDIT_ANOMALY_HISTORY_CAP = 20_000;
+
 export const PILOT_METRICS_COUNTERS_KEY = 'pilot_metrics_counters';
 
 export class DatabaseService {
@@ -812,6 +822,7 @@ export class DatabaseService {
         node_count INTEGER NOT NULL,
         stack_count INTEGER NOT NULL,
         skipped_nodes TEXT NOT NULL DEFAULT '[]',
+        skipped_stacks TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL
       );
 
@@ -1187,6 +1198,9 @@ export class DatabaseService {
         maybeAddCol('nodes', 'pilot_last_seen', 'INTEGER');
         maybeAddCol('nodes', 'pilot_agent_version', 'TEXT');
 
+        // Fleet snapshot per-stack capture warnings (partial-capture surfacing)
+        maybeAddCol('fleet_snapshots', 'skipped_stacks', "TEXT NOT NULL DEFAULT '[]'");
+
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
         maybeAddCol('scheduled_tasks', 'prune_targets', 'TEXT DEFAULT NULL');
@@ -1239,6 +1253,7 @@ export class DatabaseService {
         stmt.run('scan_history_per_image_limit', '50');
         stmt.run('trivy_auto_update', '0');
         stmt.run('trivy_last_notified_version', '');
+        stmt.run('deploy_block_honor_suppressions', '0');
         stmt.run('mesh_auto_recreate', '0');
 
         // Seed the default local node if none exists
@@ -2046,6 +2061,38 @@ export class DatabaseService {
         };
     }
 
+    public clearSelfContainerNotificationRouting(
+        nodeId: number,
+        self: { containerName?: string | null; composeProjectName?: string | null },
+    ): number {
+        const containerName = self.containerName?.trim() || null;
+        const composeProjectName = self.composeProjectName?.trim() || null;
+        if (!containerName && !composeProjectName) return 0;
+
+        const predicates: string[] = [];
+        const args: (number | string)[] = [nodeId];
+        if (containerName) {
+            predicates.push('container_name = ?');
+            args.push(containerName);
+        }
+        if (composeProjectName) {
+            predicates.push('(container_name IS NULL AND stack_name = ?)');
+            args.push(composeProjectName);
+        }
+
+        const result = this.db.prepare(`
+            UPDATE notification_history
+               SET stack_name = NULL,
+                   container_name = NULL
+             WHERE node_id = ?
+               AND actor_username = 'system:docker-events'
+               AND category = 'monitor_alert'
+               AND (stack_name IS NOT NULL OR container_name IS NOT NULL)
+               AND (${predicates.join(' OR ')})
+        `).run(...args);
+        return result.changes;
+    }
+
     public getStackActivity(nodeId: number, stackName: string, opts: { limit: number; before?: number; beforeId?: number }): NotificationHistory[] {
         // Composite (timestamp, id) cursor: pure timestamp pagination drops rows
         // on same-millisecond bursts (Docker events from one compose up).
@@ -2581,6 +2628,38 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     }
 
+    /**
+     * Atomically apply `updates` unless doing so would demote the last remaining
+     * admin. Returns false (nothing written) when the change would leave zero
+     * admins, true otherwise. The current-role read, the admin count, and the
+     * write run in a single transaction so a concurrent demote or delete of the
+     * other admin cannot race the count to zero.
+     */
+    public updateUserIfNotLastAdmin(id: number, updates: Partial<{ username: string; password_hash: string; role: string; email: string }>): boolean {
+        return this.transaction(() => {
+            if (updates.role !== undefined && updates.role !== 'admin') {
+                const current = this.db.prepare('SELECT role FROM users WHERE id = ?').get(id) as { role: string } | undefined;
+                if (current?.role === 'admin' && this.getAdminCount() <= 1) return false;
+            }
+            this.updateUser(id, updates);
+            return true;
+        });
+    }
+
+    /**
+     * Atomically delete the user unless it is the last remaining admin. Returns
+     * false (nothing deleted) in that case, true otherwise. Same single-
+     * transaction guard as {@link updateUserIfNotLastAdmin}.
+     */
+    public deleteUserIfNotLastAdmin(id: number): boolean {
+        return this.transaction(() => {
+            const current = this.db.prepare('SELECT role FROM users WHERE id = ?').get(id) as { role: string } | undefined;
+            if (current?.role === 'admin' && this.getAdminCount() <= 1) return false;
+            this.deleteUser(id);
+            return true;
+        });
+    }
+
     public getUserCount(): number {
         return (this.db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number })?.count || 0;
     }
@@ -2601,10 +2680,26 @@ export class DatabaseService {
         this.db.prepare('UPDATE users SET token_version = token_version + 1, updated_at = ? WHERE id = ?').run(Date.now(), userId);
     }
 
+    /**
+     * Invalidate every active session by bumping every user's token_version in
+     * one statement. Returns the number of users affected. Used by the
+     * emergency `clear-sessions` CLI when a stolen cookie or a wedged login
+     * state needs a clean sign-out of every user on this node.
+     */
+    public bumpAllTokenVersions(): number {
+        const result = this.db.prepare('UPDATE users SET token_version = token_version + 1, updated_at = ?').run(Date.now());
+        return result.changes;
+    }
+
     // --- User MFA ---
 
     public getUserMfa(userId: number): UserMfa | undefined {
         return this.db.prepare('SELECT * FROM user_mfa WHERE user_id = ?').get(userId) as UserMfa | undefined;
+    }
+
+    /** Count of users with a completed (enabled) two-factor enrolment. */
+    public getMfaEnrolledCount(): number {
+        return (this.db.prepare('SELECT COUNT(*) as count FROM user_mfa WHERE enabled = 1').get() as { count: number })?.count || 0;
     }
 
     /**
@@ -2711,6 +2806,33 @@ export class DatabaseService {
         return result.changes;
     }
 
+    /**
+     * Atomically consume a single backup-code hash. Re-reads the stored set,
+     * removes `matchedHash` if still present, and persists the shrunk set in
+     * one synchronous transaction. Returns true when the hash was present (and
+     * is now consumed), false when it was already gone (e.g. a concurrent
+     * /login/mfa request carrying the same code consumed it first). This is the
+     * single-use enforcement point: callers verify the code, then gate success
+     * on this returning true, so two concurrent verifications of the same code
+     * cannot both succeed.
+     */
+    public consumeBackupCodeHash(userId: number, matchedHash: string): boolean {
+        const consume = this.db.transaction((): boolean => {
+            const row = this.db
+                .prepare('SELECT backup_codes_json FROM user_mfa WHERE user_id = ?')
+                .get(userId) as { backup_codes_json: string | null } | undefined;
+            const hashes: string[] = row?.backup_codes_json ? JSON.parse(row.backup_codes_json) : [];
+            const idx = hashes.indexOf(matchedHash);
+            if (idx === -1) return false;
+            hashes.splice(idx, 1);
+            this.db
+                .prepare('UPDATE user_mfa SET backup_codes_json = ?, updated_at = ? WHERE user_id = ?')
+                .run(JSON.stringify(hashes), Date.now(), userId);
+            return true;
+        });
+        return consume();
+    }
+
     // --- Role Assignments ---
 
     public getRoleAssignments(userId: number, resourceType: ResourceType, resourceId: string): RoleAssignment[] {
@@ -2781,20 +2903,25 @@ export class DatabaseService {
 
     // --- Fleet Snapshots ---
 
-    public createSnapshot(description: string, createdBy: string, nodeCount: number, stackCount: number, skippedNodes: string): number {
+    public createSnapshot(description: string, createdBy: string, nodeCount: number, stackCount: number, skippedNodes: string, skippedStacks = '[]'): number {
         const result = this.db.prepare(
-            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-        ).run(description, createdBy, nodeCount, stackCount, skippedNodes, Date.now());
+            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).run(description, createdBy, nodeCount, stackCount, skippedNodes, skippedStacks, Date.now());
         return result.lastInsertRowid as number;
     }
 
     public insertSnapshotFiles(snapshotId: number, files: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }>): void {
+        // Snapshot file bodies are compose.yaml and .env captures, so they carry
+        // the same secrets as the live stack. Encrypt content at rest with the
+        // instance key; getSnapshotFiles/getSnapshotStackFiles decrypt on read,
+        // so restore and cloud-archive paths see plaintext and stay portable.
+        const crypto = CryptoService.getInstance();
         const insert = this.db.prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)'
         );
         const insertMany = this.db.transaction((rows: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }>) => {
             for (const row of rows) {
-                insert.run(snapshotId, row.nodeId, row.nodeName, row.stackName, row.filename, row.content);
+                insert.run(snapshotId, row.nodeId, row.nodeName, row.stackName, row.filename, crypto.encrypt(row.content));
             }
         });
         insertMany(files);
@@ -2811,15 +2938,21 @@ export class DatabaseService {
     }
 
     public getSnapshotFiles(snapshotId: number): FleetSnapshotFile[] {
-        return this.db.prepare(
+        const crypto = CryptoService.getInstance();
+        const rows = this.db.prepare(
             'SELECT * FROM fleet_snapshot_files WHERE snapshot_id = ? ORDER BY node_name, stack_name'
         ).all(snapshotId) as FleetSnapshotFile[];
+        // decrypt() returns non-ciphertext input unchanged, so rows written
+        // before content-at-rest encryption still read back as plaintext.
+        return rows.map(row => ({ ...row, content: crypto.decrypt(row.content) }));
     }
 
     public getSnapshotStackFiles(snapshotId: number, nodeId: number, stackName: string): FleetSnapshotFile[] {
-        return this.db.prepare(
+        const crypto = CryptoService.getInstance();
+        const rows = this.db.prepare(
             'SELECT * FROM fleet_snapshot_files WHERE snapshot_id = ? AND node_id = ? AND stack_name = ?'
         ).all(snapshotId, nodeId, stackName) as FleetSnapshotFile[];
+        return rows.map(row => ({ ...row, content: crypto.decrypt(row.content) }));
     }
 
     public deleteSnapshot(id: number): void {
@@ -2952,11 +3085,83 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM audit_log WHERE timestamp < ?').run(cutoff);
     }
 
-    public getAuditLogsInRange(from: number, to: number): AuditLogEntry[] {
+    public getAuditLogsInRange(from: number, to: number, limit?: number): AuditLogEntry[] {
         this.flushAuditLogBuffer();
+        if (limit !== undefined) {
+            // Cap to the most-recent `limit` rows in the window, then return
+            // them in ascending order to preserve this method's contract.
+            return this.db.prepare(
+                `SELECT * FROM (
+                   SELECT * FROM audit_log WHERE timestamp >= ? AND timestamp < ?
+                   ORDER BY timestamp DESC LIMIT ?
+                 ) ORDER BY timestamp ASC`
+            ).all(from, to, limit) as AuditLogEntry[];
+        }
         return this.db.prepare(
             'SELECT * FROM audit_log WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC'
         ).all(from, to) as AuditLogEntry[];
+    }
+
+    /**
+     * Exact aggregate inputs for the audit signal-rail stats, computed with SQL
+     * COUNT / GROUP BY rather than materializing rows. The counts and hourly
+     * series stay exact regardless of window size (no row cap), while the
+     * new-ip detection works over the small DISTINCT (user, ip) pair sets.
+     */
+    public getAuditStatsInputs(now: number): AuditStatsInput {
+        this.flushAuditLogBuffer();
+        const cutoff24h = now - 24 * 60 * 60 * 1000;
+        const cutoff7d = now - 7 * 24 * 60 * 60 * 1000;
+        const cutoff30d = now - 30 * 24 * 60 * 60 * 1000;
+        // Every current-window query is upper-bounded by `now` so a future-dated
+        // row (clock skew, a test fixture) never inflates the live counts.
+        const countOf = (sql: string, ...params: number[]): number =>
+            (this.db.prepare(sql).get(...params) as { c: number }).c;
+
+        const events24 = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ? AND timestamp < ?', cutoff24h, now);
+        const events7d = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ? AND timestamp < ?', cutoff7d, now);
+        const actors24 = countOf("SELECT COUNT(DISTINCT username) AS c FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND username != ''", cutoff24h, now);
+        const failures24 = countOf('SELECT COUNT(*) AS c FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND status_code >= 400', cutoff24h, now);
+
+        const activityByHour = Array.from({ length: 24 }, () => 0);
+        const failuresByHour = Array.from({ length: 24 }, () => 0);
+        const hourRows = this.db.prepare(
+            `SELECT CAST(strftime('%H', timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS failures
+             FROM audit_log WHERE timestamp >= ? AND timestamp < ? GROUP BY hour`,
+        ).all(cutoff24h, now) as { hour: number; total: number; failures: number }[];
+        for (const r of hourRows) {
+            if (r.hour >= 0 && r.hour < 24) {
+                activityByHour[r.hour] = r.total;
+                failuresByHour[r.hour] = r.failures;
+            }
+        }
+
+        // ORDER BY makes both the new-ip scan and the sample actor deterministic.
+        const recentPairs = this.db.prepare(
+            "SELECT DISTINCT username, ip_address FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND username != '' AND ip_address != '' ORDER BY username, ip_address",
+        ).all(cutoff24h, now) as { username: string; ip_address: string }[];
+        const priorPairs = this.db.prepare(
+            "SELECT DISTINCT username, ip_address FROM audit_log WHERE timestamp >= ? AND timestamp < ? AND username != '' AND ip_address != ''",
+        ).all(cutoff30d, cutoff24h) as { username: string; ip_address: string }[];
+        const priorByActor = new Map<string, Set<string>>();
+        for (const p of priorPairs) {
+            let set = priorByActor.get(p.username);
+            if (!set) { set = new Set(); priorByActor.set(p.username, set); }
+            set.add(p.ip_address);
+        }
+        let newIpCount = 0;
+        let sampleNewIpActor: string | null = null;
+        for (const p of recentPairs) {
+            const prior = priorByActor.get(p.username);
+            if (prior && prior.size > 0 && !prior.has(p.ip_address)) {
+                newIpCount++;
+                if (!sampleNewIpActor) sampleNewIpActor = p.username;
+            }
+        }
+
+        return { events24, events7d, actors24, failures24, activityByHour, failuresByHour, newIpCount, sampleNewIpActor };
     }
 
     // --- API Tokens ---
@@ -3636,6 +3841,17 @@ export class DatabaseService {
             )
             .all(...(params as never[]), limit, offset) as VulnerabilityDetail[];
         return { items, total };
+    }
+
+    /**
+     * All findings for a scan, unpaginated. Used by the pre-deploy policy gate
+     * to re-derive severity from suppression-filtered findings, where every row
+     * must be considered rather than a single display page.
+     */
+    public getAllVulnerabilityDetails(scanId: number): VulnerabilityDetail[] {
+        return this.db
+            .prepare('SELECT * FROM vulnerability_details WHERE scan_id = ?')
+            .all(scanId) as VulnerabilityDetail[];
     }
 
     public insertSecretFindings(

@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from './ui/button';
 import { Plus } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
 import { NotificationPanel } from './NotificationPanel';
 import { TopBar } from './TopBar';
 import { ViewRouter } from './EditorLayout/ViewRouter';
-import { CreateStackDialog } from './EditorLayout/CreateStackDialog';
+import { CreateStackDialog, type CreateMode } from './EditorLayout/CreateStackDialog';
 import { EditorView } from './EditorLayout/EditorView';
 import { ShellOverlays } from './EditorLayout/ShellOverlays';
 import { useEditorViewState } from './EditorLayout/hooks/useEditorViewState';
@@ -110,6 +110,14 @@ export default function EditorLayout() {
     createDialogOpen, setCreateDialogOpen,
   } = overlayState;
 
+  // Which mode the create dialog opens on. The toolbar Create button opens on
+  // 'empty'; the zero-stacks empty state opens on 'import'.
+  const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
+  const openCreateDialog = useCallback((mode: CreateMode) => {
+    setCreateDialogInitialMode(mode);
+    setCreateDialogOpen(true);
+  }, [setCreateDialogOpen]);
+
   const [diffPreviewEnabled] = useComposeDiffPreviewEnabled();
 
   // Use a ref to break the circular dependency:
@@ -176,6 +184,7 @@ export default function EditorLayout() {
     activeNode,
     isPaid,
     isAdmiral,
+    isAdmin,
     can,
   });
 
@@ -310,7 +319,7 @@ export default function EditorLayout() {
       <Button
         variant="outline"
         className="rounded-lg w-full"
-        onClick={() => setCreateDialogOpen(true)}
+        onClick={() => openCreateDialog('empty')}
       >
         <Plus className="w-4 h-4 mr-2" />
         Create Stack
@@ -318,6 +327,7 @@ export default function EditorLayout() {
       <CreateStackDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
+        initialMode={createDialogInitialMode}
         onStackCreated={async (sName, sourceNodeId) => {
           await refreshStacks();
           // loadFile keeps its own unsaved-changes overlay (intentional safety,
@@ -384,6 +394,8 @@ export default function EditorLayout() {
             const node = nodes.find(n => n.id === nodeId);
             if (node) void stackActions.loadFileOnNode(node, file);
           },
+          filterChip,
+          onOpenCreate: can('stack:create') ? openCreateDialog : undefined,
         }}
         activitySummary={activitySummary}
         onActivityAction={handleActivityAction}

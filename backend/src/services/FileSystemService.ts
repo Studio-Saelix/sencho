@@ -2,6 +2,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { promises as fsPromises, createReadStream } from 'fs';
+import type { Dirent } from 'fs';
 import type { Readable } from 'stream';
 import { NodeRegistry } from './NodeRegistry';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
@@ -35,6 +36,29 @@ const PROTECTED_STACK_FILES = new Set([
   'docker-compose.yml',
   '.env',
 ]);
+
+// Compose filenames Sencho recognizes, in resolution-priority order. Mirrors the
+// list FileSystemService uses elsewhere; named here for the import scan.
+const IMPORT_COMPOSE_FILENAMES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'] as const;
+const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(IMPORT_COMPOSE_FILENAMES);
+// Skip reading compose files larger than this into the import preview.
+const IMPORT_MAX_PREVIEW_BYTES = 1_048_576; // 1 MiB
+
+/**
+ * A compose file discovered on disk during the guided import scan. `status`
+ * records placement: a top-level subdirectory with a compose file is already a
+ * stack (`listed`); a compose file loose at the compose-dir root (`loose-root`)
+ * or one directory too deep (`nested`) will not auto-register and needs the user
+ * to move it. `content` is null when the file was oversized or unreadable.
+ */
+export interface ImportCandidateRaw {
+  name: string;
+  composeFile: string;
+  location: string;
+  status: 'listed' | 'loose-root' | 'nested';
+  content: string | null;
+  oversized: boolean;
+}
 
 // Strips at most one trailing slash. The upstream validator
 // (isValidRelativeStackPath) rejects any '//' sequence, so a string reaching
@@ -423,6 +447,123 @@ export class FileSystemService {
     return this.baseDir;
   }
 
+  private async firstComposeFilename(dir: string): Promise<string | null> {
+    this.assertWithinBase(dir);
+    for (const file of IMPORT_COMPOSE_FILENAMES) {
+      try {
+        await fsPromises.access(path.join(dir, file));
+        return file;
+      } catch {
+        // continue
+      }
+    }
+    return null;
+  }
+
+  private async readComposeCandidate(filePath: string): Promise<{ content: string | null; oversized: boolean }> {
+    this.assertWithinBase(filePath);
+    let fh: import('fs/promises').FileHandle | null = null;
+    try {
+      // Resolve symlinks and confirm the real target is still inside the compose
+      // directory before reading (matches resolveSafeStackPath). A symlinked
+      // compose file or symlinked parent must not expose a file outside the
+      // compose dir through the preview.
+      const realPath = await fsPromises.realpath(filePath);
+      if (!isPathWithinBase(realPath, this.baseDir)) {
+        console.warn('[FileSystemService] Skipping import candidate that escapes the compose directory:', sanitizeForLog(filePath));
+        return { content: null, oversized: false };
+      }
+      // Open the canonical path once and stat/read on the same descriptor so the
+      // size check and the read observe the same inode (no time-of-check/use race).
+      fh = await fsPromises.open(realPath, 'r');
+      const stat = await fh.stat();
+      if (!stat.isFile()) return { content: null, oversized: false };
+      if (stat.size > IMPORT_MAX_PREVIEW_BYTES) return { content: null, oversized: true };
+      // Read at most stat.size (<= cap) bytes so a file that grows after the
+      // stat cannot push this buffer past the cap.
+      const buffer = Buffer.alloc(stat.size);
+      const { bytesRead } = await fh.read(buffer, 0, stat.size, 0);
+      return { content: buffer.subarray(0, bytesRead).toString('utf-8'), oversized: false };
+    } catch (error) {
+      // The file existed at probe time, so a failure here (permission, I/O) is
+      // worth a server-side line even though the scan degrades gracefully and the
+      // route reports it to the user.
+      console.warn('[FileSystemService] Failed to read import candidate:', sanitizeForLog((error as Error)?.message ?? String(error)));
+      return { content: null, oversized: false };
+    } finally {
+      if (fh) await fh.close();
+    }
+  }
+
+  /**
+   * Scan the compose directory for compose files to surface in the guided import
+   * flow: loose files at the root, top-level stack subdirectories, and compose
+   * files one directory too deep. Read-only. Bounded by `maxCandidates` and by a
+   * single level of nesting so a deep tree cannot make this walk unbounded.
+   */
+  async findImportCandidates(maxCandidates = 100): Promise<ImportCandidateRaw[]> {
+    const candidates: ImportCandidateRaw[] = [];
+    let entries: Dirent[];
+    try {
+      entries = await fsPromises.readdir(this.baseDir, { withFileTypes: true });
+    } catch (error) {
+      // The compose dir itself is unreadable (missing, permissions). The scan
+      // degrades to an empty list, so log it rather than report "no files found"
+      // for what is really an access failure.
+      console.warn('[FileSystemService] Failed to scan compose directory for import:', sanitizeForLog((error as Error)?.message ?? String(error)));
+      return candidates;
+    }
+
+    for (const entry of entries) {
+      if (candidates.length >= maxCandidates) break;
+      if (!entry.name || typeof entry.name !== 'string') continue;
+
+      if (entry.isFile()) {
+        if (IMPORT_COMPOSE_FILENAME_SET.has(entry.name)) {
+          const loaded = await this.readComposeCandidate(path.join(this.baseDir, entry.name));
+          candidates.push({ name: '', composeFile: entry.name, location: entry.name, status: 'loose-root', ...loaded });
+        }
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+
+      const dir = path.join(this.baseDir, entry.name);
+      const topCompose = await this.firstComposeFilename(dir);
+      if (topCompose) {
+        const loaded = await this.readComposeCandidate(path.join(dir, topCompose));
+        candidates.push({ name: entry.name, composeFile: topCompose, location: `${entry.name}/${topCompose}`, status: 'listed', ...loaded });
+        continue;
+      }
+
+      // No compose at the top level: peek exactly one level deeper.
+      let children: Dirent[];
+      try {
+        children = await fsPromises.readdir(dir, { withFileTypes: true });
+      } catch (error) {
+        console.warn('[FileSystemService] Failed to read subdirectory during import scan:', sanitizeForLog((error as Error)?.message ?? String(error)));
+        continue;
+      }
+      for (const child of children) {
+        if (candidates.length >= maxCandidates) break;
+        if (!child.isDirectory() || !child.name || typeof child.name !== 'string') continue;
+        const childDir = path.join(dir, child.name);
+        const childCompose = await this.firstComposeFilename(childDir);
+        if (childCompose) {
+          const loaded = await this.readComposeCandidate(path.join(childDir, childCompose));
+          candidates.push({
+            name: child.name,
+            composeFile: childCompose,
+            location: `${entry.name}/${child.name}/${childCompose}`,
+            status: 'nested',
+            ...loaded,
+          });
+        }
+      }
+    }
+
+    return candidates;
+  }
+
   async migrateFlatToDirectory(): Promise<void> {
     try {
       try {
@@ -485,8 +626,37 @@ export class FileSystemService {
     const debug = isDebugEnabled();
     const t0 = Date.now();
     const stackDir = this.resolveStackDir(stackName);
-    const backupDir = this.getBackupDir(stackName);
+    // Canonical js/path-injection barrier (mirrors restoreStackFiles): resolve the
+    // backup path against the backup root and confirm containment inline, so the
+    // mkdir/copy/write sinks below operate on a validated path. stackName is
+    // already validated by resolveStackDir above; this re-establishes containment
+    // at the backup sinks themselves so static analysis sees the barrier.
+    const backupRoot = path.resolve(getBackupBaseDir());
+    const backupDir = path.resolve(backupRoot, String(this.nodeId), stackName);
+    if (!backupDir.startsWith(backupRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes backup directory'), { code: 'INVALID_PATH' });
+    }
     await fsPromises.mkdir(backupDir, { recursive: true });
+
+    // Clear stale managed files from the backup slot before writing the current
+    // ones. The slot is reused across runs, so a managed file removed from the
+    // stack since the last backup (e.g. a deleted .env or a switched compose
+    // variant) would otherwise linger here and a later restore would resurrect
+    // it, breaking the faithful-revert guarantee. Scope is the protected set
+    // Sencho writes; .timestamp is rewritten below. A clear failure is logged but
+    // not fatal: it only risks a stale future rollback, so it should not block an
+    // otherwise valid deploy.
+    for (const file of PROTECTED_STACK_FILES) {
+      const stale = path.resolve(backupRoot, path.join(backupDir, file));
+      if (!stale.startsWith(backupRoot + path.sep)) continue;
+      try {
+        await fsPromises.unlink(stale);
+      } catch (e: unknown) {
+        if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          console.warn(`[FileSystemService] Could not clear stale backup ${file}:`, (e as Error).message);
+        }
+      }
+    }
 
     // Copy compose file
     const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
@@ -527,11 +697,49 @@ export class FileSystemService {
     const backupDir = this.getBackupDir(stackName);
 
     const items = await fsPromises.readdir(backupDir);
+    const backedUp = new Set(items);
+
+    // Remove managed files the backup does not contain before copying, so a
+    // rollback is a faithful revert rather than an additive overlay. If the
+    // failed deploy switched compose variants (e.g. compose.yaml ->
+    // docker-compose.yml) or added a .env the backup predates, leaving the new
+    // file in place would re-deploy a hybrid of old and new configuration.
+    // Scope is strictly PROTECTED_STACK_FILES (the same set Sencho backs up);
+    // user data and bind-mounted content in the stack directory are untouched.
+    // Canonical js/path-injection barrier: path.resolve(SAFE_ROOT, untrusted)
+    // followed by a single startsWith check, both inline with the sink. stackDir
+    // is already validated by resolveStackDir; this re-establishes containment at
+    // the delete sink itself so static analysis sees the barrier.
+    const baseResolved = path.resolve(this.baseDir);
+    let removedOrphans = 0;
+    for (const file of PROTECTED_STACK_FILES) {
+      if (backedUp.has(file)) continue;
+      const target = path.resolve(baseResolved, path.join(stackDir, file));
+      if (!target.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      try {
+        await fsPromises.unlink(target);
+        removedOrphans++;
+      } catch (e: unknown) {
+        const code = (e as NodeJS.ErrnoException)?.code;
+        // ENOENT means the file is already absent, which is the desired end
+        // state. Any other code (EACCES on a chowned bind mount, EBUSY on a
+        // held file) means a managed file Sencho meant to remove is still on
+        // disk: completing the copy below would leave a hybrid config while
+        // reporting success. Abort so the caller surfaces a real failure and
+        // preserves the backup for manual recovery.
+        if (code !== 'ENOENT') {
+          throw new Error(`Rollback aborted: could not remove stale ${file} (${code ?? 'unknown error'}); the restore would leave a mix of old and new configuration.`);
+        }
+      }
+    }
+
     for (const item of items) {
       if (item === '.timestamp') continue;
       await fsPromises.copyFile(path.join(backupDir, item), path.join(stackDir, item));
     }
-    if (debug) console.debug(`[FileSystemService:debug] Restore completed in ${Date.now() - t0}ms`, { stackName, files: items.filter(i => i !== '.timestamp') });
+    if (debug) console.debug(`[FileSystemService:debug] Restore completed in ${Date.now() - t0}ms`, { stackName, restored: items.filter(i => i !== '.timestamp').length, removedOrphans });
   }
 
   async getBackupInfo(stackName: string): Promise<{ exists: boolean; timestamp: number | null }> {

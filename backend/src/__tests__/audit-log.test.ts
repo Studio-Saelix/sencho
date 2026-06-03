@@ -126,6 +126,19 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('DELETE', '/nodes/5')).toBe('Deleted node: 5');
     expect(getAuditSummary('DELETE', 'nodes/5')).toBe('Deleted node: 5');
   });
+
+  it('matches user management routes', () => {
+    expect(getAuditSummary('POST', '/users')).toBe('Created user');
+    expect(getAuditSummary('PUT', '/users/42')).toBe('Updated user: 42');
+    expect(getAuditSummary('DELETE', '/users/42')).toBe('Deleted user: 42');
+    expect(getAuditSummary('POST', '/users/42/roles')).toBe('Assigned role: 42');
+    expect(getAuditSummary('DELETE', '/users/42/roles/7')).toBe('Removed role assignment: 42');
+  });
+
+  it('labels an MFA reset distinctly and never as user creation', () => {
+    expect(getAuditSummary('POST', '/users/42/mfa/reset')).toBe('Reset two-factor authentication: 42');
+    expect(getAuditSummary('POST', '/users/42/mfa/reset')).not.toBe('Created user: 42');
+  });
 });
 
 // ---- DatabaseService audit methods ----
@@ -260,6 +273,142 @@ describe('DatabaseService audit methods', () => {
     const page2Ids = page2.entries.map(e => e.id);
     expect(page1Ids.some(id => page2Ids.includes(id))).toBe(false);
   });
+
+  it('getAuditLogsInRange caps to the most-recent rows and returns ascending order', () => {
+    const db = DatabaseService.getInstance();
+    // Old, isolated window: keeps these rows out of the "most recent" DESC
+    // queries other tests rely on, while staying easy to range-query here.
+    const base = 1_000_000_000_000; // 2001, far from any now()-based entry
+    for (let i = 0; i < 10; i++) {
+      db.insertAuditLog({
+        timestamp: base + i,
+        username: 'rangecapuser',
+        method: 'POST',
+        path: `/api/stacks/cap${i}`,
+        status_code: 200,
+        node_id: null,
+        ip_address: '127.0.0.1',
+        summary: `cap entry ${i}`,
+      });
+    }
+
+    const capped = db.getAuditLogsInRange(base, base + 100, 3);
+    expect(capped.length).toBe(3);
+    // Most-recent three (timestamps base+7, +8, +9), returned ascending.
+    expect(capped.map(e => e.timestamp)).toEqual([base + 7, base + 8, base + 9]);
+
+    const uncapped = db.getAuditLogsInRange(base, base + 100);
+    expect(uncapped.length).toBe(10);
+    expect(uncapped[0].timestamp).toBe(base);
+  });
+
+  it('getAuditStatsInputs counts the current window exactly (no row cap)', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const ts = now - 60 * 60 * 1000; // 1 hour ago, inside the 24h window
+    const hour = new Date(ts).getHours();
+
+    const before = db.getAuditStatsInputs(now);
+    const K = 12;
+    const FAILURES = 4;
+    for (let i = 0; i < K; i++) {
+      db.insertAuditLog({
+        timestamp: ts,
+        username: 'statsexactuser',
+        method: 'POST',
+        path: `/api/stacks/statsexact${i}`,
+        status_code: i < FAILURES ? 500 : 200,
+        node_id: null,
+        ip_address: '127.0.0.1',
+        summary: `stats exact ${i}`,
+      });
+    }
+    const after = db.getAuditStatsInputs(now);
+
+    expect(after.events24 - before.events24).toBe(K);
+    expect(after.events7d - before.events7d).toBe(K);
+    expect(after.failures24 - before.failures24).toBe(FAILURES);
+    expect(after.activityByHour[hour] - before.activityByHour[hour]).toBe(K);
+    expect(after.failuresByHour[hour] - before.failuresByHour[hour]).toBe(FAILURES);
+  });
+
+  it('getAuditStatsInputs excludes future-dated rows from the current window', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const before = db.getAuditStatsInputs(now);
+    // A row dated after `now` (clock skew / fixture) must not inflate the live counts.
+    db.insertAuditLog({
+      timestamp: now + 60 * 60 * 1000,
+      username: 'futureuser',
+      method: 'POST',
+      path: '/api/stacks/future',
+      status_code: 500,
+      node_id: null,
+      ip_address: '127.0.0.1',
+      summary: 'future entry',
+    });
+    const after = db.getAuditStatsInputs(now);
+
+    expect(after.events24 - before.events24).toBe(0);
+    expect(after.events7d - before.events7d).toBe(0);
+    expect(after.failures24 - before.failures24).toBe(0);
+  });
+
+  it('getAuditStatsInputs flags an actor whose recent ip is new versus prior history', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    // Prior IP for this actor, older than 24h but inside 30d.
+    db.insertAuditLog({
+      timestamp: now - 5 * 24 * 60 * 60 * 1000,
+      username: 'newipscenariouser',
+      method: 'POST',
+      path: '/api/stacks/old',
+      status_code: 200,
+      node_id: null,
+      ip_address: '10.0.0.1',
+      summary: 'old',
+    });
+    const before = db.getAuditStatsInputs(now);
+    // Recent action from a different IP.
+    db.insertAuditLog({
+      timestamp: now - 60 * 1000,
+      username: 'newipscenariouser',
+      method: 'POST',
+      path: '/api/stacks/new',
+      status_code: 200,
+      node_id: null,
+      ip_address: '203.0.113.9',
+      summary: 'new',
+    });
+    const after = db.getAuditStatsInputs(now);
+
+    expect(after.newIpCount).toBeGreaterThan(before.newIpCount);
+  });
+
+  it('getAuditStatsInputs counts distinct non-empty actors, excluding blank usernames', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const ts = now - 30 * 60 * 1000; // inside 24h
+    const before = db.getAuditStatsInputs(now);
+
+    const usernames = ['actorcountA', 'actorcountB', 'actorcountB', 'actorcountC', ''];
+    for (const username of usernames) {
+      db.insertAuditLog({
+        timestamp: ts,
+        username,
+        method: 'POST',
+        path: '/api/stacks/actorcount',
+        status_code: 200,
+        node_id: null,
+        ip_address: '127.0.0.1',
+        summary: 'actor count',
+      });
+    }
+    const after = db.getAuditStatsInputs(now);
+
+    // Three distinct non-empty actors (A, B, C); the blank username is excluded.
+    expect(after.actors24 - before.actors24).toBe(3);
+  });
 });
 
 // ---- API endpoint tests ----
@@ -318,6 +467,131 @@ describe('GET /api/audit-log', () => {
     expect(res.status).toBe(200);
     expect(res.body.entries.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('clamps a negative limit to a single row instead of returning the whole table', async () => {
+    // A negative LIMIT reaches SQLite as "unlimited" without the clamp.
+    const res = await request(app)
+      .get('/api/audit-log?limit=-1')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeLessThanOrEqual(1);
+    expect(res.body.total).toBeGreaterThan(1);
+  });
+
+  it('clamps an oversized limit to the 200 cap even when more rows match', async () => {
+    const db = DatabaseService.getInstance();
+    for (let i = 0; i < 205; i++) {
+      db.insertAuditLog({
+        timestamp: Date.now() - i,
+        username: 'limitcapuser205',
+        method: 'POST',
+        path: `/api/stacks/limitcap${i}`,
+        status_code: 200,
+        node_id: null,
+        ip_address: '127.0.0.1',
+        summary: `limit cap entry ${i}`,
+      });
+    }
+
+    const res = await request(app)
+      .get('/api/audit-log?limit=99999&search=limitcapuser205')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(205);
+    expect(res.body.entries.length).toBe(200);
+  });
+
+  it('clamps a non-positive page to page 1', async () => {
+    const negative = await request(app)
+      .get('/api/audit-log?page=-5&limit=5')
+      .set('Authorization', `Bearer ${adminToken()}`);
+    const first = await request(app)
+      .get('/api/audit-log?page=1&limit=5')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(negative.status).toBe(200);
+    expect(negative.body.entries.length).toBeGreaterThan(0);
+    // page=-5 must resolve to the same first page, not a negative offset.
+    expect(negative.body.entries[0].id).toBe(first.body.entries[0].id);
+  });
+
+  it('annotates entries with a flags array when with_anomalies=1', async () => {
+    const res = await request(app)
+      .get('/api/audit-log?with_anomalies=1&limit=5')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeGreaterThan(0);
+    for (const entry of res.body.entries) {
+      expect(Array.isArray(entry.flags)).toBe(true);
+    }
+  });
+
+  it('flags a never-before-seen actor as first_seen_actor', async () => {
+    const db = DatabaseService.getInstance();
+    db.insertAuditLog({
+      timestamp: Date.now(),
+      username: 'brandnewactor_unique',
+      method: 'POST',
+      path: '/api/stacks/firstseen',
+      status_code: 200,
+      node_id: null,
+      ip_address: '127.0.0.1',
+      summary: 'Deployed stack: firstseen',
+    });
+
+    const res = await request(app)
+      .get('/api/audit-log?with_anomalies=1&search=brandnewactor_unique')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    const entry = res.body.entries.find(
+      (e: { username: string }) => e.username === 'brandnewactor_unique',
+    );
+    expect(entry).toBeDefined();
+    expect(entry.flags).toContain('first_seen_actor');
+  });
+
+  it('treats limit=0 as the default page size, not zero rows', async () => {
+    // parseInt('0') is falsy, so the `|| 50` default applies before the clamp.
+    const res = await request(app)
+      .get('/api/audit-log?limit=0')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries.length).toBeGreaterThan(0);
+    expect(res.body.entries.length).toBeLessThanOrEqual(50);
+  });
+});
+
+describe('GET /api/audit-log/stats', () => {
+  it('returns 403 without Admiral license', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValueOnce(null);
+
+    const res = await request(app)
+      .get('/api/audit-log/stats')
+      .set('Authorization', `Bearer ${adminToken()}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('returns the four-tile stat structure for admin', async () => {
+    const res = await request(app)
+      .get('/api/audit-log/stats')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('events_24h');
+    expect(res.body).toHaveProperty('actors_24h');
+    expect(res.body).toHaveProperty('failure_rate');
+    expect(res.body).toHaveProperty('unusual_hour');
+    expect(Array.isArray(res.body.activity_by_hour)).toBe(true);
+    expect(res.body.activity_by_hour.length).toBe(24);
+    expect(res.body.failures_by_hour.length).toBe(24);
+  });
 });
 
 describe('GET /api/audit-log/export', () => {
@@ -367,6 +641,29 @@ describe('GET /api/audit-log/export', () => {
     for (const entry of res.body) {
       expect(entry.method).toBe('DELETE');
     }
+  });
+
+  it('neutralizes a formula-injection payload in the CSV export', async () => {
+    const db = DatabaseService.getInstance();
+    db.insertAuditLog({
+      timestamp: Date.now(),
+      username: 'csvinjectuser',
+      method: 'POST',
+      path: '/api/stacks/csvinject',
+      status_code: 200,
+      node_id: null,
+      ip_address: '127.0.0.1',
+      summary: '=DANGER_FORMULA',
+    });
+
+    const res = await request(app)
+      .get('/api/audit-log/export?format=csv&search=csvinjectuser')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    // The leading '=' must be defused with a single-quote prefix.
+    expect(res.text).toContain("'=DANGER_FORMULA");
+    expect(res.text).not.toMatch(/(^|,)=DANGER_FORMULA/);
   });
 });
 

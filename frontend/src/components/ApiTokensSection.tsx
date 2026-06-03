@@ -10,7 +10,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
 import { CapabilityGate } from './CapabilityGate';
-import { Zap, Plus, Copy, Trash2, CheckCircle, RefreshCw, Clock } from 'lucide-react';
+import { Zap, Plus, Copy, Trash2, CheckCircle, RefreshCw, Clock, AlertTriangle } from 'lucide-react';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
 import { SettingsCallout } from './settings/SettingsCallout';
 import { useMastheadStats } from './settings/MastheadStatsContext';
@@ -60,6 +60,7 @@ export function ApiTokensSection() {
     const [showForm, setShowForm] = useState(false);
     const [newToken, setNewToken] = useState<{ id: number; token: string } | null>(null);
     const [revokeTarget, setRevokeTarget] = useState<ApiTokenListItem | null>(null);
+    const [loadError, setLoadError] = useState(false);
 
     const [formName, setFormName] = useState('');
     const [formScope, setFormScope] = useState('read-only');
@@ -71,8 +72,16 @@ export function ApiTokensSection() {
             if (res.ok) {
                 const data: ApiTokenListItem[] = await res.json();
                 setTokens(data.filter(t => !t.revoked_at));
+                setLoadError(false);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                setLoadError(true);
+                toast.error(err?.error || err?.message || 'Failed to load API tokens.');
             }
-        } catch { toast.error('Failed to load API tokens.'); } finally { setLoading(false); }
+        } catch {
+            setLoadError(true);
+            toast.error('Failed to load API tokens.');
+        } finally { setLoading(false); }
     };
 
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -224,11 +233,26 @@ export function ApiTokensSection() {
                 )}
 
                 {/* Empty state */}
-                {!loading && tokens.length === 0 && !showForm && (
+                {!loading && !loadError && tokens.length === 0 && !showForm && (
                     <SettingsCallout
                         icon={<Zap className="h-4 w-4" />}
                         title="No API tokens yet"
                         subtitle="Create one to authenticate CI/CD pipelines and scripts."
+                    />
+                )}
+
+                {/* Load error state */}
+                {!loading && loadError && tokens.length === 0 && !showForm && (
+                    <SettingsCallout
+                        tone="error"
+                        icon={<AlertTriangle className="h-4 w-4" />}
+                        title="Couldn't load API tokens"
+                        subtitle="Check your connection and try again."
+                        action={
+                            <Button variant="outline" size="sm" onClick={() => { setLoading(true); fetchTokens(); }}>
+                                <RefreshCw className="w-4 h-4" strokeWidth={1.5} /> Retry
+                            </Button>
+                        }
                     />
                 )}
 

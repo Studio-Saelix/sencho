@@ -24,11 +24,13 @@ class SelfIdentityService {
   private static instance: SelfIdentityService;
   private containerId: string | null = null;
   private containerName: string | null = null;
+  private composeProjectName: string | null = null;
   private imageIdHex: string | null = null;
   private networkIds = new Set<string>();
   private networkNames = new Set<string>();
   private volumeNames = new Set<string>();
   private initialized = false;
+  private initializePromise: Promise<void> | null = null;
 
   public static getInstance(): SelfIdentityService {
     if (!SelfIdentityService.instance) {
@@ -38,15 +40,23 @@ class SelfIdentityService {
   }
 
   async initialize(): Promise<void> {
+    if (this.initializePromise) return this.initializePromise;
     if (this.initialized) return;
-    this.initialized = true;
+    this.initializePromise = this.initializeInternal().finally(() => {
+      this.initialized = true;
+      this.initializePromise = null;
+    });
+    return this.initializePromise;
+  }
 
+  private async initializeInternal(): Promise<void> {
     const docker = DockerController.getInstance().getDocker();
     const info = await this.resolveSelfInspect(docker);
     if (!info) return;
 
     this.containerId = info.Id ?? null;
     this.containerName = (info.Name || '').replace(/^\//, '') || null;
+    this.composeProjectName = info.Config?.Labels?.['com.docker.compose.project'] ?? null;
     this.imageIdHex = SelfIdentityService.stripSha(info.Image ?? '') || null;
 
     const nets = info.NetworkSettings?.Networks ?? {};
@@ -144,10 +154,37 @@ class SelfIdentityService {
     return this.volumeNames.has(name);
   }
 
+  /**
+   * Bind mounts on the running Sencho container, used by the environment
+   * checker to verify the compose directory is mounted at the same path on the
+   * host and inside the container. Returns null when Sencho is not running in
+   * Docker (dev / bare metal), where the 1:1 path-mapping concern does not
+   * apply. Throws when Sencho IS containerized (a container id was resolved at
+   * startup) but its own mounts cannot be read now, so the caller can report an
+   * unverified state instead of a false "not containerized". Re-inspects on
+   * each call rather than caching, because it runs only on an admin-triggered
+   * diagnostic.
+   */
+  async getBindMounts(): Promise<Array<{ source: string; destination: string }> | null> {
+    const docker = DockerController.getInstance().getDocker();
+    const info = await this.resolveSelfInspect(docker);
+    if (!info) {
+      if (this.containerId) {
+        throw new Error('container self-inspect unavailable; cannot read mounts');
+      }
+      return null;
+    }
+    const mounts = (info.Mounts ?? []) as Array<{ Type?: string; Source?: string; Destination?: string }>;
+    return mounts
+      .filter(m => m.Type === 'bind' && m.Source && m.Destination)
+      .map(m => ({ source: m.Source as string, destination: m.Destination as string }));
+  }
+
   /** Diagnostic snapshot used by route handlers when composing error responses. */
   getIdentity(): {
     containerId: string | null;
     containerName: string | null;
+    composeProjectName: string | null;
     imageId: string | null;
     networkNames: string[];
     volumeNames: string[];
@@ -155,6 +192,7 @@ class SelfIdentityService {
     return {
       containerId: this.containerId,
       containerName: this.containerName,
+      composeProjectName: this.composeProjectName,
       imageId: this.imageIdHex,
       networkNames: [...this.networkNames],
       volumeNames: [...this.volumeNames],
@@ -165,11 +203,13 @@ class SelfIdentityService {
   resetForTesting(): void {
     this.containerId = null;
     this.containerName = null;
+    this.composeProjectName = null;
     this.imageIdHex = null;
     this.networkIds.clear();
     this.networkNames.clear();
     this.volumeNames.clear();
     this.initialized = false;
+    this.initializePromise = null;
   }
 
   private static stripSha(s: string): string {

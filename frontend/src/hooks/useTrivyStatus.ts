@@ -7,6 +7,7 @@ const INITIAL_STATUS: TrivyStatus = {
   version: null,
   source: 'none',
   autoUpdate: false,
+  honorSuppressionsOnDeploy: false,
   busy: false,
 };
 
@@ -31,6 +32,7 @@ export function useTrivyStatus(): UseTrivyStatusResult {
         version: typeof d.version === 'string' ? d.version : null,
         source: d.source === 'managed' || d.source === 'host' ? d.source : 'none',
         autoUpdate: !!d.autoUpdate,
+        honorSuppressionsOnDeploy: !!d.honorSuppressionsOnDeploy,
         busy: !!d.busy,
       });
     } catch (err) {

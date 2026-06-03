@@ -109,10 +109,57 @@ describe('GET /api/system/cache-stats', () => {
   });
 });
 
+describe('GET /api/logs/global (poll snapshot)', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).get('/api/logs/global');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects non-admin users with 403', async () => {
+    const res = await request(app).get('/api/logs/global').set('Cookie', viewerCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it('admin gets a non-4xx response', async () => {
+    // Reaches the Docker daemon; 500 is acceptable in CI without Docker. We
+    // only prove the admin gate + routing, not the daemon read.
+    const res = await request(app).get('/api/logs/global').set('Cookie', adminCookie);
+    expect([200, 500]).toContain(res.status);
+    if (res.status === 200) expect(Array.isArray(res.body)).toBe(true);
+  });
+});
+
+describe('GET /api/system/log-stream-metrics', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).get('/api/system/log-stream-metrics');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects non-admin users with 403', async () => {
+    const res = await request(app).get('/api/system/log-stream-metrics').set('Cookie', viewerCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it('returns the counter snapshot for admin', async () => {
+    const res = await request(app).get('/api/system/log-stream-metrics').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('active_sse_connections');
+    expect(res.body).toHaveProperty('lines_streamed_total');
+    expect(res.body).toHaveProperty('stream_attach_errors_total');
+  });
+});
+
 describe('GET /api/logs/global/stream', () => {
   it('rejects unauthenticated requests with 401', async () => {
     const res = await request(app).get('/api/logs/global/stream');
     expect(res.status).toBe(401);
+  });
+
+  it('rejects non-admin users with 403 before opening the stream', async () => {
+    // requireAdmin runs before flushHeaders, so a viewer gets a clean JSON 403
+    // rather than a half-open event-stream.
+    const res = await request(app).get('/api/logs/global/stream').set('Cookie', viewerCookie);
+    expect(res.status).toBe(403);
   });
 
   it('sets SSE response headers for authenticated users', async () => {

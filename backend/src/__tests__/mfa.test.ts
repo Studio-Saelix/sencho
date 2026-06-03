@@ -106,26 +106,62 @@ describe('MfaService', () => {
     }
   });
 
-  it('verifyBackupCode matches and returns remaining set with the matched hash removed', async () => {
+  it('verifyBackupCode matches and returns the matched hash for the caller to consume', async () => {
     const codes = MfaService.generateBackupCodes();
     const hashes = await MfaService.hashBackupCodes(codes);
     const result = await MfaService.verifyBackupCode(hashes, codes[3]);
     expect(result.matched).toBe(true);
-    expect(result.remainingHashes).toHaveLength(hashes.length - 1);
-    expect(result.remainingHashes).not.toContain(hashes[3]);
+    if (result.matched) expect(result.matchedHash).toBe(hashes[3]);
   });
 
-  it('verifyBackupCode on non-match returns original hashes', async () => {
+  it('verifyBackupCode on non-match reports no match', async () => {
     const codes = MfaService.generateBackupCodes();
     const hashes = await MfaService.hashBackupCodes(codes);
     const result = await MfaService.verifyBackupCode(hashes, 'NOTACODE99');
     expect(result.matched).toBe(false);
-    expect(result.remainingHashes).toBe(hashes);
   });
 
   it('normalizeBackupCode strips spaces/dashes and uppercases', () => {
     expect(MfaService.normalizeBackupCode('abcde-fghij')).toBe('ABCDEFGHIJ');
     expect(MfaService.normalizeBackupCode('abcde fghij')).toBe('ABCDEFGHIJ');
+  });
+});
+
+// ─── consumeBackupCodeHash: the atomic single-use enforcement point ────────────
+
+describe('DatabaseService.consumeBackupCodeHash', () => {
+  it('consumes a present hash once: a second consume of the same hash returns false', async () => {
+    const { userId, backupCodes } = await seedMfaUser('consume-same', 'mfapassword123');
+    const db = DatabaseService.getInstance();
+    const hashes = JSON.parse(db.getUserMfa(userId)!.backup_codes_json!) as string[];
+    const target = hashes[2];
+
+    // First consume wins, second loses: this is what guarantees single-use
+    // when two concurrent logins race on the same code.
+    expect(db.consumeBackupCodeHash(userId, target)).toBe(true);
+    expect(db.consumeBackupCodeHash(userId, target)).toBe(false);
+
+    const remaining = JSON.parse(db.getUserMfa(userId)!.backup_codes_json!) as string[];
+    expect(remaining).toHaveLength(backupCodes.length - 1);
+    expect(remaining).not.toContain(target);
+  });
+
+  it('consumes two distinct hashes independently, dropping the set by two', async () => {
+    const { userId, backupCodes } = await seedMfaUser('consume-distinct', 'mfapassword123');
+    const db = DatabaseService.getInstance();
+    const hashes = JSON.parse(db.getUserMfa(userId)!.backup_codes_json!) as string[];
+
+    expect(db.consumeBackupCodeHash(userId, hashes[0])).toBe(true);
+    expect(db.consumeBackupCodeHash(userId, hashes[1])).toBe(true);
+
+    const remaining = JSON.parse(db.getUserMfa(userId)!.backup_codes_json!) as string[];
+    expect(remaining).toHaveLength(backupCodes.length - 2);
+  });
+
+  it('returns false for a hash that is not in the stored set', async () => {
+    const { userId } = await seedMfaUser('consume-absent', 'mfapassword123');
+    const db = DatabaseService.getInstance();
+    expect(db.consumeBackupCodeHash(userId, 'not-a-stored-hash')).toBe(false);
   });
 });
 
@@ -263,6 +299,87 @@ describe('POST /api/auth/login/mfa', () => {
     expect(hashes.length).toBe(remaining - 1);
   });
 
+  it('enforces single-use when the same backup code is submitted concurrently', async () => {
+    const u = 'mfauser-backup-race';
+    const p = 'mfapassword123';
+    const { backupCodes: codes } = await seedMfaUser(u, p);
+    const chosen = codes[0];
+
+    // Force the race deterministically rather than relying on scheduling: hold
+    // both requests just after verifyBackupCode (so both have already read the
+    // same stored set and matched) until both have arrived, then let them race
+    // into the atomic consume. The pre-fix non-atomic path would let both win
+    // here; the fix must still let exactly one through. A timeout releases the
+    // barrier if only one request ever arrives, so a setup fault fails loudly
+    // instead of hanging.
+    let arrived = 0;
+    let releaseBarrier!: () => void;
+    const bothVerified = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+    const realVerify = MfaService.verifyBackupCode.bind(MfaService);
+    const spy = vi.spyOn(MfaService, 'verifyBackupCode').mockImplementation(async (hashes, code) => {
+      const result = await realVerify(hashes, code);
+      arrived += 1;
+      if (arrived >= 2) releaseBarrier();
+      await Promise.race([bothVerified, new Promise<void>((r) => setTimeout(r, 3000))]);
+      return result;
+    });
+
+    try {
+      const [login1, login2] = await Promise.all([
+        request(app).post('/api/auth/login').send({ username: u, password: p }),
+        request(app).post('/api/auth/login').send({ username: u, password: p }),
+      ]);
+      const pending1 = findCookie(login1.headers, 'sencho_mfa_pending')!;
+      const pending2 = findCookie(login2.headers, 'sencho_mfa_pending')!;
+
+      const [r1, r2] = await Promise.all([
+        request(app).post('/api/auth/login/mfa').set('Cookie', pending1).send({ code: chosen, isBackupCode: true }),
+        request(app).post('/api/auth/login/mfa').set('Cookie', pending2).send({ code: chosen, isBackupCode: true }),
+      ]);
+
+      expect([r1, r2].filter((r) => r.status === 200)).toHaveLength(1);
+      expect([r1, r2].filter((r) => r.status === 401)).toHaveLength(1);
+
+      // Exactly one code was consumed from the stored set.
+      const db = DatabaseService.getInstance();
+      const mfa = db.getUserMfa(db.getUserByUsername(u)!.id)!;
+      const hashes = mfa.backup_codes_json ? (JSON.parse(mfa.backup_codes_json) as string[]) : [];
+      expect(hashes.length).toBe(codes.length - 1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('exhausts all backup codes: each works once, then none remain', async () => {
+    const u = 'mfauser-backup-exhaust';
+    const p = 'mfapassword123';
+    const { backupCodes: codes } = await seedMfaUser(u, p);
+
+    for (const code of codes) {
+      const login = await request(app).post('/api/auth/login').send({ username: u, password: p });
+      const pending = findCookie(login.headers, 'sencho_mfa_pending')!;
+      const res = await request(app)
+        .post('/api/auth/login/mfa')
+        .set('Cookie', pending)
+        .send({ code, isBackupCode: true });
+      expect(res.status).toBe(200);
+    }
+
+    const db = DatabaseService.getInstance();
+    const mfa = db.getUserMfa(db.getUserByUsername(u)!.id)!;
+    const remaining = mfa.backup_codes_json ? (JSON.parse(mfa.backup_codes_json) as string[]) : [];
+    expect(remaining.length).toBe(0);
+
+    // A further attempt with a spent code is rejected cleanly, not crashed.
+    const login = await request(app).post('/api/auth/login').send({ username: u, password: p });
+    const pending = findCookie(login.headers, 'sencho_mfa_pending')!;
+    const after = await request(app)
+      .post('/api/auth/login/mfa')
+      .set('Cookie', pending)
+      .send({ code: codes[0], isBackupCode: true });
+    expect(after.status).toBe(401);
+  });
+
   it('locks the user after MFA_MAX_FAILED (5) wrong codes and returns 423', async () => {
     const u = 'mfauser-lock';
     const p = 'mfapassword123';
@@ -383,6 +500,24 @@ describe('MFA enrol + confirm', () => {
     expect(res.status).toBe(401);
     expect(db.getUserMfa(user.id)?.enabled).toBe(1);
   });
+
+  it('disables MFA when a valid backup code is supplied as proof of possession', async () => {
+    const db = DatabaseService.getInstance();
+    const { userId, backupCodes } = await seedMfaUser('disabler-backup', 'mfapassword123');
+    const user = db.getUser(userId)!;
+    const token = jwt.sign(
+      { username: 'disabler-backup', role: 'viewer', tv: user.token_version },
+      TEST_JWT_SECRET,
+      { expiresIn: '1m' },
+    );
+    const res = await request(app)
+      .post('/api/auth/mfa/disable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ code: backupCodes[0], isBackupCode: true });
+    expect(res.status).toBe(200);
+    // Disable wipes the whole MFA record, so single-use of the code is moot here.
+    expect(db.getUserMfa(userId)).toBeUndefined();
+  });
 });
 
 // ─── Admin reset ──────────────────────────────────────────────────────────────
@@ -419,6 +554,21 @@ describe('POST /api/users/:id/mfa/reset', () => {
     expect(res.status).toBe(200);
     expect(db.getUserMfa(userId)).toBeUndefined();
     expect(db.getUser(userId)!.token_version).toBeGreaterThan(before);
+  });
+
+  it('writes exactly one audit row, labeled as a reset and never as user creation', async () => {
+    const db = DatabaseService.getInstance();
+    const { userId } = await seedMfaUser('victim3', 'victim3pass123');
+    const res = await request(app)
+      .post(`/api/users/${userId}/mfa/reset`)
+      .set('Authorization', `Bearer ${adminToken()}`);
+    expect(res.status).toBe(200);
+
+    // The route no longer writes its own audit row; the middleware writes one.
+    const { entries } = db.getAuditLogs({ search: `/users/${userId}/mfa/reset` });
+    const resetRows = entries.filter((e) => e.path === `/api/users/${userId}/mfa/reset`);
+    expect(resetRows).toHaveLength(1);
+    expect(resetRows[0].summary).toBe(`Reset two-factor authentication: ${userId}`);
   });
 });
 

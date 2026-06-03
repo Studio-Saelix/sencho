@@ -4,6 +4,8 @@ import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireBody } from '../middleware/tierGates';
 import { isValidStackName } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
+import { isDebugEnabled } from '../utils/debug';
+import { runLocalLabelStop, type LabelLocalStopResponse } from '../helpers/fleetLabelStop';
 
 // Per-node fleet-action endpoints. Mounted under `/api/fleet-actions/`, which
 // is NOT in `PROXY_EXEMPT_PREFIXES`, so when `x-node-id` targets a remote node
@@ -64,5 +66,37 @@ fleetActionsRouter.post(
       }
     }
     res.json({ results });
+  },
+);
+
+// Per-node label-matched stop. A control instance calls this on each remote
+// node during a fleet-wide stop-by-label so the destructive work runs under the
+// remote's own admin auth and per-node bulk lock. Admin-only and available on
+// every license, matching the rest of the Fleet Actions surface. The paid
+// label-driven action lives at `POST /api/labels/:id/action`; this receiver is
+// the fleet-plumbing equivalent the control fans out to, so a fleet-stop on a
+// Community fleet stops remote stacks instead of 403'ing on the remote leg.
+fleetActionsRouter.post(
+  '/labels/local-stop',
+  authMiddleware,
+  async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmin(req, res)) return;
+    if (!requireBody(req, res)) return;
+    const { labelName, dryRun } = req.body as { labelName?: unknown; dryRun?: unknown };
+    if (typeof labelName !== 'string' || labelName.trim().length === 0) {
+      res.status(400).json({ error: 'labelName is required' });
+      return;
+    }
+    const nodeId = req.nodeId ?? 0;
+    const trimmedLabel = labelName.trim();
+    try {
+      const outcome = await runLocalLabelStop(nodeId, trimmedLabel, dryRun === true);
+      if (isDebugEnabled()) console.debug('[FleetActions:debug] local-stop:', { nodeId, dryRun: dryRun === true, matched: outcome.matched, stacks: outcome.stackResults.length });
+      const body: LabelLocalStopResponse = { matched: outcome.matched, results: outcome.stackResults };
+      res.json(body);
+    } catch (err) {
+      console.error('[FleetActions] local-stop error:', { nodeId, labelName: trimmedLabel }, err);
+      res.status(500).json({ error: getErrorMessage(err, 'Failed to run local label stop') });
+    }
   },
 );

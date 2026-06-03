@@ -203,6 +203,17 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         scope: 'node',
     },
     {
+        id: 'recovery',
+        group: 'advanced',
+        label: 'Recovery',
+        description: 'System health snapshot, safe recovery actions, and emergency command-line reference.',
+        keywords: ['recovery', 'safe mode', 'diagnostics', 'health', 'emergency', 'cli', 'reset', 'backup', 'restore'],
+        tier: null,
+        scope: 'global',
+        adminOnly: true,
+        hiddenOnRemote: true,
+    },
+    {
         id: 'support',
         group: 'advanced',
         label: 'Support',

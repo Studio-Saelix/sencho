@@ -51,6 +51,20 @@ export const requireAdmin = (req: Request, res: Response): boolean => {
 };
 
 /**
+ * Require a genuine signed-in user session. Rejects opaque API tokens
+ * (`req.apiTokenScope`) and node_proxy / pilot_tunnel machine credentials,
+ * which authMiddleware maps to role 'admin' with userId 0. Endpoints that
+ * expose decrypted secrets use this so a long-lived machine credential cannot
+ * reach them; the admin role itself is still enforced separately by requireAdmin.
+ */
+export const requireUserSession = (req: Request, res: Response): boolean => {
+  if (req.apiTokenScope || !req.user || req.user.userId === 0) {
+    return deny(res, 'SESSION_REQUIRED', 'This action requires a signed-in user session.');
+  }
+  return true;
+};
+
+/**
  * Accept only calls from a sibling Sencho using its node_proxy Bearer token.
  * Browser sessions, API tokens, and console tokens are all rejected.
  */

@@ -35,9 +35,16 @@ export interface SenchoNavigateDetail {
 
 export function NodeManager() {
   const { isPaid } = useLicense();
-  const { isAdmin } = useAuth();
+  const { isAdmin, can } = useAuth();
   const canEditLabels = isPaid && isAdmin;
-  const { nodes } = useNodes();
+  // Mirror the backend node:manage guard. This top-level flag checks the global
+  // role only (admin or global node-admin); the per-row Test/Edit/Delete buttons
+  // below additionally honor scoped per-node grants via can('node:manage', 'node', id).
+  // Admins resolve immediately via isAdmin; node-admins once /permissions/me lands.
+  // Generate-token and reset-anchor below stay admin-only to match their stricter
+  // backend guards (requireAdmin, and requireAdmin + requirePaid).
+  const canManageNodes = isAdmin || can('node:manage');
+  const { nodes, refreshNodeMeta } = useNodes();
   useMastheadStats([
     { label: 'NODES', value: `${nodes.length}` },
     {
@@ -128,6 +135,10 @@ export function NodeManager() {
       if (result.success) {
         toast.success(`Connected to "${node.name}" successfully`);
         setTestResult({ nodeId: node.id, info: result.info });
+        // The test dropped the server-side metadata cache; force a client refresh
+        // so the version pill and capability gates reflect the node's current state
+        // now, instead of waiting out the dashboard's metadata TTL.
+        void refreshNodeMeta(node.id, true);
       } else {
         toast.error(`Failed to connect: ${result.error}`);
       }
@@ -185,21 +196,29 @@ export function NodeManager() {
 
   return (
     <div className="space-y-6">
-      {/* Actions */}
-      <div className="flex justify-end">
-        <SettingsPrimaryButton
-          size="sm"
-          className="gap-1 shrink-0"
-          onClick={openCreate}
-        >
-          <Plus className="w-4 h-4" />
-          Add node
-        </SettingsPrimaryButton>
-      </div>
+      {/* Actions (node management is admin / node-admin only, mirroring the
+          node:manage backend guard). The read-only table below stays visible to
+          every role with node:read. */}
+      {canManageNodes && (
+        <>
+          <div className="flex justify-end">
+            <SettingsPrimaryButton
+              size="sm"
+              className="gap-1 shrink-0"
+              onClick={openCreate}
+            >
+              <Plus className="w-4 h-4" />
+              Add node
+            </SettingsPrimaryButton>
+          </div>
 
-      <Separator />
+          <Separator />
+        </>
+      )}
 
-      {/* Generate Node Token - for use on THIS instance as a remote target */}
+      {/* Generate a node token so THIS instance can serve as a remote target.
+          Admin-only, matching the requireAdmin guard on /auth/generate-node-token. */}
+      {isAdmin && (
       <div className="rounded-md border p-4 space-y-3">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -231,6 +250,7 @@ export function NodeManager() {
           </div>
         )}
       </div>
+      )}
 
       {/* Sync issues: surfaces FleetSync sticky errors (currently CONTROL_IDENTITY_MISMATCH). */}
       {anchorMismatches.length > 0 && (
@@ -253,15 +273,17 @@ export function NodeManager() {
                   {' '}Reset the anchor on the peer to resume sync, or remove the node from this fleet.
                 </div>
                 <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => handleResetAnchor(nodeId)}
-                    disabled={resettingAnchor === nodeId}
-                  >
-                    {resettingAnchor === nodeId ? 'Resetting...' : 'Reset anchor on peer'}
-                  </Button>
-                  {node && !node.is_default && (
+                  {isAdmin && isPaid && (
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => handleResetAnchor(nodeId)}
+                      disabled={resettingAnchor === nodeId}
+                    >
+                      {resettingAnchor === nodeId ? 'Resetting...' : 'Reset anchor on peer'}
+                    </Button>
+                  )}
+                  {node && !node.is_default && (isAdmin || can('node:manage', 'node', String(nodeId))) && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -295,7 +317,9 @@ export function NodeManager() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {nodes.map((node) => (
+            {nodes.map((node) => {
+              const canManageThis = isAdmin || can('node:manage', 'node', String(node.id));
+              return (
               <TableRow key={node.id}>
                 <TableCell>
                   {node.is_default && (
@@ -429,42 +453,46 @@ export function NodeManager() {
                       </Tooltip>
                     </TooltipProvider>
 
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            onClick={() => testConnection(node)}
-                            disabled={testing === node.id}
-                            aria-label="Test connection"
-                          >
-                            <Wifi className={`w-4 h-4 ${testing === node.id ? 'animate-pulse' : ''}`} />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Test Connection</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                    {canManageThis && (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => testConnection(node)}
+                              disabled={testing === node.id}
+                              aria-label="Test connection"
+                            >
+                              <Wifi className={`w-4 h-4 ${testing === node.id ? 'animate-pulse' : ''}`} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Test Connection</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
 
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            onClick={() => openEdit(node)}
-                            aria-label="Edit node"
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Edit Node</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                    {canManageThis && (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => openEdit(node)}
+                              aria-label="Edit node"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Edit Node</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
 
-                    {!node.is_default && (
+                    {!node.is_default && canManageThis && (
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -485,7 +513,8 @@ export function NodeManager() {
                   </div>
                 </TableCell>
               </TableRow>
-            ))}
+              );
+            })}
           </TableBody>
         </Table>
       </div>

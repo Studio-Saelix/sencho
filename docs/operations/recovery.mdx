@@ -1,0 +1,133 @@
+---
+title: Recovery
+description: What to do when Sencho, a deploy, sign-in, Docker, or a remote node fails, and how to get back to a working state.
+---
+
+When something goes wrong, the first question is always the same: *can I get back to a working state, and how much is at risk?* For Sencho the answer is reassuring, because Sencho keeps very little state of its own.
+
+Everything Sencho knows lives in two directories:
+
+- **`DATA_DIR`** (default `/app/data`) holds `sencho.db` and `encryption.key`: your users, nodes, alert rules, labels, and settings.
+- **`COMPOSE_DIR`** holds your stacks: the `compose.yaml` and `.env` files that define your actual applications.
+
+Your compose files on disk are always the source of truth. Sencho reads them; it does not hide your stacks inside a database. That means most recovery is file-level: if Sencho itself is unhealthy, your running containers keep running, and a fresh Sencho pointed at the same two directories comes back with everything intact.
+
+<Note>
+  The single most valuable thing you can do before relying on Sencho is to back up those two directories. See [Backup & Restore](/operations/backup) for a copy-and-restore routine and a one-line nightly cron. Do this before you start testing in earnest.
+</Note>
+
+---
+
+## Environment checks
+
+Sencho runs a short environment preflight as the final step of first-boot setup, and you can re-run it anytime from **Settings · Recovery**. It confirms the things a deploy depends on, so a deploy does not fail for an avoidable reason:
+
+- the Docker engine is reachable and Sencho has permission to talk to the socket,
+- the Docker Compose plugin is present,
+- the compose directory exists, is writable, and is mounted at a matching host path (the [1:1 path rule](/getting-started/configuration#compose-directory-the-11-path-rule)),
+- the dashboard is reached over TLS rather than plain HTTP,
+- and the compose volume has disk headroom.
+
+Every result that needs attention carries a specific fix rather than a generic error. The checks are advisory: they never stop you from continuing, so an operator who knows their setup can move straight on.
+
+---
+
+## Sencho itself won't start or is misbehaving
+
+**Symptom:** The dashboard won't load, the container restarts in a loop, or the UI is throwing errors with no useful message.
+
+**What to do:**
+
+1. Read the container's own logs first. This is where backend route and service errors surface:
+   ```bash
+   docker logs sencho
+   ```
+2. Check the health endpoint. A `200` confirms the backend is up:
+   ```bash
+   curl http://localhost:1852/api/health
+   ```
+3. If the database is corrupted (for example after an interrupted disk write or a full disk), stop the container and restore `DATA_DIR` from your most recent backup, then start it again.
+
+Because your containers and compose files are independent of the Sencho process, none of this stops or changes your running stacks. A reinstall pointed at the same `DATA_DIR` and `COMPOSE_DIR` resumes with your settings and stacks in place.
+
+See [Backup & Restore](/operations/backup#restoring) for the restore steps and [Troubleshooting](/operations/troubleshooting#getting-logs-from-the-sencho-container-itself) for reading logs and the health endpoint.
+
+---
+
+## A stack deploy fails
+
+**Symptom:** You click Deploy and the containers exit immediately, never appear, or come up unhealthy.
+
+**What to do:**
+
+1. Look at the stack's own logs through the [Host Console](/features/host-console), or directly on the host:
+   ```bash
+   docker compose -f /path/to/your/stack/compose.yaml logs
+   ```
+2. The usual causes are a missing environment variable, a host port already in use, or a bind-mount path that does not exist yet. Each is fixed in the compose file or `.env`.
+3. If a previously working stack broke after an edit, use **one-click rollback** in the editor to return to the last deployed version of the compose file.
+
+See [Troubleshooting: containers won't start after deploy](/operations/troubleshooting#containers-wont-start-after-deploy) for the full cause list and [Stack management](/features/stack-management) for the editor and rollback.
+
+---
+
+## You are locked out of sign-in
+
+**Symptom:** An administrator has lost their second factor, or the admin password is forgotten, and no one can sign in through the UI.
+
+**What to do, least disruptive first:**
+
+1. **Another admin is still in:** any administrator can reset a locked-out user's two-factor enrolment from **Settings · Users**. The user then signs in with their password alone and re-enrols.
+2. **Every admin has lost 2FA:** reset two-factor for the admin account directly on the host with the emergency command-line reset. It acts on the same database the app uses and records the action in the audit log.
+3. **The admin password itself is forgotten:** Sencho has no password-reset email flow, but you do not need to discard your configuration. From a shell on the host, reset the password with the emergency command line, or create a fresh emergency administrator. Both act on the live database and leave your nodes, alert rules, and labels untouched.
+4. **Last resort, the database is unusable:** reset first-boot setup by removing `sencho.db`, which lets you create a fresh admin account from scratch.
+
+<Warning>
+  Removing `sencho.db` resets all Sencho configuration: users, nodes, alert rules, notification settings, and labels. Your Docker stacks and their compose files are not affected, and Sencho re-discovers them on the next scan. Use this only when no administrator can sign in and the command-line recovery above is not enough.
+</Warning>
+
+See [Emergency command-line recovery](/operations/emergency-cli) for the full command set, [Managing Two-Factor Authentication](/operations/two-factor-admin) for the admin two-factor reset, and [Troubleshooting: forgotten admin password](/operations/troubleshooting#forgotten-admin-password) for the database-reset path.
+
+---
+
+## Docker is unavailable
+
+**Symptom:** Sencho starts but the stack list is empty, or you see errors accessing Docker even though containers exist on the host.
+
+**What to do:**
+
+1. Confirm the Docker socket is mounted into the Sencho container:
+   ```yaml
+   volumes:
+     - /var/run/docker.sock:/var/run/docker.sock
+   ```
+2. Confirm the Docker daemon is running on the host (`docker ps` from a host shell).
+3. If the daemon was down or restarting, Sencho reconnects on its own once Docker is back; no action is needed inside Sencho.
+
+See [Troubleshooting: permission denied on the Docker socket](/operations/troubleshooting#permission-denied-on-the-docker-socket) for the socket-mount details.
+
+---
+
+## A remote node is unreachable
+
+**Symptom:** A node you added shows an offline or unknown status in the Fleet view.
+
+**What to do, in order:**
+
+1. Confirm the remote Sencho instance is running on that machine.
+2. Confirm the node's API URL is correct, including protocol and port, and that the host can reach it.
+3. Confirm the node's token is valid. If in doubt, generate a fresh token on the remote instance and update the node config.
+4. Confirm no firewall is blocking the port between the primary and the remote.
+5. Re-test connectivity from **Settings · Nodes** using the test button on the node row.
+
+A node going offline never affects the other nodes or the primary; each Sencho instance manages its own Docker independently.
+
+See [Troubleshooting: remote node shows offline](/operations/troubleshooting#remote-node-shows-offline-or-unknown) and the [Multi-node guide](/features/multi-node) for the connectivity model.
+
+---
+
+## If none of this helps
+
+- Review the [known limitations](https://github.com/studio-saelix/sencho/blob/main/KNOWN_LIMITATIONS.md) to confirm you are not hitting a documented constraint.
+- Browse the full [Troubleshooting](/operations/troubleshooting) page for symptom-specific entries.
+- Reach the team through the channels on the [Contact & Support](/reference/contact) page.

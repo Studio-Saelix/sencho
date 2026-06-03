@@ -244,6 +244,103 @@ describe('POST /api/fleet/prune/estimate', () => {
   });
 });
 
+describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
+  // Guards the C-1 fix: the remote fan-out must target the admin-only
+  // /api/fleet-actions/labels/local-stop receiver (reachable on every license),
+  // never the paid /api/labels/:id/action it used to call, which 403'd on
+  // Community remotes.
+  it('fans out to the admin-only local-stop receiver, never the paid per-label action route', async () => {
+    const remoteId = db.addNode({
+      name: 'remote-stop',
+      type: 'remote',
+      api_url: 'http://remote-stop.example:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    try {
+      const label = db.createLabel(remoteId, `remote-c1-${++labelCounter}`, 'teal');
+      db.setStackLabels('alpha', remoteId, [label.id]);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ matched: true, results: [{ stackName: 'alpha', success: true }] }),
+      } as unknown as Response);
+
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: label.name });
+
+      expect(res.status).toBe(200);
+      const urls = fetchSpy.mock.calls.map(c => String(c[0]));
+      expect(urls.some(u => u.endsWith('/api/fleet-actions/labels/local-stop'))).toBe(true);
+      expect(urls.some(u => u.includes('/api/labels/'))).toBe(false);
+
+      const call = fetchSpy.mock.calls.find(c => String(c[0]).endsWith('/api/fleet-actions/labels/local-stop'));
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ labelName: label.name, dryRun: false });
+
+      const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(remoteRow.stackResults).toEqual([{ stackName: 'alpha', success: true }]);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('honors the remote matched:false flag over the control mirror (mirror skew)', async () => {
+    const remoteId = db.addNode({
+      name: 'remote-skew', type: 'remote', api_url: 'http://remote-skew.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      // The control mirror believes the remote carries this label + stack...
+      const label = db.createLabel(remoteId, `remote-skew-${++labelCounter}`, 'teal');
+      db.setStackLabels('alpha', remoteId, [label.id]);
+      // ...but the remote authoritatively reports it has no such label.
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, status: 200, json: async () => ({ matched: false, results: [] }),
+      } as unknown as Response);
+
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: label.name });
+
+      expect(res.status).toBe(200);
+      const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(remoteRow.matched).toBe(false);
+      expect(remoteRow.stackResults).toEqual([]);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('degrades a malformed 200 body (non-array results) to empty instead of forwarding it', async () => {
+    const remoteId = db.addNode({
+      name: 'remote-malformed', type: 'remote', api_url: 'http://remote-malformed.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      const label = db.createLabel(remoteId, `remote-malformed-${++labelCounter}`, 'teal');
+      db.setStackLabels('alpha', remoteId, [label.id]);
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, status: 200, json: async () => ({ matched: true, results: 'not-an-array' }),
+      } as unknown as Response);
+
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: label.name });
+
+      expect(res.status).toBe(200);
+      const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(remoteRow.stackResults).toEqual([]);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+});
+
 describe('POST /api/fleet/labels/fleet-stop with dryRun: true', () => {
   it('marks each stack dryRun: true and does not invoke containerActionForStack', async () => {
     const label = await createAssignedLabel('dry-stop', ['alpha', 'beta']);

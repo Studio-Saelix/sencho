@@ -11,12 +11,36 @@
  * Service-layer logic (encryption, error mapping, mutex, pending lifecycle)
  * is covered in git-source-service.test.ts.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { DatabaseService } from '../services/DatabaseService';
+import { GitSourceService } from '../services/GitSourceService';
+
+function seedGitSource(stackName: string): void {
+    DatabaseService.getInstance().upsertGitSource({
+        stack_name: stackName,
+        repo_url: 'https://github.com/example/repo.git',
+        branch: 'main',
+        compose_path: 'compose.yaml',
+        sync_env: false,
+        env_path: null,
+        auth_type: 'none',
+        encrypted_token: null,
+        auto_apply_on_webhook: false,
+        auto_deploy_on_apply: false,
+        last_applied_commit_sha: null,
+        last_applied_content_hash: null,
+        pending_commit_sha: null,
+        pending_compose_content: null,
+        pending_env_content: null,
+        pending_fetched_at: null,
+        last_debounce_at: null,
+    });
+}
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -229,6 +253,41 @@ describe('git-source routes — invalid stack names', () => {
     });
 });
 
+describe('GET /api/stacks/:stackName/git-source', () => {
+    it('returns 200 { linked: false } when the stack exists but has no Git source', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, 'unlinked-stack'), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, 'unlinked-stack', 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        const res = await request(app)
+            .get('/api/stacks/unlinked-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ linked: false });
+    });
+
+    it('returns 404 when the stack does not exist on the active node', async () => {
+        const res = await request(app)
+            .get('/api/stacks/ghost-stack-get/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(404);
+        expect(res.body.error).toMatch(/stack not found/i);
+    });
+
+    it('returns 200 with the source object when a Git source is configured', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, 'linked-stack'), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, 'linked-stack', 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        seedGitSource('linked-stack');
+        const res = await request(app)
+            .get('/api/stacks/linked-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body.stack_name).toBe('linked-stack');
+        expect(res.body.repo_url).toBe('https://github.com/example/repo.git');
+        expect(res.body.linked).toBeUndefined();
+    });
+});
+
 describe('POST /api/stacks/from-git', () => {
     const validBody = {
         stack_name: 'route-from-git',
@@ -288,6 +347,55 @@ describe('POST /api/stacks/from-git', () => {
             .send({ ...validBody, stack_name: 'existing-stack' });
         expect(res.status).toBe(409);
         expect(res.body.error).toMatch(/already exists/i);
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () => {
+    it('returns 404 (not 200) when the stack has no Git source configured', async () => {
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/webhook-pull')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(404);
+        expect(res.body.error).toMatch(/no git source/i);
+    });
+
+    it('returns 401 without auth', async () => {
+        const res = await request(app).post('/api/stacks/existing-stack/git-source/webhook-pull');
+        expect(res.status).toBe(401);
+    });
+
+    it('maps a failed pull to 422 (not 200) so a Git provider sees the failure', async () => {
+        seedGitSource('webhook-status-422');
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+            .mockResolvedValue({ status: 'error', message: 'Validation failed: bad compose' });
+        const res = await request(app)
+            .post('/api/stacks/webhook-status-422/git-source/webhook-pull')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(422);
+        expect(res.body.status).toBe('error');
+        pullSpy.mockRestore();
+    });
+
+    it('maps a debounced pull to 202', async () => {
+        seedGitSource('webhook-status-202');
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+            .mockResolvedValue({ status: 'skipped', message: 'Rate limited (debounced).' });
+        const res = await request(app)
+            .post('/api/stacks/webhook-status-202/git-source/webhook-pull')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(202);
+        pullSpy.mockRestore();
+    });
+
+    it('maps a successful pull to 200', async () => {
+        seedGitSource('webhook-status-200');
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+            .mockResolvedValue({ status: 'success', message: 'Pending update ready at abc1234.' });
+        const res = await request(app)
+            .post('/api/stacks/webhook-status-200/git-source/webhook-pull')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        pullSpy.mockRestore();
     });
 });
 

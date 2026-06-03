@@ -16,7 +16,8 @@ import { MeshProxyTunnelDialer, type DialFailureCode } from './MeshProxyTunnelDi
 import { generateOverrideYaml, MeshAlias, SENCHO_MESH_NETWORK } from './MeshComposeOverride';
 import { lookupContainerIp } from '../mesh/containerLookup';
 import { STREAM_PENDING_DATA_MAX_BYTES } from '../pilot/protocol';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { isDebugEnabled } from '../utils/debug';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
@@ -1460,6 +1461,24 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
     }
 
+    /**
+     * Developer-mode diagnostic log for the mesh data plane. Off in production
+     * by default; gated on the shared `developer_mode` setting via
+     * isDebugEnabled(). Each value is run through redactSensitiveText and then
+     * sanitizeForLog, so a secret-shaped value (Bearer token, JWT, credentialed
+     * URL) is redacted and control characters are stripped before it reaches the
+     * log surface, even if a future caller passes one. Safe at per-operation,
+     * per-accept (once per new TCP connection), and per-60s-tick cadences; never
+     * call it from the per-frame relay loops in openSameNode / openCrossNode.
+     */
+    private logDiag(message: string, details: Record<string, unknown> = {}): void {
+        if (!isDebugEnabled()) return;
+        const cleaned = Object.fromEntries(
+            Object.entries(details).map(([key, value]) => [key, sanitizeForLog(redactSensitiveText(value))]),
+        );
+        console.debug(`[Mesh:diag] ${message}`, cleaned);
+    }
+
     public getActivity(filter?: { alias?: string; source?: MeshActivitySource; level?: MeshActivityLevel; limit?: number }): MeshActivityEvent[] {
         let out = this.activity;
         if (filter?.alias) out = out.filter((e) => e.alias === filter.alias);
@@ -1477,6 +1496,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     // --- Opt-in / opt-out ---
 
     public async optInStack(nodeId: number, stackName: string, actor: string): Promise<void> {
+        this.logDiag('opt-in start', { nodeId, stackName, actor });
+        const t0 = Date.now();
         if (!isValidStackName(stackName)) {
             throw new MeshError('denied', `invalid stack name: ${stackName}`);
         }
@@ -1548,6 +1569,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         this.cascadeRecomposeAcrossFleet(nodeId, stackName, actor);
         this.triggerRedeploy(nodeId, stackName, actor);
 
+        this.logDiag('opt-in complete', { nodeId, stackName, services: services.length, ms: Date.now() - t0 });
         this.logActivity({
             source: 'mesh', level: 'info', type: 'opt_in',
             nodeId, message: `opt-in ${stackName}`, details: { actor },
@@ -1561,6 +1583,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     public async optOutStack(nodeId: number, stackName: string, actor: string): Promise<void> {
+        this.logDiag('opt-out start', { nodeId, stackName, actor });
         if (!isValidStackName(stackName)) {
             throw new MeshError('denied', `invalid stack name: ${stackName}`);
         }
@@ -1596,6 +1619,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     public async enableForNode(nodeId: number): Promise<void> {
+        this.logDiag('enable-for-node', { nodeId });
         DatabaseService.getInstance().setNodeMeshEnabled(nodeId, true);
         this.logActivity({
             source: 'mesh', level: 'info', type: 'mesh.enable',
@@ -1617,6 +1641,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         nodeId: number,
         actor: string = 'system:mesh.disable',
     ): Promise<void> {
+        this.logDiag('disable-for-node start', { nodeId, actor });
+        const t0 = Date.now();
         DatabaseService.getInstance().setNodeMeshEnabled(nodeId, false);
         const stacks = DatabaseService.getInstance().listMeshStacks(nodeId);
         for (const s of stacks) {
@@ -1645,6 +1671,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         for (const s of stacks) {
             this.triggerRedeploy(nodeId, s.stack_name, actor);
         }
+        this.logDiag('disable-for-node complete', { nodeId, stacks: stacks.length, ms: Date.now() - t0 });
         this.logActivity({
             source: 'mesh', level: 'info', type: 'mesh.disable',
             nodeId, message: `mesh disabled on node ${nodeId}`,
@@ -1969,6 +1996,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     // --- Alias aggregation ---
 
     public async refreshAliasCache(): Promise<void> {
+        const t0 = Date.now();
         const db = DatabaseService.getInstance();
         const next = new Map<string, MeshGlobalAlias>();
         const portMap = new Map<number, MeshGlobalAlias>();
@@ -2016,6 +2044,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
         this.aliasCache = next;
         this.aliasByPort = portMap;
+        this.logDiag('alias cache refreshed', {
+            stacks: stacks.length,
+            aliases: next.size,
+            ports: portMap.size,
+            ms: Date.now() - t0,
+        });
     }
 
     public async listAliases(): Promise<MeshGlobalAlias[]> {
@@ -2415,6 +2449,18 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             this.proxyTunnelSelfCentralNodeId
             ?? this.selfCentralNodeId
             ?? NodeRegistry.getInstance().getDefaultNodeId();
+        let selfSource: string;
+        if (this.proxyTunnelSelfCentralNodeId != null) selfSource = 'proxy-tunnel';
+        else if (this.selfCentralNodeId != null) selfSource = 'enroll-token';
+        else selfSource = 'default-node';
+        this.logDiag('forwarder dispatch', {
+            port,
+            alias: target.alias,
+            targetNodeId: target.nodeId,
+            selfNodeId,
+            selfSource,
+            path: target.nodeId === selfNodeId ? 'same-node' : 'cross-node',
+        });
         if (target.nodeId === selfNodeId) {
             await this.openSameNode(target, src);
         } else {

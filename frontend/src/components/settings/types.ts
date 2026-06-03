@@ -48,6 +48,7 @@ export type SectionId =
     | 'nodes'
     | 'app-store'
     | 'notification-routing'
+    | 'recovery'
     | 'support'
     | 'about';
 

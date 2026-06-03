@@ -26,6 +26,7 @@ const {
   mockRunCommand,
   mockDeployStack,
   mockBackupStackFiles,
+  mockEnforcePolicyPreDeploy,
 } = vi.hoisted(() => ({
   mockGetDueScheduledTasks: vi.fn().mockReturnValue([]),
   mockCreateScheduledTaskRun: vi.fn().mockReturnValue(1),
@@ -66,6 +67,7 @@ const {
   mockRunCommand: vi.fn().mockResolvedValue(undefined),
   mockDeployStack: vi.fn().mockResolvedValue(undefined),
   mockBackupStackFiles: vi.fn().mockResolvedValue(undefined),
+  mockEnforcePolicyPreDeploy: vi.fn(),
 }));
 
 vi.mock('../services/DatabaseService', () => ({
@@ -185,10 +187,25 @@ vi.mock('../services/TrivyService', () => ({
   },
 }));
 
+vi.mock('../services/PolicyEnforcement', () => ({
+  enforcePolicyPreDeploy: mockEnforcePolicyPreDeploy,
+}));
+
 import { SchedulerService } from '../services/SchedulerService';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks only clears call history, not implementations, so restore the
+  // mocks that individual tests mutate (tier, variant, node lookup, proxy
+  // target) to their documented defaults. Without this a test that points
+  // getNode at a remote node or drops the tier leaks that state into every
+  // later test in the file.
+  mockGetTier.mockReturnValue('paid');
+  mockGetVariant.mockReturnValue('admiral');
+  mockGetNode.mockReturnValue({ id: 1, name: 'local', type: 'local', status: 'online' });
+  mockGetProxyTarget.mockReturnValue(null);
+  // Default: the scan-policy gate allows. Individual tests override to a block.
+  mockEnforcePolicyPreDeploy.mockResolvedValue({ ok: true, bypassed: false, violations: [] });
   (SchedulerService as any).instance = undefined;
 });
 
@@ -612,6 +629,35 @@ describe('SchedulerService - executeUpdate', () => {
     expect(mockClearStackUpdateStatus).toHaveBeenCalledWith(1, 'web-app');
   });
 
+  it('does not run a scheduled update on the community tier', async () => {
+    // Scheduled tasks are paid-only at every entry point (the tick tier check and
+    // the manual-run route both require paid), and executeTask guards again, so a
+    // community licence never runs the update. Hub-driven updates to a community
+    // remote worker take a different path (the /auto-update/execute route, which
+    // derives atomicity from the proxy tier header) and are unaffected.
+    mockGetTier.mockReturnValue('community');
+    mockGetScheduledTask.mockReturnValue({
+      id: 82,
+      name: 'update-community',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(82);
+
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failure' }),
+    );
+  });
+
   it('skips when all images up to date', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 81,
@@ -780,6 +826,73 @@ describe('SchedulerService - executeUpdate', () => {
         output: expect.not.stringContaining('WARNING'),
       })
     );
+  });
+
+  it('dispatches a scan_finding warning and skips the stack when a policy blocks the update', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 88,
+      name: 'blocked-update',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:1.14' }]);
+    mockCheckImage.mockResolvedValue({ hasUpdate: true });
+    mockEnforcePolicyPreDeploy.mockResolvedValue({
+      ok: false,
+      bypassed: false,
+      policy: { id: 1, name: 'block-high', max_severity: 'HIGH' },
+      violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 2, highCount: 5, scanId: 7 }],
+    });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(88);
+
+    // Gate blocked it: the stack must not be updated.
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    // A scan_finding warning naming the policy and the offending image fired.
+    const warn = mockDispatchAlert.mock.calls.find((c) => c[0] === 'warning' && c[1] === 'scan_finding');
+    expect(warn).toBeDefined();
+    expect(warn![2]).toContain('block-high');
+    expect(warn![2]).toContain('nginx:1.14');
+    // The run completes (skip-and-continue), not a hard task failure.
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
+  });
+
+  it('reports a failed run and an Auto-start warning when a policy blocks a scheduled auto-start', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 89,
+      name: 'blocked-start',
+      action: 'auto_start',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockEnforcePolicyPreDeploy.mockResolvedValue({
+      ok: false,
+      bypassed: false,
+      policy: { id: 1, name: 'block-high', max_severity: 'HIGH' },
+      violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 1, highCount: 0, scanId: 3 }],
+    });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(89);
+
+    // Gate blocked it: the stack must not start.
+    expect(mockDeployStack).not.toHaveBeenCalled();
+    const warn = mockDispatchAlert.mock.calls.find((c) => c[0] === 'warning' && c[1] === 'scan_finding');
+    expect(warn).toBeDefined();
+    expect(warn![2]).toContain('Auto-start');
+    expect(warn![2]).toContain('block-high');
+    // Auto-start does not skip-and-continue; the run is recorded as a failure.
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
   });
 
   it('exposes isTaskRunning status', async () => {
@@ -1299,6 +1412,7 @@ describe('SchedulerService - executeSnapshot', () => {
       1,
       1,
       expect.any(String),
+      expect.any(String),
     );
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
@@ -1503,6 +1617,184 @@ describe('SchedulerService - lifecycle actions', () => {
 
     await new Promise(r => setTimeout(r, 50));
     expect(mockRunCommand).toHaveBeenCalled();
+  });
+});
+
+// ── Lifecycle remote proxy ──────────────────────────────────────────────
+
+describe('SchedulerService - lifecycle remote proxy', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const remoteHeaders = expect.objectContaining({
+    'Authorization': 'Bearer tkn',
+    'x-sencho-tier': 'paid',
+    'x-sencho-variant': 'admiral',
+  });
+
+  function stubRemote(okBody: unknown = { success: true }) {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => okBody });
+    vi.stubGlobal('fetch', mockFetch);
+    return mockFetch;
+  }
+
+  it('auto_stop proxies to the remote stop endpoint instead of running locally', async () => {
+    const fetchMock = stubRemote();
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote:1852/api/stacks/my-stack/stop',
+      expect.objectContaining({ method: 'POST', headers: remoteHeaders }),
+    );
+    expect(mockRunCommand).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
+  });
+
+  it('auto_down proxies to the remote down endpoint', async () => {
+    const fetchMock = stubRemote();
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_down', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote:1852/api/stacks/my-stack/down',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(mockRunCommand).not.toHaveBeenCalled();
+  });
+
+  it('auto_start proxies to the remote deploy endpoint and skips the hub policy gate', async () => {
+    const fetchMock = stubRemote();
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote:1852/api/stacks/my-stack/deploy',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(mockDeployStack).not.toHaveBeenCalled();
+    expect(mockEnforcePolicyPreDeploy).not.toHaveBeenCalled();
+  });
+
+  it('auto_backup proxies to the remote backup endpoint', async () => {
+    const fetchMock = stubRemote();
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote:1852/api/stacks/my-stack/backup',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(mockBackupStackFiles).not.toHaveBeenCalled();
+  });
+
+  it('restart (all services) proxies to the remote restart endpoint', async () => {
+    const fetchMock = stubRemote();
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('restart', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote:1852/api/stacks/my-stack/restart',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+  });
+
+  it('restart with target_services fans out to per-service restart endpoints', async () => {
+    const fetchMock = stubRemote();
+    mockGetScheduledTask.mockReturnValue(
+      makeLifecycleTask('restart', { node_id: 2, target_services: JSON.stringify(['api', 'worker']) }),
+    );
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote:1852/api/stacks/my-stack/services/api/restart',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote:1852/api/stacks/my-stack/services/worker/restart',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('records failure when the remote node returns an error', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: 'Docker daemon is unreachable' }),
+    }));
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('Docker daemon is unreachable') }),
+    );
+  });
+
+  it('falls back to the HTTP status when the remote error body is not JSON', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => { throw new Error('not json'); },
+    }));
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_down', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('HTTP 502') }),
+    );
+  });
+
+  it('records failure when the remote node has no proxy credentials', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    // getProxyTarget defaults to null (no credentials configured).
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('not configured or missing API credentials') }),
+    );
+  });
+
+  it('restart fan-out fails fast and names already-restarted services', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) })
+      .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    mockGetScheduledTask.mockReturnValue(
+      makeLifecycleTask('restart', { node_id: 2, target_services: JSON.stringify(['api', 'worker', 'cache']) }),
+    );
+    await SchedulerService.getInstance().triggerTask(300);
+    // Third service is never reached after the second fails.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('already restarted: api') }),
+    );
+  });
+});
+
+// ── Unpaid-tier guard in executeTask ────────────────────────────────────
+
+describe('SchedulerService - unpaid tier guard', () => {
+  it('records a failed run and does not execute when the licence is not paid', async () => {
+    mockGetTier.mockReturnValue('community');
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop'));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(mockRunCommand).not.toHaveBeenCalled();
+    // The skip is visible in run history rather than silently dropped.
+    expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('paid licence') }),
+    );
   });
 });
 

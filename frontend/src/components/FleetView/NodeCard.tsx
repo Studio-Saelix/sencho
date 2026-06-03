@@ -68,13 +68,16 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
     const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
     const { isPaid, license } = useLicense();
-    const { isAdmin } = useAuth();
+    const { isAdmin, can } = useAuth();
     const { nodes: registryNodes } = useNodes();
     const isAdmiral = isPaid && license?.variant === 'admiral';
     const registryNode = registryNodes.find(n => n.id === node.id);
     const canEdit = Boolean(isAdmin && onEdit && registryNode);
     const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default);
-    const canCordon = isAdmiral;
+    // Cordon is Admiral-tier AND requires node:manage, matching the backend guard
+    // (requirePermission('node:manage','node',id) + requireAdmiral). Gating on tier
+    // alone would surface the control to deployer/viewer/auditor users whose calls 403.
+    const canCordon = isAdmiral && can('node:manage', 'node', String(node.id));
     const showMenu = canEdit || canDelete || canCordon;
 
     const isOnline = node.status === 'online';
@@ -211,8 +214,8 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                     <UpdateStatusBadge
                                         status={updateStatus.updateStatus}
                                         error={updateStatus.error}
-                                        onRetry={onRetryUpdate ? () => onRetryUpdate(node.id) : undefined}
-                                        onDismiss={onDismissUpdate ? () => onDismissUpdate(node.id) : undefined}
+                                        onRetry={isAdmin && onRetryUpdate ? () => onRetryUpdate(node.id) : undefined}
+                                        onDismiss={isAdmin && onDismissUpdate ? () => onDismissUpdate(node.id) : undefined}
                                     />
                                 )}
                                 {updateStatus?.updateAvailable && !updateStatus.updateStatus && (
@@ -292,8 +295,8 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                     </div>
                 )}
 
-                {/* Update button */}
-                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && onUpdate && (
+                {/* Update button (mutating action: admin only, matches the requireAdmin route guard) */}
+                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && onUpdate && isAdmin && (
                     <div className="mt-3 pt-3 border-t border-border/50">
                         <Button
                             variant="outline"

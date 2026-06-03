@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { Response } from 'express';
-import { gitSourceStatus, sendGitSourceError } from '../utils/gitSourceHttp';
+import { gitSourceStatus, sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { GitSourceError } from '../services/GitSourceService';
 
 describe('gitSourceStatus', () => {
@@ -29,6 +29,20 @@ describe('gitSourceStatus', () => {
 
     it('maps unknown codes to 400', () => {
         expect(gitSourceStatus('GIT_ERROR')).toBe(400);
+    });
+});
+
+describe('webhookPullStatus', () => {
+    it('maps a successful pull/apply to 200', () => {
+        expect(webhookPullStatus('success')).toBe(200);
+    });
+
+    it('maps a debounced (skipped) pull to 202', () => {
+        expect(webhookPullStatus('skipped')).toBe(202);
+    });
+
+    it('maps a failed pull/apply to 422, never 200', () => {
+        expect(webhookPullStatus('error')).toBe(422);
     });
 });
 

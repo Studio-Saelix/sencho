@@ -87,6 +87,8 @@ Open `http://localhost:1852` in a browser. On a fresh install you land on the **
 
 Pick a username, choose a password, confirm it, and click **Initialize console**. The username placeholder shows `admin`. The password must be at least eight characters, and the strength indicator labels the password **Weak**, **Fair**, or **Strong** as you type.
 
+Sencho then runs a short **environment preflight**: it confirms the Docker engine and Compose plugin are reachable, the compose directory is writable and mounted at a matching host path, the dashboard is behind TLS, and there is disk headroom. Anything that needs attention shows an inline fix. The checks never block you, so click **Enter Sencho** to continue; you can re-run them anytime from **Settings · Recovery**.
+
 <Note>
   The Cold start card only appears the first time you open Sencho. Once the admin account exists, every subsequent visit goes to the regular sign-in screen.
 </Note>
@@ -121,5 +123,8 @@ Click **Create Stack** in the sidebar and choose **Empty**, **From Git**, or **F
   </Card>
   <Card title="App Store" icon="grid-2" href="/features/app-store">
     Browse the default LinuxServer.io template catalogue and deploy in one click.
+  </Card>
+  <Card title="Recovery" icon="life-ring" href="/operations/recovery">
+    What to do if Sencho, a deploy, sign-in, Docker, or a node fails, and how to get back to a working state.
   </Card>
 </CardGroup>

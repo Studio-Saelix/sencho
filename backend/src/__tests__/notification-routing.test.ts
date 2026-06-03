@@ -2,7 +2,7 @@
  * Unit tests for Notification Routing — CRUD operations on notification_routes,
  * routing logic in NotificationService, and edge cases.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -55,6 +55,7 @@ const mockFetch = vi.fn().mockResolvedValue({ ok: true });
 vi.stubGlobal('fetch', mockFetch);
 
 import { NotificationService } from '../services/NotificationService';
+import { StackActivityMetricsService } from '../services/StackActivityMetricsService';
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -471,5 +472,102 @@ describe('NotificationService - routing logic', () => {
       'https://discord.com/api/webhooks/123/abc',
       expect.objectContaining({ method: 'POST' })
     );
+  });
+});
+
+describe('NotificationService - crash safety (dispatchAlert never rejects)', () => {
+  let svc: NotificationService;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (NotificationService as any).instance = undefined;
+    svc = NotificationService.getInstance();
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('resolves (does not reject) and skips dispatch when the history write throws', async () => {
+    const recordSpy = vi.spyOn(StackActivityMetricsService.getInstance(), 'record');
+    mockAddNotificationHistory.mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+    mockGetEnabledAgents.mockReturnValue([makeAgent()]);
+
+    await expect(
+      svc.dispatchAlert('error', 'monitor_alert', 'Container crashed', { stackName: 'my-app' }),
+    ).resolves.toBeUndefined();
+
+    // No external dispatch and no routing read when there is no persisted row.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockGetEnabledNotificationRoutes).not.toHaveBeenCalled();
+    // The write failure is recorded for metrics and logged.
+    expect(recordSpy).toHaveBeenCalledWith(1, 'write', expect.any(Number), false);
+    expect(consoleErrorSpy).toHaveBeenCalledWith('[Notify] Failed to persist notification:', expect.any(Error));
+    recordSpy.mockRestore();
+  });
+
+  it('records a successful write metric on the happy path', async () => {
+    const recordSpy = vi.spyOn(StackActivityMetricsService.getInstance(), 'record');
+
+    await svc.dispatchAlert('info', 'system', 'Host rebooted');
+
+    expect(recordSpy).toHaveBeenCalledWith(1, 'write', expect.any(Number), true);
+    recordSpy.mockRestore();
+  });
+
+  it('resolves (does not reject) when reading routes throws after a successful write', async () => {
+    mockGetEnabledNotificationRoutes.mockImplementationOnce(() => {
+      throw new Error('database read failed');
+    });
+
+    await expect(
+      svc.dispatchAlert('error', 'monitor_alert', 'Container crashed', { stackName: 'my-app' }),
+    ).resolves.toBeUndefined();
+
+    // The history row was still written; only routing failed, and it was logged.
+    expect(mockAddNotificationHistory).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy).toHaveBeenCalledWith('[Notify] dispatchAlert failed:', expect.any(Error));
+  });
+
+  it('resolves (does not reject) when a subscriber send throws during broadcast', async () => {
+    // A subscriber whose socket reports OPEN but throws on send exercises the
+    // broadcast leg of the outer guard.
+    const throwingWs = {
+      readyState: 1, // WebSocket.OPEN
+      send: () => { throw new Error('socket write failed'); },
+    } as unknown as import('ws').WebSocket;
+    svc.subscribe(throwingWs);
+
+    await expect(
+      svc.dispatchAlert('info', 'system', 'Host rebooted'),
+    ).resolves.toBeUndefined();
+
+    expect(mockAddNotificationHistory).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy).toHaveBeenCalledWith('[Notify] dispatchAlert failed:', expect.any(Error));
+  });
+
+  it('snapshots subscribers so an unsubscribe during a send does not skip later subscribers', async () => {
+    const sent: string[] = [];
+    let unsubscribeB: () => void = () => {};
+    const wsB = {
+      readyState: 1, // WebSocket.OPEN
+      send: () => { sent.push('B'); },
+    } as unknown as import('ws').WebSocket;
+    // A's send removes B mid-iteration, mimicking a 'close' handler firing.
+    const wsA = {
+      readyState: 1,
+      send: () => { sent.push('A'); unsubscribeB(); },
+    } as unknown as import('ws').WebSocket;
+    svc.subscribe(wsA);
+    unsubscribeB = svc.subscribe(wsB);
+
+    await svc.dispatchAlert('info', 'system', 'Host rebooted');
+
+    // B still receives the broadcast because iteration runs over a snapshot.
+    expect(sent).toEqual(['A', 'B']);
   });
 });

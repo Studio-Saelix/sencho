@@ -53,6 +53,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /users': 'Created user',
   'DELETE /users': 'Deleted user',
   'PUT /users': 'Updated user',
+  'POST /users/*/mfa/reset': 'Reset two-factor authentication',
   'POST /users/*/roles': 'Assigned role',
   'DELETE /users/*/roles': 'Removed role assignment',
 

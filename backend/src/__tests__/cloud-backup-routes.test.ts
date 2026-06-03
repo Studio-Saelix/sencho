@@ -201,6 +201,47 @@ describe('Cloud backup tier gating', () => {
     });
 });
 
+describe('Cloud backup read routes are admin-only', () => {
+    // The archive download returns plaintext compose/.env, so listing and
+    // downloading cloud snapshots must be admin-gated like the local snapshot
+    // reads, regardless of provider/tier.
+    let viewerCookie: string;
+    const keyB64 = Buffer.from('sencho/instances/x/snapshots/1.tar.gz').toString('base64url');
+
+    beforeAll(async () => {
+        const db = DatabaseService.getInstance();
+        const bcrypt = (await import('bcrypt')).default;
+        const hash = await bcrypt.hash('cloud-viewer-pass', 1);
+        try { db.addUser({ username: 'cloud-viewer', password_hash: hash, role: 'viewer' }); } catch { /* may already exist */ }
+        const login = await request(app).post('/api/auth/login').send({ username: 'cloud-viewer', password: 'cloud-viewer-pass' });
+        const cookies = login.headers['set-cookie'] as string | string[];
+        viewerCookie = Array.isArray(cookies) ? cookies[0] : cookies;
+    });
+
+    it('GET /snapshots returns 403 for a non-admin', async () => {
+        const res = await request(app).get('/api/cloud-backup/snapshots').set('Cookie', viewerCookie);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('ADMIN_REQUIRED');
+    });
+
+    it('GET /status/:id returns 403 for a non-admin', async () => {
+        const res = await request(app).get('/api/cloud-backup/status/1').set('Cookie', viewerCookie);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('ADMIN_REQUIRED');
+    });
+
+    it('GET /object/:keyB64/download returns 403 for a non-admin', async () => {
+        const res = await request(app).get(`/api/cloud-backup/object/${keyB64}/download`).set('Cookie', viewerCookie);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('ADMIN_REQUIRED');
+    });
+
+    it('does not block an admin on GET /snapshots', async () => {
+        const res = await request(app).get('/api/cloud-backup/snapshots').set('Cookie', authCookie);
+        expect(res.status).not.toBe(403);
+    });
+});
+
 describe('Cloud backup config CRUD', () => {
     it('redacts secret_key on read; persists encrypted ciphertext', async () => {
         const putRes = await request(app)

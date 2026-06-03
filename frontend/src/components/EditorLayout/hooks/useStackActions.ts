@@ -1,5 +1,5 @@
 import { useRef, useCallback, useEffect } from 'react';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, withDeploySession } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
@@ -9,7 +9,7 @@ import type { Node } from '@/context/NodeContext';
 import type { ActionVerb } from '@/context/DeployFeedbackContext';
 import type { StackAction } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
-import type { PolicyBlockPayload } from '../../stack/PolicyBlockDialog';
+import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
 
 interface RunResult {
   ok: boolean;
@@ -61,7 +61,7 @@ interface UseStackActionsOptions {
   isPaid: boolean;
   runWithLog: (
     params: { stackName: string; action: ActionVerb },
-    run: (deployStarted: Promise<void>) => Promise<RunResult>,
+    run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>,
   ) => Promise<RunResult>;
   diffPreviewEnabled: boolean;
 }
@@ -506,11 +506,35 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  // Parse a 409 body for a scan-policy block. When it is one, record it (with
+  // the originating action and file so the bypass retries the right endpoint)
+  // so PolicyBlockDialog can open, and return the policy name. Returns null
+  // when the body is not a policy block (e.g. a stack-op-in-progress 409).
+  const tryOpenPolicyBlock = (
+    rawBody: string,
+    stackName: string,
+    stackFile: string,
+    action: PolicyBlockableAction,
+  ): string | null => {
+    let parsed: PolicyBlockPayload | null = null;
+    try {
+      parsed = JSON.parse(rawBody) as PolicyBlockPayload;
+    } catch {
+      /* not JSON */
+    }
+    if (parsed && parsed.policy && Array.isArray(parsed.violations)) {
+      overlayState.setPolicyBlock({ stackName, stackFile, action, payload: parsed });
+      return parsed.policy.name;
+    }
+    return null;
+  };
+
   const runDeploy = async (
     stackName: string,
     stackFile: string,
     ignorePolicy: boolean,
     started?: Promise<void>,
+    deploySessionId?: string,
   ): Promise<RunResult> => {
     const previousStatus = stackListState.stackStatuses[stackFile];
     stackListState.setOptimisticStatus(stackFile, 'running');
@@ -519,39 +543,25 @@ export function useStackActions(options: UseStackActionsOptions) {
         ? `/stacks/${stackName}/deploy?ignorePolicy=true`
         : `/stacks/${stackName}/deploy`;
       if (started) await started;
-      const response = await apiFetch(path, { method: 'POST' });
+      const response = await apiFetch(path, withDeploySession(deploySessionId ?? '', { method: 'POST' }));
       if (!response.ok) {
         const rawBody = await response.text();
         if (response.status === 409) {
+          // Either 409 sub-case (op-in-progress or policy block) leaves the
+          // stack in its prior state; undo the optimistic "running" flip once.
+          if (previousStatus !== undefined)
+            stackListState.setOptimisticStatus(stackFile, previousStatus as 'running' | 'exited');
           const inProgress = parseStackOpInProgress(rawBody);
           if (inProgress) {
             const message = stackOpInProgressMessage(stackName, inProgress);
-            if (previousStatus !== undefined)
-              stackListState.setOptimisticStatus(
-                stackFile,
-                previousStatus as 'running' | 'exited',
-              );
             toast.error(message);
             return { ok: false, errorMessage: message };
           }
-          let parsed: PolicyBlockPayload | null = null;
-          try {
-            parsed = JSON.parse(rawBody) as PolicyBlockPayload;
-          } catch {
-            /* not JSON */
-          }
-          if (parsed && parsed.policy && Array.isArray(parsed.violations)) {
-            overlayState.setPolicyBlock({ stackName, payload: parsed });
-            if (previousStatus !== undefined)
-              stackListState.setOptimisticStatus(
-                stackFile,
-                previousStatus as 'running' | 'exited',
-              );
-            toast.error(`Deploy blocked by policy "${parsed.policy.name}"`);
-            return {
-              ok: false,
-              errorMessage: `Deploy blocked by policy "${parsed.policy.name}"`,
-            };
+          const blockedBy = tryOpenPolicyBlock(rawBody, stackName, stackFile, 'deploy');
+          if (blockedBy) {
+            const message = `Deploy blocked by policy "${blockedBy}"`;
+            toast.error(message);
+            return { ok: false, errorMessage: message };
           }
         }
         throw parseStackActionError(rawBody, 'Deploy failed');
@@ -598,8 +608,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     stackListState.setStackAction(stackFile, 'deploy');
     try {
-      await runWithLog({ stackName, action: 'deploy' }, started =>
-        runDeploy(stackName, stackFile, false, started),
+      await runWithLog({ stackName, action: 'deploy' }, (started, ds) =>
+        runDeploy(stackName, stackFile, false, started, ds),
       );
     } finally {
       stackListState.clearStackAction(stackFile);
@@ -613,39 +623,69 @@ export function useStackActions(options: UseStackActionsOptions) {
     await deployStack(e);
   };
 
-  const bypassPolicyAndDeploy = async () => {
+  // Admin "Deploy anyway": re-issue the blocked action with ?ignorePolicy=true.
+  // Retries whichever action triggered the block (deploy or update) so an
+  // update bypass still re-pulls images, matching the backend bypass on each
+  // endpoint. The server ignores the flag unless the caller is an admin.
+  const bypassPolicyAndRetry = async () => {
     const policyBlock = overlayState.policyBlock;
     if (!policyBlock) return;
-    const { stackName } = policyBlock;
-    const existingFile =
-      stackListState.selectedFile?.replace(/\.(yml|yaml)$/, '') === stackName
-        ? stackListState.selectedFile
-        : (stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? `${stackName}.yml`);
+    const { stackName, stackFile, action } = policyBlock;
+    const existingFile = stackListState.files.includes(stackFile)
+      ? stackFile
+      : (stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackFile);
     overlayState.setPolicyBypassing(true);
-    stackListState.setStackAction(existingFile, 'deploy');
     try {
-      await runWithLog({ stackName, action: 'deploy' }, started =>
-        runDeploy(stackName, existingFile, true, started),
-      );
+      if (action === 'update') {
+        await runStackAction(existingFile, 'update', 'update', 'running', 'Stack updated successfully!', true);
+      } else if (action === 'rollback') {
+        await rollbackStack(true);
+      } else {
+        stackListState.setStackAction(existingFile, 'deploy');
+        try {
+          await runWithLog({ stackName, action: 'deploy' }, (started, ds) =>
+            runDeploy(stackName, existingFile, true, started, ds),
+          );
+        } finally {
+          stackListState.clearStackAction(existingFile);
+          stackListState.refreshStacks(true);
+        }
+      }
     } finally {
       overlayState.setPolicyBypassing(false);
-      stackListState.clearStackAction(existingFile);
-      stackListState.refreshStacks(true);
     }
   };
 
-  const rollbackStack = async () => {
+  const rollbackStack = async (ignorePolicy = false) => {
     if (!stackListState.selectedFile || stackListState.isStackBusy(stackListState.selectedFile))
       return;
     const stackFile = stackListState.selectedFile;
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     stackListState.setStackAction(stackFile, 'rollback');
     stackListState.setOptimisticStatus(stackFile, 'running');
     try {
-      const res = await apiFetch(`/stacks/${stackFile}/rollback`, { method: 'POST' });
+      const path = ignorePolicy
+        ? `/stacks/${stackFile}/rollback?ignorePolicy=true`
+        : `/stacks/${stackFile}/rollback`;
+      const res = await apiFetch(path, { method: 'POST' });
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err?.error || 'Rollback failed');
+        const rawBody = await res.text();
+        if (res.status === 409) {
+          const inProgress = parseStackOpInProgress(rawBody);
+          if (inProgress) {
+            const message = stackOpInProgressMessage(stackName, inProgress);
+            toast.error(message);
+            return;
+          }
+          const blockedBy = tryOpenPolicyBlock(rawBody, stackName, stackFile, 'rollback');
+          if (blockedBy) {
+            toast.error(`Rollback blocked by policy "${blockedBy}"`);
+            return;
+          }
+        }
+        throw parseStackActionError(rawBody, 'Rollback failed');
       }
+      overlayState.setPolicyBlock(null);
       toast.success('Stack rolled back successfully.');
       const contentRes = await apiFetch(`/stacks/${stackFile}`);
       const text = await contentRes.text();
@@ -712,6 +752,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     endpoint: string,
     optimisticStatus: 'running' | 'exited',
     successMessage: string,
+    ignorePolicy = false,
   ): Promise<void> => {
     if (stackListState.isStackBusy(stackFile)) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
@@ -719,10 +760,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackListState.setStackAction(stackFile, action);
     stackListState.setOptimisticStatus(stackFile, optimisticStatus);
     try {
-      await runWithLog({ stackName, action }, async (started) => {
+      await runWithLog({ stackName, action }, async (started, ds) => {
         await started;
         try {
-          const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST' });
+          const url = ignorePolicy
+            ? `/stacks/${stackName}/${endpoint}?ignorePolicy=true`
+            : `/stacks/${stackName}/${endpoint}`;
+          const response = await apiFetch(url, withDeploySession(ds, { method: 'POST' }));
           if (!response.ok) {
             const errText = await response.text();
             if (response.status === 409) {
@@ -732,6 +776,14 @@ export function useStackActions(options: UseStackActionsOptions) {
                 toast.error(message);
                 return { ok: false as const, errorMessage: message };
               }
+              if (action === 'update') {
+                const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, 'update');
+                if (blockedBy) {
+                  const message = `Update blocked by policy "${blockedBy}"`;
+                  toast.error(message);
+                  return { ok: false as const, errorMessage: message };
+                }
+              }
             }
             const actionError = parseStackActionError(errText, `${action} failed`);
             return {
@@ -740,6 +792,7 @@ export function useStackActions(options: UseStackActionsOptions) {
               rolledBack: actionError.rolledBack,
             };
           }
+          overlayState.setPolicyBlock(null);
           toast.success(successMessage);
           if (action === 'update') stackListState.fetchImageUpdates();
           if (stackListState.selectedFile === stackFile) {
@@ -893,6 +946,13 @@ export function useStackActions(options: UseStackActionsOptions) {
             toast.error(stackOpInProgressMessage(stackName, inProgress));
             return;
           }
+          if (action === 'deploy' || action === 'update') {
+            const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, action);
+            if (blockedBy) {
+              toast.error(`${action === 'update' ? 'Update' : 'Deploy'} blocked by policy "${blockedBy}"`);
+              return;
+            }
+          }
         }
         throw parseStackActionError(errText, `${action} failed`);
       }
@@ -999,7 +1059,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     scanStackConfig,
     runDeploy,
     deployStack,
-    bypassPolicyAndDeploy,
+    bypassPolicyAndRetry,
     stopStack,
     restartStack,
     serviceAction,

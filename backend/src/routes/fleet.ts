@@ -6,7 +6,7 @@ import type Dockerode from 'dockerode';
 import { DatabaseService, type Node } from '../services/DatabaseService';
 import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
-import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
+import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPDATE_TIMEOUT_MS, UPDATE_TIMEOUT_MSG, TERMINAL_TTL_MS } from '../services/FleetUpdateTrackerService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
@@ -16,7 +16,7 @@ import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierGates';
 import { scheduleLocalUpdate } from './license';
-import { runPolicyGate } from '../helpers/policyGate';
+import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, type SnapshotNodeData } from '../utils/snapshot-capture';
 import { getLatestVersion } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
@@ -29,21 +29,56 @@ import { withTimeout, TimeoutError } from '../utils/withTimeout';
 // paths cap the slow `docker system df` call at the same 8s budget (F-6).
 const FLEET_DF_TIMEOUT_MS = 8_000;
 import { POLICY_SEVERITIES } from '../utils/severity';
-import { sanitizeForLog } from '../utils/safeLog';
+import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
-import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
-import { containerActionForStack } from './stacks';
+import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { activeBulkActions } from './labels';
+import { runLocalLabelStop, type LabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
-const UPDATE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const UPDATE_TIMEOUT_MSG = 'Node did not come back online within 5 minutes.';
 const EARLY_FAIL_MS = 180 * 1000; // 3 minutes before declaring a probable pull failure
+// Throttle the forced latest-version refresh so a caller cannot loop the recheck
+// endpoint to hammer GitHub / Docker Hub. The 30-minute cache still serves reads
+// between forced refreshes; this only bounds how often we bypass it.
+const FORCED_RECHECK_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+let lastForcedRecheckAt = 0;
+
+/** Test-only: reset the forced-recheck throttle clock so suites do not depend
+ *  on cross-test ordering of the module-scope timestamp. */
+export function _resetForcedRecheckThrottleForTests(): void {
+  lastForcedRecheckAt = 0;
+}
+
+/**
+ * Atomically resolve an in-flight update tracker to a terminal state and store
+ * it. Re-reads the live entry and transitions only if it is still 'updating'
+ * with the same startedAt; because there is no await between the read and the
+ * set, a concurrent /update-status poll that already resolved this node cannot
+ * be clobbered or cause a duplicate WARN. For failure-class outcomes (failed /
+ * timeout) it emits one operator-visible WARN so a failed fleet update is
+ * observable without enabling developer mode. The error text is secret-redacted
+ * and control-stripped before logging; no tokens or meta dumps.
+ */
+function resolveTerminal(
+  node: { id: number; name: string },
+  tracker: UpdateTracker,
+  status: TerminalStatus,
+  error?: string,
+): void {
+  const live = updateTracker.get(node.id);
+  if (!live || live.status !== 'updating' || live.startedAt !== tracker.startedAt) return;
+  if (status !== 'completed') {
+    const elapsedSec = Math.round((Date.now() - live.startedAt) / 1000);
+    const detail = error ? `: ${sanitizeForLog(redactSensitiveText(error))}` : '';
+    console.warn(`[Fleet] Node update ${status} for "${sanitizeForLog(node.name)}" (id ${node.id}) after ${elapsedSec}s${detail}`);
+  }
+  updateTracker.set(node.id, updateTracker.resolve(live, status, error));
+}
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 
@@ -702,6 +737,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
     const results = await Promise.allSettled(
       nodes.map(async (node) => {
         const tracker = updateTracker.get(node.id);
+        const statusBeforeResolve = tracker?.status;
 
         let version: string | null = null;
         let remoteStartedAt: number | null = null;
@@ -726,17 +762,20 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
           if (elapsed > UPDATE_TIMEOUT_MS) {
             if (debug) console.debug('[Fleet:debug] Node', node.id, 'timed out after', Math.round(elapsed / 1000) + 's');
-            updateTracker.set(node.id, updateTracker.resolve(tracker, 'timeout', UPDATE_TIMEOUT_MSG));
+            resolveTerminal(node, tracker, 'timeout', UPDATE_TIMEOUT_MSG);
           } else if (node.type === 'remote') {
             if (remoteUpdateError) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'reported pull failure:', remoteUpdateError);
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'failed', remoteUpdateError));
+              resolveTerminal(node, tracker, 'failed', remoteUpdateError);
             } else if (!remoteOnline) {
               if (!tracker.wasOffline) {
                 if (debug) console.debug('[Fleet:debug] Node', node.id, 'went offline (restarting)');
                 updateTracker.set(node.id, { ...tracker, wasOffline: true });
               }
-            } else if (version !== tracker.previousVersion) {
+            } else if (isValidVersion(version) && version !== tracker.previousVersion) {
+              // Signal 1: a valid, different version. A null/unparseable version
+              // from a transient /api/meta blip is NOT a version change, so it
+              // must not complete a still-running, same-process node here.
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 1 (version changed):', tracker.previousVersion, '->', version);
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (
@@ -746,8 +785,18 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
             ) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 2 (process restarted):', tracker.previousProcessStart, '->', remoteStartedAt);
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
-            } else if (tracker.wasOffline && remoteOnline) {
-              if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 3 (offline then online)');
+            } else if (
+              tracker.wasOffline &&
+              remoteOnline &&
+              (remoteStartedAt === null || tracker.previousProcessStart === null)
+            ) {
+              // Signal 3: offline-then-online is only trustworthy as a completion
+              // signal when we cannot read the remote process start time. When
+              // startedAt IS known and unchanged (signal 2 above did not fire),
+              // the process never restarted, so a brief unreachable blip on the
+              // same version must not be reported as a completed update; it falls
+              // through to the early-fail / timeout heuristics instead.
+              if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 3 (offline then online, startedAt unavailable)');
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (
               elapsed > 15_000 &&
@@ -763,7 +812,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (elapsed > EARLY_FAIL_MS) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's - no signals detected');
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'failed', 'Update may have failed. The node is still running and its version has not changed.'));
+              resolveTerminal(node, tracker, 'failed', 'Update may have failed. The node is still running and its version has not changed.');
             }
           } else if (node.type === 'local') {
             // Local node has only two failure signals: an explicit pull/spawn
@@ -775,18 +824,18 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
             const localError = selfUpdate.getLastError();
             if (localError) {
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'update failed:', localError);
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'failed', localError));
+              resolveTerminal(node, tracker, 'failed', localError);
               selfUpdate.clearLastError();
             } else if (elapsed > EARLY_FAIL_MS) {
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's');
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'failed', 'Local update did not complete. The container may not have restarted; check Docker logs on the host.'));
+              resolveTerminal(node, tracker, 'failed', 'Local update did not complete. The container may not have restarted; check Docker logs on the host.');
             }
           }
         }
 
-        // Auto-expire completed entries 60s after they resolved so the badge
-        // is visible briefly after completion.
-        if (tracker?.status === 'completed' && tracker.resolvedAt && Date.now() - tracker.resolvedAt > 60_000) {
+        // Auto-expire completed entries after their visibility window so the
+        // badge is visible briefly after completion.
+        if (tracker?.status === 'completed' && tracker.resolvedAt && Date.now() - tracker.resolvedAt > TERMINAL_TTL_MS) {
           updateTracker.delete(node.id);
         }
 
@@ -799,6 +848,17 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         }
 
         const currentTracker = updateTracker.get(node.id);
+        // A node that just finished updating runs new code with a possibly
+        // different version and capability set. Drop its cached /api/meta on
+        // the completion transition so the dashboard reflects the new state
+        // immediately instead of waiting out the remote-meta TTL.
+        if (
+          node.type === 'remote' &&
+          statusBeforeResolve !== 'completed' &&
+          currentTracker?.status === 'completed'
+        ) {
+          invalidateRemoteMetaCache(node.id);
+        }
         return {
           nodeId: node.id,
           name: node.name,
@@ -814,6 +874,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
     const nodeStatuses = results.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
+      console.warn(`[Fleet] Update-status poll failed for node ${nodes[i].name}:`, r.reason);
       return {
         nodeId: nodes[i].id,
         name: nodes[i].name,
@@ -983,6 +1044,9 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
     const skipped = nodes.filter(n => !candidates.includes(n)).map(n => n.name);
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
+      if (r.status === 'rejected') {
+        console.warn(`[Fleet] Update-all failed for node ${candidates[i].name}:`, r.reason);
+      }
       const val = r.status === 'fulfilled' ? r.value : { name: candidates[i].name, triggered: false };
       (val.triggered ? updating : skipped).push(val.name);
     }
@@ -996,6 +1060,7 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
 });
 
 fleetRouter.delete('/nodes/:nodeId/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
   try {
     const nodeId = parseIntParam(req, res, 'nodeId', 'node ID');
     if (nodeId === null) return;
@@ -1013,16 +1078,25 @@ fleetRouter.delete('/nodes/:nodeId/update-status', authMiddleware, async (req: R
 });
 
 fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  // Pre-fetch fresh latest version so the next GET has up-to-date data.
+  if (!requireAdmin(req, res)) return;
+  // Optionally pre-fetch a fresh latest version so the next GET compares against
+  // it. Throttled so a caller cannot loop this to hammer the upstream registries;
+  // `rechecked` tells the client whether the forced refresh actually ran.
+  let rechecked = false;
   if (req.query.recheck === 'true') {
-    await getLatestVersion(true);
+    const now = Date.now();
+    if (now - lastForcedRecheckAt >= FORCED_RECHECK_COOLDOWN_MS) {
+      lastForcedRecheckAt = now;
+      await getLatestVersion(true);
+      rechecked = true;
+    }
   }
   for (const [nodeId, tracker] of updateTracker.entries()) {
     if (tracker.status === 'timeout' || tracker.status === 'failed' || tracker.status === 'completed') {
       updateTracker.delete(nodeId);
     }
   }
-  res.status(204).send();
+  res.status(200).json({ rechecked });
 });
 
 // ─── Fleet Actions: gateway-orchestrated endpoints (multi-node) ───
@@ -1030,6 +1104,12 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
 // Per-node fleet-action endpoints (run on the target node via the proxy) live
 // in `routes/fleetActions.ts`. The endpoint below is gateway-orchestrated and
 // lives here so it sits behind the `/api/fleet/` proxy-exempt prefix.
+
+// Attribute one error to every stack a node was supposed to act on. Used for
+// the fleet-stop failure paths (no proxy target, non-ok remote, transport
+// error, local exception) so each stack carries the same node-level cause.
+const failAllStacks = (stacks: string[], error: string): StackStopResult[] =>
+  stacks.map(stackName => ({ stackName, success: false, error }));
 
 // Fleet-wide stop by label name. Matches each node's labels by name and runs
 // container stops on each matching stack.
@@ -1051,7 +1131,36 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
+    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-stop:', { labelName: trimmed, dryRun: isDryRun, nodes: nodes.length });
     const results = await Promise.all(nodes.map(async (node) => {
+      if (node.type === 'local') {
+        // Match + stop runs in-process against the control's own Docker. The
+        // helper shares the per-node `bulk:<id>` lock with the per-label action
+        // route so the two cannot double-stop the same containers. A control-side
+        // failure (e.g. the compose dir is unreadable) degrades to a per-stack
+        // error for this node only, the same way the remote leg does, so one bad
+        // node never discards the rest of the fleet's results.
+        try {
+          const outcome = await runLocalLabelStop(node.id, trimmed, isDryRun);
+          return { nodeId: node.id, nodeName: node.name, matched: outcome.matched, stackResults: outcome.stackResults };
+        } catch (err) {
+          const errorMsg = getErrorMessage(err, 'Failed to stop local stacks');
+          const localLabel = db.getLabels(node.id).find(l => l.name === trimmed);
+          const localStacks = localLabel ? db.getStacksForLabel(localLabel.id, node.id) : [];
+          return {
+            nodeId: node.id, nodeName: node.name, matched: !!localLabel,
+            stackResults: failAllStacks(localStacks, errorMsg),
+          };
+        }
+      }
+
+      // Remote node. The control's mirror tells us which stacks *should* match
+      // so transport errors can be attributed per stack; the authoritative stop
+      // runs on the remote via its admin-only local-stop receiver, which reuses
+      // the same name-matched helper under the remote's own bulk lock. This
+      // replaces the previous fan-out to `POST /api/labels/:id/action`, a
+      // paid-tier route that 403'd on Community remotes even though fleet-stop
+      // itself is available on every license.
       const label = db.getLabels(node.id).find(l => l.name === trimmed);
       if (!label) {
         return { nodeId: node.id, nodeName: node.name, matched: false, stackResults: [] };
@@ -1061,56 +1170,21 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: [] };
       }
 
-      if (node.type === 'local') {
-        // Share the per-node bulk lock with `POST /api/labels/:id/action` so
-        // a fleet-stop and a per-label action cannot double-stop the same
-        // containers concurrently on the same local node. Dry run acquires
-        // the same lock so the rehearsal exercises the same contention path.
-        const lockKey = `bulk:${node.id}`;
-        if (activeBulkActions.has(lockKey)) {
-          return {
-            nodeId: node.id, nodeName: node.name, matched: true,
-            stackResults: stackNames.map(stackName => ({ stackName, success: false, error: 'A bulk action is already running on this node' })),
-          };
-        }
-        activeBulkActions.add(lockKey);
-        try {
-          const fsStacks = await FileSystemService.getInstance(node.id).getStacks();
-          const fsStackSet = new Set(fsStacks);
-          const validStacks = stackNames.filter(name => fsStackSet.has(name));
-          const stackResults: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] = [];
-          for (const stackName of validStacks) {
-            if (isDryRun) {
-              stackResults.push({ stackName, success: true, dryRun: true });
-              continue;
-            }
-            const outcome = await containerActionForStack(node.id, stackName, 'stop');
-            if (outcome.kind === 'ok') stackResults.push({ stackName, success: true });
-            else if (outcome.kind === 'no-containers') stackResults.push({ stackName, success: false, error: 'No containers found for this stack' });
-            else stackResults.push({ stackName, success: false, error: outcome.message });
-          }
-          if (!isDryRun && stackResults.some(r => r.success)) invalidateNodeCaches(node.id);
-          return { nodeId: node.id, nodeName: node.name, matched: true, stackResults };
-        } finally {
-          activeBulkActions.delete(lockKey);
-        }
-      }
-
       const target = NodeRegistry.getInstance().getProxyTarget(node.id);
       if (!target) {
         const error = formatNoTargetError(node);
         return {
           nodeId: node.id, nodeName: node.name, matched: true,
-          stackResults: stackNames.map(stackName => ({ stackName, success: false, error })),
+          stackResults: failAllStacks(stackNames, error),
         };
       }
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
-        const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/labels/${label.id}/action`, {
+        const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/fleet-actions/labels/local-stop`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ action: 'stop', dryRun: isDryRun }),
+          body: JSON.stringify({ labelName: trimmed, dryRun: isDryRun }),
           signal: AbortSignal.timeout(60000),
         });
         if (!response.ok) {
@@ -1118,19 +1192,34 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
           const message = err.error || `Remote returned ${response.status}`;
           return {
             nodeId: node.id, nodeName: node.name, matched: true,
-            stackResults: stackNames.map(stackName => ({ stackName, success: false, error: message })),
+            stackResults: failAllStacks(stackNames, message),
           };
         }
-        const remote = (await response.json()) as { results?: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] };
-        return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: remote.results ?? [] };
+        // Trust the remote's own matched flag over the control's mirror: a
+        // mirror-skewed control could believe the label exists while the remote
+        // has no such label, which the remote reports as matched:false. Guard
+        // results as an array so a malformed 200 body degrades to empty rather
+        // than flowing a non-array into the per-stack renderers.
+        const remote = (await response.json()) as Partial<LabelLocalStopResponse>;
+        return {
+          nodeId: node.id, nodeName: node.name,
+          matched: remote.matched ?? true,
+          stackResults: Array.isArray(remote.results) ? remote.results : [],
+        };
       } catch (err) {
         const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
         return {
           nodeId: node.id, nodeName: node.name, matched: true,
-          stackResults: stackNames.map(stackName => ({ stackName, success: false, error: errorMsg })),
+          stackResults: failAllStacks(stackNames, errorMsg),
         };
       }
     }));
+    if (isDebugEnabled()) {
+      const matched = results.filter(r => r.matched).length;
+      const stopped = results.reduce((n, r) => n + r.stackResults.filter(s => s.success).length, 0);
+      const failed = results.reduce((n, r) => n + r.stackResults.filter(s => !s.success).length, 0);
+      console.debug('[Fleet:debug] fleet-stop complete:', { matched, stopped, failed });
+    }
     res.json({ results });
   } catch (error) {
     console.error('[Fleet] fleet-stop error:', error);
@@ -1183,6 +1272,7 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
+    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-prune:', { targets, scope, dryRun: isDryRun, nodes: nodes.length });
 
     const results: NodeResult[] = await Promise.all(nodes.map(async (node): Promise<NodeResult> => {
       if (node.type === 'local') {
@@ -1291,6 +1381,11 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
       };
     }));
 
+    if (isDebugEnabled()) {
+      const reachable = results.filter(r => r.reachable).length;
+      const reclaimed = results.reduce((n, r) => n + r.targets.reduce((m, t) => m + t.reclaimedBytes, 0), 0);
+      console.debug('[Fleet:debug] fleet-prune complete:', { reachable, unreachable: results.length - reachable, reclaimedBytes: reclaimed });
+    }
     res.json({ results });
   } catch (error) {
     console.error('[Fleet] fleet-prune error:', error);
@@ -1502,6 +1597,7 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
 
     let totalStacks = 0;
     const allFiles: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }> = [];
+    const skippedStacks: Array<{ nodeId: number; nodeName: string; stackName: string; reason: string }> = [];
 
     for (const nodeData of capturedNodes) {
       totalStacks += nodeData.stacks.length;
@@ -1516,6 +1612,14 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
           });
         }
       }
+      for (const warning of nodeData.warnings) {
+        skippedStacks.push({
+          nodeId: nodeData.nodeId,
+          nodeName: nodeData.nodeName,
+          stackName: warning.stackName,
+          reason: warning.reason,
+        });
+      }
     }
 
     const snapshotId = db.createSnapshot(
@@ -1524,6 +1628,7 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
       capturedNodes.length,
       totalStacks,
       JSON.stringify(skippedNodes),
+      JSON.stringify(skippedStacks),
     );
 
     if (allFiles.length > 0) {
@@ -1532,20 +1637,29 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
 
     const cloudSvc = CloudBackupService.getInstance();
     if (cloudSvc.isEnabled() && cloudSvc.isAutoUploadOn()) {
-      void cloudSvc.uploadSnapshot(snapshotId).catch(uploadErr => {
-        const message = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
-        console.error('[Fleet Snapshot] Cloud upload failed:', message);
-        void NotificationService.getInstance()
-          .dispatchAlert('error', 'system', `Cloud backup upload failed for snapshot ${snapshotId}: ${message}`)
-          .catch(() => { /* notification dispatch is best-effort */ });
-      });
+      void cloudSvc.uploadSnapshot(snapshotId)
+        .then(() => console.log(`[Fleet Snapshot] Cloud auto-upload OK for snapshot ${snapshotId}`))
+        .catch(uploadErr => {
+          const message = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+          console.error('[Fleet Snapshot] Cloud upload failed:', message);
+          void NotificationService.getInstance()
+            .dispatchAlert('error', 'system', `Cloud backup upload failed for snapshot ${snapshotId}: ${message}`)
+            .catch(() => { /* notification dispatch is best-effort */ });
+        });
     }
 
-    console.log('[Fleet] Snapshot created:', capturedNodes.length, 'nodes,', totalStacks, 'stacks');
+    if (skippedNodes.length > 0 || skippedStacks.length > 0) {
+      console.warn(`[Fleet] Snapshot ${snapshotId} partial: ${capturedNodes.length} node(s), ${totalStacks} stack(s); skipped ${skippedNodes.length} node(s), ${skippedStacks.length} stack(s)`);
+    } else {
+      console.log('[Fleet] Snapshot created:', capturedNodes.length, 'nodes,', totalStacks, 'stacks');
+    }
     if (isDebugEnabled()) {
       console.debug(`[Fleet:debug] Snapshot ${snapshotId} capture completed in ${Date.now() - captureStart}ms, ${allFiles.length} file(s) stored`);
       for (const skip of skippedNodes) {
         console.debug(`[Fleet:debug] Skipped node "${skip.nodeName}" (id=${skip.nodeId}): ${skip.reason}`);
+      }
+      for (const skip of skippedStacks) {
+        console.debug(`[Fleet:debug] Skipped stack "${skip.stackName}" on "${skip.nodeName}" (id=${skip.nodeId}): ${skip.reason}`);
       }
     }
     const snapshot = db.getSnapshot(snapshotId);
@@ -1557,6 +1671,8 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
 });
 
 fleetRouter.get('/snapshots', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+
   try {
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
     const offset = parseInt(req.query.offset as string, 10) || 0;
@@ -1572,6 +1688,8 @@ fleetRouter.get('/snapshots', authMiddleware, async (req: Request, res: Response
 });
 
 fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+
   try {
     const id = parseIntParam(req, res, 'id', 'snapshot ID');
     if (id === null) return;
@@ -1614,6 +1732,119 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
   }
 });
 
+// Raised when a remote target node has no reachable proxy address. The
+// single-stack restore route maps it to a 503; restore-all records it as a
+// per-stack failure instead.
+class SnapshotProxyTargetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SnapshotProxyTargetError';
+  }
+}
+
+interface RemoteProxyContext {
+  baseUrl: string;
+  headers: Record<string, string>;
+}
+
+// Builds an error from a failed remote response so the thrown message names the
+// remote node's actual reason (policy block, validation, write error) instead
+// of a generic string. The body is truncated to keep the recorded message bounded.
+async function remoteStackError(action: string, res: Awaited<ReturnType<typeof fetch>>): Promise<Error> {
+  let detail = '';
+  try {
+    detail = (await res.text()).slice(0, 300).trim();
+  } catch {
+    // Remote body unavailable; the status code alone still names the failure.
+  }
+  return new Error(`${action} on remote node (${res.status})${detail ? `: ${detail}` : ''}`);
+}
+
+// Builds the base URL + proxy headers for a remote node, or null when the node
+// has no reachable target. Tier/variant headers describe the central instance
+// and stay unconditional; the Bearer header is gated on a non-empty token
+// because pilot-loopback dispatch carries auth via the tunnel.
+function buildRemoteProxyContext(node: Node): RemoteProxyContext | null {
+  const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
+  if (!proxyTarget) return null;
+  const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    [PROXY_TIER_HEADER]: proxyHeaders.tier,
+    [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
+  };
+  if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
+  return { baseUrl: proxyTarget.apiUrl.replace(/\/$/, ''), headers };
+}
+
+// Writes a snapshot stack's files back to its node: local nodes write to disk
+// (backing up any current files first), remote nodes receive them over the
+// proxy. Throws SnapshotProxyTargetError when a remote node is unreachable, and
+// an Error carrying the remote node's status and reason on a failed remote write.
+async function applySnapshotStackFiles(
+  node: Node,
+  stackName: string,
+  files: Array<{ filename: string; content: string }>,
+): Promise<void> {
+  if (node.type === 'local') {
+    const fsService = FileSystemService.getInstance(node.id);
+    try {
+      await fsService.backupStackFiles(stackName);
+    } catch (e) {
+      // Stack may not exist yet before first restore; that is ok.
+      console.warn(`[Fleet Snapshot] Pre-restore backup failed for stack "${stackName}" (may not exist yet):`, getErrorMessage(e, 'unknown'));
+    }
+    for (const file of files) {
+      if (file.filename === 'compose.yaml') {
+        await fsService.saveStackContent(stackName, file.content);
+      } else if (file.filename === '.env') {
+        await fsService.saveEnvContent(stackName, file.content);
+      }
+    }
+    return;
+  }
+
+  const ctx = buildRemoteProxyContext(node);
+  if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
+  for (const file of files) {
+    if (file.filename === 'compose.yaml') {
+      const putRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}`, {
+        method: 'PUT',
+        headers: ctx.headers,
+        body: JSON.stringify({ content: file.content }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!putRes.ok) throw await remoteStackError('Failed to restore compose file', putRes);
+    } else if (file.filename === '.env') {
+      const putRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`, {
+        method: 'PUT',
+        headers: ctx.headers,
+        body: JSON.stringify({ content: file.content }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!putRes.ok) throw await remoteStackError('Failed to restore env file', putRes);
+    }
+  }
+}
+
+// Redeploys a stack after its files are restored. The deploy policy gate stays
+// with the caller (local deploys gate centrally; remote deploys are gated by
+// the remote node), so this only performs the deploy itself.
+async function redeploySnapshotStack(node: Node, stackName: string): Promise<void> {
+  if (node.type === 'local') {
+    await ComposeService.getInstance(node.id).deployStack(stackName);
+    return;
+  }
+  const ctx = buildRemoteProxyContext(node);
+  if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
+  const deployRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
+    method: 'POST',
+    headers: ctx.headers,
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!deployRes.ok) throw await remoteStackError('Failed to redeploy stack', deployRes);
+}
+
 fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
 
@@ -1655,83 +1886,103 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       return;
     }
 
-    if (node.type === 'local') {
-      const fsService = FileSystemService.getInstance(node.id);
+    await applySnapshotStackFiles(node, stackName, files);
 
-      try {
-        await fsService.backupStackFiles(stackName);
-      } catch (e) {
-        // Stack may not exist yet before first restore; that is ok.
-        console.warn(`[Fleet Snapshot] Pre-restore backup failed for stack "${stackName}" (may not exist yet):`, getErrorMessage(e, 'unknown'));
-      }
-
-      for (const file of files) {
-        if (file.filename === 'compose.yaml') {
-          await fsService.saveStackContent(stackName, file.content);
-        } else if (file.filename === '.env') {
-          await fsService.saveEnvContent(stackName, file.content);
-        }
-      }
-
-      if (redeploy) {
-        if (!(await runPolicyGate(req, res, stackName, node.id))) return;
-        const composeService = ComposeService.getInstance(node.id);
-        await composeService.deployStack(stackName);
-      }
-    } else {
-      const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
-      if (!proxyTarget) {
-        res.status(503).json({ error: formatNoTargetError(node) });
-        return;
-      }
-
-      const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
-      const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-      // Tier/variant headers describe the central instance and stay
-      // unconditional; the Bearer header is gated on a non-empty token
-      // because pilot-loopback dispatch carries auth via the tunnel.
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        [PROXY_TIER_HEADER]: proxyHeaders.tier,
-        [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
-      };
-      if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
-
-      for (const file of files) {
-        if (file.filename === 'compose.yaml') {
-          const putRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}`, {
-            method: 'PUT',
-            headers,
-            body: JSON.stringify({ content: file.content }),
-            signal: AbortSignal.timeout(15000),
-          });
-          if (!putRes.ok) throw new Error('Failed to restore compose file on remote node');
-        } else if (file.filename === '.env') {
-          const putRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`, {
-            method: 'PUT',
-            headers,
-            body: JSON.stringify({ content: file.content }),
-            signal: AbortSignal.timeout(15000),
-          });
-          if (!putRes.ok) throw new Error('Failed to restore env file on remote node');
-        }
-      }
-
-      if (redeploy) {
-        const deployRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
-          method: 'POST',
-          headers,
-          signal: AbortSignal.timeout(30000),
-        });
-        if (!deployRes.ok) throw new Error('Failed to redeploy stack on remote node');
-      }
+    if (redeploy) {
+      // Local deploys are gated centrally here; remote deploys are gated by the
+      // remote node's own deploy endpoint.
+      if (node.type === 'local' && !(await runPolicyGate(req, res, stackName, node.id))) return;
+      await redeploySnapshotStack(node, stackName);
     }
 
     console.log('[Fleet] Snapshot restore: snapshot=%s node=%s stack=%s', snapshotId, sanitizeForLog(nodeId), sanitizeForLog(stackName));
     res.json({ message: 'Stack restored successfully', redeployed: redeploy });
   } catch (error) {
+    if (error instanceof SnapshotProxyTargetError) {
+      res.status(503).json({ error: error.message });
+      return;
+    }
     console.error('[Fleet Snapshot] Restore error:', error);
     res.status(500).json({ error: 'Failed to restore stack from snapshot' });
+  }
+});
+
+// One row per (node, stack) in a restore-all run. A failed row carries the
+// reason in `error`; a succeeded row reports whether it was also redeployed.
+interface SnapshotRestoreResult {
+  nodeId: number;
+  nodeName: string;
+  stackName: string;
+  success: boolean;
+  redeployed: boolean;
+  error?: string;
+}
+
+fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+
+  try {
+    const snapshotId = parseIntParam(req, res, 'id', 'snapshot ID');
+    if (snapshotId === null) return;
+    const redeploy: boolean = req.body?.redeploy === true;
+
+    const db = DatabaseService.getInstance();
+    const snapshot = db.getSnapshot(snapshotId);
+    if (!snapshot) {
+      res.status(404).json({ error: 'Snapshot not found' });
+      return;
+    }
+
+    const files = db.getSnapshotFiles(snapshotId);
+    if (files.length === 0) {
+      res.status(404).json({ error: 'Snapshot has no files to restore' });
+      return;
+    }
+
+    // Group the snapshot's files by node + stack, mirroring the detail route.
+    const groups = new Map<string, { nodeId: number; nodeName: string; stackName: string; files: Array<{ filename: string; content: string }> }>();
+    for (const file of files) {
+      const key = `${file.node_id}:${file.stack_name}`;
+      let entry = groups.get(key);
+      if (!entry) {
+        entry = { nodeId: file.node_id, nodeName: file.node_name, stackName: file.stack_name, files: [] };
+        groups.set(key, entry);
+      }
+      entry.files.push({ filename: file.filename, content: file.content });
+    }
+
+    const policyOptions = buildPolicyGateOptions(req);
+    const results: SnapshotRestoreResult[] = [];
+
+    // Restore every stack independently: one stack failing (unreachable node,
+    // blocked deploy, write error) is recorded and the rest still proceed.
+    for (const group of groups.values()) {
+      try {
+        if (!isValidStackName(group.stackName)) throw new Error('Invalid stack name');
+        const node = db.getNode(group.nodeId);
+        if (!node) throw new Error('Target node no longer exists');
+
+        await applySnapshotStackFiles(node, group.stackName, group.files);
+
+        let redeployed = false;
+        if (redeploy) {
+          if (node.type === 'local') await assertPolicyGateAllows(group.stackName, node.id, policyOptions);
+          await redeploySnapshotStack(node, group.stackName);
+          redeployed = true;
+        }
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed });
+      } catch (e) {
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, error: getErrorMessage(e, 'Restore failed') });
+      }
+    }
+
+    const restored = results.filter(r => r.success).length;
+    const failed = results.length - restored;
+    console.log('[Fleet] Snapshot restore-all: snapshot=%s restored=%s failed=%s redeploy=%s', snapshotId, restored, failed, redeploy);
+    res.json({ restored, failed, redeploy, results });
+  } catch (error) {
+    console.error('[Fleet Snapshot] Restore-all error:', error);
+    res.status(500).json({ error: 'Failed to restore snapshot' });
   }
 });
 

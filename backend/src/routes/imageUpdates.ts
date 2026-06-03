@@ -52,7 +52,8 @@ imageUpdatesRouter.get('/status', authMiddleware, (_req: Request, res: Response)
   res.json({ checking: ImageUpdateService.getInstance().isChecking() });
 });
 
-imageUpdatesRouter.get('/fleet', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
   try {
     const result = await CacheService.getInstance().getOrFetch<Record<number, Record<string, boolean>>>(
       FLEET_UPDATE_CACHE_KEY,
@@ -197,6 +198,7 @@ export const autoUpdateRouter = Router();
 
 autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const { target } = req.body as { target?: string };
     console.log(`[AutoUpdate] Execute requested: target="${sanitizeForLog(target || '')}"`);
@@ -288,7 +290,8 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           }),
         );
         if (!autoUpdateGate.ok) {
-          const blockedMsg = `Policy "${autoUpdateGate.policy?.name}" blocked auto-update: ${autoUpdateGate.violations.length} image(s) exceed ${autoUpdateGate.policy?.max_severity}`;
+          const blockedImages = autoUpdateGate.violations.map((v) => v.imageRef).join(', ');
+          const blockedMsg = `Policy "${autoUpdateGate.policy?.name}" blocked auto-update: ${autoUpdateGate.violations.length} image(s) exceed ${autoUpdateGate.policy?.max_severity}${blockedImages ? ` (${blockedImages})` : ''}`;
           NotificationService.getInstance().dispatchAlert('warning', 'scan_finding', blockedMsg, { stackName, actor: 'system:image-update' });
           results.push(`Stack "${stackName}": ${blockedMsg}`);
           continue;

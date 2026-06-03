@@ -25,6 +25,7 @@ const {
     mockInspect,
     mockGetContainer,
     mockGetDocker,
+    mockIsOwnContainer,
 } = vi.hoisted(() => ({
     mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
     mockBroadcastEvent: vi.fn(),
@@ -34,6 +35,7 @@ const {
     mockInspect: vi.fn().mockResolvedValue({}),
     mockGetContainer: vi.fn(),
     mockGetDocker: vi.fn(),
+    mockIsOwnContainer: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock('../services/NotificationService', () => ({
@@ -54,6 +56,14 @@ vi.mock('../services/DatabaseService', () => ({
 vi.mock('../services/NodeRegistry', () => ({
     NodeRegistry: {
         getInstance: () => ({ getDocker: mockGetDocker }),
+    },
+}));
+
+vi.mock('../services/SelfIdentityService', () => ({
+    default: {
+        getInstance: () => ({
+            isOwnContainer: mockIsOwnContainer,
+        }),
     },
 }));
 
@@ -88,6 +98,8 @@ beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     mockGetGlobalSettings.mockReturnValue({ global_crash: '1' });
+    mockIsOwnContainer.mockReset();
+    mockIsOwnContainer.mockReturnValue(false);
 
     stream = makeStream();
     mockGetEvents.mockImplementation(async () => stream);
@@ -127,6 +139,112 @@ describe('DockerEventService - die classification', () => {
             'monitor_alert',
             expect.stringContaining('Container Crash Detected'),
             expect.objectContaining({ containerName: 'web' }),
+        );
+    });
+
+    it('stamps a crash signal and clears it on a later clean exit', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // Crash: non-zero exit, no prior kill.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-clean', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(service.getContainerState('c-clean')?.crashedAt).toBeTypeOf('number');
+
+        // A subsequent clean exit (code 0) must wipe the stale crash signal.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-clean', Attributes: { exitCode: '0', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(service.getContainerState('c-clean')?.crashedAt).toBeUndefined();
+    });
+
+    it('does not stamp a crash for a die that was superseded by a start', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // Establish tracked state so the later start is recorded.
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: healthy',
+            Actor: { ID: 'c-race', Attributes: { name: 'web' } },
+        });
+        // Crash, then restart strictly later but still within the 500ms grace
+        // window before the die is classified.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: { ID: 'c-race', Attributes: { exitCode: '1', name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        stream.push({
+            Type: 'container',
+            Action: 'start',
+            Actor: { ID: 'c-race', Attributes: { name: 'web' } },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(service.getContainerState('c-race')?.crashedAt).toBeUndefined();
+    });
+
+    it('keeps stack and container routing for non-self compose crashes', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: {
+                ID: 'app-id',
+                Attributes: {
+                    exitCode: '1',
+                    name: 'web',
+                    'com.docker.compose.project': 'web-stack',
+                },
+            },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledWith(
+            'error',
+            'monitor_alert',
+            expect.stringContaining('Container Crash Detected'),
+            expect.objectContaining({ stackName: 'web-stack', containerName: 'web' }),
+        );
+    });
+
+    it('routes self-container crashes as system-only notifications', async () => {
+        mockIsOwnContainer.mockImplementation((idOrName: string) =>
+            idOrName === 'self-id' || idOrName === 'sencho',
+        );
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: {
+                ID: 'self-id',
+                Attributes: {
+                    exitCode: '1',
+                    name: 'sencho',
+                    'com.docker.compose.project': 'sencho',
+                },
+            },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        expect(mockDispatchAlert).toHaveBeenCalledWith(
+            'error',
+            'monitor_alert',
+            expect.stringContaining('Container Crash Detected'),
+            { actor: 'system:docker-events' },
         );
     });
 
@@ -228,6 +346,33 @@ describe('DockerEventService - die classification', () => {
             'monitor_alert',
             expect.stringContaining('Healthcheck failed'),
             expect.objectContaining({ containerName: 'api' }),
+        );
+    });
+
+    it('routes self-container unhealthy alerts as system-only notifications', async () => {
+        mockIsOwnContainer.mockImplementation((idOrName: string) =>
+            idOrName === 'self-id' || idOrName === 'sencho',
+        );
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: {
+                ID: 'self-id',
+                Attributes: {
+                    name: 'sencho',
+                    'com.docker.compose.project': 'sencho',
+                },
+            },
+        });
+
+        expect(mockDispatchAlert).toHaveBeenCalledWith(
+            'error',
+            'monitor_alert',
+            expect.stringContaining('Healthcheck failed'),
+            { actor: 'system:docker-events' },
         );
     });
 
@@ -614,6 +759,30 @@ describe('DockerEventService - state-invalidate broadcasts', () => {
             containerId: 'aaa',
             action: 'start',
         }));
+    });
+
+    it('does not broadcast stack state-invalidate for Sencho self-container events', async () => {
+        mockIsOwnContainer.mockImplementation((idOrName: string) =>
+            idOrName === 'self-id' || idOrName === 'sencho',
+        );
+        service = new DockerEventService(7, 'node-7');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'start',
+            Actor: {
+                ID: 'self-id',
+                Attributes: {
+                    name: 'sencho',
+                    'com.docker.compose.project': 'sencho',
+                },
+            },
+            time: 1,
+        });
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(mockBroadcastEvent).not.toHaveBeenCalled();
     });
 
     it('broadcasts state-invalidate on health_status:unhealthy', async () => {

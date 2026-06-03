@@ -2,6 +2,7 @@ import Docker from 'dockerode';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationCategory, NotificationService } from './NotificationService';
 import { DatabaseService } from './DatabaseService';
+import SelfIdentityService from './SelfIdentityService';
 import {
     classifyDie,
     classifyGapExit,
@@ -32,6 +33,13 @@ export interface ContainerHealthSnapshot {
     healthStatus?: 'healthy' | 'unhealthy' | 'starting';
     unhealthySince?: number;
     lastKillAt?: number;
+    /**
+     * Timestamp (ms) of the last exit classified as a crash or OOM kill, cleared
+     * when the container next starts. Set independently of the crash-alert toggle
+     * so Auto-Heal can distinguish a crash (heal-worthy) from an operator stop or
+     * clean exit (which are never stamped here).
+     */
+    crashedAt?: number;
 }
 
 /** Grace window after a `die` before classifying, to absorb out-of-order kill events. */
@@ -79,10 +87,13 @@ const SETTINGS_CACHE_MS = 500;
 interface InternalContainerState extends ContainerLifecycleState {
     name?: string;
     stackName?: string;
+    isSelf?: boolean;
     lastCrashAlertAt?: number;
     lastActivityAt: number;
     healthStatus?: 'healthy' | 'unhealthy' | 'starting';
     unhealthySince?: number;
+    crashedAt?: number;
+    lastStartAt?: number;
 }
 
 interface DockerEventPayload {
@@ -341,9 +352,10 @@ export class DockerEventService {
             const name = inspect.Name?.replace(/^\//, '') ?? containerId.slice(0, 12);
             const stackName = inspect.Config?.Labels?.[COMPOSE_PROJECT_LABEL];
             const exitCode = inspect.State?.ExitCode ?? 0;
+            const isSelf = this.isSelfContainer(containerId, name);
 
             // Gap exits have no in-memory state, so there's no dedup to bump.
-            await this.emitClassification(classification, null, { name, exitCode, stackName });
+            await this.emitClassification(classification, null, { name, exitCode, stackName, isSelf });
         } catch (err) {
             if (isDebugEnabled()) {
                 console.log(`[DockerEvents:${this.nodeName}:diag] gap inspect failed:`,
@@ -379,6 +391,8 @@ export class DockerEventService {
         const action = event.Action ?? '';
         const id = event.Actor?.ID;
         if (!id) return;
+        const attrs = event.Actor?.Attributes ?? {};
+        const isSelf = this.isSelfContainer(id, attrs.name);
 
         // Normalize: `health_status: unhealthy` -> base action
         const baseAction = action.startsWith('health_status') ? 'health_status' : action;
@@ -387,12 +401,12 @@ export class DockerEventService {
         // refetch stack statuses immediately on a real container event,
         // without waiting for the next polling tick. This is fire-and-forget
         // and is NOT persisted to the alerts history.
-        if (STATE_INVALIDATE_ACTIONS.has(baseAction)) {
+        if (STATE_INVALIDATE_ACTIONS.has(baseAction) && !isSelf) {
             this.notifier.broadcastEvent({
                 type: 'state-invalidate',
                 scope: 'stack',
                 nodeId: this.nodeId,
-                stackName: event.Actor?.Attributes?.[COMPOSE_PROJECT_LABEL] ?? null,
+                stackName: attrs[COMPOSE_PROJECT_LABEL] ?? null,
                 containerId: id,
                 action: baseAction,
                 ts: Date.now(),
@@ -422,12 +436,15 @@ export class DockerEventService {
     }
 
     private onDie(id: string, event: DockerEventPayload): void {
+        // Capture the die time at arrival, not inside the deferred classifier, so a
+        // start that races in during the grace window is correctly seen as later.
+        const dieAt = this.eventTimeMs(event);
         // Defer classification to absorb out-of-order kill events.
         const existing = this.pendingDieTimers.get(id);
         if (existing) clearTimeout(existing);
         const timer = setTimeout(() => {
             this.pendingDieTimers.delete(id);
-            void this.classifyDie(id, event);
+            void this.classifyDie(id, event, dieAt);
         }, DIE_GRACE_WINDOW_MS);
         this.pendingDieTimers.set(id, timer);
     }
@@ -449,12 +466,12 @@ export class DockerEventService {
             state.healthStatus = 'unhealthy';
             if (!this.isCrashAlertsEnabled()) return;
             const name = state.name ?? id.slice(0, 12);
-            const stackName = state.stackName;
             void this.emitError(
                 'monitor_alert',
                 `Healthcheck failed: ${name} is unhealthy.`,
-                stackName,
+                state.stackName,
                 state.name,
+                state.isSelf === true,
             );
         } else {
             state.unhealthySince = undefined;
@@ -473,8 +490,10 @@ export class DockerEventService {
         state.lastKillAt = undefined;
         state.oomPending = undefined;
         state.lastCrashAlertAt = undefined;
+        state.crashedAt = undefined;
         state.unhealthySince = undefined;
         state.healthStatus = 'starting';
+        state.lastStartAt = Date.now();
         state.lastActivityAt = Date.now();
     }
 
@@ -487,7 +506,7 @@ export class DockerEventService {
         }
     }
 
-    private async classifyDie(id: string, event: DockerEventPayload): Promise<void> {
+    private async classifyDie(id: string, event: DockerEventPayload, dieAt: number): Promise<void> {
         const state = this.getOrCreateState(id, event);
         const exitCodeStr = event.Actor?.Attributes?.exitCode;
         const parsedExit = exitCodeStr !== undefined ? parseInt(exitCodeStr, 10) : undefined;
@@ -495,7 +514,7 @@ export class DockerEventService {
         const now = Date.now();
 
         let classification = classifyDie(
-            { at: this.eventTimeMs(event), exitCode },
+            { at: dieAt, exitCode },
             { lastKillAt: state.lastKillAt, oomPending: state.oomPending },
         );
 
@@ -503,7 +522,25 @@ export class DockerEventService {
         state.oomPending = undefined;
         state.lastActivityAt = now;
 
-        if (classification === 'intentional' || classification === 'clean') return;
+        // A clean or intentional exit clears any prior crash signal, so a stale
+        // crash cannot outlive a later graceful stop and be mistaken for a fresh one.
+        if (classification === 'intentional' || classification === 'clean') {
+            state.crashedAt = undefined;
+            return;
+        }
+
+        // If the container started again strictly after this die occurred, the die
+        // is superseded (the container recovered). Do not stamp a crash signal or
+        // alert for it; the classification is deferred 500ms, so an immediate
+        // restart can race ahead of this handler. A start at the same instant is
+        // treated as preceding a genuine re-crash, not superseding it.
+        if (state.lastStartAt !== undefined && state.lastStartAt > dieAt) return;
+
+        // Stamp the heal signal for Auto-Heal before the alert dedup/toggle gates
+        // below. This must be independent of whether a crash alert is dispatched,
+        // so Auto-Heal still sees the crash when crash alerts are disabled or
+        // rate-suppressed. Cleared on the next `start` or a later clean exit.
+        state.crashedAt = now;
 
         // Dedup early: crashloops repeatedly reach this point with exit 137,
         // and the OOM fallback below issues a Docker inspect. Skipping the
@@ -534,6 +571,7 @@ export class DockerEventService {
             name: state.name ?? id.slice(0, 12),
             exitCode: exitCode ?? 0,
             stackName: state.stackName,
+            isSelf: state.isSelf === true,
         });
     }
 
@@ -544,7 +582,7 @@ export class DockerEventService {
     private async emitClassification(
         classification: Classification,
         state: InternalContainerState | null,
-        info: { name: string; exitCode: number; stackName?: string },
+        info: { name: string; exitCode: number; stackName?: string; isSelf?: boolean },
     ): Promise<void> {
         // Respect the existing global crash-alerts toggle so users who have
         // disabled these notifications in Settings remain opted out.
@@ -564,7 +602,7 @@ export class DockerEventService {
         // rate-suppressed alerts don't silently lock out the next real crash.
         if (state) state.lastCrashAlertAt = Date.now();
 
-        await this.emitError('monitor_alert', message, info.stackName, info.name);
+        await this.emitError('monitor_alert', message, info.stackName, info.name, info.isSelf === true);
     }
 
     private isCrashAlertsEnabled(): boolean {
@@ -649,7 +687,17 @@ export class DockerEventService {
             const project = attrs[COMPOSE_PROJECT_LABEL];
             if (project && !state.stackName) state.stackName = project;
         }
+        if (this.isSelfContainer(id, state.name)) {
+            state.isSelf = true;
+        }
         return state;
+    }
+
+    private isSelfContainer(id?: string, name?: string): boolean {
+        const self = SelfIdentityService.getInstance();
+        if (id && self.isOwnContainer(id)) return true;
+        const normalizedName = name?.replace(/^\//, '');
+        return normalizedName ? self.isOwnContainer(normalizedName) : false;
     }
 
     private eventTimeMs(event: DockerEventPayload): number {
@@ -662,6 +710,10 @@ export class DockerEventService {
         if (this.containerState.size === 0) return;
         const cutoff = Date.now() - STATE_STALE_AFTER_MS;
         for (const [id, state] of this.containerState) {
+            // Keep state for a container with an unresolved crash so Auto-Heal can
+            // still act on it past the default stale window (policy thresholds run
+            // up to 24h). It is cleared on `start` and removed on `destroy`.
+            if (state.crashedAt !== undefined) continue;
             if (state.lastActivityAt < cutoff) {
                 this.containerState.delete(id);
             }
@@ -672,16 +724,26 @@ export class DockerEventService {
     // Notification wrappers (prefix with node name for multi-node clarity)
     // ========================================================================
 
-    private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('error', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
+    private buildAlertOptions(
+        stackName?: string,
+        containerName?: string,
+        systemOnly = false,
+    ): { stackName?: string; containerName?: string; actor: string } {
+        return systemOnly
+            ? { actor: 'system:docker-events' }
+            : { stackName, containerName, actor: 'system:docker-events' };
+    }
+
+    private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string, systemOnly = false): Promise<void> {
+        return this.notifier.dispatchAlert('error', category, this.prefix(message), this.buildAlertOptions(stackName, containerName, systemOnly));
     }
 
     private async emitWarning(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('warning', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
+        return this.notifier.dispatchAlert('warning', category, this.prefix(message), this.buildAlertOptions(stackName, containerName));
     }
 
     private async emitInfo(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('info', category, this.prefix(message), { stackName, containerName, actor: 'system:docker-events' });
+        return this.notifier.dispatchAlert('info', category, this.prefix(message), this.buildAlertOptions(stackName, containerName));
     }
 
     private prefix(message: string): string {
@@ -733,6 +795,7 @@ export class DockerEventService {
             healthStatus: s.healthStatus,
             unhealthySince: s.unhealthySince,
             lastKillAt: s.lastKillAt,
+            crashedAt: s.crashedAt,
         };
     }
 }

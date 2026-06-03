@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Pencil, Pin, Play, Power, Trash2 } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
@@ -48,6 +48,12 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     const [deleteConfirmText, setDeleteConfirmText] = useState('');
     const { nodes } = useNodes();
 
+    // Hold the latest onOpenChange without making it a refresh dependency. Parents
+    // pass a fresh closure on every render, so binding refresh to it would re-run the
+    // load effect on each parent render and flicker the body through its skeleton.
+    const onOpenChangeRef = useRef(onOpenChange);
+    useEffect(() => { onOpenChangeRef.current = onOpenChange; }, [onOpenChange]);
+
     const refresh = useCallback(async () => {
         setLoading(true);
         try {
@@ -55,11 +61,11 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
             setSummary(result);
         } catch (err) {
             toast.error(err instanceof Error ? err.message : 'Failed to load blueprint');
-            onOpenChange(false);
+            onOpenChangeRef.current(false);
         } finally {
             setLoading(false);
         }
-    }, [blueprintId, onOpenChange]);
+    }, [blueprintId]);
 
     useEffect(() => {
         if (open) {
@@ -229,7 +235,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 crumb={['Blueprints', blueprint?.name ?? '…']}
                 name={blueprint?.name ?? <Skeleton className="h-7 w-40 inline-block" />}
                 meta={meta}
-                primaryAction={blueprint ? {
+                primaryAction={blueprint && canEdit ? {
                     label: 'Apply now',
                     icon: Play,
                     onClick: handleApply,
@@ -245,7 +251,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 footerContext={footerContext}
                 size="lg"
             >
-                {loading || !blueprint || !summary ? (
+                {!blueprint || !summary ? (
                     <div className="space-y-3">
                         <Skeleton className="h-12 w-full" />
                         <Skeleton className="h-32 w-full" />

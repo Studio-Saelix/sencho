@@ -183,15 +183,18 @@ export class WebhookService {
         }
 
         const skipped = result.status === 'skipped';
+        // A debounced pull is rate-limited, not failed (the route answers 202
+        // Accepted). Record it as a success carrying the debounce note so it
+        // does not pollute the webhook's failure history.
         this.recordExecution(
             webhookId,
             action,
-            skipped ? 'failure' : 'success',
+            'success',
             triggerSource,
             durationMs,
             skipped ? result.message : null,
         );
-        return { success: !skipped, error: skipped ? result.message : undefined, duration_ms: durationMs };
+        return { success: true, error: undefined, duration_ms: durationMs };
     }
 
     private async executeRemote(
@@ -214,13 +217,17 @@ export class WebhookService {
             const durationMs = Date.now() - startTime;
             const payload = await response.json().catch(() => ({})) as { error?: string; message?: string; status?: string };
 
-            if (!response.ok || payload.status === 'error' || payload.status === 'skipped') {
+            if (!response.ok || payload.status === 'error') {
                 const error = payload.error || payload.message || `Remote ${action} failed with status ${response.status}`;
                 this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, error);
                 return { success: false, error, duration_ms: durationMs };
             }
 
-            this.recordExecution(webhookId, action, 'success', triggerSource, durationMs, null);
+            // A debounced remote pull comes back 202 with status "skipped": it was
+            // accepted and rate-limited, not failed. Record it as a success with
+            // the debounce note rather than failure noise.
+            const skipped = payload.status === 'skipped';
+            this.recordExecution(webhookId, action, 'success', triggerSource, durationMs, skipped ? (payload.message ?? null) : null);
             return { success: true, duration_ms: durationMs };
         } catch (err) {
             const durationMs = Date.now() - startTime;

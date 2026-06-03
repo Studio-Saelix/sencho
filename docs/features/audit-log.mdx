@@ -113,7 +113,7 @@ In Stream view, Sencho annotates individual entries with lightweight anomaly fla
 | **new ip** | The IP address on this entry has not been seen for this actor in the last 30 days, and the actor already has at least one prior IP on record. |
 | **first seen** | The actor has no prior entries in the 30-day history window. Useful for spotting brand-new service accounts, CLI tools, or compromised sessions. |
 
-Flags are computed at read time against your existing audit history. No new tables, no per-entry storage overhead, and the logic is cache-friendly, so enabling Stream view does not slow down the audit log endpoint.
+Flags are computed at read time against your existing audit history. No new tables, no per-entry storage overhead, and the logic is cache-friendly, so enabling Stream view does not slow down the audit log endpoint. On instances with a very large audit history, baselines are computed from the most recent slice of activity so the view stays responsive; this keeps memory and latency bounded without changing how flags behave for typical histories.
 
 ## Filtering and search
 

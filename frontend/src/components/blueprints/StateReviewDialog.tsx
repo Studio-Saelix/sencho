@@ -1,4 +1,4 @@
-import { Database, Play } from 'lucide-react';
+import { Database, Loader2, Play } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 
@@ -31,11 +31,20 @@ export function StateReviewDialog({
                         type="button"
                         onClick={() => onAccept('fresh')}
                         disabled={busy}
-                        className="w-full text-left rounded-lg border border-card-border border-t-card-border-top bg-card hover:border-t-card-border-hover transition-colors p-3 cursor-pointer"
+                        className="w-full text-left rounded-lg border border-card-border border-t-card-border-top bg-card hover:border-t-card-border-hover transition-colors p-3 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                         <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.2em] text-brand">
-                            <Play className="w-3 h-3" strokeWidth={1.5} />
-                            Deploy fresh
+                            {busy ? (
+                                <>
+                                    <Loader2 className="w-3 h-3 animate-spin" strokeWidth={1.5} />
+                                    Deploying…
+                                </>
+                            ) : (
+                                <>
+                                    <Play className="w-3 h-3" strokeWidth={1.5} />
+                                    Deploy fresh
+                                </>
+                            )}
                         </div>
                         <p className="text-xs text-stat-subtitle mt-1.5 leading-relaxed">
                             Create empty named volumes on this node. The container starts with whatever default state its image carries.

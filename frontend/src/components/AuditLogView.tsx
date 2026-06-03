@@ -101,6 +101,13 @@ function dayKey(ts: number): string {
     return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
+// These views fetch localOnly, so a 401 is the user's own expired session,
+// which apiFetch already turns into a global logout. Skip the redundant
+// load-failure toast in that case so logout does not stack toasts.
+function isExpiredSession(err: unknown): boolean {
+    return err instanceof Error && err.message === 'Unauthorized';
+}
+
 export function AuditLogView() {
     const [entries, setEntries] = useState<AuditEntry[]>([]);
     const [total, setTotal] = useState(0);
@@ -151,9 +158,15 @@ export function AuditLogView() {
                 const data = await res.json();
                 setEntries(data.entries);
                 setTotal(data.total);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err?.error || err?.message || 'Failed to load audit log.');
             }
         } catch (err) {
             console.error('[AuditLog] Failed to fetch:', err);
+            if (!isExpiredSession(err)) {
+                toast.error('Failed to load audit log.');
+            }
         } finally {
             setLoading(false);
         }
@@ -164,9 +177,15 @@ export function AuditLogView() {
             const res = await apiFetch('/audit-log/stats', { localOnly: true });
             if (res.ok) {
                 setStats(await res.json());
+            } else {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err?.error || err?.message || 'Failed to load audit stats.');
             }
         } catch (err) {
             console.error('[AuditLog] Failed to fetch stats:', err);
+            if (!isExpiredSession(err)) {
+                toast.error('Failed to load audit stats.');
+            }
         }
     }, []);
 
