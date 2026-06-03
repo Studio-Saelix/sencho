@@ -311,9 +311,12 @@ metricsRouter.get('/system/stats', authMiddleware, async (req: Request, res: Res
           },
           memory: {
             total: mem.total,
-            used: mem.used,
-            free: mem.free,
-            usagePercent: ((mem.used / mem.total) * 100).toFixed(1),
+            // Percentage is keyed off mem.active (the real working set), not mem.used:
+            // on Linux/BSD/macOS mem.used counts reclaimable page cache and reads ~99%
+            // on a busy host. mem.available is total - active, so used + free = total.
+            used: mem.active,
+            free: mem.available,
+            usagePercent: ((mem.active / mem.total) * 100).toFixed(1),
           },
           disk: mainDisk ? {
             fs: mainDisk.fs,

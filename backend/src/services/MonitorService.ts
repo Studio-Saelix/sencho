@@ -299,7 +299,10 @@ export class MonitorService {
                 this.clearHostMetricSuppression('cpu');
             }
 
-            const ramUsage = (mem.used / mem.total) * 100;
+            // Key off mem.active (the real working set), not mem.used: on Linux/BSD/macOS
+            // mem.used counts reclaimable page cache and reads ~99% on a busy host, which
+            // would fire spurious host-memory alerts.
+            const ramUsage = (mem.active / mem.total) * 100;
             const ramLimit = parseFloat(settings['host_ram_limit']);
             if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
                 await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
