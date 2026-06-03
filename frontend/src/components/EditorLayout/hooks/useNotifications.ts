@@ -28,7 +28,8 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
     try {
       const currentNodes = nodesRef.current;
       const localNode = currentNodes.find(n => n.type === 'local');
-      const remoteNodes = currentNodes.filter(n => n.type === 'remote');
+      // Skip offline nodes: polling a removed/unreachable node only yields 502s.
+      const remoteNodes = currentNodes.filter(n => n.type === 'remote' && n.status !== 'offline');
 
       const [localResult, ...remoteNodeResults] = await Promise.allSettled([
         apiFetch('/notifications', { localOnly: true } as Parameters<typeof apiFetch>[1]),
@@ -134,7 +135,9 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
 
   // Open/close per-remote-node WebSocket connections as the nodes list changes.
   useEffect(() => {
-    const remoteNodes = nodes.filter(n => n.type === 'remote');
+    // Skip offline nodes: an offline node leaves the active set, so the cleanup
+    // loop below closes its socket instead of reconnecting to a dead 503 forever.
+    const remoteNodes = nodes.filter(n => n.type === 'remote' && n.status !== 'offline');
     const currentIds = new Set(remoteNotifWsRef.current.keys());
     const newIds = new Set(remoteNodes.map(n => n.id));
 
