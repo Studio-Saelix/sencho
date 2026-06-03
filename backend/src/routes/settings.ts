@@ -4,12 +4,12 @@ import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 
-// Keys that contain auth credentials; never exposed to the frontend or
-// writable via the settings API.
-const PRIVATE_SETTINGS_KEYS = new Set(['auth_username', 'auth_password_hash', 'auth_jwt_secret']);
-
-// Strict allowlist of keys writable via the settings API. Prevents
-// overwriting auth credentials through a misconfigured key.
+// Strict allowlist of keys readable and writable via the generic settings
+// API. This is the single source of truth for what the endpoint exposes:
+// reads project only these keys, so secrets written to global_settings by
+// other subsystems (the cloud_backup_* credentials stored by the cloud-backup
+// route, the auth_* login secrets) are never returned here; writes are
+// rejected for anything outside the list.
 const ALLOWED_SETTING_KEYS = new Set([
   'host_cpu_limit',
   'host_ram_limit',
@@ -47,9 +47,14 @@ export const settingsRouter = Router();
 
 settingsRouter.get('/', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
   try {
-    const settings = { ...DatabaseService.getInstance().getGlobalSettings() };
-    for (const key of PRIVATE_SETTINGS_KEYS) {
-      delete settings[key];
+    const all = DatabaseService.getInstance().getGlobalSettings();
+    // Project only allowlisted operational keys. A denylist would leak every
+    // future sensitive key written to global_settings by default (e.g. the
+    // cloud_backup_* credentials the cloud-backup route stores here); the
+    // allowlist fails closed.
+    const settings: Record<string, string> = {};
+    for (const [key, value] of Object.entries(all)) {
+      if (ALLOWED_SETTING_KEYS.has(key)) settings[key] = value;
     }
     res.json(settings);
   } catch (error) {
