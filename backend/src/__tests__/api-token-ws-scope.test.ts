@@ -5,29 +5,17 @@
  * scope gate before dispatch. Driven through a real listening server, no mocks.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import crypto from 'crypto';
 import WebSocket from 'ws';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
 let server: import('http').Server;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 
 function createToken(scope: 'read-only' | 'deploy-only' | 'full-admin'): string {
-  const raw = generateApiToken();
-  const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
   const db = DatabaseService.getInstance();
-  const userId = db.getUserByUsername('testadmin')!.id;
-  db.addApiToken({
-    token_hash: tokenHash,
-    name: `ws-${scope}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    scope,
-    user_id: userId,
-    created_at: Date.now(),
-    expires_at: null,
-  });
-  return raw;
+  return createTestApiToken({ db: DatabaseService, scope, userId: db.getUserByUsername('testadmin')!.id });
 }
 
 beforeAll(async () => {

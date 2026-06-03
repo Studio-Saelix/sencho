@@ -5,47 +5,41 @@
  *   - rateLimitKeyGenerator: per-token budget only for live tokens; forged,
  *     bad-checksum, revoked, or expired token-shaped bearers fall back to
  *     per-IP keying so they cannot fragment the limiter (H-1).
+ *
+ * Token rows are seeded through the shared apiTokenTestHelper and their stored
+ * hash is read back from the row, so this suite hashes nothing itself.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
-import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import type { Request } from 'express';
+import type { ApiToken } from '../services/DatabaseService';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { COOKIE_NAME } from '../helpers/constants';
-import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken, unbackedApiToken } from './helpers/apiTokenTestHelper';
 import { validateApiToken, touchApiTokenLastUsed } from '../utils/apiTokenAuth';
 import { rateLimitKeyGenerator } from '../middleware/rateLimiters';
 
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 
-/** Insert an API token directly and return both the raw value and its row id. */
+/** Seed an API token via the shared helper and return the raw value plus its stored row. */
 function createToken(
   scope: 'read-only' | 'deploy-only' | 'full-admin',
   opts: { expiresAt?: number | null; revoked?: boolean } = {},
-): { raw: string; id: number } {
-  const raw = generateApiToken();
-  const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+): { raw: string; row: ApiToken } {
   const db = DatabaseService.getInstance();
   const userId = db.getUserByUsername('testadmin')!.id;
-  const id = db.addApiToken({
-    token_hash: tokenHash,
-    name: `hardening-${scope}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    scope,
-    user_id: userId,
-    created_at: Date.now(),
-    expires_at: opts.expiresAt ?? null,
-  });
-  if (opts.revoked) db.revokeApiToken(id);
-  return { raw, id };
+  const name = `hardening-${scope}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const raw = createTestApiToken({ db: DatabaseService, scope, userId, name, expiresAt: opts.expiresAt ?? null });
+  const row = db.getActiveApiTokenByNameAndUser(name, userId)!;
+  if (opts.revoked) db.revokeApiToken(row.id);
+  return { raw, row };
 }
 
 /** Minimal Express request carrying a Bearer token, for the key generator. */
 function bearerReq(token: string): Request {
   return { cookies: {}, headers: { authorization: `Bearer ${token}` }, ip: '203.0.113.7' } as unknown as Request;
 }
-
-const sk16 = (raw: string): string => crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16);
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -79,7 +73,7 @@ describe('validateApiToken', () => {
   });
 
   it('rejects a well-formed token that is not in the database', () => {
-    const result = validateApiToken(generateApiToken());
+    const result = validateApiToken(unbackedApiToken());
     expect(result).toEqual({ ok: false, reason: 'not-found' });
   });
 
@@ -98,24 +92,21 @@ describe('validateApiToken', () => {
 
 describe('touchApiTokenLastUsed', () => {
   it('writes when last_used_at is null', () => {
-    const { id } = createToken('read-only');
-    const row = DatabaseService.getInstance().getApiTokenById(id)!;
+    const { row } = createToken('read-only');
     const spy = vi.spyOn(DatabaseService.getInstance(), 'updateApiTokenLastUsed');
     touchApiTokenLastUsed({ ...row, last_used_at: null });
-    expect(spy).toHaveBeenCalledWith(id);
+    expect(spy).toHaveBeenCalledWith(row.id);
   });
 
   it('writes when last_used_at is stale (older than the throttle window)', () => {
-    const { id } = createToken('read-only');
-    const row = DatabaseService.getInstance().getApiTokenById(id)!;
+    const { row } = createToken('read-only');
     const spy = vi.spyOn(DatabaseService.getInstance(), 'updateApiTokenLastUsed');
     touchApiTokenLastUsed({ ...row, last_used_at: Date.now() - 70_000 });
-    expect(spy).toHaveBeenCalledWith(id);
+    expect(spy).toHaveBeenCalledWith(row.id);
   });
 
   it('skips the write when last_used_at is within the throttle window', () => {
-    const { id } = createToken('read-only');
-    const row = DatabaseService.getInstance().getApiTokenById(id)!;
+    const { row } = createToken('read-only');
     const spy = vi.spyOn(DatabaseService.getInstance(), 'updateApiTokenLastUsed');
     touchApiTokenLastUsed({ ...row, last_used_at: Date.now() - 1000 });
     expect(spy).not.toHaveBeenCalled();
@@ -124,20 +115,20 @@ describe('touchApiTokenLastUsed', () => {
 
 describe('rateLimitKeyGenerator (API token branch)', () => {
   it('keys a live token by its own hash and memoizes the row for auth reuse', () => {
-    const { raw } = createToken('read-only');
+    const { raw, row } = createToken('read-only');
     const spy = vi.spyOn(DatabaseService.getInstance(), 'getApiTokenByHash');
     const req = bearerReq(raw);
-    expect(rateLimitKeyGenerator(req)).toBe(`user:sk:${sk16(raw)}`);
-    expect(req._apiToken?.token_hash).toBe(crypto.createHash('sha256').update(raw).digest('hex'));
+    expect(rateLimitKeyGenerator(req)).toBe(`user:sk:${row.token_hash.slice(0, 16)}`);
+    expect(req._apiToken?.token_hash).toBe(row.token_hash);
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it('reuses the memoized row on a second pass without another lookup', () => {
-    const { raw } = createToken('read-only');
+    const { raw, row } = createToken('read-only');
     const req = bearerReq(raw);
     rateLimitKeyGenerator(req);
     const spy = vi.spyOn(DatabaseService.getInstance(), 'getApiTokenByHash');
-    expect(rateLimitKeyGenerator(req)).toBe(`user:sk:${sk16(raw)}`);
+    expect(rateLimitKeyGenerator(req)).toBe(`user:sk:${row.token_hash.slice(0, 16)}`);
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -152,7 +143,7 @@ describe('rateLimitKeyGenerator (API token branch)', () => {
   });
 
   it('falls back to per-IP keying for a well-formed but unknown token', () => {
-    const req = bearerReq(generateApiToken());
+    const req = bearerReq(unbackedApiToken());
     const key = rateLimitKeyGenerator(req);
     expect(key).not.toMatch(/^user:sk:/);
     expect(key).toContain('203.0.113.7');
@@ -181,8 +172,8 @@ describe('rateLimitKeyGenerator (API token branch)', () => {
     const ip = '198.51.100.42';
     const forged = (token: string) =>
       ({ cookies: {}, headers: { authorization: `Bearer ${token}` }, ip } as unknown as Request);
-    const keyA = rateLimitKeyGenerator(forged(generateApiToken()));
-    const keyB = rateLimitKeyGenerator(forged(generateApiToken()));
+    const keyA = rateLimitKeyGenerator(forged(unbackedApiToken()));
+    const keyB = rateLimitKeyGenerator(forged(unbackedApiToken()));
     const keyAnon = rateLimitKeyGenerator({ cookies: {}, headers: {}, ip } as unknown as Request);
     expect(keyA).not.toMatch(/^user:sk:/);
     expect(keyA).toBe(keyB);
