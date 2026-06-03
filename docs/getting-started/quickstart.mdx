@@ -85,6 +85,10 @@ Pick a username (the placeholder shows `admin`), choose a password, confirm it, 
 
 Sencho then runs a short **environment preflight**: it confirms the Docker engine and Compose plugin are reachable, the compose directory is writable and mounted at a matching host path, the dashboard is behind TLS, and there is disk headroom. Anything that needs attention shows an inline fix. The checks never block you, so click **Enter Sencho** to continue; you can re-run them anytime from **Settings · Recovery**.
 
+<Frame>
+  <img src="/images/quickstart/setup-environment.png" alt="Sencho first-boot environment preflight with check rows for Docker engine, Docker Compose, Compose directory, path mapping, TLS, and disk space, each showing an OK or warning result, a Re-run button, and an Enter Sencho button" />
+</Frame>
+
 <Note>
   The Cold start card only appears the first time you open Sencho. Once the admin account exists, every subsequent visit goes to the regular sign-in screen.
 </Note>
