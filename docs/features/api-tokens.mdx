@@ -360,6 +360,10 @@ Read Only is sufficient for the notification stream.
   <Accordion title="The API Tokens tab is missing from Settings">
     The tab is admin-only. Sign in as an admin user to see it. Tokens are also issued from the hub; if you have selected a remote node in the node switcher, switch back to the local hub and the tab will appear under **Settings → Identity**.
   </Accordion>
+
+  <Accordion title="The token list shows `Couldn't load API tokens`">
+    The list could not be fetched. Use the **Retry** button on the error card to reload. If it persists, confirm you are signed in as an admin and that the hub is reachable, then check the browser console and the hub logs for the underlying error. An empty list with no error card simply means you have not created any tokens yet.
+  </Accordion>
 </AccordionGroup>
 
 ## FAQ
@@ -430,7 +434,7 @@ Read Only is sufficient for the notification stream.
   <Card title="Webhooks" icon="webhook" href="/features/webhooks">
     Inbound counterpart to API tokens; HMAC-authenticated push triggers.
   </Card>
-  <Card title="Security overview" icon="shield-check" href="/security">
+  <Card title="Security overview" icon="shield-check" href="/reference/security">
     Where API tokens fit in Sencho's wider security model.
   </Card>
 </Columns>

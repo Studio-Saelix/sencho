@@ -3,7 +3,7 @@ title: Quickstart
 description: Get Sencho running in under five minutes.
 ---
 
-This walks you from a clean Docker host to a working Sencho cockpit. Five minutes if your Compose directory is already in the right place, ten if you need to lay it out first.
+This walks you from a clean Docker host to a working Sencho console. Five minutes if your Compose directory is already in the right place, ten if you need to lay it out first.
 
 <Note>
   Sencho is currently in public beta on the path to v1.0. Core workflows are actively tested, but early users should review the [known limitations](https://github.com/studio-saelix/sencho/blob/main/KNOWN_LIMITATIONS.md) and avoid deploying it blindly on critical infrastructure without testing in their own environment first.
@@ -14,9 +14,13 @@ This walks you from a clean Docker host to a working Sencho cockpit. Five minute
 - Docker and Docker Compose installed on the host.
 - A directory where your Compose projects live (for example `/opt/compose`). Each subdirectory inside becomes one stack in Sencho.
 
+<Warning>
+  Sencho needs the Docker socket to manage containers. Mounting `/var/run/docker.sock` gives Sencho the same level of Docker control as an operator running Docker commands on the host. For exposed or shared environments, put Sencho behind a TLS-terminating reverse proxy and restrict who can sign in. See [Self-hosting](/operations/self-hosting) for the operational guidance.
+</Warning>
+
 ## Run with Docker Compose
 
-Drop this into a `docker-compose.yml` next to your Compose tree (or anywhere convenient) and bring it up:
+Drop this into a `docker-compose.yml` next to your Compose tree, or anywhere convenient, and bring it up:
 
 ```yaml
 services:
@@ -81,7 +85,7 @@ Open `http://localhost:1852` in a browser. On a fresh install you land on the **
   <img src="/images/quickstart/setup-cold-start.png" alt="Sencho first-boot Cold start card with Username, Password, and Confirm password fields, and an Initialize console button" />
 </Frame>
 
-Pick a username (the placeholder shows `admin`), choose a password, confirm it, and click **Initialize console**. The strength indicator under the password field expects at least eight characters.
+Pick a username, choose a password, confirm it, and click **Initialize console**. The username placeholder shows `admin`. The password must be at least eight characters, and the strength indicator labels the password **Weak**, **Fair**, or **Strong** as you type.
 
 Sencho then runs a short **environment preflight**: it confirms the Docker engine and Compose plugin are reachable, the compose directory is writable and mounted at a matching host path, the dashboard is behind TLS, and there is disk headroom. Anything that needs attention shows an inline fix. The checks never block you, so click **Enter Sencho** to continue; you can re-run them anytime from **Settings · Recovery**.
 
@@ -95,15 +99,19 @@ Sencho then runs a short **environment preflight**: it confirms the Docker engin
 
 ## After signing in
 
-You land on the dashboard. A status bar across the top tells you whether the fleet is healthy, the gauge strip below it shows CPU, memory, disk, and network at a glance, and the **Stack health** table sorts your stacks by load.
+You land on **Home**, the default operational view. The health masthead reports **Healthy**, **Degraded**, or **Critical**, names the active node, shows how many nodes are registered, and lists any signals that need attention. The resource gauge strip tracks **CPU**, **Memory**, **Disk**, and **Network**. **Stack health** lists discovered stacks on the active node, sorted so exited or high-load stacks rise to the top.
 
 <Frame>
-  <img src="/images/quickstart/dashboard.png" alt="Sencho dashboard with status bar across the top, CPU/MEMORY/DISK/NETWORK gauges, and a Stack health table sorted by load" />
+  <img src="/images/quickstart/dashboard.png" alt="Sencho Home view with the health masthead, CPU, Memory, Disk, and Network gauges, Stack health, Configuration Status, an activity panel, and Recent Alerts" />
 </Frame>
 
-The top nav (HOME, FLEET, RESOURCES, APP STORE, LOGS, AUTO-UPDATE, CONSOLE, AUDIT, SCHEDULES) is your map of the cockpit. The sidebar on the left lists every stack Sencho discovered under `COMPOSE_DIR`; on a fresh install it is empty until you create one.
+Below the stack table, **Configuration Status** summarizes notification delivery, alert rules, automation, account security, backups, host thresholds, and crash detection. The neighboring activity card shows **Fleet Heartbeat** when remote nodes exist, or **Stack Restarts (7d)** on a local-only install. **Recent Alerts** shows the latest notification feed and includes **Clear All Notifications** when there is anything to clear.
 
-Click **Create Stack** in the sidebar to deploy your first stack, or open **App Store** in the top nav for a one-click template.
+On the local node, the top navigation includes **Home**, **Fleet**, **Resources**, **App Store**, and **Logs**. Depending on license, role, and node context, it can also include **Auto-Update**, **Schedules**, **Console**, and **Audit**; hub-only views are hidden when a remote node is active. The right side of the top bar holds global search, notifications, and the profile menu entries **Settings**, **Documentation**, **Feedback**, **Appearance**, and **Log Out**.
+
+The left sidebar is the stack workspace. Below the Sencho brand, it starts with the node switcher, then **Create Stack**, a bulk-mode toggle, and **Scan stacks folder** for importing Compose projects added outside Sencho. Use **Search stacks...** with the **All**, **Up**, **Down**, and **Updates** chips to narrow the list. On a fresh install the stack list is empty until you create a stack or scan a populated `COMPOSE_DIR`.
+
+Click **Create Stack** in the sidebar and choose **Empty**, **From Git**, or **From Docker Run**. Open **App Store** for a template-driven deploy flow. Once a stack exists, select it in the sidebar or in **Stack health** to open the stack workspace with container health, logs, files, compose editing, and stack actions.
 
 ## Where to next
 
@@ -112,13 +120,13 @@ Click **Create Stack** in the sidebar to deploy your first stack, or open **App 
     Environment variables, volume mounts, reverse proxy, and the 1:1 path rule in detail.
   </Card>
   <Card title="Stack management" icon="layer-group" href="/features/stack-management">
-    Deploy, edit, restart, update, and roll back stacks from the cockpit.
+    Deploy, edit, restart, update, and roll back stacks from the stack workspace.
   </Card>
   <Card title="Multi-node" icon="server" href="/features/multi-node">
     Add a remote Sencho instance and manage it from the same console.
   </Card>
   <Card title="App Store" icon="grid-2" href="/features/app-store">
-    Browse 190+ pre-configured templates and deploy in one click.
+    Browse the default LinuxServer.io template catalogue and deploy in one click.
   </Card>
   <Card title="Recovery" icon="life-ring" href="/operations/recovery">
     What to do if Sencho, a deploy, sign-in, Docker, or a node fails, and how to get back to a working state.
