@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.88.0](https://github.com/Studio-Saelix/sencho/compare/v0.87.0...v0.88.0) (2026-06-03)
+
+
+### Added
+
+* **fleet-snapshots:** add restore-all, per-file download, and scrollable preview ([#1276](https://github.com/Studio-Saelix/sencho/issues/1276)) ([e60c1c0](https://github.com/Studio-Saelix/sencho/commit/e60c1c0525355768d4100a5a1eb559bee85d972d))
+* **mesh:** add developer-mode diagnostics to the mesh data plane ([#1287](https://github.com/Studio-Saelix/sencho/issues/1287)) ([5e6e96e](https://github.com/Studio-Saelix/sencho/commit/5e6e96e40555ebcc762f5c5547d7c70d9774701e))
+* **onboarding:** add first-run environment checker ([#1290](https://github.com/Studio-Saelix/sencho/issues/1290)) ([5289f01](https://github.com/Studio-Saelix/sencho/commit/5289f01bfd9d587c3453403a89ace6ff82b6f27e))
+* **recovery:** add safe-mode recovery surface and emergency CLI ([#1286](https://github.com/Studio-Saelix/sencho/issues/1286)) ([c6d1631](https://github.com/Studio-Saelix/sencho/commit/c6d1631afe9be235d12cc4c86f841b879c876677))
+* **stacks:** guided first stack import flow ([#1285](https://github.com/Studio-Saelix/sencho/issues/1285)) ([06b2526](https://github.com/Studio-Saelix/sencho/commit/06b25262cc63a0cbf48011a019c1f2fce9faf70f))
+
+
+### Fixed
+
+* **blueprints:** stop the deployment detail sheet flickering and show deploy progress ([#1278](https://github.com/Studio-Saelix/sencho/issues/1278)) ([f6c6ffe](https://github.com/Studio-Saelix/sencho/commit/f6c6ffea150187b5a6786f2c1df423cc8f243a89))
+* **federation:** gate node cordon control on node:manage to match backend ([#1277](https://github.com/Studio-Saelix/sencho/issues/1277)) ([dd2c2b2](https://github.com/Studio-Saelix/sencho/commit/dd2c2b22ecf55bc8cc4b4b162b9d3fd3c1ed852f))
+* **fleet-secrets:** restrict bundle management to admin hub sessions ([#1274](https://github.com/Studio-Saelix/sencho/issues/1274)) ([9fb4ccc](https://github.com/Studio-Saelix/sencho/commit/9fb4ccccff7cc7b32a595f6f869717fba697dfa6))
+* **git-sources:** return 200 for stacks without a Git source ([#1294](https://github.com/Studio-Saelix/sencho/issues/1294)) ([ae0b9d1](https://github.com/Studio-Saelix/sencho/commit/ae0b9d166c63e6009c62645fc76c674a6bf375a3))
+* **mesh:** hide node and stack management controls from non-admins ([#1284](https://github.com/Studio-Saelix/sencho/issues/1284)) ([c82a39c](https://github.com/Studio-Saelix/sencho/commit/c82a39c65a9d344e4ea84731c9d5590898708d9b))
+* **nodes:** gate node-management actions by role and release pilot tunnels on delete ([#1280](https://github.com/Studio-Saelix/sencho/issues/1280)) ([35a1182](https://github.com/Studio-Saelix/sencho/commit/35a1182890c5799c369a0b6ed6d5a4e8463d2b2d))
+* **nodes:** never send stored node tokens to clients ([#1281](https://github.com/Studio-Saelix/sencho/issues/1281)) ([65a69d9](https://github.com/Studio-Saelix/sencho/commit/65a69d9ecc7ff9b484e69b7e8c71473356008ff5))
+* **notifications:** stop subscribing to offline remote nodes ([#1291](https://github.com/Studio-Saelix/sencho/issues/1291)) ([a8f0ce9](https://github.com/Studio-Saelix/sencho/commit/a8f0ce90726c4b3df4169192211286261ab39d0d))
+* **stack-files:** record download metric when response closes after a full read ([#1282](https://github.com/Studio-Saelix/sencho/issues/1282)) ([5af0c04](https://github.com/Studio-Saelix/sencho/commit/5af0c043d513f8fb7e8653a6d361f3b13dada125))
+* **stacks:** name the body field in the stack-create required error ([#1289](https://github.com/Studio-Saelix/sencho/issues/1289)) ([653be32](https://github.com/Studio-Saelix/sencho/commit/653be3296bdcaeb2251c6fa5ad0d1ea02a51d216))
+* **stacks:** reflect apply progress and clear the anatomy update banner ([#1279](https://github.com/Studio-Saelix/sencho/issues/1279)) ([2dd0660](https://github.com/Studio-Saelix/sencho/commit/2dd0660491db0b2f61b6f9b365c6a3bf8bf8c8d0))
+
 ## [0.87.0](https://github.com/Studio-Saelix/sencho/compare/v0.86.6...v0.87.0) (2026-06-01)
 
 
