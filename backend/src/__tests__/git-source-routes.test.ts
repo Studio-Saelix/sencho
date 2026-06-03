@@ -253,6 +253,41 @@ describe('git-source routes — invalid stack names', () => {
     });
 });
 
+describe('GET /api/stacks/:stackName/git-source', () => {
+    it('returns 200 { linked: false } when the stack exists but has no Git source', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, 'unlinked-stack'), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, 'unlinked-stack', 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        const res = await request(app)
+            .get('/api/stacks/unlinked-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ linked: false });
+    });
+
+    it('returns 404 when the stack does not exist on the active node', async () => {
+        const res = await request(app)
+            .get('/api/stacks/ghost-stack-get/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(404);
+        expect(res.body.error).toMatch(/stack not found/i);
+    });
+
+    it('returns 200 with the source object when a Git source is configured', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, 'linked-stack'), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, 'linked-stack', 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        seedGitSource('linked-stack');
+        const res = await request(app)
+            .get('/api/stacks/linked-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body.stack_name).toBe('linked-stack');
+        expect(res.body.repo_url).toBe('https://github.com/example/repo.git');
+        expect(res.body.linked).toBeUndefined();
+    });
+});
+
 describe('POST /api/stacks/from-git', () => {
     const validBody = {
         stack_name: 'route-from-git',

@@ -265,7 +265,13 @@ export default function StackAnatomyPanel({
         if (cancelled) return;
         if (res.ok) {
           const data = await res.json();
-          setGitSource({ repo_url: data.repo_url, branch: data.branch, compose_path: data.compose_path });
+          // An unlinked stack answers 200 { linked: false }; only render the
+          // badge when an actual source is attached.
+          if (data && data.linked === false) {
+            setGitSource(null);
+          } else {
+            setGitSource({ repo_url: data.repo_url, branch: data.branch, compose_path: data.compose_path });
+          }
         } else {
           setGitSource(null);
         }

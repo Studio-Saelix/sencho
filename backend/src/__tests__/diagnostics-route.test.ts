@@ -63,3 +63,28 @@ describe('GET /api/diagnostics', () => {
         expect(res.body.config.cloud_backup_secret_key).toBeUndefined();
     });
 });
+
+describe('GET /api/diagnostics/environment', () => {
+    it('requires authentication', async () => {
+        const res = await request(app).get('/api/diagnostics/environment');
+        expect(res.status).toBe(401);
+    });
+
+    it('rejects a non-admin', async () => {
+        const res = await request(app).get('/api/diagnostics/environment').set('Authorization', viewerAuthHeader);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('ADMIN_REQUIRED');
+    });
+
+    it('returns the environment report for an admin', async () => {
+        const res = await request(app).get('/api/diagnostics/environment').set('Authorization', adminAuthHeader);
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body.checks)).toBe(true);
+        const ids = (res.body.checks as Array<{ id: string }>).map(c => c.id);
+        expect(ids).toEqual(['docker_socket', 'docker_compose', 'compose_dir', 'path_mapping', 'tls', 'disk_space']);
+        for (const c of res.body.checks as Array<{ status: string; detail: string }>) {
+            expect(['pass', 'warn', 'fail']).toContain(c.status);
+            expect(typeof c.detail).toBe('string');
+        }
+    });
+});

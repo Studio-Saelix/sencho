@@ -6,6 +6,7 @@ import { ArrowRight, Loader2 } from 'lucide-react';
 import { AuthCanvas } from '@/components/auth/AuthCanvas';
 import { AuthStepHeader } from '@/components/auth/AuthStepHeader';
 import { ErrorRail } from '@/components/auth/ErrorRail';
+import { EnvironmentChecks } from '@/components/settings/EnvironmentChecks';
 
 interface SetupProps {
   onComplete: () => void;
@@ -34,6 +35,10 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // The admin account is created in step 1; /api/auth/setup signs the operator
+  // in (session cookie), so step 2 can run the admin-gated environment checks
+  // before handing off to the console.
+  const [step, setStep] = useState<'account' | 'env'>('account');
 
   const strength = gaugePassword(password);
   const strengthClass =
@@ -72,7 +77,7 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
       });
       const data = await response.json();
       if (response.ok && data.success) {
-        onComplete();
+        setStep('env');
       } else {
         setError(data.error || 'Setup failed');
       }
@@ -82,6 +87,37 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
       setIsLoading(false);
     }
   };
+
+  if (step === 'env') {
+    return (
+      <div className={cn('relative', className)} {...props}>
+        <AuthCanvas
+          footer={
+            <div className="flex items-center justify-between">
+              <span>Console · First boot</span>
+              <span className="text-stat-subtitle/70">Account ready</span>
+            </div>
+          }
+        >
+          <div className="flex flex-col gap-7">
+            <AuthStepHeader
+              kicker="SENCHO · ENVIRONMENT"
+              hero="Preflight"
+              caption="A quick check that this host can run Docker deploys. Warnings won't stop you; each one carries a fix."
+            />
+            <EnvironmentChecks />
+            <Button
+              type="button"
+              onClick={onComplete}
+              className="h-11 w-full bg-brand text-brand-foreground shadow-btn-glow hover:bg-brand/90"
+            >
+              Enter Sencho<ArrowRight strokeWidth={1.5} />
+            </Button>
+          </div>
+        </AuthCanvas>
+      </div>
+    );
+  }
 
   return (
     <div className={cn('relative', className)} {...props}>

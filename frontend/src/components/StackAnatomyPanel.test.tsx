@@ -221,6 +221,43 @@ describe('StackAnatomyPanel update banner', () => {
     expect(otherCalls()).toBe(1); // the apply-completion re-check must not fire for "other"
   });
 
+  it('renders the git badge when a source is attached', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) return jsonRes(previewBody(false));
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      if (url.includes('/git-source')) {
+        return jsonRes({ repo_url: 'https://github.com/org/repo.git', branch: 'main', compose_path: 'compose.yaml' });
+      }
+      return jsonRes(null, false);
+    });
+
+    render(panel(false));
+
+    // Positive control: a linked stack shows the "git · host/repo#branch" badge,
+    // which proves the matcher used by the unlinked test below is real.
+    await screen.findByText(/github\.com\/org\/repo#main/);
+    expect(screen.queryByText('local')).not.toBeInTheDocument();
+  });
+
+  it('treats a 200 { linked: false } git-source response as unlinked', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) return jsonRes(previewBody(true));
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      if (url.includes('/git-source')) return jsonRes({ linked: false }); // 200, no source attached
+      return jsonRes(null, false);
+    });
+
+    render(panel(false));
+
+    // The git-source effect runs before the banner effect, so by the time the
+    // banner renders the git-source response has been applied. An unlinked
+    // stack must keep the "local" label, not flip to a git badge.
+    await screen.findByTestId('update-available-banner');
+    expect(screen.getByText('local')).toBeInTheDocument();
+  });
+
   it('ignores a stale re-check that resolves after the stack changed', async () => {
     let resolveStale!: (r: Response) => void;
     const stale = new Promise<Response>((r) => { resolveStale = r; });

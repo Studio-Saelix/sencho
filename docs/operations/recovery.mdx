@@ -18,6 +18,20 @@ Your compose files on disk are always the source of truth. Sencho reads them; it
 
 ---
 
+## Environment checks
+
+Sencho runs a short environment preflight as the final step of first-boot setup, and you can re-run it anytime from **Settings · Recovery**. It confirms the things a deploy depends on, so a deploy does not fail for an avoidable reason:
+
+- the Docker engine is reachable and Sencho has permission to talk to the socket,
+- the Docker Compose plugin is present,
+- the compose directory exists, is writable, and is mounted at a matching host path (the [1:1 path rule](/getting-started/configuration#compose-directory-the-11-path-rule)),
+- the dashboard is reached over TLS rather than plain HTTP,
+- and the compose volume has disk headroom.
+
+Every result that needs attention carries a specific fix rather than a generic error. The checks are advisory: they never stop you from continuing, so an operator who knows their setup can move straight on.
+
+---
+
 ## Sencho itself won't start or is misbehaving
 
 **Symptom:** The dashboard won't load, the container restarts in a loop, or the UI is throwing errors with no useful message.

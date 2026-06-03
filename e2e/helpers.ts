@@ -69,7 +69,11 @@ export async function loginAs(page: Page, username = TEST_USERNAME, password = T
     const confirmInput = page.locator('#confirmPassword');
     if (await confirmInput.isVisible()) await confirmInput.fill(password);
     await page.locator('button[type="submit"]').click();
-    // After setup, the app logs in automatically and shows the dashboard
+    // Setup signs the new admin in and then shows an environment-preflight
+    // step; clicking "Enter Sencho" completes onboarding and lands the dashboard.
+    const enterButton = page.getByRole('button', { name: /enter sencho/i });
+    await expect(enterButton).toBeVisible({ timeout: 10_000 });
+    await enterButton.click();
     await expect(page.locator(DASHBOARD_INDICATOR)).toBeVisible({ timeout: 10_000 });
     return;
   }
