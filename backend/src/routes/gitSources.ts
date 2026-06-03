@@ -49,11 +49,21 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   try {
     const source = GitSourceService.getInstance().get(stackName);
-    if (!source) {
-      res.status(404).json({ error: 'No Git source configured for this stack' });
+    if (source) {
+      res.json(source);
       return;
     }
-    res.json(source);
+    // No source row. A non-existent stack is a genuine 404, but an existing
+    // stack with no Git source attached is a normal, non-error state. The
+    // dashboard probes this endpoint for every stack, so returning 404 here
+    // would paint a console error for every unlinked stack; answer 200 with
+    // a discriminator instead and reserve 404 for the stack-not-found case.
+    const stacks = await FileSystemService.getInstance(req.nodeId).getStacks();
+    if (!stacks.includes(stackName)) {
+      res.status(404).json({ error: 'Stack not found' });
+      return;
+    }
+    res.json({ linked: false });
   } catch (error) {
     sendGitSourceError(res, error);
   }

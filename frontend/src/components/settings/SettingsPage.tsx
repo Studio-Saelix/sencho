@@ -25,6 +25,7 @@ import {
     AppStoreSection,
     SupportSection,
     AboutSection,
+    RecoverySection,
     SETTINGS_ITEMS,
     SETTINGS_GROUPS,
     getSettingsItem,
@@ -200,6 +201,7 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
             case 'developer': return <DeveloperSection onDirtyChange={(d) => handleDirtyChange('developer', d)} />;
             case 'nodes': return <NodeManager />;
             case 'app-store': return <AppStoreSection />;
+            case 'recovery': return <RecoverySection />;
             case 'support': return <SupportSection />;
             case 'about': return <AboutSection />;
             default: return null;
