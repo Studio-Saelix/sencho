@@ -63,18 +63,15 @@ function isNodeProxyRequest(req: Request): boolean {
 }
 
 /**
- * Hybrid rate limit key: JWT username/sub for authenticated requests
- * (per-user budgets), IP otherwise. `jwt.decode()` avoids double-verification;
- * `authMiddleware` handles signature checks downstream.
+ * Hybrid rate limit key: per-token / per-user for authenticated requests, IP
+ * otherwise. Mirrors authMiddleware's bearer-over-cookie precedence (auth.ts
+ * uses `bearerToken || cookieToken`) so the limiter keys off the same credential
+ * auth will use. Checking the cookie first would let a request authenticated by
+ * a Bearer API token be bucketed under an unrelated (or forged) cookie username,
+ * sidestepping the per-token / per-IP keying. `jwt.decode()` avoids
+ * double-verification; `authMiddleware` handles signature checks downstream.
  */
 export function rateLimitKeyGenerator(req: Request): string {
-  const cookie = req.cookies?.[COOKIE_NAME];
-  if (cookie) {
-    try {
-      const decoded = jwt.decode(cookie) as { username?: string } | null;
-      if (decoded?.username) return `user:${decoded.username}`;
-    } catch { /* fall through to IP */ }
-  }
   const auth = req.headers.authorization;
   if (auth?.startsWith('Bearer ')) {
     const bearer = auth.slice(7);
@@ -85,8 +82,8 @@ export function rateLimitKeyGenerator(req: Request): string {
     // that is not a live token therefore falls through to per-IP keying. The
     // validated row is memoized on the request so authMiddleware reuses it
     // without a second lookup (and a request crossing two limiters reuses it
-    // here too). Like the jwt.decode branches below, a lookup failure degrades
-    // to per-IP keying rather than throwing out of the key generator.
+    // here too). Like the jwt.decode branches, a lookup failure degrades to
+    // per-IP keying rather than throwing out of the key generator.
     if (looksLikeApiToken(bearer)) {
       if (req._apiToken) return `user:sk:${req._apiToken.token_hash.slice(0, 16)}`;
       try {
@@ -104,6 +101,13 @@ export function rateLimitKeyGenerator(req: Request): string {
       const decoded = jwt.decode(bearer) as { username?: string; sub?: string } | null;
       if (decoded?.username) return `user:${decoded.username}`;
       if (decoded?.sub) return `user:${decoded.sub}`;
+    } catch { /* fall through to cookie / IP */ }
+  }
+  const cookie = req.cookies?.[COOKIE_NAME];
+  if (cookie) {
+    try {
+      const decoded = jwt.decode(cookie) as { username?: string } | null;
+      if (decoded?.username) return `user:${decoded.username}`;
     } catch { /* fall through to IP */ }
   }
   return ipKeyGenerator(req.ip || 'unknown');

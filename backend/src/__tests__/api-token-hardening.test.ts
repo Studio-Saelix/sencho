@@ -180,6 +180,32 @@ describe('rateLimitKeyGenerator (API token branch)', () => {
     expect(keyA).toBe(keyAnon);
   });
 
+  it('keys a live API-token bearer by the token even when a cookie is present (bearer precedence)', () => {
+    // authMiddleware prefers the Bearer token over the cookie, so the limiter
+    // must key off the same credential; a forged cookie must not override the
+    // token's bucket.
+    const { raw, row } = createToken('read-only');
+    const forgedCookie = jwt.sign({ username: 'someone-else' }, 'attacker-secret');
+    const req = {
+      cookies: { [COOKIE_NAME]: forgedCookie },
+      headers: { authorization: `Bearer ${raw}` },
+      ip: '203.0.113.7',
+    } as unknown as Request;
+    expect(rateLimitKeyGenerator(req)).toBe(`user:sk:${row.token_hash.slice(0, 16)}`);
+  });
+
+  it('does not let a forged cookie rescue a forged API-token bearer from per-IP keying', () => {
+    const forgedCookie = jwt.sign({ username: 'rotated-1' }, 'attacker-secret');
+    const req = {
+      cookies: { [COOKIE_NAME]: forgedCookie },
+      headers: { authorization: `Bearer ${unbackedApiToken()}` },
+      ip: '203.0.113.7',
+    } as unknown as Request;
+    const key = rateLimitKeyGenerator(req);
+    expect(key).not.toMatch(/^user:/);
+    expect(key).toContain('203.0.113.7');
+  });
+
   it('still keys a JWT session bearer by username (non-token branch intact)', () => {
     const token = jwt.sign({ username: 'ci-bot' }, TEST_JWT_SECRET);
     const req = { cookies: {}, headers: { authorization: `Bearer ${token}` }, ip: '203.0.113.7' } as unknown as Request;
