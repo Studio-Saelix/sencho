@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton, SettingsSecondaryButton } from './SettingsActions';
+import { EnvironmentChecks } from './EnvironmentChecks';
 import { DEPLOY_FEEDBACK_KEY } from '@/hooks/use-deploy-feedback-enabled';
 import { COMPOSE_DIFF_PREVIEW_KEY } from '@/hooks/use-compose-diff-preview-enabled';
 
@@ -218,6 +219,16 @@ export function RecoverySection() {
                         Export diagnostics
                     </SettingsPrimaryButton>
                 </SettingsActions>
+            </SettingsSection>
+
+            <SettingsSection
+                title="Environment"
+                kicker="preflight"
+                description="What deploys depend on: the Docker engine, the Compose plugin, the compose directory and its host path mapping, TLS, and disk headroom. Each warning carries a fix."
+            >
+                <div className="pt-3">
+                    <EnvironmentChecks />
+                </div>
             </SettingsSection>
 
             <SettingsSection

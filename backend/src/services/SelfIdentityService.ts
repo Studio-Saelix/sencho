@@ -154,6 +154,24 @@ class SelfIdentityService {
     return this.volumeNames.has(name);
   }
 
+  /**
+   * Bind mounts on the running Sencho container, used by the environment
+   * checker to verify the compose directory is mounted at the same path on the
+   * host and inside the container. Returns null when Sencho is not running in
+   * Docker (dev / bare metal), where the 1:1 path-mapping concern does not
+   * apply. Re-inspects on each call rather than caching, because it runs only
+   * on an admin-triggered diagnostic.
+   */
+  async getBindMounts(): Promise<Array<{ source: string; destination: string }> | null> {
+    const docker = DockerController.getInstance().getDocker();
+    const info = await this.resolveSelfInspect(docker);
+    if (!info) return null;
+    const mounts = (info.Mounts ?? []) as Array<{ Type?: string; Source?: string; Destination?: string }>;
+    return mounts
+      .filter(m => m.Type === 'bind' && m.Source && m.Destination)
+      .map(m => ({ source: m.Source as string, destination: m.Destination as string }));
+  }
+
   /** Diagnostic snapshot used by route handlers when composing error responses. */
   getIdentity(): {
     containerId: string | null;
