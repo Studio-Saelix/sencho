@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { requireAdmin, requireUserSession } from '../middleware/tierGates';
 import { collectDiagnostics } from '../services/DiagnosticsService';
+import { collectEnvironmentReport, buildRealProbes } from '../services/EnvironmentCheckService';
 import DockerController from '../services/DockerController';
 import { withTimeout } from '../utils/withTimeout';
 
@@ -34,5 +35,24 @@ diagnosticsRouter.get('/', async (req: Request, res: Response): Promise<void> =>
     } catch (err) {
         console.error('[diagnostics] failed to collect report:', (err as Error).message);
         res.status(500).json({ error: 'Failed to collect diagnostics.' });
+    }
+});
+
+// First-run / preflight environment checks (Docker engine + Compose, the
+// compose directory and its host path mapping, TLS, disk headroom). Same admin
+// session gate as the recovery report. proto / host come from the request so
+// the TLS verdict reflects how this browser reached the dashboard; behind a
+// reverse proxy that terminates TLS, x-forwarded-proto carries the real scheme.
+diagnosticsRouter.get('/environment', async (req: Request, res: Response): Promise<void> => {
+    if (!requireUserSession(req, res)) return;
+    if (!requireAdmin(req, res)) return;
+    try {
+        const proto = (req.get('x-forwarded-proto')?.split(',')[0].trim()) || req.protocol;
+        const host = req.get('host') || '';
+        const report = await collectEnvironmentReport(buildRealProbes({ proto, host }));
+        res.json(report);
+    } catch (err) {
+        console.error('[diagnostics] failed to collect environment report:', (err as Error).message);
+        res.status(500).json({ error: 'Failed to collect environment checks.' });
     }
 });
