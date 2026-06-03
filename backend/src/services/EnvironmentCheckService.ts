@@ -12,9 +12,10 @@
  * is unit-testable without a live Docker daemon or filesystem. No probe failure
  * throws out of the report: it degrades to a non-throwing row whose status fits
  * the check. The Docker socket and compose-directory probes surface a `fail`;
- * an unreadable disk degrades to a `warn` rather than a false `pass`. A missing
- * container self-inspect reads as "not containerized" (a `pass`), since that is
- * the common case and Sencho cannot prove a mapping it cannot see.
+ * an unreadable disk degrades to a `warn` rather than a false `pass`. Path
+ * mapping distinguishes "not containerized" (a `pass`, the dev / bare-metal
+ * case) from "containerized but mounts unreadable" (a `warn`), so an
+ * unverifiable mapping never reads as healthy.
  */
 import fs from 'fs/promises';
 import { constants as fsConstants } from 'fs';
@@ -86,7 +87,11 @@ export interface EnvironmentProbes {
     /** Resolves the `docker compose` version string; rejects when the plugin is absent. */
     composeVersion: () => Promise<string>;
     accessDir: (dir: string) => Promise<DirAccess>;
-    /** Bind mounts on the Sencho container, or null when not containerized. */
+    /**
+     * Bind mounts on the Sencho container, or null when not containerized. A
+     * rejection means containerized-but-unreadable and is reported as an
+     * unverified path-mapping warn rather than a false pass.
+     */
     bindMounts: () => Promise<Array<{ source: string; destination: string }> | null>;
     /** Disk usage of the filesystem backing the compose dir, or null when unknown. */
     diskUsage: (dir: string) => Promise<DiskUsage | null>;
@@ -193,11 +198,23 @@ function checkComposeDir(dir: string, access: DirAccess): EnvironmentCheck {
     return { ...base, status: 'pass', detail: `${dir} is present and writable.` };
 }
 
-function checkPathMapping(
-    dir: string,
-    mounts: Array<{ source: string; destination: string }> | null,
-): EnvironmentCheck {
+// Bind mounts on the Sencho container: an array when containerized, `null` when
+// confirmed not containerized, `'unknown'` when containerized but the mounts
+// could not be read (so the verdict is an unverified warn, not a false pass).
+type BindMounts = Array<{ source: string; destination: string }> | null | 'unknown';
+
+function checkPathMapping(dir: string, mounts: BindMounts): EnvironmentCheck {
     const base = { id: 'path_mapping' as const, label: 'Path mapping' };
+    if (mounts === 'unknown') {
+        return {
+            ...base,
+            status: 'warn',
+            detail: 'Could not read the container mounts to verify path mapping.',
+            remediation:
+                `Sencho is running in a container but could not inspect its own mounts. Confirm the compose `
+                + `directory is bind-mounted from the host at the same path, e.g. -v ${dir}:${dir}.`,
+        };
+    }
     if (mounts === null) {
         return {
             ...base,
@@ -206,27 +223,38 @@ function checkPathMapping(
         };
     }
     const target = normPath(dir);
-    const match = mounts.find(m => normPath(m.destination) === target);
+    // The bind mount covering the compose dir is the one whose destination is the
+    // longest path prefix of it, so a parent bind (-v /opt:/opt) covers
+    // COMPOSE_DIR=/opt/compose just as a direct -v /opt/compose:/opt/compose does.
+    const match = mounts
+        .filter(m => {
+            const d = normPath(m.destination);
+            return target === d || target.startsWith(d + '/') || target.startsWith(d + '\\');
+        })
+        .sort((a, b) => normPath(b.destination).length - normPath(a.destination).length)[0];
     if (!match) {
         return {
             ...base,
             status: 'warn',
-            detail: `${dir} is not a host bind mount.`,
+            detail: `${dir} is not under a host bind mount.`,
             remediation:
-                `Bind-mount the compose directory from the host at the same path, e.g. `
-                + `-v ${dir}:${dir}. Without it, relative bind mounts in your stacks resolve against `
-                + `the container filesystem instead of the host.`,
+                `Bind-mount the compose directory from the host, e.g. -v ${dir}:${dir}. Without it, relative `
+                + `bind mounts in your stacks resolve against the container filesystem instead of the host.`,
         };
     }
-    if (normPath(match.source) !== target) {
+    // The host path the daemon resolves for the compose dir: the mount source
+    // plus the compose dir's path below the mount destination.
+    const relative = target.slice(normPath(match.destination).length);
+    const hostPath = normPath(normPath(match.source) + relative);
+    if (hostPath !== target) {
         return {
             ...base,
             status: 'warn',
-            detail: `Host path ${match.source} is mounted at ${match.destination}.`,
+            detail: `Host path ${hostPath} is mounted at ${dir}.`,
             remediation:
-                `Mount the compose directory at the same path on host and container, e.g. `
-                + `-v ${dir}:${dir}. A mismatch breaks relative bind mounts in your stacks, because the `
-                + `daemon resolves them against the host path Sencho never sees.`,
+                `Mount the compose directory at the same path on host and container, e.g. -v ${dir}:${dir}. `
+                + `A mismatch breaks relative bind mounts in your stacks, because the daemon resolves them `
+                + `against the host path Sencho never sees.`,
         };
     }
     return { ...base, status: 'pass', detail: `Mounted 1:1 at ${dir}.` };
@@ -288,7 +316,10 @@ export async function collectEnvironmentReport(probes: EnvironmentProbes): Promi
             a => a,
             (e): DirAccess => { logProbeFailure('accessDir')(e); return { exists: false, isDir: false, writable: false }; },
         ),
-        probes.bindMounts().then(m => m, (e) => { logProbeFailure('bindMounts')(e); return null; }),
+        probes.bindMounts().then(
+            (m): BindMounts => m,
+            (e): BindMounts => { logProbeFailure('bindMounts')(e); return 'unknown'; },
+        ),
         probes.diskUsage(probes.composeDir).then(d => d, (e) => { logProbeFailure('diskUsage')(e); return null; }),
     ]);
 

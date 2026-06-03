@@ -145,6 +145,15 @@ describe('collectEnvironmentReport', () => {
             expect(byId(checks, 'path_mapping').status).toBe('pass');
         });
 
+        it('warns (not a false pass) when containerized but mounts are unreadable', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({
+                bindMounts: async () => { throw new Error('self-inspect unavailable'); },
+            }));
+            const c = byId(checks, 'path_mapping');
+            expect(c.status).toBe('warn');
+            expect(c.detail).toMatch(/could not read/i);
+        });
+
         it('warns when host and container paths differ', async () => {
             const { checks } = await collectEnvironmentReport(baseProbes({
                 bindMounts: async () => [{ source: '/srv/host-compose', destination: '/app/compose' }],
@@ -154,7 +163,7 @@ describe('collectEnvironmentReport', () => {
             expect(remediationOf(c)).toContain('/app/compose:/app/compose');
         });
 
-        it('warns when the compose dir is not a bind mount', async () => {
+        it('warns when the compose dir is not under a bind mount', async () => {
             const { checks } = await collectEnvironmentReport(baseProbes({
                 bindMounts: async () => [{ source: '/srv/other', destination: '/data' }],
             }));
@@ -164,6 +173,35 @@ describe('collectEnvironmentReport', () => {
         it('treats a trailing slash as equal', async () => {
             const { checks } = await collectEnvironmentReport(baseProbes({
                 bindMounts: async () => [{ source: '/app/compose/', destination: '/app/compose' }],
+            }));
+            expect(byId(checks, 'path_mapping').status).toBe('pass');
+        });
+
+        it('passes a 1:1 parent bind that covers the compose dir', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({
+                composeDir: '/opt/compose',
+                bindMounts: async () => [{ source: '/opt', destination: '/opt' }],
+            }));
+            expect(byId(checks, 'path_mapping').status).toBe('pass');
+        });
+
+        it('warns when a parent bind maps the compose dir to a different host path', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({
+                composeDir: '/opt/compose',
+                bindMounts: async () => [{ source: '/srv/opt', destination: '/opt' }],
+            }));
+            const c = byId(checks, 'path_mapping');
+            expect(c.status).toBe('warn');
+            expect(c.detail).toContain('/srv/opt/compose');
+        });
+
+        it('selects the longest-prefix mount when both a parent and child bind exist', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({
+                composeDir: '/opt/compose',
+                bindMounts: async () => [
+                    { source: '/wrong', destination: '/opt' },
+                    { source: '/opt/compose', destination: '/opt/compose' },
+                ],
             }));
             expect(byId(checks, 'path_mapping').status).toBe('pass');
         });
@@ -267,9 +305,9 @@ describe('collectEnvironmentReport', () => {
             diskUsage: async () => { throw new Error('fsSize blew up'); },
         }));
         // accessDir rejection degrades to "missing" -> fail; a rejected bindMounts
-        // reads as not-containerized -> pass; a rejected diskUsage is unknown -> warn.
+        // is unverifiable -> warn; a rejected diskUsage is unknown -> warn.
         expect(byId(checks, 'compose_dir').status).toBe('fail');
-        expect(byId(checks, 'path_mapping').status).toBe('pass');
+        expect(byId(checks, 'path_mapping').status).toBe('warn');
         expect(byId(checks, 'disk_space').status).toBe('warn');
     });
 });
