@@ -111,6 +111,18 @@ settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
 settingsRouter.patch('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
+    // Reject unknown/disallowed keys outright rather than letting Zod silently
+    // strip them. This keeps the bulk path fail-closed and consistent with the
+    // single-key POST, so a client sending a stale or disallowed key (e.g. an
+    // auth_* secret) gets a 400, not a misleading 200.
+    const body = req.body;
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      const unknownKeys = Object.keys(body).filter(k => !ALLOWED_SETTING_KEYS.has(k));
+      if (unknownKeys.length > 0) {
+        res.status(400).json({ error: `Invalid or disallowed setting key(s): ${unknownKeys.join(', ')}` });
+        return;
+      }
+    }
     const parsed = SettingsPatchSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });

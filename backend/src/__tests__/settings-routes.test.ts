@@ -192,6 +192,29 @@ describe('PATCH /api/settings (bulk update)', () => {
       .send({});
     expect(res.status).toBe(200);
   });
+
+  it('rejects a PATCH with unknown or disallowed keys (400) and writes nothing', async () => {
+    const before = DatabaseService.getInstance().getGlobalSettings().host_cpu_limit;
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ host_cpu_limit: 65, auth_jwt_secret: 'pwned' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid or disallowed setting key/);
+    // Fail-closed: the allowlisted key in the same body must not be written.
+    expect(DatabaseService.getInstance().getGlobalSettings().host_cpu_limit).toBe(before);
+  });
+
+  it('rejects a PATCH whose only key is a private auth secret (was a silent 200 no-op before)', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ auth_jwt_secret: 'pwned' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid or disallowed setting key/);
+    // The auth secret must never be written through the settings API.
+    expect(DatabaseService.getInstance().getGlobalSettings().auth_jwt_secret).not.toBe('pwned');
+  });
 });
 
 describe('Admiral-only setting keys (audit_retention_days)', () => {
