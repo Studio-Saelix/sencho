@@ -18,6 +18,7 @@ interface TopBarProps {
     mobileNavOpen: boolean;
     onMobileNavOpenChange: (open: boolean) => void;
     search?: ReactNode;
+    themeSwitch?: ReactNode;
     notifications: ReactNode;
     userMenu: ReactNode;
 }
@@ -29,6 +30,7 @@ export function TopBar({
     mobileNavOpen,
     onMobileNavOpenChange,
     search,
+    themeSwitch,
     notifications,
     userMenu,
 }: TopBarProps) {
@@ -76,6 +78,7 @@ export function TopBar({
             {/* RIGHT ZONE: Utilities + identity pin */}
             <div className="flex flex-1 min-w-0 items-center justify-end gap-2">
                 {search}
+                {themeSwitch}
                 {notifications}
                 {userMenu}
 
