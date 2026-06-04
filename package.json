@@ -25,10 +25,10 @@
   },
   "homepage": "https://github.com/studio-saelix/sencho#readme",
   "devDependencies": {
-    "@commitlint/cli": "^21.0.1",
-    "@commitlint/config-conventional": "^21.0.1",
+    "@commitlint/cli": "^21.0.2",
+    "@commitlint/config-conventional": "^21.0.2",
     "@playwright/test": "^1.60.0",
     "husky": "^9.1.7",
-    "otplib": "^13.4.0"
+    "otplib": "^13.4.1"
   }
 }

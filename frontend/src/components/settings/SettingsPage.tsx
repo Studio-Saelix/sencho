@@ -100,11 +100,11 @@ export function SettingsPage(props: SettingsPageProps) {
 }
 
 function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProps) {
-    const { isAdmin } = useAuth();
-    const { isPaid, license } = useLicense();
+    const { isAdmin, permissions } = useAuth();
+    const { isPaid } = useLicense();
     const { activeNode } = useNodes();
     const isRemote = activeNode?.type === 'remote';
-    const isAdmiral = isPaid && license?.variant === 'admiral';
+    const isAdmiral = permissions?.isAdmiral ?? false;
     const visibility: VisibilityContext = useMemo(
         () => ({ isRemote, isAdmin, isPaid, isAdmiral }),
         [isRemote, isAdmin, isPaid, isAdmiral],

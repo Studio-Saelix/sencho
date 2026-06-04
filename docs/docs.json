@@ -94,6 +94,7 @@
             "group": "Features",
             "pages": [
               "features/overview",
+              "features/appearance",
               {
                 "group": "Stacks",
                 "expanded": true,

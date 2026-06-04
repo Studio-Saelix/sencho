@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import { RefreshCw } from 'lucide-react';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
@@ -19,6 +20,8 @@ function SectionSkeleton() {
 }
 
 export function AppStoreSection() {
+    const { isAdmin } = useAuth();
+    const readOnly = !isAdmin;
     const [templateRegistryUrl, setTemplateRegistryUrl] = useState('');
     const serverUrl = useRef('');
     const [isLoading, setIsLoading] = useState(false);
@@ -74,7 +77,7 @@ export function AppStoreSection() {
     if (isLoading) return <SectionSkeleton />;
 
     return (
-        <div className="flex flex-col gap-10">
+        <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Default registry">
                 <SettingsField
                     label="LinuxServer.io"
@@ -100,29 +103,31 @@ export function AppStoreSection() {
                     />
                 </SettingsField>
 
-                <SettingsActions align="between" hint={templateRegistryUrl ? 'using custom registry' : 'using default'}>
-                    <div className="flex items-center gap-2">
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setTemplateRegistryUrl('')}
-                            disabled={isSavingRegistry || !templateRegistryUrl}
-                        >
-                            Reset to default
-                        </Button>
-                        <SettingsPrimaryButton onClick={saveRegistrySettings} disabled={isSavingRegistry}>
-                            {isSavingRegistry ? (
-                                <>
-                                    <RefreshCw className="w-4 h-4 animate-spin" />
-                                    Saving
-                                </>
-                            ) : (
-                                'Save & refresh'
-                            )}
-                        </SettingsPrimaryButton>
-                    </div>
+                <SettingsActions align="between" hint={readOnly ? 'Read-only · admin access required to edit' : (templateRegistryUrl ? 'using custom registry' : 'using default')}>
+                    {!readOnly && (
+                        <div className="flex items-center gap-2">
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setTemplateRegistryUrl('')}
+                                disabled={isSavingRegistry || !templateRegistryUrl}
+                            >
+                                Reset to default
+                            </Button>
+                            <SettingsPrimaryButton onClick={saveRegistrySettings} disabled={isSavingRegistry}>
+                                {isSavingRegistry ? (
+                                    <>
+                                        <RefreshCw className="w-4 h-4 animate-spin" />
+                                        Saving
+                                    </>
+                                ) : (
+                                    'Save & refresh'
+                                )}
+                            </SettingsPrimaryButton>
+                        </div>
+                    )}
                 </SettingsActions>
             </SettingsSection>
-        </div>
+        </fieldset>
     );
 }
