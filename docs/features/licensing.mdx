@@ -87,7 +87,7 @@ Sencho validates the key and unlocks your tier. If activation fails, the toast s
 When a license is active, **Settings → License** opens on the **Plan** section. The page masthead at the top exposes three stat pills, and the section below lists the metadata for the active license.
 
 <Frame>
-  <img src="/images/licensing/license-admiral-active.png" alt="License page showing an Admiral lifetime plan with the masthead stat strip listing SCOPE, PLAN, and DURATION, then the Plan section with the Customer, Product, and masked License key fields and the Deactivate button" />
+  <img src="/images/licensing/license-admiral-active.png" alt="License page showing an active Sencho Admiral license, with the Plan section listing the Customer, Product, and masked License key fields and a Deactivate button" />
 </Frame>
 
 The masthead pills are:
@@ -96,7 +96,7 @@ The masthead pills are:
 |------|---------|
 | **SCOPE** | Reads `operator` when you are signed in as an admin. |
 | **PLAN** | The current tier: `community` or `admiral`. Trial licenses show `admiral`. |
-| **DURATION** / **RENEWS** / **TRIAL** / **STATUS** | `DURATION: lifetime` for lifetime licenses, `RENEWS: <date>` for active subscriptions, `TRIAL: Xd left` for trials, and `STATUS: expired` for expired licenses. |
+| **RENEWS** / **TRIAL** / **STATUS** | `RENEWS: <date>` for active subscriptions, `TRIAL: Xd left` for trials, and `STATUS: expired` for expired licenses. |
 
 The **Plan** card lists:
 
@@ -107,7 +107,7 @@ The **Plan** card lists:
 
 ## Managing your subscription
 
-When the license is an active subscription (not lifetime), the Plan section action row exposes **Manage subscription** alongside **Deactivate**. **Manage subscription** opens the billing portal in a new tab, where you can update your payment method, view invoices, cancel, or switch plans.
+When the license is an active subscription, the Plan section action row exposes **Manage subscription** alongside **Deactivate**. **Manage subscription** opens the billing portal in a new tab, where you can update your payment method, view invoices, cancel, or switch plans.
 
 The same portal is reachable from the profile menu in the top-right corner of the app:
 
@@ -115,11 +115,7 @@ The same portal is reachable from the profile menu in the top-right corner of th
   <img src="/images/licensing/profile-menu.png" alt="Profile dropdown popover showing an identity header with the admin role and Admiral tier badges, a navigation strip with Settings, Documentation, and Feedback entries, an Appearance theme picker, and a Log Out button" />
 </Frame>
 
-Click your initials in the top-right corner to open the popover. For active subscription licenses, a **Billing** row appears between **Settings** and **Documentation** that opens the same portal as **Manage subscription**. Lifetime licenses have no recurring subscription to manage, so the **Billing** row is hidden.
-
-### Lifetime licenses
-
-Lifetime licenses have no recurring subscription, so the **Manage subscription** button and the profile menu **Billing** row are both hidden, and the masthead shows `DURATION: lifetime` instead of a renewal date. Deactivation, multi-node enforcement, and periodic validation work the same as for subscription licenses.
+Click your initials in the top-right corner to open the popover. For active subscription licenses, a **Billing** row appears between **Settings** and **Documentation** that opens the same portal as **Manage subscription**.
 
 ## License validation
 
@@ -134,7 +130,6 @@ The License page renders differently depending on the license status:
 | **Community** | `Sencho Community` with "Free tier with the core experience." | Visible | Visible |
 | **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a paid key can replace the trial) | Hidden |
 | **Active subscription** | Tier name with Customer, Product, License key, plus `Manage subscription` and `Deactivate` | Hidden | Hidden |
-| **Active lifetime** | Tier name with Customer, Product, License key, plus `Deactivate` only | Hidden | Hidden |
 | **Expired** | `Sencho Community` with "Your license has expired. Renew to restore paid features." and a destructive **Status: Expired** field | Visible | Visible |
 | **Disabled** | `Sencho Community` with "Your license has been disabled. Contact support for assistance." | Visible | Visible |
 
