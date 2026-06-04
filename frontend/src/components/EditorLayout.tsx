@@ -13,7 +13,8 @@ import { useStackListState } from './EditorLayout/hooks/useStackListState';
 import { useViewNavigationState } from './EditorLayout/hooks/useViewNavigationState';
 import { useOverlayState } from './EditorLayout/hooks/useOverlayState';
 import { useStackActions, NODE_SWITCH_PENDING_TOKEN } from './EditorLayout/hooks/useStackActions';
-import { useTheme } from './EditorLayout/hooks/useTheme';
+import { useTheme } from '@/hooks/use-theme';
+import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
@@ -223,7 +224,7 @@ export default function EditorLayout() {
   const loadingAction = selectedFile ? (stackActionMap[selectedFile] ?? null) : null;
   const stackName = selectedFile || '';
 
-  const { theme, setTheme, isDarkMode } = useTheme();
+  const { isDarkMode } = useTheme();
 
   // Track the last "committed" node id so the node-switch dirty guard can
   // detect an actual switch (vs the initial mount or an internal revert).
@@ -347,7 +348,7 @@ export default function EditorLayout() {
 
   return (
     <GlobalCommandPaletteProvider>
-    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
+    <div className="flex h-screen w-screen overflow-hidden app-canvas text-foreground">
       <GlobalCommandPalette
         navItems={navItems}
         onNavigate={handleNavigate}
@@ -417,6 +418,7 @@ export default function EditorLayout() {
           mobileNavOpen={mobileNavOpen}
           onMobileNavOpenChange={setMobileNavOpen}
           search={<GlobalCommandPaletteTrigger />}
+          themeSwitch={<ThemeQuickSwitch />}
           notifications={
             <NotificationPanel
               notifications={notifications}
@@ -429,8 +431,6 @@ export default function EditorLayout() {
           }
           userMenu={
             <UserProfileDropdown
-              theme={theme}
-              setTheme={setTheme}
               onOpenSettings={() => handleOpenSettings('account')}
             />
           }

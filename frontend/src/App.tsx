@@ -14,7 +14,7 @@ function AppContent() {
 
   if (appStatus === 'loading') {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
+      <div className="min-h-screen flex items-center justify-center app-canvas">
         <div className="text-muted-foreground">Loading...</div>
       </div>
     );
