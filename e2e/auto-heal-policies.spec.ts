@@ -4,8 +4,8 @@
  * Opens the Auto-Heal sheet from the stack sidebar context menu, creates a
  * policy, verifies it appears in the list, then deletes it.
  *
- * Requires a paid license (Skipper or Admiral) on the test instance. The test
- * skips gracefully when the PaidGate upgrade prompt is detected instead.
+ * Auto-heal policies are available on every tier, so no paid license is
+ * required; the test skips gracefully when no stacks exist on the instance.
  */
 import { test, expect } from '@playwright/test';
 import { loginAs } from './helpers';

@@ -3,7 +3,7 @@
  *
  * The route flips the global `trivy_auto_update` setting that the scheduler
  * reads every 24h to decide whether to pull newer Trivy binary releases.
- * It must be reachable only by an admin on a paid (Skipper or Admiral) tier.
+ * It must be reachable only by an admin on a paid (Admiral) tier.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';

@@ -88,7 +88,7 @@ describe('GET /api/scheduled-tasks', () => {
     expect(Array.isArray(res.body[0].next_runs)).toBe(true);
   });
 
-  it('shows every action to Skipper users', async () => {
+  it('shows every action to admins', async () => {
     const db = DatabaseService.getInstance();
     const now = Date.now();
     db.createScheduledTask({

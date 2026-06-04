@@ -4,7 +4,7 @@
  * The route flips the global `deploy_block_honor_suppressions` setting that the
  * pre-deploy policy gate reads to decide whether a suppressed CVE still counts
  * toward a block-on-deploy policy. It must be reachable only by an admin on a
- * paid (Skipper or Admiral) tier, matching the trivy-auto-update toggle.
+ * paid (Admiral) tier, matching the trivy-auto-update toggle.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
