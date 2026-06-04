@@ -25,8 +25,6 @@ export interface StackMenuCtx {
   stackStatus: StackLifecycleStatus;
   hasPort: boolean;
   isBusy: boolean;
-  isPaid: boolean;
-  isAdmiral: boolean;
   isAdmin: boolean;
   canDelete: boolean;
   canEditLabels: boolean;

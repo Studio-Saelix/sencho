@@ -71,11 +71,10 @@ const PAGE_SIZE = 10;
 
 export default function FleetSnapshots() {
     const { isAdmin } = useAuth();
-    const { license, isPaid } = useLicense();
-    const isAdmiral = isPaid && license?.variant === 'admiral';
+    const { isPaid } = useLicense();
 
     // Cloud-upload affordance is reachable when the saved provider is custom
-    // (every tier) or sencho on an Admiral license. A downgraded admin whose
+    // (every tier) or sencho on a paid license. A downgraded admin whose
     // saved provider is still 'sencho' sees no upload button — they cannot
     // call POST /cloud-backup/upload/:id because gateForCurrentProvider would
     // 403 anyway, so the UI must not advertise an action that is gated away.
@@ -133,11 +132,11 @@ export default function FleetSnapshots() {
             const res = await apiFetch('/cloud-backup/config', { localOnly: true });
             if (!res.ok) return;
             const data = await res.json() as { provider: 'disabled' | 'sencho' | 'custom' };
-            setCloudEnabled(data.provider === 'custom' || (data.provider === 'sencho' && isAdmiral));
+            setCloudEnabled(data.provider === 'custom' || (data.provider === 'sencho' && isPaid));
         } catch {
             // best-effort; cloud affordances stay hidden on failure
         }
-    }, [isAdmiral]);
+    }, [isPaid]);
 
     const fetchCloudSnapshots = useCallback(async () => {
         if (!cloudEnabled) return;

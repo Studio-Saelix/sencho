@@ -19,7 +19,6 @@ interface PermissionsData {
   globalRole: UserRole;
   globalPermissions: PermissionAction[];
   scopedPermissions: Record<string, PermissionAction[]>;
-  isAdmiral: boolean;
 }
 
 interface AuthContextType {

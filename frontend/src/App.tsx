@@ -36,8 +36,8 @@ function AppContent() {
     <NodeProvider>
       <LicenseProvider>
         <EditorLayout />
-        {/* Portal lives inside LicenseProvider so DeployFeedbackModal can
-            call useLicense() (M-3 atomic-deploy notice depends on isPaid).
+        {/* Portal lives inside LicenseProvider so the editor surface and its
+            portalled overlays can read license state via useLicense().
             Outer DeployFeedbackProvider is still an ancestor through App. */}
         <DeployFeedbackPortal />
       </LicenseProvider>

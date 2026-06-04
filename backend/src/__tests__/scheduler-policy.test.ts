@@ -14,7 +14,7 @@ const {
   mockUpdateScheduledTask, mockCleanupOldTaskRuns, mockGetScheduledTask, mockGetNodes, mockGetNode,
   mockCreateSnapshot, mockInsertSnapshotFiles, mockClearStackUpdateStatus,
   mockMarkStaleRunsAsFailed, mockDeleteOldScans,
-  mockGetTier, mockGetVariant,
+  mockGetTier,
   mockDispatchAlert,
   mockGetProxyTarget,
   mockIsTrivyAvailable,
@@ -34,7 +34,6 @@ const {
   mockMarkStaleRunsAsFailed: vi.fn().mockReturnValue(0),
   mockDeleteOldScans: vi.fn().mockReturnValue(0),
   mockGetTier: vi.fn().mockReturnValue('paid'),
-  mockGetVariant: vi.fn().mockReturnValue('admiral'),
   mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
   mockGetProxyTarget: vi.fn().mockReturnValue(null),
   mockIsTrivyAvailable: vi.fn().mockReturnValue(true),
@@ -65,7 +64,6 @@ vi.mock('../services/LicenseService', () => ({
   LicenseService: {
     getInstance: () => ({
       getTier: mockGetTier,
-      getVariant: mockGetVariant,
     }),
   },
 }));

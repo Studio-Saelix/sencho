@@ -1,6 +1,6 @@
 import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { wsProxyServer } from '../proxy/websocketProxy';
 import { getErrorMessage } from '../utils/errors';
@@ -48,7 +48,6 @@ export async function handleRemoteForwarder(
         headers: {
           'Authorization': `Bearer ${target.apiToken}`,
           [PROXY_TIER_HEADER]: consoleHeaders.tier,
-          [PROXY_VARIANT_HEADER]: consoleHeaders.variant || '',
         },
       });
       if (!tokenRes.ok) {
@@ -78,7 +77,6 @@ export async function handleRemoteForwarder(
   delete req.headers['cookie'];
   const fwdHeaders = LicenseService.getInstance().getProxyHeaders();
   req.headers[PROXY_TIER_HEADER] = fwdHeaders.tier;
-  req.headers[PROXY_VARIANT_HEADER] = fwdHeaders.variant || '';
   // Strip nodeId from the forwarded URL so the remote treats the request as
   // local. The remote has no record of the gateway's nodeId; leaving it would
   // trigger nodeContext's 404 branch.

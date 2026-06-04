@@ -4,7 +4,7 @@ description: Trigger stack actions from CI/CD pipelines via HTTP webhooks with H
 ---
 
 <Note>
-  Webhooks require a **Skipper** or **Admiral** license. Managing webhooks is admin-only.
+  Managing webhooks is admin-only.
 </Note>
 
 Sencho webhooks let external systems trigger stack actions over HTTP. The typical use case: your CI pipeline builds a new image, then calls a Sencho webhook to deploy the updated stack, with no manual intervention required.
@@ -163,7 +163,7 @@ Sencho retains the last 100 executions per webhook and surfaces the 20 most rece
 
 <AccordionGroup>
   <Accordion title="I don't see Webhooks in Settings.">
-    The page requires a **Skipper** or **Admiral** license. If you are on a paid tier but the node switcher in the top-left shows a remote node, switch to **Local** to reveal the page.
+    Webhooks are managed on the local node. If the node switcher in the top-left shows a remote node, switch to **Local** to reveal the page.
   </Accordion>
 
   <Accordion title="My trigger returns 404 'Webhook not found or signature invalid'.">

@@ -5,7 +5,6 @@ import { Badge } from '@/components/ui/badge';
 import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play, CalendarClock, Monitor, Globe } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
-import { PaidGate } from '@/components/PaidGate';
 import { useNodes } from '@/context/NodeContext';
 import type { ScheduledTask } from '@/types/scheduling';
 
@@ -657,9 +656,5 @@ function AutoUpdateReadinessContent() {
 }
 
 export default function AutoUpdateReadinessView() {
-  return (
-    <PaidGate>
-      <AutoUpdateReadinessContent />
-    </PaidGate>
-  );
+  return <AutoUpdateReadinessContent />;
 }

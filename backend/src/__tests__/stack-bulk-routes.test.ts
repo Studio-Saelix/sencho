@@ -330,7 +330,7 @@ describe('POST /api/stacks/bulk execution', () => {
     expect(res.body.success).toBe(true);
   });
 
-  it('returns 403 on update action when caller is not on a paid tier', async () => {
+  it('allows the update action on the community tier (bulk ops are free)', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
     try {
@@ -339,8 +339,8 @@ describe('POST /api/stacks/bulk execution', () => {
         .set('Cookie', authCookie)
         .send({ action: 'update', stackNames: ['web'] });
 
-      expect(res.status).toBe(403);
-      expect(mockUpdateStack).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(mockUpdateStack).toHaveBeenCalled();
     } finally {
       tierSpy.mockRestore();
     }

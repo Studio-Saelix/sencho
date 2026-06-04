@@ -219,8 +219,7 @@ describe('deploy_failure notification on /deploy error', () => {
     const res = await request(app)
       .post('/api/stacks/myapp/deploy')
       .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', 'skipper');
+      .set('x-sencho-tier', 'paid');
 
     expect(res.status).toBe(200);
     expect(mockDeployStack.mock.calls[0][2]).toBe(true);
@@ -349,8 +348,7 @@ describe('deploy_failure notification on /update error', () => {
     const res = await request(app)
       .post('/api/stacks/myapp/update')
       .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', 'skipper');
+      .set('x-sencho-tier', 'paid');
 
     expect(res.status).toBe(200);
     expect(mockUpdateStack.mock.calls[0][2]).toBe(true);

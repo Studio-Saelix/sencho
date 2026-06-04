@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
-import { useAuth } from '@/context/AuthContext';
+import { useLicense } from '@/context/LicenseContext';
 import { visibilityInterval } from '@/lib/utils';
 import type { MeshDataPlaneStatus } from '@/types/mesh';
 
@@ -12,15 +12,13 @@ export interface MeshDataPlaneResult {
 /**
  * Poll `/mesh/status` for the local data-plane health so dashboard surfaces
  * can flag a down mesh without opening the Routing tab. The endpoint is
- * Admiral-gated, so the hook short-circuits on non-Admiral tiers (no
- * request fired, no banner rendered). On the rare 403 from an Admiral
- * tier (token race during downgrade) we leave `status` at null. 30 s
- * cadence matches `useFleetHeartbeat` so the dashboard refresh feel is
- * consistent.
+ * paid-gated, so the hook short-circuits on the free tier (no request
+ * fired, no banner rendered). On the rare 403 from a paid tier (token
+ * race during downgrade) we leave `status` at null. 30 s cadence matches
+ * `useFleetHeartbeat` so the dashboard refresh feel is consistent.
  */
 export function useMeshDataPlane(): MeshDataPlaneResult {
-    const { permissions } = useAuth();
-    const isAdmiral = permissions?.isAdmiral ?? false;
+    const { isPaid } = useLicense();
     const [status, setStatus] = useState<MeshDataPlaneStatus | null>(null);
     const [loading, setLoading] = useState(true);
 
@@ -43,14 +41,14 @@ export function useMeshDataPlane(): MeshDataPlaneResult {
     }, []);
 
     useEffect(() => {
-        if (!isAdmiral) {
+        if (!isPaid) {
             setStatus(null);
             setLoading(false);
             return;
         }
         void fetchStatus();
         return visibilityInterval(() => { void fetchStatus(); }, 30_000);
-    }, [isAdmiral, fetchStatus]);
+    }, [isPaid, fetchStatus]);
 
     return { status, loading };
 }

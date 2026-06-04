@@ -188,7 +188,6 @@ export interface EditorViewProps {
     // Permissions / tier / context
     can: ReturnType<typeof useAuth>['can'];
     isAdmin: boolean;
-    isPaid: boolean;
     trivy: { available: boolean };
     activeNode: Node | null;
 
@@ -255,7 +254,6 @@ export function EditorView({
     stackMisconfigScanning,
     can,
     isAdmin,
-    isPaid,
     trivy,
     activeNode,
     copiedDigestTimerRef,
@@ -404,7 +402,7 @@ export function EditorView({
                                 {(() => {
                                     const canDeploy = can('stack:deploy', 'stack', stackName);
                                     const canDelete = can('stack:delete', 'stack', stackName);
-                                    const canRollback = canDeploy && isPaid && backupInfo.exists;
+                                    const canRollback = canDeploy && backupInfo.exists;
                                     const canScan = trivy.available && isAdmin;
                                     const hasOverflowExtras = canRollback || canScan;
                                     const hasOverflow = hasOverflowExtras || canDelete;

@@ -12,7 +12,6 @@
 
 export type LicenseTier = 'community' | 'paid';
 export type LicenseStatus = 'community' | 'trial' | 'active' | 'expired' | 'disabled';
-export type LicenseVariant = 'skipper' | 'admiral' | null;
 
 export interface ActivationResult {
     success: boolean;
@@ -40,7 +39,6 @@ export interface BillingPortalError {
 export interface LicenseInfo {
     tier: LicenseTier;
     status: LicenseStatus;
-    variant: LicenseVariant;
     customerName: string | null;
     productName: string | null;
     maskedKey: string | null;
@@ -49,10 +47,4 @@ export interface LicenseInfo {
     instanceId: string;
     portalUrl: string | null;
     isLifetime: boolean;
-}
-
-/** Seat limits per variant. null = unlimited. */
-export interface SeatLimits {
-    maxAdmins: number | null;
-    maxViewers: number | null;
 }

@@ -42,8 +42,6 @@ beforeAll(async () => {
   // Suite runs at Community tier to prove token routes work without a paid license.
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue(null);
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
   authCookie = await loginAsTestAdmin(app);

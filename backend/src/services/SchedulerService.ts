@@ -2,7 +2,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService } from './DatabaseService';
 import type { ScheduledTask } from './DatabaseService';
 import { LicenseService } from './LicenseService';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
@@ -215,8 +215,7 @@ export class SchedulerService {
         try {
             const db = DatabaseService.getInstance();
 
-            // Vulnerability scanning is available on every tier, so the stale-scan sweep
-            // and Trivy re-detect run before the paid-tier gate below.
+            // Sweep stale vulnerability scans and re-detect Trivy on every tick.
             try {
                 const staleScans = db.markStaleScansAsFailed(STALE_SCAN_THRESHOLD_MS);
                 if (staleScans > 0) {
@@ -228,9 +227,6 @@ export class SchedulerService {
                 console.error('[SchedulerService] Stale scan sweep failed:', error);
             }
             await this.maybeRedetectTrivy();
-
-            const ls = LicenseService.getInstance();
-            if (ls.getTier() !== 'paid') return;
 
             const now = Date.now();
             const dueTasks = db.getDueScheduledTasks(now);
@@ -290,21 +286,6 @@ export class SchedulerService {
             error: null,
             triggered_by: triggeredBy,
         });
-
-        // Defense in depth: every entry point that reaches here is already paid-gated
-        // (the route's requirePaid and the tick's tier check), but guard again so a
-        // task can never run on an unpaid licence regardless of the caller. Record the
-        // skip as a failed run so a manual trigger (which already returned 202 to the
-        // operator) shows in run history rather than vanishing silently.
-        if (LicenseService.getInstance().getTier() !== 'paid') {
-            console.warn(`[SchedulerService] Skipping task "${task.name}" (id=${task.id}): licence is not paid`);
-            db.updateScheduledTaskRun(runId, {
-                completed_at: Date.now(),
-                status: 'failure',
-                error: 'Scheduled tasks require a paid licence; task was not run.',
-            });
-            return;
-        }
 
         try {
             // Pre-check: ensure target node exists and is reachable
@@ -751,7 +732,6 @@ export class SchedulerService {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${proxyTarget.apiToken}`,
                 [PROXY_TIER_HEADER]: proxyHeaders.tier,
-                [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
             },
             body: JSON.stringify({ target }),
             signal: AbortSignal.timeout(300_000), // 5 minute timeout for long updates
@@ -793,7 +773,6 @@ export class SchedulerService {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${proxyTarget.apiToken}`,
                 [PROXY_TIER_HEADER]: proxyHeaders.tier,
-                [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
             },
             signal: AbortSignal.timeout(300_000),
         });
@@ -871,12 +850,9 @@ export class SchedulerService {
             'Auto-update',
             `/api/scheduled-tasks/auto-update/${stackName}`,
         );
-        // Atomic backup/rollback is a paid capability. Every path that reaches
-        // this method is already paid-gated (the scheduler tick and the manual
-        // run route both require a paid licence), but the flag is resolved from
-        // the licence here so the tier intent is explicit at the call site and
-        // survives any future refactor that introduces another caller.
-        const atomic = LicenseService.getInstance().getTier() === 'paid';
+        // Atomic backup/rollback is the default deploy mode: take a pre-op
+        // backup and roll back on failure for every scheduled auto-update.
+        const atomic = true;
         await compose.updateStack(stackName, undefined, atomic);
         db.clearStackUpdateStatus(nodeId, stackName);
 

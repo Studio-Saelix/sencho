@@ -4,12 +4,10 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { HostTerminalService } from '../services/HostTerminalService';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER } from '../services/license-headers';
 import {
   isLicenseTier,
-  isLicenseVariant,
   normalizeTier,
-  normalizeVariant,
 } from '../services/license-normalize';
 import { LicenseService } from '../services/LicenseService';
 import { ROLE_PERMISSIONS, type PermissionAction } from '../middleware/permissions';
@@ -34,8 +32,8 @@ interface HostConsoleContext {
  *  2. RBAC: user session tokens require the `system:console` permission.
  *     console_session tokens are pre-gated at issuance (see
  *     `routes/console.ts`) and skip this check.
- *  3. License: host console requires paid + admiral. For console_session
- *     tokens the tier/variant is trusted from the gateway-supplied headers;
+ *  3. License: host console requires the paid tier. For console_session
+ *     tokens the tier is trusted from the gateway-supplied header;
  *     otherwise the local LicenseService is consulted.
  */
 export function handleHostConsoleWs(
@@ -62,15 +60,11 @@ export function handleHostConsoleWs(
   }
 
   const consoleTierHeader = req.headers[PROXY_TIER_HEADER] as string | undefined;
-  const consoleVariantHeader = req.headers[PROXY_VARIANT_HEADER] as string | undefined;
   const ls = LicenseService.getInstance();
   const consoleTier = (isConsoleSession && isLicenseTier(consoleTierHeader))
     ? normalizeTier(consoleTierHeader)
     : ls.getTier();
-  const consoleVariant = (isConsoleSession && consoleVariantHeader !== undefined && isLicenseVariant(consoleVariantHeader))
-    ? normalizeVariant(consoleVariantHeader)
-    : ls.getVariant();
-  if (consoleTier !== 'paid' || consoleVariant !== 'admiral') {
+  if (consoleTier !== 'paid') {
     return reject(socket, 403, 'Forbidden');
   }
 

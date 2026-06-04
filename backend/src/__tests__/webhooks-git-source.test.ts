@@ -27,8 +27,8 @@ afterAll(() => {
 
 beforeEach(() => {
     vi.restoreAllMocks();
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
+    // Webhooks are free; run at the Community tier.
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
 });
 
 describe('node-aware Git source webhooks', () => {

@@ -30,13 +30,12 @@ describe('console_session token parity (HTTP route vs mint helper)', () => {
     ({ app } = await import('../index'));
     adminCookie = await loginAsTestAdmin(app);
 
-    // POST /api/system/console-token is Admiral-gated. Seed an active Admiral
-    // license so the parity assertion can observe the token the route returns.
-    // The license_last_validated fallback is skipped when the state key is
-    // absent, so we only need the two keys that drive requireAdmiral.
+    // POST /api/system/console-token is paid-gated. Seed an active license so the
+    // parity assertion can observe the token the route returns. The
+    // license_last_validated fallback is skipped when the state key is absent, so
+    // the active status alone drives the paid tier.
     const { DatabaseService } = await import('../services/DatabaseService');
     DatabaseService.getInstance().setSystemState('license_status', 'active');
-    DatabaseService.getInstance().setSystemState('license_variant_type', 'admiral');
   });
 
   afterAll(() => {

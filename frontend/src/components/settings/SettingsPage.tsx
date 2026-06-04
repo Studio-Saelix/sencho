@@ -100,14 +100,13 @@ export function SettingsPage(props: SettingsPageProps) {
 }
 
 function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProps) {
-    const { isAdmin, permissions } = useAuth();
+    const { isAdmin } = useAuth();
     const { isPaid } = useLicense();
     const { activeNode } = useNodes();
     const isRemote = activeNode?.type === 'remote';
-    const isAdmiral = permissions?.isAdmiral ?? false;
     const visibility: VisibilityContext = useMemo(
-        () => ({ isRemote, isAdmin, isPaid, isAdmiral }),
-        [isRemote, isAdmin, isPaid, isAdmiral],
+        () => ({ isRemote, isAdmin, isPaid }),
+        [isRemote, isAdmin, isPaid],
     );
 
     // Resolve the rendered section: must be a registry id and must be visible to the
@@ -195,7 +194,7 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
             case 'system': return <SystemSection onDirtyChange={(d) => handleDirtyChange('system', d)} />;
             case 'notifications': return <NotificationsSection />;
             case 'notification-routing': return <NotificationRoutingSection />;
-            case 'webhooks': return <WebhooksSection isPaid={isPaid} />;
+            case 'webhooks': return <WebhooksSection />;
             case 'security': return <SecuritySection isPaid={isPaid} />;
             case 'cloud-backup': return <CloudBackupSection />;
             case 'developer': return <DeveloperSection onDirtyChange={(d) => handleDirtyChange('developer', d)} />;

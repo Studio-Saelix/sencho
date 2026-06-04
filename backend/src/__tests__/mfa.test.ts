@@ -68,11 +68,9 @@ beforeAll(async () => {
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ MfaService } = await import('../services/MfaService'));
 
-  // Mock LicenseService to return paid/admiral so the admin routes pass gates
+  // Mock LicenseService to return paid so the admin routes pass gates
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
 });

@@ -52,7 +52,7 @@ describe('SSO Config Endpoints (Protected)', () => {
     expect(res.status).toBe(401);
   });
 
-  it('GET /api/sso/config returns 200 with admin token (no Admiral required)', async () => {
+  it('GET /api/sso/config returns 200 with admin token (no paid tier required)', async () => {
     const res = await supertest(app)
       .get('/api/sso/config')
       .set('Authorization', `Bearer ${adminToken}`);
@@ -113,12 +113,6 @@ describe('SSO OIDC Callback', () => {
 });
 
 describe('SSO User Provisioning', () => {
-  // Mock LicenseService to return team variant (unlimited seats) for provisioning tests
-  beforeAll(async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
-  });
-
   afterAll(() => {
     vi.restoreAllMocks();
   });
@@ -294,11 +288,6 @@ describe('Database migration - SSO columns', () => {
 });
 
 describe('SSO Role Sync on Re-Login', () => {
-  beforeAll(async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
-  });
-
   afterAll(() => {
     vi.restoreAllMocks();
   });
@@ -352,50 +341,6 @@ describe('SSO Role Sync on Re-Login', () => {
   });
 });
 
-describe('SSO Seat Limit Enforcement', () => {
-  it('downgrades new admin to viewer when admin seats are full', async () => {
-    const { SSOService } = await import('../services/SSOService');
-    const { LicenseService } = await import('../services/LicenseService');
-
-    // Mock: 1 admin seat max (already used by testadmin)
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: 1, maxViewers: null });
-
-    const sso = SSOService.getInstance();
-    const user = sso.provisionUser({
-      authProvider: 'oidc_google',
-      providerId: 'seat-limit-admin-test',
-      preferredUsername: 'seatlimit_admin',
-      role: 'admin',
-    });
-
-    // Should be downgraded to viewer since admin seat is taken
-    expect(user.role).toBe('viewer');
-
-    vi.restoreAllMocks();
-  });
-
-  it('throws when all viewer seats are full', async () => {
-    const { SSOService } = await import('../services/SSOService');
-    const { LicenseService } = await import('../services/LicenseService');
-    const { DatabaseService } = await import('../services/DatabaseService');
-    const db = DatabaseService.getInstance();
-
-    // Count existing viewers to set a tight limit
-    const currentViewers = db.getViewerCount();
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: 1, maxViewers: currentViewers });
-
-    const sso = SSOService.getInstance();
-    expect(() => sso.provisionUser({
-      authProvider: 'oidc_google',
-      providerId: 'seat-limit-viewer-test',
-      preferredUsername: 'seatlimit_viewer',
-      role: 'viewer',
-    })).toThrow('User seat limit reached');
-
-    vi.restoreAllMocks();
-  });
-});
-
 describe('LDAP Filter Escaping', () => {
   it('escapes special characters in LDAP filters', async () => {
     const { SSOService } = await import('../services/SSOService');
@@ -412,12 +357,12 @@ describe('LDAP Filter Escaping', () => {
 
 describe('SSO Config Validation on PUT', () => {
   // Validation tests exercise the required-field checks inside PUT. Per-provider
-  // tier gates run before validation, so mock the license to Admiral here to keep
-  // these tests focused on validation logic; tier-gate coverage lives in its own block.
+  // tier gates run before validation, so mock the license to the paid tier here
+  // to keep these tests focused on validation logic; tier-gate coverage lives in
+  // its own block.
   beforeAll(async () => {
     const { LicenseService } = await import('../services/LicenseService');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
   });
 
   afterAll(() => {
@@ -637,29 +582,27 @@ describe('SSO OIDC Callback - Additional Error Handling', () => {
 });
 
 describe('SSO Config Tier Gating (per-provider)', () => {
-  // Per-provider tier rules: Custom OIDC = admin only, preset OIDC (Google/GitHub/Okta) = Skipper+, LDAP = Admiral.
-  // The matrix below covers mutations only; GET /sso/config (list) intentionally stays tier-ungated so
-  // downgraded admins can still see previously-configured providers.
+  // Per-provider tier rules: Custom OIDC and preset OIDC (Google/GitHub/Okta) are
+  // free; only LDAP requires the paid tier. The matrix below covers mutations
+  // only; GET /sso/config (list) intentionally stays tier-ungated so downgraded
+  // admins can still see previously-configured providers.
   let tierSpy: ReturnType<typeof vi.spyOn>;
-  let variantSpy: ReturnType<typeof vi.spyOn>;
 
   beforeAll(async () => {
     const { LicenseService } = await import('../services/LicenseService');
     tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier');
-    variantSpy = vi.spyOn(LicenseService.getInstance(), 'getVariant');
   });
 
   afterAll(() => {
     vi.restoreAllMocks();
   });
 
-  const setTier = (tier: 'community' | 'paid', variant: 'skipper' | 'admiral' | null): void => {
+  const setTier = (tier: 'community' | 'paid'): void => {
     tierSpy.mockReturnValue(tier);
-    variantSpy.mockReturnValue(variant);
   };
 
   describe('community tier', () => {
-    beforeAll(() => setTier('community', null));
+    beforeAll(() => setTier('community'));
 
     it('PUT oidc_custom succeeds (no tier gate)', async () => {
       const res = await supertest(app)
@@ -669,36 +612,33 @@ describe('SSO Config Tier Gating (per-provider)', () => {
       expect(res.status).toBe(200);
     });
 
-    it('PUT oidc_google returns 403 PAID_REQUIRED', async () => {
+    it('PUT oidc_google succeeds (presets are free)', async () => {
       const res = await supertest(app)
         .put('/api/sso/config/oidc_google')
         .set('Authorization', `Bearer ${adminToken}`)
         .send({ enabled: false });
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('PAID_REQUIRED');
+      expect(res.status).toBe(200);
     });
 
-    it('PUT ldap returns 403 PAID_REQUIRED (tier check precedes variant check)', async () => {
+    it('DELETE oidc_github succeeds (presets are free)', async () => {
+      const res = await supertest(app)
+        .delete('/api/sso/config/oidc_github')
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(res.status).toBe(200);
+    });
+
+    it('POST oidc_okta/test reaches the handler (presets are free, not tier-gated)', async () => {
+      const res = await supertest(app)
+        .post('/api/sso/config/oidc_okta/test')
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(res.status).not.toBe(403);
+    });
+
+    it('PUT ldap returns 403 PAID_REQUIRED', async () => {
       const res = await supertest(app)
         .put('/api/sso/config/ldap')
         .set('Authorization', `Bearer ${adminToken}`)
         .send({ enabled: false });
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('PAID_REQUIRED');
-    });
-
-    it('DELETE oidc_github returns 403 PAID_REQUIRED', async () => {
-      const res = await supertest(app)
-        .delete('/api/sso/config/oidc_github')
-        .set('Authorization', `Bearer ${adminToken}`);
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('PAID_REQUIRED');
-    });
-
-    it('POST oidc_okta/test returns 403 PAID_REQUIRED', async () => {
-      const res = await supertest(app)
-        .post('/api/sso/config/oidc_okta/test')
-        .set('Authorization', `Bearer ${adminToken}`);
       expect(res.status).toBe(403);
       expect(res.body.code).toBe('PAID_REQUIRED');
     });
@@ -712,45 +652,8 @@ describe('SSO Config Tier Gating (per-provider)', () => {
     });
   });
 
-  describe('skipper tier', () => {
-    beforeAll(() => setTier('paid', 'skipper'));
-
-    it('PUT oidc_custom succeeds', async () => {
-      const res = await supertest(app)
-        .put('/api/sso/config/oidc_custom')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ enabled: false });
-      expect(res.status).toBe(200);
-    });
-
-    it('PUT oidc_google succeeds', async () => {
-      const res = await supertest(app)
-        .put('/api/sso/config/oidc_google')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ enabled: false });
-      expect(res.status).toBe(200);
-    });
-
-    it('PUT ldap returns 403 ADMIRAL_REQUIRED', async () => {
-      const res = await supertest(app)
-        .put('/api/sso/config/ldap')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ enabled: false });
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
-    });
-
-    it('DELETE ldap returns 403 ADMIRAL_REQUIRED', async () => {
-      const res = await supertest(app)
-        .delete('/api/sso/config/ldap')
-        .set('Authorization', `Bearer ${adminToken}`);
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
-    });
-  });
-
-  describe('admiral tier', () => {
-    beforeAll(() => setTier('paid', 'admiral'));
+  describe('paid tier', () => {
+    beforeAll(() => setTier('paid'));
 
     it('PUT ldap succeeds', async () => {
       const res = await supertest(app)

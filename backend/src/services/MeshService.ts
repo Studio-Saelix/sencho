@@ -8,7 +8,7 @@ import { DatabaseService, type NodeMode } from './DatabaseService';
 import DockerController from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { LicenseService } from './LicenseService';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER } from './license-headers';
 import { MeshForwarder, type MeshForwarderHost } from './MeshForwarder';
 import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
@@ -2232,9 +2232,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
     /**
      * Build a `fetch` against a remote Sencho's API with the bearer token
-     * and the proxy tier/variant headers in place. Centralizes the header
-     * shape so a future addition (license header, audit context) only
-     * needs to land in one place.
+     * and the proxy tier header in place. Centralizes the header shape so a
+     * future addition (license header, audit context) only needs to land in
+     * one place.
      *
      * `x-node-id` is deliberately NOT set: callers target the remote
      * Sencho's own routes, which operate against the remote's local node
@@ -2255,7 +2255,6 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (target.apiToken) headers['Authorization'] = `Bearer ${target.apiToken}`;
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         headers[PROXY_TIER_HEADER] = proxyHeaders.tier;
-        headers[PROXY_VARIANT_HEADER] = proxyHeaders.variant || '';
         return await fetch(url, {
             method,
             headers,

@@ -6,4 +6,3 @@
  * authenticated as a node_proxy bearer.
  */
 export const PROXY_TIER_HEADER = 'x-sencho-tier';
-export const PROXY_VARIANT_HEADER = 'x-sencho-variant';

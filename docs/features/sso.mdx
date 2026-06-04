@@ -12,9 +12,9 @@ SSO is available on every Sencho tier. Higher tiers add preset providers for Goo
 | Provider | Protocol | Tier | Notes |
 |----------|----------|------|-------|
 | **Custom OIDC** | OpenID Connect | Community | Any spec-compliant OIDC provider: Authelia, Keycloak, Authentik, Zitadel, KanIDM, Pocket ID, and more |
-| **Google** | OpenID Connect | Skipper | Preset for Google Workspace or personal Google accounts, with branded login button |
-| **GitHub** | OAuth 2.0 | Skipper | Preset for GitHub personal accounts and GitHub orgs, with branded login button |
-| **Okta** | OpenID Connect | Skipper | Preset for any Okta org or Okta-compatible IdP, with branded login button |
+| **Google** | OpenID Connect | Community | Preset for Google Workspace or personal Google accounts, with branded login button |
+| **GitHub** | OAuth 2.0 | Community | Preset for GitHub personal accounts and GitHub orgs, with branded login button |
+| **Okta** | OpenID Connect | Community | Preset for any Okta org or Okta-compatible IdP, with branded login button |
 | **LDAP / Active Directory** | LDAP bind + search | Admiral | Works with OpenLDAP, Active Directory, FreeIPA, and any LDAPv3 server |
 
 ## How it works
@@ -42,9 +42,8 @@ When a user signs in via SSO for the first time, Sencho creates a local account:
 - **Username** is derived from the identity provider profile (display name, email prefix, or login handle).
 - **Role** is assigned from [role mapping](#role-mapping); defaults to Viewer if no mapping matches.
 - **Password** is set to an unusable placeholder. SSO users cannot sign in with the password form.
-- **Seat limits** from your license apply. If admin seats are full, the user is downgraded to Viewer. If every seat is full, sign-in is denied with a clear error message.
 
-On every subsequent sign-in, the existing account is reused and the user's **email** and **role** are synced from the identity provider. Adding someone to your admin group promotes them to Admin on their next sign-in; removing them demotes them to the default role. Promotions defer cleanly when admin seats are full and apply as soon as a seat opens up.
+On every subsequent sign-in, the existing account is reused and the user's **email** and **role** are synced from the identity provider. Adding someone to your admin group promotes them to Admin on their next sign-in; removing them demotes them to the default role.
 
 ## Role mapping
 

@@ -10,7 +10,6 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useAuth, type UserRole } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
-import { PaidGate } from '@/components/PaidGate';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import { RefreshCw, Trash2, Plus, Pencil, ShieldOff } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
@@ -37,7 +36,7 @@ interface RoleAssignmentItem {
 
 export function UsersSection() {
     const { user: currentUser } = useAuth();
-    const { isPaid, license } = useLicense();
+    const { isPaid } = useLicense();
     const [users, setUsers] = useState<UserItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [showForm, setShowForm] = useState(false);
@@ -260,8 +259,7 @@ export function UsersSection() {
     };
 
     return (
-        <PaidGate>
-          <CapabilityGate capability="users" featureName="User Management">
+        <CapabilityGate capability="users" featureName="User Management">
             <div className="space-y-6">
                 {!showForm && (
                     <div className="flex justify-end">
@@ -290,7 +288,7 @@ export function UsersSection() {
                                     options={[
                                         { value: 'admin', label: 'Admin' },
                                         { value: 'viewer', label: 'Viewer' },
-                                        ...(isPaid && license?.variant === 'admiral' ? [
+                                        ...(isPaid ? [
                                             { value: 'deployer', label: 'Deployer' },
                                             { value: 'node-admin', label: 'Node Admin' },
                                             { value: 'auditor', label: 'Auditor' },
@@ -336,8 +334,8 @@ export function UsersSection() {
                             </SettingsPrimaryButton>
                         </div>
 
-                        {/* Scoped Permissions (Admiral, editing only) */}
-                        {editingUser && isPaid && license?.variant === 'admiral' && (
+                        {/* Scoped Permissions (paid, editing only) */}
+                        {editingUser && isPaid && (
                             <div className="border border-glass-border rounded-lg p-4 space-y-3 mt-4">
                                 <h4 className="text-sm font-medium">Scoped Permissions</h4>
                                 <p className="text-xs text-muted-foreground">
@@ -522,7 +520,6 @@ export function UsersSection() {
                     </p>
                 </ConfirmModal>
             </div>
-          </CapabilityGate>
-        </PaidGate>
+        </CapabilityGate>
     );
 }

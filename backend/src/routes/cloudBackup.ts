@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { DatabaseService } from '../services/DatabaseService';
 import { CryptoService } from '../services/CryptoService';
-import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
+import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { getErrorMessage } from '../utils/errors';
 
@@ -11,18 +11,18 @@ const SECRET_REDACTED = '***';
 const VALID_PROVIDERS = new Set(['disabled', 'sencho', 'custom']);
 
 // Provider-aware tier gates. The managed Sencho Cloud Backup target requires
-// Admiral; the bring-your-own-bucket Custom S3 target is available on every
-// tier. These wrappers short-circuit to requireAdmiral only when the operation
-// actually touches the 'sencho' provider.
+// a paid license; the bring-your-own-bucket Custom S3 target is available on
+// every tier. These wrappers short-circuit to requirePaid only when the
+// operation actually touches the 'sencho' provider.
 
 function gateForCurrentProvider(req: Request, res: Response): boolean {
     const provider = CloudBackupService.getInstance().getProvider();
-    if (provider === 'sencho') return requireAdmiral(req, res);
+    if (provider === 'sencho') return requirePaid(req, res);
     return true;
 }
 
 function gateForRequestedProvider(req: Request, res: Response, requested: string): boolean {
-    if (requested === 'sencho') return requireAdmiral(req, res);
+    if (requested === 'sencho') return requirePaid(req, res);
     return true;
 }
 
@@ -153,7 +153,7 @@ cloudBackupRouter.post('/test', async (req: Request, res: Response): Promise<voi
 cloudBackupRouter.post('/provision', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
     if (!requireAdmin(req, res)) return;
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     try {
         const result = await CloudBackupService.getInstance().provisionSenchoCloudBackup();
         if (!result.success) {
@@ -169,7 +169,7 @@ cloudBackupRouter.post('/provision', async (req: Request, res: Response): Promis
 
 cloudBackupRouter.get('/usage', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     try {
         const svc = CloudBackupService.getInstance();
         if (svc.getProvider() !== 'sencho') {

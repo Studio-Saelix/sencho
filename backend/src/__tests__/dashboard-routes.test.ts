@@ -4,8 +4,8 @@
  * Covers:
  *  - Both endpoints reject unauthenticated requests (global authGate).
  *  - GET /api/dashboard/configuration returns the documented shape and
- *    applies tier-correct `locked` flags for Community, Skipper, and
- *    Admiral personas (toggled via LicenseService spies).
+ *    applies tier-correct `locked` flags for the Community and paid
+ *    personas (toggled via LicenseService spies).
  *  - GET /api/dashboard/stack-restarts clamps the `days` query parameter
  *    to [1, 30] and falls back to 7 for invalid inputs.
  *  - Neither endpoint leaks secret material (agent URLs, tokens) in the
@@ -26,12 +26,9 @@ beforeAll(async () => {
   ({ LicenseService } = await import('../services/LicenseService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
-  // Default the app to a paid+admiral tier so the import sees a fully
-  // populated license; individual tests override with vi.spyOn before
-  // hitting the route.
+  // Default the app to the paid tier so the import sees a fully populated
+  // license; individual tests override with vi.spyOn before hitting the route.
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);
@@ -40,10 +37,9 @@ beforeAll(async () => {
 afterAll(() => cleanupTestDb(tmpDir));
 
 beforeEach(() => {
-  // Reset to the default Admiral baseline before each test; individual
-  // tests below re-spy as needed for Community/Skipper personas.
+  // Reset to the default paid baseline before each test; individual tests
+  // below re-spy as needed for the Community persona.
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
 });
 
 describe('GET /api/dashboard/configuration', () => {
@@ -74,35 +70,22 @@ describe('GET /api/dashboard/configuration', () => {
     });
   });
 
-  it('flags routingRules / webhooks / scheduledTasks / scanPolicies as locked for Community', async () => {
+  it('keeps freed rows unlocked and only scanPolicies locked for Community', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue(null);
 
     const res = await request(app).get('/api/dashboard/configuration').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
-    expect(res.body.notifications.routingRules.locked).toBe(true);
-    expect(res.body.automation.webhooks.locked).toBe(true);
-    expect(res.body.automation.scheduledTasks.locked).toBe(true);
+    // routing rules, webhooks, and scheduled tasks are free.
+    expect(res.body.notifications.routingRules.locked).toBe(false);
+    expect(res.body.automation.webhooks.locked).toBe(false);
+    expect(res.body.automation.scheduledTasks.locked).toBe(false);
+    // Scan policies stay paid-gated.
     expect(res.body.security.scanPolicies.locked).toBe(true);
   });
 
-  it('unlocks paid-tier rows but keeps Admiral-only rows locked for Skipper', async () => {
+  it('unlocks every gated row for the paid tier', async () => {
+    // The beforeEach already sets the paid tier; reassert for clarity.
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
-
-    const res = await request(app).get('/api/dashboard/configuration').set('Cookie', adminCookie);
-    expect(res.status).toBe(200);
-    expect(res.body.notifications.routingRules.locked).toBe(false);
-    expect(res.body.automation.webhooks.locked).toBe(false);
-    expect(res.body.security.scanPolicies.locked).toBe(false);
-    // Scheduled tasks remain Admiral-only.
-    expect(res.body.automation.scheduledTasks.locked).toBe(true);
-  });
-
-  it('unlocks every gated row for Admiral', async () => {
-    // The beforeEach already sets Admiral; reassert for clarity.
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
 
     const res = await request(app).get('/api/dashboard/configuration').set('Cookie', adminCookie);
     expect(res.status).toBe(200);

@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
+import { requireAdmin, requirePaid } from '../middleware/tierGates';
 
 // Strict allowlist of keys readable and writable via the generic settings
 // API. This is the single source of truth for what the endpoint exposes:
@@ -26,11 +26,10 @@ const ALLOWED_SETTING_KEYS = new Set([
   'scan_history_per_image_limit',
 ]);
 
-// Keys whose write requires the Admiral variant, not just an admin role.
-// audit_retention_days configures the Admiral-only audit log (the audit-log
-// routes are requireAdmiral and the UI only shows this field to Admiral
-// operators), so a lower-tier admin must not be able to set it.
-const ADMIRAL_ONLY_SETTING_KEYS = new Set(['audit_retention_days']);
+// Keys whose write requires a paid license, not just an admin role.
+// audit_retention_days configures the paid audit log, so a Community admin
+// must not be able to set it.
+const PAID_ONLY_SETTING_KEYS = new Set(['audit_retention_days']);
 
 // Bulk PATCH schema. All keys optional; present keys are fully validated.
 const SettingsPatchSchema = z.object({
@@ -77,7 +76,7 @@ settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
       res.status(400).json({ error: `Invalid or disallowed setting key: ${key}` });
       return;
     }
-    if (ADMIRAL_ONLY_SETTING_KEYS.has(key) && !requireAdmiral(req, res)) return;
+    if (PAID_ONLY_SETTING_KEYS.has(key) && !requirePaid(req, res)) return;
     if (value === undefined || value === null) {
       res.status(400).json({ error: 'Setting value is required' });
       return;
@@ -133,7 +132,7 @@ settingsRouter.patch('/', authMiddleware, async (req: Request, res: Response): P
       res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
       return;
     }
-    if (Object.keys(parsed.data).some(k => ADMIRAL_ONLY_SETTING_KEYS.has(k)) && !requireAdmiral(req, res)) return;
+    if (Object.keys(parsed.data).some(k => PAID_ONLY_SETTING_KEYS.has(k)) && !requirePaid(req, res)) return;
     const db = DatabaseService.getInstance();
     const updateMany = db.getDb().transaction((entries: [string, string][]) => {
       for (const [k, v] of entries) {

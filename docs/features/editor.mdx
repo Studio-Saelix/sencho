@@ -37,8 +37,8 @@ The action bar runs every state transition for the whole stack. The primary butt
 
 The kebab dropdown carries:
 
-- **Rollback `<timestamp>`** restores the previous deployment using the stored snapshot. Visible only when a backup exists. Skipper or Admiral.
-- **Scan config** runs Trivy against the compose configuration and surfaces misconfigurations inline. Visible only when Trivy is reachable. Admin role required. Skipper or Admiral.
+- **Rollback `<timestamp>`** restores the previous deployment using the stored snapshot. Visible only when a backup exists.
+- **Scan config** runs Trivy against the compose configuration and surfaces misconfigurations inline. Visible only when Trivy is reachable. Admin role required.
 - **Delete** stops the stack and removes its compose directory. Requires the `stack:delete` permission.
 
 ## Containers list

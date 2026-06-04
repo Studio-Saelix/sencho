@@ -100,7 +100,6 @@ beforeAll(async () => {
 
   const { LicenseService } = await import('../services/LicenseService');
   tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue(null);
 
   ({ app } = await import('../index'));
 });

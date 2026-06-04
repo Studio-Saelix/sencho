@@ -21,8 +21,6 @@ beforeAll(async () => {
     ({ LicenseService } = await import('../services/LicenseService'));
 
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
     ({ app } = await import('../index'));
     adminCookie = await loginAsTestAdmin(app);
@@ -39,8 +37,6 @@ beforeEach(() => {
     vi.restoreAllMocks();
 
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
     vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
     vi.spyOn(FileSystemService.prototype, 'deleteStack').mockResolvedValue(undefined);

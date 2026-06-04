@@ -11,7 +11,6 @@ function base(overrides: Partial<ComponentProps<typeof StackRow>> = {}) {
     status: 'running' as const,
     isBusy: false,
     isActive: false,
-    isPaid: true,
     labels: [] as Label[],
     hasUpdate: false,
     hasGitPending: false,
@@ -74,12 +73,12 @@ describe('StackRow', () => {
     expect(screen.queryByText('UP')).not.toBeInTheDocument();
   });
 
-  it('renders label indicators on community tier', () => {
+  it('renders label indicators', () => {
     const labels: Label[] = [
       { id: 1, node_id: 0, name: 'prod', color: 'teal' },
       { id: 2, node_id: 0, name: 'media', color: 'blue' },
     ];
-    const { container } = render(<StackRow {...base({ isPaid: false, labels })} />);
+    const { container } = render(<StackRow {...base({ labels })} />);
     expect(container.querySelectorAll('[style*="--label-"]')).toHaveLength(2);
   });
 });

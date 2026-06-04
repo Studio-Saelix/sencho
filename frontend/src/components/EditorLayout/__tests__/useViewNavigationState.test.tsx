@@ -23,18 +23,16 @@ function mockCommunityUser() {
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: false,
-    license: null,
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
-function mockAdmiralAdmin() {
+function mockPaidAdmin() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: true,
     can: (p: string) => p === 'system:audit',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: true,
-    license: { variant: 'admiral' } as ReturnType<typeof LicenseContext.useLicense>['license'],
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
@@ -45,18 +43,6 @@ function mockCommunityAdmin() {
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: false,
-    license: null,
-  } as unknown as ReturnType<typeof LicenseContext.useLicense>);
-}
-
-function mockSkipperAdmin() {
-  vi.mocked(AuthContext.useAuth).mockReturnValue({
-    isAdmin: true,
-    can: () => false,
-  } as unknown as ReturnType<typeof AuthContext.useAuth>);
-  vi.mocked(LicenseContext.useLicense).mockReturnValue({
-    isPaid: true,
-    license: { variant: 'skipper' } as ReturnType<typeof LicenseContext.useLicense>['license'],
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
@@ -231,6 +217,16 @@ describe('useViewNavigationState', () => {
     expect(result.current.navItems.map(i => i.value)).toContain('global-observability');
   });
 
+  it('shows Auto-Update and Schedules for a community admin (now free) but hides paid Console and Audit', () => {
+    mockCommunityAdmin();
+    const { result } = renderHook(() => useViewNavigationState());
+    const values = result.current.navItems.map(i => i.value);
+    expect(values).toContain('auto-updates');
+    expect(values).toContain('scheduled-ops');
+    expect(values).not.toContain('host-console');
+    expect(values).not.toContain('audit-log');
+  });
+
   it('redirects a non-admin off the Logs view when reached via a deep-link event', () => {
     const onNavigateToDashboard = vi.fn();
     // Community (non-admin) is the beforeEach default.
@@ -244,10 +240,10 @@ describe('useViewNavigationState', () => {
     expect(onNavigateToDashboard).toHaveBeenCalled();
   });
 
-  // ── navItems: admiral admin ────────────────────────────────────────────────
+  // ── navItems: paid admin ───────────────────────────────────────────────────
 
-  it('navItems for admiral paid admin contains all items', () => {
-    mockAdmiralAdmin();
+  it('navItems for a paid admin contains all items', () => {
+    mockPaidAdmin();
     const { result } = renderHook(() => useViewNavigationState());
     const values = result.current.navItems.map(i => i.value);
     expect(values).toContain('auto-updates');
@@ -256,22 +252,10 @@ describe('useViewNavigationState', () => {
     expect(values).toContain('scheduled-ops');
   });
 
-  // ── navItems: skipper admin ────────────────────────────────────────────────
-
-  it('navItems for skipper paid admin contains schedules and auto-updates but not admiral items', () => {
-    mockSkipperAdmin();
-    const { result } = renderHook(() => useViewNavigationState());
-    const values = result.current.navItems.map(i => i.value);
-    expect(values).toContain('auto-updates');
-    expect(values).toContain('scheduled-ops');
-    expect(values).not.toContain('host-console');
-    expect(values).not.toContain('audit-log');
-  });
-
   // ── navItems: hub-only gating on remote node ───────────────────────────────
 
   it('hides hub-only views from the nav strip when active node is remote', () => {
-    mockAdmiralAdmin();
+    mockPaidAdmin();
     mockActiveNode('remote');
     const { result } = renderHook(() => useViewNavigationState());
     const values = result.current.navItems.map(i => i.value);
@@ -288,7 +272,7 @@ describe('useViewNavigationState', () => {
   });
 
   it('shows hub-only views again when active node switches back to local', () => {
-    mockAdmiralAdmin();
+    mockPaidAdmin();
     mockActiveNode('remote');
     const { result, rerender } = renderHook(() => useViewNavigationState());
     expect(result.current.navItems.map(i => i.value)).not.toContain('fleet');
@@ -305,7 +289,7 @@ describe('useViewNavigationState', () => {
 
   it('auto-redirects to dashboard when active view is hub-only and node becomes remote', () => {
     const onNavigateToDashboard = vi.fn();
-    mockAdmiralAdmin();
+    mockPaidAdmin();
     mockActiveNode('local');
     const { result, rerender } = renderHook(() =>
       useViewNavigationState({ onNavigateToDashboard }),
@@ -329,7 +313,7 @@ describe('useViewNavigationState', () => {
 
   it('does not redirect when a non-hub-only view is active and node becomes remote', () => {
     const onNavigateToDashboard = vi.fn();
-    mockAdmiralAdmin();
+    mockPaidAdmin();
     mockActiveNode('local');
     const { result, rerender } = renderHook(() =>
       useViewNavigationState({ onNavigateToDashboard }),

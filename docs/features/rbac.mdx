@@ -4,7 +4,7 @@ description: Role-based access control for Sencho. Manage admin, viewer, deploye
 ---
 
 <Note>
-  Multi-user support requires a Sencho **Skipper** or **Admiral** license. Community Edition runs as a single admin account. The **Deployer**, **Node Admin**, and **Auditor** roles, plus scoped permissions, require **Admiral**.
+  Community supports unlimited accounts with the **Admin** and **Viewer** roles. The **Deployer**, **Node Admin**, and **Auditor** roles, plus scoped permissions, require **Admiral**.
 </Note>
 
 <Note>
@@ -17,8 +17,8 @@ Sencho ships with five built-in roles that map to the permissions most operators
 
 | Role | What it grants | Tier |
 |------|----------------|------|
-| **Admin** | Full operator access: deploy, edit compose, manage users, configure nodes, view audit log, every system setting | Skipper+ |
-| **Viewer** | Read-only access to stacks, logs, stats, file contents, and node listings | Skipper+ |
+| **Admin** | Full operator access: deploy, edit compose, manage users, configure nodes, view audit log, every system setting | Community |
+| **Viewer** | Read-only access to stacks, logs, stats, file contents, and node listings | Community |
 | **Deployer** | Deploy, restart, stop, and start stacks. Cannot edit compose files, create or delete stacks, or view nodes | Admiral |
 | **Node Admin** | Full stack and node management across the fleet. No access to system settings, users, or license | Admiral |
 | **Auditor** | Read-only access to stacks, nodes, and the audit log. No write access anywhere | Admiral |
@@ -51,15 +51,14 @@ On Admiral, a user with a lower global role can still hold extra permissions on 
 
 | Tier | Admin accounts | Non-admin accounts | Intermediate roles | Scoped permissions |
 |------|---------------|--------------------|--------------------|--------------------|
-| **Community** | 1 | 0 | No | No |
-| **Skipper** | 1 | 3 | No | No |
+| **Community** | Unlimited | Unlimited | No | No |
 | **Admiral** | Unlimited | Unlimited | Yes | Yes |
 
-Quotas are enforced when you click **Create user**. Hitting a cap returns a `403` with a clear message, and the form keeps your input so you can adjust the role.
+Community accounts use the **Admin** and **Viewer** roles. Admiral adds the intermediate roles (Deployer, Node Admin, Auditor) and scoped permissions.
 
 ## Managing users
 
-The Users panel lives at **Settings · Users**, under the **Identity** group of the settings sidebar. It is visible only to users with the Admin role on Skipper or Admiral, and is hidden when a remote node is the active selection.
+The Users panel lives at **Settings · Users**, under the **Identity** group of the settings sidebar. It is visible only to users with the Admin role, and is hidden when a remote node is the active selection.
 
 <Frame>
   <img src="/images/rbac/users-list.png" alt="Settings Users panel showing the Identity sidebar selection, a SCOPE operator chip, an OPERATORS 2 counter, an Add user button, and a four-column table (Username, Role, Created, Actions) with two rows: admin marked (you) with a disabled trash icon and viewer with active edit and trash icons." />
@@ -84,7 +83,7 @@ Click **Add user**. The form opens inline below the button (it is not a modal), 
 | Field | Rules |
 |-------|-------|
 | **Username** | At least 3 characters. Letters, numbers, underscores, and hyphens only. Submitting with `.` or whitespace returns `Username can only contain letters, numbers, underscores, and hyphens.` |
-| **Role** | Combobox. On Admiral you see all five roles; on Skipper you see Admin and Viewer only. |
+| **Role** | Combobox. On Admiral you see all five roles; on Community you see Admin and Viewer only. |
 | **Password** | At least 8 characters. The placeholder reads `min. 8 characters`. |
 | **Confirm Password** | Must match the password field, validated on submit. |
 
@@ -105,7 +104,7 @@ The password fields change subtly in edit mode:
 - The **Password** label becomes **New Password (optional)** with the placeholder `Leave blank to keep`. Submit without filling them in and the current password is preserved.
 - If the user was provisioned via SSO, the password fields are replaced with an inline line that reads `Password is managed by the identity provider (<provider>).` Sencho never stores or rotates passwords for SSO accounts.
 
-Click **Update user** to save. Changing the role takes effect on the next API request from any of that user's active sessions; see [Session security](#session-security) below. Promoting a user to **Admin** consumes an admin seat, so it is subject to the same per-tier limit as creating an admin: at your cap, the change is rejected until you free a seat or upgrade.
+Click **Update user** to save. Changing the role takes effect on the next API request from any of that user's active sessions; see [Session security](#session-security) below.
 
 ## Scoped permissions
 
@@ -195,7 +194,7 @@ Two SSO-specific behaviors to keep in mind:
 
 The role assigned at provisioning is the role configured on the SSO provider (or, for LDAP, derived from group membership). After provisioning, an admin can adjust the role and add scoped permissions just like any local account.
 
-To configure a provider, see [SSO Authentication](/features/sso). The tier split for provider configuration (Custom OIDC at Community, preset providers at Skipper, LDAP at Admiral) is enforced separately from the rest of the user-management surface.
+To configure a provider, see [SSO Authentication](/features/sso). The tier split for provider configuration (Custom OIDC and preset providers at Community, LDAP at Admiral) is enforced separately from the rest of the user-management surface.
 
 ## API tokens for automation
 
@@ -219,19 +218,16 @@ Entries include the acting user, IP address, HTTP method and path, response stat
 
 <AccordionGroup>
   <Accordion title="The Users entry is missing from the Settings sidebar">
-    The Users entry is hidden in three cases. **One,** the active license is Community: the Users panel is gated to Skipper+ and does not render on Community. Activate a Skipper or Admiral license under **Settings · License** to expose it. **Two,** you are signed in as a non-admin (Viewer, Deployer, Auditor): the entry is admin-only. **Three,** you have a remote node selected: the panel is hub-only and is hidden in the sidebar when any remote node is active. Switch back to the local node via the node switcher in the masthead.
+    The Users entry is hidden in two cases. **One,** you are signed in as a non-admin (Viewer, Deployer, Auditor): the entry is admin-only. **Two,** you have a remote node selected: the panel is hub-only and is hidden in the sidebar when any remote node is active. Switch back to the local node via the node switcher in the masthead.
   </Accordion>
   <Accordion title="The role I want is greyed out in the role combobox">
-    The combobox only shows roles available on your tier. On Skipper, the combobox lists Admin and Viewer only. **Deployer**, **Node Admin**, and **Auditor** are Admiral-only roles and do not appear on Skipper. Upgrade to Admiral, or use scoped permissions equivalents once you do.
-  </Accordion>
-  <Accordion title="Creating a user or promoting one to Admin fails with `Your license allows a maximum of N account(s)`">
-    You have hit the seat limit for your tier. Skipper allows one admin and three non-admin users; Admiral has no cap. Promoting an existing user to Admin counts against the admin limit the same way creating one does. Either delete an unused account or upgrade. The exact remaining capacity is visible on the OPERATORS counter in the panel header.
+    The combobox only shows roles available on your tier. On Community, the combobox lists Admin and Viewer only. **Deployer**, **Node Admin**, and **Auditor** are Admiral roles. Upgrade to Admiral to use them, or the scoped-permission equivalents.
   </Accordion>
   <Accordion title="A user complains they were signed out unexpectedly">
     Token-version bumps invalidate sessions. Two events do this: an admin changed the user's password, or an admin reset their 2FA. Both rotate the user's token version, so every JWT issued before the rotation is rejected on the next request. The user can sign in again with their (possibly new) password. Role changes do **not** sign the user out; they take effect on the next request without rotating the token version.
   </Accordion>
   <Accordion title="A scoped Deployer cannot deploy a stack they were granted">
-    Two causes. **One,** the assignment was created on Admiral but the license has since dropped to Skipper. The permission resolver only consults scoped assignments when the effective tier is Admiral; on Skipper the scope is ignored and the user falls back to their global role. **Two,** the resource type or name on the assignment does not match the request's resource. Re-open the user in the edit form and check the existing-scope row matches the stack name (case-sensitive) exactly.
+    Two causes. **One,** the assignment was created on Admiral but the license has since dropped to Community. The permission resolver only consults scoped assignments when the effective tier is Admiral; on Community the scope is ignored and the user falls back to their global role. **Two,** the resource type or name on the assignment does not match the request's resource. Re-open the user in the edit form and check the existing-scope row matches the stack name (case-sensitive) exactly.
   </Accordion>
   <Accordion title="The shield (Reset 2FA) icon is missing on a user I expected to see it on">
     The icon only appears for users with a finished TOTP enrollment. If the user started enrollment but never confirmed their first code, the enrollment is incomplete and the icon stays hidden. Ask the user to finish enrollment from their account settings, or, if they cannot, leave the row alone: there is nothing to reset.

@@ -1,5 +1,5 @@
 /**
- * Tests for /api/cloud-backup routes — tier gating (community/skipper/admiral),
+ * Tests for /api/cloud-backup routes — tier gating (community vs paid),
  * admin gating, config CRUD round-trip with secret encryption, audit logging.
  * The S3 SDK is mocked at the module level so no network calls happen.
  */
@@ -31,7 +31,6 @@ beforeAll(async () => {
     ({ LicenseService } = await import('../services/LicenseService'));
 
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
 
     ({ app } = await import('../index'));
     authCookie = await loginAsTestAdmin(app);
@@ -60,19 +59,13 @@ beforeEach(() => {
 
 // Sticky mocks (mockReturnValue, not mockReturnValueOnce) so a test that does
 // not actually hit a tier-gated codepath doesn't leak its persona into later
-// tests. The afterEach hook resets back to the Admiral baseline.
+// tests. The afterEach hook resets back to the paid baseline.
 function mockCommunity() {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
 }
 
-function mockSkipper() {
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
-}
-
 afterEach(() => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
 });
 
 const customConfigBody = {
@@ -96,27 +89,15 @@ describe('Cloud backup tier gating', () => {
         expect(res.status).toBe(200);
     });
 
-    it('GET /config is readable on Skipper', async () => {
-        mockSkipper();
-        const res = await request(app).get('/api/cloud-backup/config').set('Cookie', authCookie);
-        expect(res.status).toBe(200);
-    });
-
-    it('GET /config is readable on Admiral', async () => {
+    it('GET /config is readable on the paid tier', async () => {
         const res = await request(app).get('/api/cloud-backup/config').set('Cookie', authCookie);
         expect(res.status).toBe(200);
         expect(res.body).toHaveProperty('provider', 'disabled');
     });
 
-    // PUT /config: 'custom' is available on every tier, 'sencho' is Admiral-only.
+    // PUT /config: 'custom' is available on every tier, 'sencho' is paid-only.
     it('PUT /config with provider=custom succeeds on Community', async () => {
         mockCommunity();
-        const res = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
-        expect(res.status).toBe(204);
-    });
-
-    it('PUT /config with provider=custom succeeds on Skipper', async () => {
-        mockSkipper();
         const res = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
         expect(res.status).toBe(204);
     });
@@ -128,14 +109,7 @@ describe('Cloud backup tier gating', () => {
         expect(res.body.code).toBe('PAID_REQUIRED');
     });
 
-    it('PUT /config with provider=sencho is rejected on Skipper with ADMIRAL_REQUIRED', async () => {
-        mockSkipper();
-        const res = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({ provider: 'sencho' });
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('ADMIRAL_REQUIRED');
-    });
-
-    // POST /provision is Admiral-only by definition (Sencho Cloud Backup activation).
+    // POST /provision is paid-only by definition (Sencho Cloud Backup activation).
     it('POST /provision is rejected on Community', async () => {
         mockCommunity();
         const res = await request(app).post('/api/cloud-backup/provision').set('Cookie', authCookie);
@@ -143,22 +117,9 @@ describe('Cloud backup tier gating', () => {
         expect(res.body.code).toBe('PAID_REQUIRED');
     });
 
-    it('POST /provision is rejected on Skipper', async () => {
-        mockSkipper();
-        const res = await request(app).post('/api/cloud-backup/provision').set('Cookie', authCookie);
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('ADMIRAL_REQUIRED');
-    });
-
-    // GET /usage is Admiral-only (sencho-specific endpoint).
+    // GET /usage is paid-only (sencho-specific endpoint).
     it('GET /usage is rejected on Community', async () => {
         mockCommunity();
-        const res = await request(app).get('/api/cloud-backup/usage').set('Cookie', authCookie);
-        expect(res.status).toBe(403);
-    });
-
-    it('GET /usage is rejected on Skipper', async () => {
-        mockSkipper();
         const res = await request(app).get('/api/cloud-backup/usage').set('Cookie', authCookie);
         expect(res.status).toBe(403);
     });
@@ -194,8 +155,8 @@ describe('Cloud backup tier gating', () => {
         expect(res.status).toBe(403);
     });
 
-    // Admiral retains access to every endpoint.
-    it('Admiral can configure provider=sencho', async () => {
+    // The paid tier retains access to every endpoint.
+    it('a paid admin can configure provider=sencho', async () => {
         const res = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({ provider: 'sencho' });
         expect(res.status).toBe(204);
     });

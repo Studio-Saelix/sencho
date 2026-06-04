@@ -42,7 +42,7 @@ interface WebhookExecution {
     executed_at: number;
 }
 
-export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
+export function WebhooksSection() {
     const { isAdmin } = useAuth();
     const { activeNode, nodes } = useNodes();
     const [webhooks, setWebhooks] = useState<WebhookItem[]>([]);
@@ -157,8 +157,6 @@ export function WebhooksSection({ isPaid }: { isPaid: boolean }) {
             toast.error('Failed to copy to clipboard.');
         }
     };
-
-    if (!isPaid) return null;
 
     return (
         <div className="flex flex-col gap-10">

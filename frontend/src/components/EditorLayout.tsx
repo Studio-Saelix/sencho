@@ -28,7 +28,6 @@ import { SENCHO_OPEN_LOGS_EVENT } from '@/lib/events';
 import type { SenchoOpenLogsDetail } from '@/lib/events';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { StackSidebar } from '@/components/sidebar/StackSidebar';
@@ -42,7 +41,6 @@ import { toast } from '@/components/ui/toast-store';
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
-  const { isPaid, license } = useLicense();
   const { status: trivy } = useTrivyStatus();
   const { runWithLog, panelState } = useDeployFeedback();
 
@@ -142,8 +140,6 @@ export default function EditorLayout() {
     navItems,
   } = navState;
 
-  const isAdmiral = license?.variant === 'admiral';
-
   const {
     notifications,
     tickerConnected,
@@ -169,7 +165,6 @@ export default function EditorLayout() {
     activeNode,
     setActiveNode,
     nodes,
-    isPaid,
     runWithLog,
     diffPreviewEnabled,
   });
@@ -183,8 +178,6 @@ export default function EditorLayout() {
     overlayState,
     stackActions,
     activeNode,
-    isPaid,
-    isAdmiral,
     isAdmin,
     can,
   });
@@ -374,7 +367,6 @@ export default function EditorLayout() {
         list={{
           files: chipFilteredFiles,
           isLoading,
-          isPaid,
           selectedFile,
           searchQuery,
           stackLabelMap,
@@ -402,7 +394,6 @@ export default function EditorLayout() {
         onActivityAction={handleActivityAction}
         bulkMode={bulkMode}
         selectedFiles={selectedFiles}
-        isPaid={isPaid}
         onToggleBulkMode={toggleBulkMode}
         onToggleSelect={toggleSelect}
         onClearSelection={clearSelection}
@@ -493,7 +484,6 @@ export default function EditorLayout() {
                 stackMisconfigScanning={stackMisconfigScanning}
                 can={can}
                 isAdmin={isAdmin}
-                isPaid={isPaid}
                 trivy={trivy}
                 activeNode={activeNode}
                 copiedDigestTimerRef={copiedDigestTimerRef}

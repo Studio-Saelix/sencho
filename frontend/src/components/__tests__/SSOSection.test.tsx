@@ -33,9 +33,6 @@ vi.mock('../CapabilityGate', () => ({
 vi.mock('../PaidGate', () => ({
   PaidGate: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
-vi.mock('../AdmiralGate', () => ({
-  AdmiralGate: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
 vi.mock('../settings/MastheadStatsContext', () => ({
   useMastheadStats: () => undefined,
 }));

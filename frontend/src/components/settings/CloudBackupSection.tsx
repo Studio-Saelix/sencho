@@ -68,9 +68,8 @@ const PANEL_CLASS = 'rounded-lg border border-card-border border-t-card-border-t
 const PAGE_SIZE = 10;
 
 export function CloudBackupSection() {
-    const { license, isPaid } = useLicense();
-    const isAdmiral = isPaid && license?.variant === 'admiral';
-    const providerOptions = isAdmiral
+    const { isPaid } = useLicense();
+    const providerOptions = isPaid
         ? [BASE_PROVIDER_OPTIONS[0], SENCHO_PROVIDER_OPTION, BASE_PROVIDER_OPTIONS[1]]
         : BASE_PROVIDER_OPTIONS;
     const [loading, setLoading] = useState(true);
@@ -312,7 +311,7 @@ export function CloudBackupSection() {
                 </p>
             </div>
 
-            {isAdmiral && provider === 'sencho' && !senchoProvisioned && (
+            {isPaid && provider === 'sencho' && !senchoProvisioned && (
                 <div className={PANEL_CLASS}>
                     <div className="flex items-center gap-2">
                         <Cloud className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
@@ -328,7 +327,7 @@ export function CloudBackupSection() {
                 </div>
             )}
 
-            {isAdmiral && provider === 'sencho' && senchoProvisioned && (
+            {isPaid && provider === 'sencho' && senchoProvisioned && (
                 <div className={PANEL_CLASS}>
                     <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2">

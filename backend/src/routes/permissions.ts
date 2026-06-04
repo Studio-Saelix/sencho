@@ -1,6 +1,5 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
-import { LicenseService } from '../services/LicenseService';
 import { authMiddleware } from '../middleware/auth';
 import { ROLE_PERMISSIONS, type PermissionAction } from '../middleware/permissions';
 
@@ -30,8 +29,6 @@ permissionsRouter.get('/me', authMiddleware, (req: Request, res: Response): void
       globalRole,
       globalPermissions,
       scopedPermissions,
-      isAdmiral: LicenseService.getInstance().getTier() === 'paid'
-        && LicenseService.getInstance().getVariant() === 'admiral',
     });
   } catch (error) {
     console.error('[Permissions] Error:', error);

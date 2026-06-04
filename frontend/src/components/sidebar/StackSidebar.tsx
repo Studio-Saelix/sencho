@@ -29,7 +29,6 @@ export interface StackSidebarProps {
   onActivityAction: (action: SidebarActivityAction) => void;
   bulkMode: boolean;
   selectedFiles: Set<string>;
-  isPaid: boolean;
   onToggleBulkMode: () => void;
   onToggleSelect: (file: string) => void;
   onClearSelection: () => void;
@@ -41,7 +40,7 @@ export function StackSidebar(props: StackSidebarProps) {
     isDarkMode, nodeSwitcherSlot, createStackSlot, onScan, isScanning, canCreate,
     searchQuery, onSearchChange, filterChip, filterCounts, onFilterChipChange,
     list, activitySummary, onActivityAction,
-    bulkMode, selectedFiles, isPaid, onToggleBulkMode, onToggleSelect, onClearSelection, onBulkAction,
+    bulkMode, selectedFiles, onToggleBulkMode, onToggleSelect, onClearSelection, onBulkAction,
   } = props;
 
   const [filtersVisible, setFiltersVisible] = useState(() => {
@@ -84,7 +83,6 @@ export function StackSidebar(props: StackSidebarProps) {
         {selectedFiles.size > 0 && (
           <SidebarBulkBar
             selectedCount={selectedFiles.size}
-            isPaid={isPaid}
             onAction={onBulkAction}
             onClear={onClearSelection}
           />

@@ -14,23 +14,22 @@ interface AgentStatus {
 
 export interface ConfigurationStatus {
   tier: 'community' | 'paid';
-  variant: 'skipper' | 'admiral' | null;
   notifications: {
     agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus };
     alertRules: number;
-    routingRules: { count: number; enabledCount: number; locked: boolean; requiredTier: 'skipper' };
+    routingRules: { count: number; enabledCount: number; locked: boolean };
   };
   automation: {
     autoHeal: { total: number; enabled: number };
     autoUpdate: { enabled: number; total: number };
-    scheduledTasks: { total: number; enabled: number; locked: boolean; requiredTier: 'admiral' };
-    webhooks: { total: number; enabled: number; locked: boolean; requiredTier: 'skipper' };
+    scheduledTasks: { total: number; enabled: number; locked: boolean };
+    webhooks: { total: number; enabled: number; locked: boolean };
   };
   security: {
     mfaEnabled: boolean | null;
     ssoEnabled: boolean;
     ssoProvider: string | null;
-    scanPolicies: { total: number; enabled: number; locked: boolean; requiredTier: 'skipper' };
+    scanPolicies: { total: number; enabled: number; locked: boolean };
   };
   thresholds: {
     cpuLimit: number;

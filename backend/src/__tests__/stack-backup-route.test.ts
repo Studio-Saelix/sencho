@@ -1,9 +1,10 @@
 /**
  * Integration tests for POST /api/stacks/:stackName/backup, the on-demand
- * stack-files backup trigger. Covers auth, role, paid gating, the success
- * path, the missing-stack 404, name validation, and error propagation. The
- * route exists so a scheduled auto_backup can run on a remote node through the
- * proxy path, and so an operator can take a snapshot on demand.
+ * stack-files backup trigger. Covers auth, role, the success path, the
+ * missing-stack 404, name validation, and error propagation. The route exists
+ * so a scheduled auto_backup can run on a remote node through the proxy path,
+ * and so an operator can take a snapshot on demand. The backup is available on
+ * every tier (no paid gate).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -39,7 +40,6 @@ beforeAll(async () => {
 
   const { LicenseService } = await import('../services/LicenseService');
   tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
 
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);
@@ -82,11 +82,12 @@ describe('POST /api/stacks/:stackName/backup', () => {
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
-  it('returns 403 on the community tier', async () => {
+  it('backs up on the community tier (no paid gate)', async () => {
     tierSpy.mockReturnValue('community');
     const res = await request(app).post('/api/stacks/web/backup').set('Cookie', adminCookie);
-    expect(res.status).toBe(403);
-    expect(mockBackupStackFiles).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(mockBackupStackFiles).toHaveBeenCalledWith('web');
   });
 
   it('returns 404 when the stack does not exist', async () => {

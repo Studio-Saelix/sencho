@@ -1,13 +1,13 @@
 /**
  * Gate coverage for the mesh router.
  *
- * Every /api/mesh route is tier-gated (requireAdmiral). The five operator
+ * Every /api/mesh route is tier-gated (requirePaid). The five operator
  * mutations are additionally role-gated (requireAdmin): node enable/disable,
  * stack opt-in/opt-out, and the override regen. The operator read routes
- * (status, aliases, activity, diagnostics) stay reachable for any Admiral-tier
+ * (status, aliases, activity, diagnostics) stay reachable for any paid-tier
  * user regardless of role, which is what lets a non-admin see a read-only
  * Routing tab. The node-to-node routes that central calls over the proxy on the
- * operator's behalf (local-override PUT/DELETE, alias test) are Admiral-gated
+ * operator's behalf (local-override PUT/DELETE, alias test) are paid-gated
  * but intentionally not admin-gated. These tests lock that split so the backend
  * can never silently diverge from the matching frontend render gate (a button
  * that 403s, or a feature an owner cannot see).
@@ -30,9 +30,8 @@ function userToken(username: string): string {
     return jwt.sign({ username, role: user.role, tv: user.token_version }, TEST_JWT_SECRET, { expiresIn: '5m' });
 }
 
-function setTier(tier: 'community' | 'paid', variant: 'skipper' | 'admiral' | null): void {
+function setTier(tier: 'community' | 'paid'): void {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue(tier);
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue(variant);
 }
 
 beforeAll(async () => {
@@ -48,9 +47,9 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-    // Default every test to a fully entitled Admiral instance; tier-rejection
+    // Default every test to a fully entitled paid instance; tier-rejection
     // tests override this locally.
-    setTier('paid', 'admiral');
+    setTier('paid');
 });
 
 afterAll(() => {
@@ -58,9 +57,9 @@ afterAll(() => {
     cleanupTestDb(tmpDir);
 });
 
-describe('mesh tier gate (requireAdmiral)', () => {
+describe('mesh tier gate (requirePaid)', () => {
     it('rejects Community tier with PAID_REQUIRED', async () => {
-        setTier('community', null);
+        setTier('community');
         const res = await request(app)
             .get('/api/mesh/aliases')
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
@@ -68,17 +67,8 @@ describe('mesh tier gate (requireAdmiral)', () => {
         expect(res.body.code).toBe('PAID_REQUIRED');
     });
 
-    it('rejects a paid non-Admiral variant with ADMIRAL_REQUIRED', async () => {
-        setTier('paid', 'skipper');
-        const res = await request(app)
-            .get('/api/mesh/aliases')
-            .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('ADMIRAL_REQUIRED');
-    });
-
     it('rejects Community tier on a mutation before the role gate runs', async () => {
-        setTier('community', null);
+        setTier('community');
         const res = await request(app)
             .post('/api/mesh/regen-overrides')
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
@@ -87,7 +77,7 @@ describe('mesh tier gate (requireAdmiral)', () => {
     });
 });
 
-describe('mesh read routes are visible to a non-admin Admiral user', () => {
+describe('mesh read routes are visible to a non-admin paid user', () => {
     it('returns aliases to a viewer', async () => {
         const res = await request(app)
             .get('/api/mesh/aliases')
@@ -123,7 +113,7 @@ describe('mesh mutation routes require the admin role (requireAdmin)', () => {
     ];
 
     for (const route of mutationRoutes) {
-        it(`${route.name} rejects a non-admin Admiral user with ADMIN_REQUIRED`, async () => {
+        it(`${route.name} rejects a non-admin paid user with ADMIN_REQUIRED`, async () => {
             const res = await request(app)
                 .post(route.path())
                 .set('Authorization', `Bearer ${userToken('mesh-viewer')}`);
@@ -132,7 +122,7 @@ describe('mesh mutation routes require the admin role (requireAdmin)', () => {
         });
     }
 
-    it('lets an Admiral admin pass both gates on regen-overrides', async () => {
+    it('lets a paid admin pass both gates on regen-overrides', async () => {
         const res = await request(app)
             .post('/api/mesh/regen-overrides')
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
@@ -140,7 +130,7 @@ describe('mesh mutation routes require the admin role (requireAdmin)', () => {
         expect(res.body).toHaveProperty('regenerated');
     });
 
-    it('lets an Admiral admin past both gates on a node mutation (not gate-rejected)', async () => {
+    it('lets a paid admin past both gates on a node mutation (not gate-rejected)', async () => {
         // Locks the guard order (tier before role) for a mutation other than
         // regen-overrides: an admin must never be rejected by either gate. The
         // handler may still 4xx/5xx for other reasons in the test environment;
@@ -149,7 +139,6 @@ describe('mesh mutation routes require the admin role (requireAdmin)', () => {
             .post(`/api/mesh/nodes/${defaultNodeId}/enable`)
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
         expect(res.body.code).not.toBe('PAID_REQUIRED');
-        expect(res.body.code).not.toBe('ADMIRAL_REQUIRED');
         expect(res.body.code).not.toBe('ADMIN_REQUIRED');
     });
 });

@@ -7,13 +7,8 @@ import {
   type ApiTokenScope,
 } from '../services/DatabaseService';
 import { getErrorMessage } from '../utils/errors';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
-import {
-  isLicenseTier,
-  isLicenseVariant,
-  normalizeTier,
-  normalizeVariant,
-} from '../services/license-normalize';
+import { PROXY_TIER_HEADER } from '../services/license-headers';
+import { isLicenseTier, normalizeTier } from '../services/license-normalize';
 import { isDebugEnabled } from '../utils/debug';
 import {
   COOKIE_NAME,
@@ -116,14 +111,8 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
       // Browser sessions and API tokens cannot set these; only a valid node_proxy JWT (signed with
       // this instance's JWT secret) unlocks the trusted path.
       const tierHeader = req.headers[PROXY_TIER_HEADER] as string | undefined;
-      const variantHeader = req.headers[PROXY_VARIANT_HEADER] as string | undefined;
       if (isLicenseTier(tierHeader)) {
         req.proxyTier = normalizeTier(tierHeader);
-      }
-      if (isLicenseVariant(variantHeader)) {
-        req.proxyVariant = normalizeVariant(variantHeader);
-      } else if (variantHeader === '') {
-        req.proxyVariant = null;
       }
       next();
       return;

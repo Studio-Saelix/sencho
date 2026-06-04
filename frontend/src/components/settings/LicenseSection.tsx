@@ -16,17 +16,14 @@ import { useMastheadStats } from './MastheadStatsContext';
 
 const PRICING_URL = 'https://sencho.io/pricing';
 
-function getTierDisplayName(tier?: string, variant?: string | null, status?: string): string {
-    if (tier === 'paid' && variant === 'admiral' && status === 'active') return 'Sencho Admiral';
-    if (tier === 'paid' && variant === 'admiral' && status === 'trial') return 'Sencho Admiral (Trial)';
-    if (tier === 'paid') return 'Sencho Skipper';
+function getTierDisplayName(tier?: string, status?: string): string {
+    if (tier === 'paid' && status === 'trial') return 'Sencho Admiral (Trial)';
+    if (tier === 'paid') return 'Sencho Admiral';
     return 'Sencho Community';
 }
 
-function getTierMastheadValue(tier?: string, variant?: string | null): string {
-    if (tier === 'paid' && variant === 'admiral') return 'admiral';
-    if (tier === 'paid') return 'skipper';
-    return 'community';
+function getTierMastheadValue(tier?: string): string {
+    return tier === 'paid' ? 'admiral' : 'community';
 }
 
 export function LicenseSection() {
@@ -69,7 +66,7 @@ export function LicenseSection() {
     useMastheadStats([
         {
             label: 'PLAN',
-            value: getTierMastheadValue(license?.tier, license?.variant),
+            value: getTierMastheadValue(license?.tier),
             tone: isPaid ? 'value' : 'subtitle',
         },
         ...(license?.status === 'trial' && license.trialDaysRemaining !== null
@@ -93,7 +90,7 @@ export function LicenseSection() {
         <div className="flex flex-col gap-10">
             <SettingsSection title="Plan">
                 <SettingsField
-                    label={getTierDisplayName(license?.tier, license?.variant, license?.status)}
+                    label={getTierDisplayName(license?.tier, license?.status)}
                     helper={
                         license?.status === 'expired'
                             ? 'Your license has expired. Renew to restore paid features.'

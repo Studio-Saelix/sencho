@@ -1,7 +1,7 @@
 import { Suspense, lazy, type ReactNode } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/context/AuthContext';
-import { AdmiralGate } from '../AdmiralGate';
+import { PaidGate } from '../PaidGate';
 import { CapabilityGate } from '../CapabilityGate';
 import { HubOnlyGate } from '../HubOnlyGate';
 import LazyBoundary from '../LazyBoundary';
@@ -15,7 +15,7 @@ import type { ScheduleTaskPrefill } from '../ScheduledOperationsView';
 import type { ActiveView } from './hooks/useViewNavigationState';
 
 // Paid-tier views and the security-history overlay are loaded on demand.
-// Their internal PaidGate / AdmiralGate / CapabilityGate wrappers render
+// Their internal PaidGate / CapabilityGate wrappers render
 // the upsell or capability-missing card with blurred children rather than
 // short-circuiting, so a tier-locked or capability-missing operator
 // opening one of these tabs still triggers the chunk fetch to render the
@@ -127,13 +127,13 @@ export function ViewRouter({
         // view another way from mounting a console that the server will 403.
         if (!can('system:console')) return null;
         return (
-            <AdmiralGate>
+            <PaidGate>
                 <CapabilityGate capability="host-console" featureName="Host Console">
                     <LazyView>
                         <HostConsole stackName={selectedFile} onClose={onHostConsoleClose} />
                     </LazyView>
                 </CapabilityGate>
-            </AdmiralGate>
+            </PaidGate>
         );
     }
     // Fall-through: when activeView === 'editor' but selectedFile is

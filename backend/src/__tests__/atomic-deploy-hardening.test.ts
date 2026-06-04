@@ -6,8 +6,8 @@
  *    race a concurrent deploy/update on the same stack (and vice versa).
  *  - Rollback releases the lock after both success and failure.
  *  - Rollback dispatches a notification on success/failure.
- *  - The backup-metadata read and the rollback action are paid-gated, matching
- *    the frontend, which only fetches backup state on a licensed instance.
+ *  - The backup-metadata read and the rollback action are available on every
+ *    tier (deploy safety is free).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -238,20 +238,22 @@ describe('Developer Mode logging matrix', () => {
   });
 });
 
-describe('Tier gating parity (M-3)', () => {
-  it('rejects rollback on community with PAID_REQUIRED', async () => {
+describe('Deploy safety is available on every tier', () => {
+  it('allows rollback on community', async () => {
     mockTier('community');
+    mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: 1700000000000 });
+    mockDeployStack.mockResolvedValue(undefined);
     const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
-    expect(mockDeployStack).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(mockDeployStack).toHaveBeenCalled();
   });
 
-  it('rejects GET /backup on community with PAID_REQUIRED', async () => {
+  it('returns backup metadata on community', async () => {
     mockTier('community');
+    mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: 1700000000000 });
     const res = await request(app).get('/api/stacks/web/backup').set('Cookie', authCookie);
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ exists: true, timestamp: 1700000000000 });
   });
 
   it('returns backup metadata on paid', async () => {

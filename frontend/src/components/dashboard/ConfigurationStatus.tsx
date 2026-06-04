@@ -1,7 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Bell, Zap, Shield, HardDrive, ChevronRight } from 'lucide-react';
 import { formatCount } from '@/lib/utils';
-import { useLicense } from '@/context/LicenseContext';
 import { useConfigurationStatus } from './useConfigurationStatus';
 import type { SectionId } from '@/components/settings/types';
 
@@ -83,7 +82,6 @@ function SkeletonRow() {
 
 export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps = {}) {
   const { status, loading } = useConfigurationStatus();
-  const { isPaid } = useLicense();
 
   const open = (section: SectionId) => () => onOpenSection?.(section);
 
@@ -156,34 +154,30 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
             />
           )}
 
-          {isPaid && (
-            <>
-              <SectionHeader icon={Zap} label="Automation" />
-              <Row
-                label="Auto-heal policies"
-                value={automation.autoHeal.total === 0 ? 'None' : `${automation.autoHeal.enabled} / ${automation.autoHeal.total} active`}
-                onClick={open('system')}
-              />
-              <Row
-                label="Auto-update schedules"
-                value={automation.autoUpdate.total === 0 ? 'None' : `${automation.autoUpdate.enabled} / ${automation.autoUpdate.total} active`}
-                onClick={open('system')}
-              />
-              {!automation.webhooks.locked && (
-                <Row
-                  label="Webhooks"
-                  value={formatCount(automation.webhooks.enabled, 'active')}
-                  onClick={open('webhooks')}
-                />
-              )}
-              {!automation.scheduledTasks.locked && (
-                <Row
-                  label="Scheduled tasks"
-                  value={formatCount(automation.scheduledTasks.enabled, 'active')}
-                  onClick={open('system')}
-                />
-              )}
-            </>
+          <SectionHeader icon={Zap} label="Automation" />
+          <Row
+            label="Auto-heal policies"
+            value={automation.autoHeal.total === 0 ? 'None' : `${automation.autoHeal.enabled} / ${automation.autoHeal.total} active`}
+            onClick={open('system')}
+          />
+          <Row
+            label="Auto-update schedules"
+            value={automation.autoUpdate.total === 0 ? 'None' : `${automation.autoUpdate.enabled} / ${automation.autoUpdate.total} active`}
+            onClick={open('system')}
+          />
+          {!automation.webhooks.locked && (
+            <Row
+              label="Webhooks"
+              value={formatCount(automation.webhooks.enabled, 'active')}
+              onClick={open('webhooks')}
+            />
+          )}
+          {!automation.scheduledTasks.locked && (
+            <Row
+              label="Scheduled tasks"
+              value={formatCount(automation.scheduledTasks.enabled, 'active')}
+              onClick={open('system')}
+            />
           )}
 
           <SectionHeader icon={Shield} label="Security" />

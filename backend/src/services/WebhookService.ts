@@ -4,7 +4,7 @@ import { DatabaseService, type Webhook } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { GitSourceService } from './GitSourceService';
 import { LicenseService } from './LicenseService';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER } from './license-headers';
 import { NodeRegistry } from './NodeRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText } from '../utils/safeLog';
@@ -19,10 +19,10 @@ const REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS = 30_000;
 export class WebhookService {
     private static instance: WebhookService;
     // Stable per-process decoy secret used to keep HMAC work non-skippable on
-    // reject paths (unknown webhook id, disabled, non-paid tier, etc.). Never
-    // accepts a signature: the trigger handler decides the final 202 / 404
-    // outcome from independent conditions and only consults the HMAC result
-    // when every other check has already passed.
+    // reject paths (unknown webhook id, disabled, etc.). Never accepts a
+    // signature: the trigger handler decides the final 202 / 404 outcome from
+    // independent conditions and only consults the HMAC result when every
+    // other check has already passed.
     private static decoySecret: string | null = null;
 
     public static getInstance(): WebhookService {
@@ -52,7 +52,7 @@ export class WebhookService {
         // wrong-secret case through repeated near-rate-limit probes with a
         // large attacker-controlled body. Timing now depends only on the
         // size of `payload`, which the attacker already controls and which
-        // does not reveal anything about the webhook id or licence tier.
+        // does not reveal anything about the webhook id.
         const expected = crypto.createHmac('sha256', secret).update(payload).digest();
         const provided = Buffer.alloc(32);
         let formatOk = false;
@@ -252,7 +252,6 @@ export class WebhookService {
 
         const licenseHeaders = LicenseService.getInstance().getProxyHeaders();
         headers[PROXY_TIER_HEADER] = licenseHeaders.tier;
-        headers[PROXY_VARIANT_HEADER] = licenseHeaders.variant || '';
 
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS);
@@ -311,7 +310,7 @@ export class WebhookService {
         durationMs: number,
         error: string | null,
     ): void {
-        // Execution history is readable by any paid user; scrub bearer tokens,
+        // Execution history is readable in the UI; scrub bearer tokens,
         // JWTs, URL credentials, and homedir paths before persisting so a
         // compose / remote-node error surfacing on the dashboard cannot leak
         // operator secrets or infrastructure details.

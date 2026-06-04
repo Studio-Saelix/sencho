@@ -73,30 +73,30 @@ Every self-hosted instance includes the full security stack, with advanced featu
 
 Every Sencho instance includes the foundational security stack. Advanced access-control and compliance features are available on paid tiers.
 
-| Feature | Community | Skipper | Admiral |
-|---------|:---------:|:-------:|:-------:|
-| Password authentication | ✓ | ✓ | ✓ |
-| Custom OIDC SSO (Authelia, Keycloak, Authentik, any provider) | ✓ | ✓ | ✓ |
-| Preset Google / GitHub / Okta SSO | | ✓ | ✓ |
-| LDAP / Active Directory | | | ✓ |
-| Two-factor authentication (TOTP + backup codes) | ✓ | ✓ | ✓ |
-| Session management (httpOnly, Secure, SameSite) | ✓ | ✓ | ✓ |
-| Encryption at rest (AES-256-GCM) | ✓ | ✓ | ✓ |
-| Rate limiting (auth + API) | ✓ | ✓ | ✓ |
-| Node-to-node authentication | ✓ | ✓ | ✓ |
-| Vulnerability scanning (on-demand + post-deploy) | ✓ | ✓ | ✓ |
-| Multi-user with RBAC (Admin, Viewer) | | ✓ | ✓ |
-| Scan policies, scheduled scans, SBOM generation | | ✓ | ✓ |
-| Fleet Secrets (encrypted env-var bundles) | | ✓ | ✓ |
-| Webhook signatures (HMAC-SHA256) | | ✓ | ✓ |
-| API tokens (scoped, expiring) | ✓ | ✓ | ✓ |
-| Advanced RBAC (Deployer, Node Admin, Auditor) | | | ✓ |
-| Scoped permissions (per-stack, per-node) | | | ✓ |
-| Audit log with export | | | ✓ |
+| Feature | Community | Admiral |
+|---------|:---------:|:-------:|
+| Password authentication | ✓ | ✓ |
+| Custom OIDC SSO (Authelia, Keycloak, Authentik, any provider) | ✓ | ✓ |
+| Preset Google / GitHub / Okta SSO | ✓ | ✓ |
+| LDAP / Active Directory | | ✓ |
+| Two-factor authentication (TOTP + backup codes) | ✓ | ✓ |
+| Session management (httpOnly, Secure, SameSite) | ✓ | ✓ |
+| Encryption at rest (AES-256-GCM) | ✓ | ✓ |
+| Rate limiting (auth + API) | ✓ | ✓ |
+| Node-to-node authentication | ✓ | ✓ |
+| Vulnerability scanning (on-demand + post-deploy + scheduled) | ✓ | ✓ |
+| Multi-user with RBAC (Admin, Viewer) | ✓ | ✓ |
+| Webhook signatures (HMAC-SHA256) | ✓ | ✓ |
+| API tokens (scoped, expiring) | ✓ | ✓ |
+| Scan policies and SBOM generation | | ✓ |
+| Fleet Secrets (encrypted env-var bundles) | | ✓ |
+| Advanced RBAC (Deployer, Node Admin, Auditor) | | ✓ |
+| Scoped permissions (per-stack, per-node) | | ✓ |
+| Audit log with export | | ✓ |
 
 ## Password authentication
 
-Sencho enforces a minimum 8-character password policy aligned with [NIST SP 800-63B](https://pages.nist.gov/800-63-3/sp800-63b.html). Passwords are hashed with bcrypt (cost factor 10) before storage. On first launch, you create the initial admin account through a setup wizard; additional users can be created from **Settings · Users** on paid tiers.
+Sencho enforces a minimum 8-character password policy aligned with [NIST SP 800-63B](https://pages.nist.gov/800-63-3/sp800-63b.html). Passwords are hashed with bcrypt (cost factor 10) before storage. On first launch, you create the initial admin account through a setup wizard; additional users can be created from **Settings · Users**.
 
 Changing your password immediately invalidates all other active sessions, so a compromised session cannot survive a password reset.
 
@@ -104,8 +104,7 @@ Changing your password immediately invalidates all other active sessions, so a c
 
 Sencho supports five identity providers split across tiers by delivery model:
 
-- **Community**: **Custom OIDC**, which connects to any spec-compliant OpenID Connect provider (Authelia, Keycloak, Authentik, Zitadel, KanIDM, Pocket ID, and others).
-- **Skipper**: preset providers for **Google**, **GitHub**, and **Okta**.
+- **Community**: **Custom OIDC**, which connects to any spec-compliant OpenID Connect provider (Authelia, Keycloak, Authentik, Zitadel, KanIDM, Pocket ID, and others), plus preset providers for **Google**, **GitHub**, and **Okta**.
 - **Admiral**: **LDAP / Active Directory** for on-premises directories.
 
 All OIDC flows use PKCE (Proof Key for Code Exchange) and a cryptographic state parameter to prevent authorization code interception and cross-site request forgery. SSO credentials (client secrets and LDAP bind passwords) are encrypted at rest with AES-256-GCM.
@@ -174,11 +173,11 @@ For setup and usage, see [API Tokens](/features/api-tokens).
 
 Webhook triggers are authenticated with a per-webhook HMAC-SHA256 secret (32 random bytes). The secret is generated at create time and displayed exactly once in the success callout; the configured-webhooks list shows only a masked preview thereafter. Every inbound trigger must present a matching `X-Webhook-Signature` header computed over the raw request body. Sencho recomputes the HMAC server-side and compares it with a constant-time check to defeat timing attacks; mismatches return 401 before any deploy action runs.
 
-Webhooks are available on Skipper and Admiral. For setup and verification recipes, see [Webhooks](/features/webhooks).
+Webhooks are available on every tier. For setup and verification recipes, see [Webhooks](/features/webhooks).
 
 ## Role-based access control
 
-Sencho defines five roles with increasing levels of access. Admin and Viewer are available on Skipper; Deployer, Node Admin, and Auditor require Admiral.
+Sencho defines five roles with increasing levels of access. Admin and Viewer are available on every tier; Deployer, Node Admin, and Auditor require Admiral.
 
 ### Permission matrix
 
@@ -200,7 +199,7 @@ Sencho defines five roles with increasing levels of access. Admin and Viewer are
 
 On Admiral, you can create **scoped assignments** that grant a user elevated permissions on specific stacks or nodes without giving them broad access. For example, a Viewer can be promoted to Deployer on a single production stack.
 
-Account limits are enforced by tier: Community supports one admin, Skipper supports one admin and three viewers, and Admiral supports unlimited accounts.
+Both tiers support unlimited accounts. Community uses the Admin and Viewer roles; Admiral adds the Deployer, Node Admin, and Auditor roles plus scoped permissions.
 
 For user management and scoped permissions, see [RBAC & User Management](/features/rbac).
 

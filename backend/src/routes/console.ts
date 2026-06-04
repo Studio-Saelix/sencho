@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
+import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { mintConsoleSession } from '../helpers/consoleSession';
 
@@ -17,7 +17,7 @@ export const consoleRouter = Router();
 consoleRouter.post('/console-token', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, 'API tokens cannot generate console tokens.')) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     res.json({ token: mintConsoleSession() });
   } catch (error) {

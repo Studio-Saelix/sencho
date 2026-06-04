@@ -11,7 +11,7 @@ info:
     ## Authentication
 
     All authenticated endpoints accept a Bearer token in the `Authorization` header.
-    Generate API tokens from **Settings > API Tokens** in the Sencho dashboard (requires Admiral license).
+    Generate API tokens from **Settings > API Tokens** in the Sencho dashboard (admin role required).
 
     ```
     Authorization: Bearer YOUR_API_TOKEN
@@ -25,8 +25,8 @@ info:
 
     ## License Tiers
 
-    Some endpoints require a Skipper or Admiral license. Requests to gated endpoints
-    on Community Edition return `403` with `code: "PAID_REQUIRED"` or `code: "ADMIRAL_REQUIRED"`.
+    Some endpoints require an Admiral license. Requests to gated endpoints
+    on Community return `403` with `code: "PAID_REQUIRED"`.
   contact:
     name: Sencho
     url: https://sencho.io
@@ -57,15 +57,15 @@ tags:
   - name: Containers
     description: List and manage running containers
   - name: API Tokens
-    description: Manage scoped API tokens (Admiral license required)
+    description: Manage scoped API tokens (admin role required)
   - name: Webhooks
-    description: Configure and trigger deployment webhooks (Skipper or Admiral license required)
+    description: Configure and trigger deployment webhooks
   - name: Nodes
     description: Manage local and remote Sencho nodes
   - name: Fleet
-    description: Multi-node fleet overview and snapshots (Skipper or Admiral license required)
+    description: Multi-node fleet overview and snapshots
   - name: Scheduled Tasks
-    description: Configure recurring automated operations (Admiral license required)
+    description: Configure recurring automated operations (admin role required)
   - name: Registries
     description: Manage private container registry credentials (Admiral license required). These endpoints are only accessible via browser sessions — API tokens receive `SCOPE_DENIED`.
   - name: Image Updates
@@ -132,7 +132,7 @@ components:
         code:
           type: string
           description: Machine-readable error code (e.g., `PAID_REQUIRED`, `SCOPE_DENIED`).
-          enum: [PAID_REQUIRED, ADMIRAL_REQUIRED, SCOPE_DENIED]
+          enum: [PAID_REQUIRED, SCOPE_DENIED]
 
     SuccessMessage:
       type: object
@@ -506,7 +506,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
           example:
-            error: "This feature requires a Skipper or Admiral license."
+            error: "This feature requires a Sencho Admiral license."
             code: "PAID_REQUIRED"
     NotFound:
       description: Resource not found.
@@ -934,7 +934,7 @@ paths:
       tags: [Stacks]
       summary: Deploy stack
       description: |
-        Runs `docker compose up -d` for the stack. On Skipper/Admiral tier, uses atomic deployment
+        Runs `docker compose up -d` for the stack using atomic deployment
         with automatic rollback on failure. Requires `stack:deploy` permission.
       parameters:
         - $ref: "#/components/parameters/stackName"
@@ -962,7 +962,7 @@ paths:
                     type: string
                   rolledBack:
                     type: boolean
-                    description: Whether the stack was automatically rolled back (Skipper/Admiral tier).
+                    description: Whether the stack was automatically rolled back.
 
   /api/stacks/{stackName}/down:
     post:
@@ -1077,8 +1077,8 @@ paths:
       tags: [Stacks]
       summary: Pull and recreate stack
       description: |
-        Pulls latest images and recreates containers (`docker compose pull && up -d`).
-        On Skipper/Admiral tier, uses atomic update with automatic rollback on failure.
+        Pulls latest images and recreates containers (`docker compose pull && up -d`)
+        using atomic update with automatic rollback on failure.
         Requires `stack:deploy` permission.
       parameters:
         - $ref: "#/components/parameters/stackName"
@@ -1115,7 +1115,7 @@ paths:
       operationId: rollbackStack
       tags: [Stacks]
       summary: Rollback stack
-      description: Restores the stack to its previous deployment state. Requires Skipper or Admiral license and `stack:deploy` permission.
+      description: Restores the stack to its previous deployment state. Requires `stack:deploy` permission.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
@@ -1301,7 +1301,7 @@ paths:
       summary: Create API token
       description: |
         Generates a new scoped API token. The full token is only returned in the creation response
-        and cannot be retrieved again. Requires Admiral license and admin role.
+        and cannot be retrieved again. Requires admin role.
 
         **Note:** API tokens cannot create other API tokens.
       responses:
@@ -1366,7 +1366,7 @@ paths:
       summary: List API tokens
       description: |
         Returns all API tokens for the current user. Token hashes are never exposed.
-        Requires Admiral license and admin role.
+        Requires admin role.
 
         **Note:** API tokens cannot list other API tokens.
       responses:
@@ -1390,7 +1390,7 @@ paths:
       summary: Revoke API token
       description: |
         Permanently revokes an API token. Users can only revoke their own tokens.
-        Requires Admiral license and admin role.
+        Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -1419,7 +1419,7 @@ paths:
       operationId: listWebhooks
       tags: [Webhooks]
       summary: List webhooks
-      description: Returns all configured webhooks with masked secrets. Requires Skipper or Admiral license.
+      description: Returns all configured webhooks with masked secrets.
       responses:
         "200":
           description: Array of webhook objects.
@@ -1439,7 +1439,7 @@ paths:
       summary: Create webhook
       description: |
         Creates a new webhook for a stack. The webhook secret is auto-generated and only
-        returned in the creation response. Requires Skipper or Admiral license and admin role.
+        returned in the creation response. Requires admin role.
       requestBody:
         required: true
         content:
@@ -1496,7 +1496,7 @@ paths:
       operationId: updateWebhook
       tags: [Webhooks]
       summary: Update webhook
-      description: Updates webhook configuration. Requires Skipper or Admiral license and admin role.
+      description: Updates webhook configuration. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       requestBody:
@@ -1542,7 +1542,7 @@ paths:
       operationId: deleteWebhook
       tags: [Webhooks]
       summary: Delete webhook
-      description: Permanently deletes a webhook. Requires Skipper or Admiral license and admin role.
+      description: Permanently deletes a webhook. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -1564,7 +1564,7 @@ paths:
       operationId: getWebhookHistory
       tags: [Webhooks]
       summary: Get webhook execution history
-      description: Returns the execution log for a webhook. Requires Skipper or Admiral license.
+      description: Returns the execution log for a webhook.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -2100,7 +2100,7 @@ paths:
       operationId: createFleetSnapshot
       tags: [Fleet]
       summary: Create fleet snapshot
-      description: Creates a point-in-time backup of all compose files across all nodes. Requires Skipper or Admiral license and admin role.
+      description: Creates a point-in-time backup of all compose files across all nodes. Requires admin role.
       requestBody:
         required: false
         content:
@@ -2127,7 +2127,7 @@ paths:
       operationId: listFleetSnapshots
       tags: [Fleet]
       summary: List fleet snapshots
-      description: Returns paginated fleet snapshots. Requires Skipper or Admiral license.
+      description: Returns paginated fleet snapshots.
       parameters:
         - name: limit
           in: query
@@ -2165,7 +2165,7 @@ paths:
       operationId: getFleetSnapshot
       tags: [Fleet]
       summary: Get snapshot details
-      description: Returns full snapshot details including all captured files grouped by node and stack. Requires Skipper or Admiral license.
+      description: Returns full snapshot details including all captured files grouped by node and stack.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -2185,7 +2185,7 @@ paths:
       operationId: deleteFleetSnapshot
       tags: [Fleet]
       summary: Delete snapshot
-      description: Permanently deletes a fleet snapshot. Requires Skipper or Admiral license and admin role.
+      description: Permanently deletes a fleet snapshot. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -2207,7 +2207,7 @@ paths:
       operationId: restoreFleetSnapshot
       tags: [Fleet]
       summary: Restore from snapshot
-      description: Restores a specific stack on a specific node from the snapshot. Optionally redeploys after restore. Requires Skipper or Admiral license and admin role.
+      description: Restores a specific stack on a specific node from the snapshot. Optionally redeploys after restore. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       requestBody:
@@ -2256,7 +2256,7 @@ paths:
       operationId: listScheduledTasks
       tags: [Scheduled Tasks]
       summary: List scheduled tasks
-      description: Returns all scheduled tasks. Requires Admiral license and admin role.
+      description: Returns all scheduled tasks. Requires admin role.
       responses:
         "200":
           description: Array of scheduled task objects.
@@ -2280,7 +2280,7 @@ paths:
         - `snapshot` requires `target_type: fleet`
         - `prune` requires `target_type: system`
 
-        Requires Admiral license and admin role.
+        Requires admin role.
       requestBody:
         required: true
         content:
@@ -2373,7 +2373,7 @@ paths:
       operationId: updateScheduledTask
       tags: [Scheduled Tasks]
       summary: Update scheduled task
-      description: Updates task configuration. Same validation rules as creation apply. Requires Admiral license and admin role.
+      description: Updates task configuration. Same validation rules as creation apply. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       requestBody:
@@ -2432,7 +2432,7 @@ paths:
       operationId: deleteScheduledTask
       tags: [Scheduled Tasks]
       summary: Delete scheduled task
-      description: Permanently deletes a scheduled task. Requires Admiral license and admin role.
+      description: Permanently deletes a scheduled task. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -2460,7 +2460,7 @@ paths:
       operationId: toggleScheduledTask
       tags: [Scheduled Tasks]
       summary: Toggle task enabled/disabled
-      description: Flips the enabled state of a scheduled task. Requires Admiral license and admin role.
+      description: Flips the enabled state of a scheduled task. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -2488,7 +2488,7 @@ paths:
       operationId: runScheduledTask
       tags: [Scheduled Tasks]
       summary: Run task immediately
-      description: Executes the scheduled task immediately, regardless of its cron schedule. Requires Admiral license and admin role.
+      description: Executes the scheduled task immediately, regardless of its cron schedule. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -2516,7 +2516,7 @@ paths:
       operationId: listScheduledTaskRuns
       tags: [Scheduled Tasks]
       summary: List task execution history
-      description: Returns paginated execution history for a scheduled task. Requires Admiral license and admin role.
+      description: Returns paginated execution history for a scheduled task. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
         - name: limit
@@ -2556,7 +2556,7 @@ paths:
       operationId: exportScheduledTaskRuns
       tags: [Scheduled Tasks]
       summary: Export task history as CSV
-      description: Downloads the execution history for a scheduled task as a CSV file. Requires Admiral license and admin role.
+      description: Downloads the execution history for a scheduled task as a CSV file. Requires admin role.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:

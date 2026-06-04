@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { getErrorMessage } from '../utils/errors';
@@ -49,7 +49,6 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // state changes within one proxy call.
         const headers = LicenseService.getInstance().getProxyHeaders();
         proxyReq.setHeader(PROXY_TIER_HEADER, headers.tier);
-        proxyReq.setHeader(PROXY_VARIANT_HEADER, headers.variant || '');
         // Strip the ?nodeId= query param so the remote's nodeContextMiddleware
         // doesn't reject the request with 404 ("Node X not found") - the remote
         // has no record of the gateway's node IDs and should treat the request

@@ -8,7 +8,7 @@ import { Combobox } from '@/components/ui/combobox';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
-import { AdmiralGate } from './AdmiralGate';
+import { PaidGate } from './PaidGate';
 import { CapabilityGate } from './CapabilityGate';
 import { Database, Plus, Trash2, Pencil, RefreshCw, CheckCircle, XCircle, Clock, Zap } from 'lucide-react';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
@@ -283,7 +283,7 @@ export function RegistriesSection() {
     };
 
     return (
-        <AdmiralGate>
+        <PaidGate>
           <CapabilityGate capability="registries" featureName="Private Registries">
             <div className="space-y-6">
                 <div className="flex justify-end">
@@ -474,6 +474,6 @@ export function RegistriesSection() {
                 </ConfirmModal>
             </div>
           </CapabilityGate>
-        </AdmiralGate>
+        </PaidGate>
     );
 }

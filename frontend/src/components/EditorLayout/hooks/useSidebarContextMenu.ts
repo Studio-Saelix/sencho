@@ -19,8 +19,6 @@ interface UseSidebarContextMenuOptions {
   overlayState: OverlayState;
   stackActions: StackActionsHook;
   activeNode: Node | null | undefined;
-  isPaid: boolean;
-  isAdmiral: boolean;
   isAdmin: boolean;
   can: (action: PermissionAction, resourceType?: string, resourceId?: string) => boolean;
 }
@@ -31,8 +29,6 @@ export function useSidebarContextMenu({
   overlayState,
   stackActions,
   activeNode,
-  isPaid,
-  isAdmiral,
   isAdmin,
   can,
 }: UseSidebarContextMenuOptions) {
@@ -42,8 +38,6 @@ export function useSidebarContextMenu({
       stackStatus: (stackListState.stackStatuses[file] ?? 'unknown') as 'running' | 'exited' | 'unknown',
       hasPort: Boolean(stackListState.stackPorts[file]),
       isBusy: stackListState.isStackBusy(file),
-      isPaid,
-      isAdmiral,
       isAdmin,
       canDelete: can('stack:delete', 'stack', sName),
       canEditLabels: can('stack:edit', 'stack', sName),
@@ -130,7 +124,7 @@ export function useSidebarContextMenu({
     // deps would force a rebuild on every parent render and defeat the memo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    stackListState.stackStatuses, stackListState.stackPorts, isPaid, isAdmiral, isAdmin,
+    stackListState.stackStatuses, stackListState.stackPorts, isAdmin,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
     stackListState.pin, stackListState.unpin,
   ]);

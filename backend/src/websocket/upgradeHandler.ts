@@ -17,8 +17,8 @@ import { rejectUpgrade as reject } from './reject';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
 import { validateApiToken, touchApiTokenLastUsed } from '../utils/apiTokenAuth';
 import { isDebugEnabled } from '../utils/debug';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
-import { isLicenseTier, normalizeTier, isLicenseVariant, normalizeVariant } from '../services/license-normalize';
+import { PROXY_TIER_HEADER } from '../services/license-headers';
+import { isLicenseTier, normalizeTier } from '../services/license-normalize';
 
 function parseCookies(req: IncomingMessage): Record<string, string> {
   const header = req.headers.cookie || '';
@@ -143,28 +143,24 @@ export function attachUpgrade(
       // Restricted api_token scopes (read-only, deploy-only) are blocked
       // earlier by the scope gate above before this branch is reached.
       //
-      // Admiral entitlement is decided against the *central's* license, not
+      // Mesh entitlement is decided against the *central's* license, not
       // the receiver's, matching every HTTP mesh route in routes/mesh.ts that
-      // uses `requireAdmiral` / `effectiveTier`. On the node_proxy path the
-      // central forwards `x-sencho-tier` / `x-sencho-variant` and the WS
-      // dispatcher trusts them off the node_proxy credential (same rule as
-      // middleware/auth.ts:117-135 for HTTP). On the full-admin api_token
-      // path no central is asserting tier, so we fall back to the receiver's
-      // own license. Both produce paid+admiral or the upgrade is rejected.
+      // uses `requirePaid` / `effectiveTier`. On the node_proxy path the
+      // central forwards `x-sencho-tier` and the WS dispatcher trusts it off
+      // the node_proxy credential (same rule as middleware/auth.ts for HTTP).
+      // On the full-admin api_token path no central is asserting tier, so we
+      // fall back to the receiver's own license. Both produce paid or the
+      // upgrade is rejected.
       if (pathname === '/api/mesh/proxy-tunnel') {
         if (!isProxyToken && wsApiTokenScope !== 'full-admin') {
           return reject(socket, 403, 'Forbidden');
         }
         const license = LicenseService.getInstance();
         const tunnelTierHeader = req.headers[PROXY_TIER_HEADER] as string | undefined;
-        const tunnelVariantHeader = req.headers[PROXY_VARIANT_HEADER] as string | undefined;
         const tunnelTier = isProxyToken && isLicenseTier(tunnelTierHeader)
           ? normalizeTier(tunnelTierHeader)
           : license.getTier();
-        const tunnelVariant = isProxyToken && tunnelVariantHeader !== undefined && isLicenseVariant(tunnelVariantHeader)
-          ? normalizeVariant(tunnelVariantHeader)
-          : license.getVariant();
-        if (tunnelTier !== 'paid' || tunnelVariant !== 'admiral') {
+        if (tunnelTier !== 'paid') {
           return reject(socket, 403, 'Forbidden');
         }
         await handleMeshProxyTunnel(req, socket, head);

@@ -64,20 +64,9 @@ afterAll(() => {
 });
 
 describe('AutoHealService.evaluate', () => {
-    it('does not evaluate existing policies on Community tier', async () => {
+    it('evaluates existing policies on the Community tier (no paid gate)', async () => {
         const db = DatabaseService.getInstance();
         makePolicy(db);
-        vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-        const dockerSpy = vi.spyOn(DockerController, 'getInstance');
-
-        await resetAutoHealSingleton().evaluate();
-
-        expect(dockerSpy).not.toHaveBeenCalled();
-    });
-
-    it('evaluates trusted proxy-entitled policies on a Community runtime node', async () => {
-        const db = DatabaseService.getInstance();
-        makePolicy(db, { proxy_entitled_until: Date.now() + 60_000 });
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
         const getAllContainers = vi.fn().mockResolvedValue([]);
         const getInstance = vi.spyOn(DockerController, 'getInstance').mockReturnValue({
@@ -411,9 +400,7 @@ describe('AutoHealService.evaluate', () => {
             api_token: 'tok',
         });
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-        vi.spyOn(LicenseService.getInstance(), 'getProxyHeaders').mockReturnValue(
-            { tier: 'paid', variant: 'admiral' } as ReturnType<ReturnType<typeof LicenseService.getInstance>['getProxyHeaders']>,
-        );
+        vi.spyOn(LicenseService.getInstance(), 'getProxyHeaders').mockReturnValue({ tier: 'paid' });
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'http://remote:1852',
             apiToken: 'tok',
@@ -429,8 +416,16 @@ describe('AutoHealService.evaluate', () => {
         expect((opts as RequestInit).headers).toMatchObject({ 'x-sencho-tier': 'paid' });
     });
 
-    it('does not refresh remote leases when the controlling instance is not paid', async () => {
+    it('forwards the controlling instance tier header when it is community', async () => {
+        // The lease refresh is not self-gated on the local tier: it always runs and
+        // forwards the controlling instance's tier so the remote runtime decides
+        // entitlement from the trusted header.
         const db = DatabaseService.getInstance();
+        // Start from a clean remote set so the single-node fetch count is deterministic
+        // (the shared beforeEach clears policies but not nodes).
+        for (const n of db.getNodes().filter(n => n.type === 'remote')) {
+            if (n.id !== undefined) db.deleteNode(n.id);
+        }
         db.addNode({
             name: 'lease-remote-community',
             type: 'remote',
@@ -440,12 +435,19 @@ describe('AutoHealService.evaluate', () => {
             api_token: 'tok2',
         });
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+        vi.spyOn(LicenseService.getInstance(), 'getProxyHeaders').mockReturnValue({ tier: 'community' });
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
+            apiUrl: 'http://remote2:1852',
+            apiToken: 'tok2',
+        });
         const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
 
         const service = resetAutoHealSingleton();
         await (service as unknown as { refreshRemoteLeases: () => Promise<void> }).refreshRemoteLeases();
 
-        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [, opts] = fetchSpy.mock.calls[0];
+        expect((opts as RequestInit).headers).toMatchObject({ 'x-sencho-tier': 'community' });
     });
 
     it('keeps refreshing other remotes when one node is unreachable', async () => {
@@ -467,9 +469,7 @@ describe('AutoHealService.evaluate', () => {
             api_token: 'tok',
         });
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-        vi.spyOn(LicenseService.getInstance(), 'getProxyHeaders').mockReturnValue(
-            { tier: 'paid', variant: 'admiral' } as ReturnType<ReturnType<typeof LicenseService.getInstance>['getProxyHeaders']>,
-        );
+        vi.spyOn(LicenseService.getInstance(), 'getProxyHeaders').mockReturnValue({ tier: 'paid' });
         const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(((input: unknown) => {
             const url = String(input);
             if (url.includes('bad-host')) return Promise.reject(new Error('ECONNREFUSED'));
@@ -498,9 +498,7 @@ describe('AutoHealService.evaluate', () => {
             api_token: '',
         });
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-        vi.spyOn(LicenseService.getInstance(), 'getProxyHeaders').mockReturnValue(
-            { tier: 'paid', variant: 'admiral' } as ReturnType<ReturnType<typeof LicenseService.getInstance>['getProxyHeaders']>,
-        );
+        vi.spyOn(LicenseService.getInstance(), 'getProxyHeaders').mockReturnValue({ tier: 'paid' });
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
         const fetchSpy = vi.spyOn(global, 'fetch');
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

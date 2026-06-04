@@ -129,7 +129,7 @@ When a flag is not supported, paste the partial output into the **Empty** tab as
 
 ## The stack list
 
-All discovered stacks appear in the left sidebar. The list groups stacks by label (Skipper+) and by pinned status, so the most relevant entries surface at the top.
+All discovered stacks appear in the left sidebar. The list groups stacks by label and by pinned status, so the most relevant entries surface at the top.
 
 ### Status indicator
 
@@ -163,7 +163,7 @@ Each chip carries a live count. Click **Hide filters** in the top-right of the r
 The list is grouped to keep frequently used stacks reachable.
 
 - **PINNED**: sits at the very top when at least one stack is pinned. Pin a stack with **Pin to top** in the kebab menu (`P` shortcut).
-- **Label groups**: each label produces its own collapsible section, header rendered uppercase. Labels are a Skipper+ feature; see [Stack Labels](/features/stack-labels) for color and assignment options.
+- **Label groups**: each label produces its own collapsible section, header rendered uppercase. See [Stack Labels](/features/stack-labels) for color and assignment options.
 - **UNLABELED**: bottom group with everything that has no label.
 
 Click any group header to collapse or expand it. The group's stack count appears in the header.
@@ -279,8 +279,8 @@ The stack header groups actions by frequency of use. The most common action is t
 | Primary | **Restart** | `docker compose restart` | Restarts all containers in the stack. |
 | Secondary | **Stop** | `docker compose stop` | Stops containers without removing them. State is preserved. |
 | Secondary | **Update** | `docker compose pull` + `up -d` | Pulls the latest image tags and recreates containers. |
-| Overflow | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists (Skipper+). |
-| Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (Skipper+, admin). |
+| Overflow | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists. |
+| Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (admin role). |
 | Overflow | **Delete** | `down --volumes` + removes files | Stops and removes containers and volumes, then deletes the stack directory. |
 
 **When stopped:**
@@ -316,7 +316,7 @@ Bulk mode lets you run a single lifecycle action across several stacks at once, 
 - **Start**: deploys every selected stack that is currently down.
 - **Stop**: stops every selected stack that is currently running.
 - **Restart**: restarts every selected stack that is currently running.
-- **Update**: pulls the latest image tags and redeploys (Skipper+).
+- **Update**: pulls the latest image tags and redeploys.
 
 Press `B` again or toggle the bulk mode button to leave bulk mode.
 
@@ -345,13 +345,13 @@ Click the kebab on a stack row in the sidebar to open its context menu. The menu
 **inspect**
 
 - **Alerts** (`A`): open the alert rule editor for this stack. See [Alerts and Notifications](/features/alerts-notifications).
-- **Auto-Heal** (`H`): configure auto-recovery for this stack (Skipper+). See [Auto-Heal Policies](/features/auto-heal-policies).
+- **Auto-Heal** (`H`): configure auto-recovery for this stack. See [Auto-Heal Policies](/features/auto-heal-policies).
 - **Check updates** (`U`): force an image update check now.
 - **Open App** (`↗`): open the stack's web interface in a new tab. Shown only when the stack is running and exposes a web port.
 
 **organize**
 
-- **Labels** (`›`): assign or remove labels (Skipper+). See [Stack Labels](/features/stack-labels).
+- **Labels** (`›`): assign or remove labels. See [Stack Labels](/features/stack-labels).
 - **Pin to top** (`P`): pin or unpin the stack from the **PINNED** group at the top of the list.
 
 **lifecycle**
@@ -359,7 +359,7 @@ Click the kebab on a stack row in the sidebar to open its context menu. The menu
 - **Stop** (`⌘.`): shown when running.
 - **Restart** (`⌘R`): shown when running.
 - **Update** (`⌘↑`): pulls the latest image tags and redeploys.
-- **Schedule task**: open the scheduler pre-filled for this stack (Skipper+); pick **Auto-update Stack** to set up unattended image updates on your own cadence. See [Scheduled Operations](/features/scheduled-operations) and [Auto-Update Policies](/features/auto-update-policies).
+- **Schedule task**: open the scheduler pre-filled for this stack; pick **Auto-update Stack** to set up unattended image updates on your own cadence. See [Scheduled Operations](/features/scheduled-operations) and [Auto-Update Policies](/features/auto-update-policies).
 - **Deploy** (`⌘↵`): shown when stopped, in place of Stop and Restart.
 
 **destructive**
@@ -391,7 +391,3 @@ Click the **Scan stacks folder** icon button to the right of **Create Stack**. S
 ### Service action returns a "service not found" error
 
 The service name used in the action must match the `services:` key in the stack's `compose.yaml`. This error occurs when no running containers match that service name, either because the service was never deployed or because the compose file defines a different name. Verify the service key in your compose file and ensure the stack has been deployed at least once so containers exist for that service.
-
-### Bulk **Update** is missing from the action bar
-
-The bulk **Update** action is a Skipper-tier feature; on Community, it does not appear in the action bar at all. **Start**, **Stop**, and **Restart** are available on every tier.

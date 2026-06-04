@@ -18,7 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightI
 import { springs } from '@/lib/motion';
 import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
-import { AdmiralGate } from './AdmiralGate';
+import { PaidGate } from './PaidGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetConfiguration } from './fleet/FleetConfiguration';
 import { RoutingTab } from './fleet/RoutingTab';
@@ -34,9 +34,8 @@ interface FleetViewProps {
 }
 
 export function FleetView({ onNavigateToNode }: FleetViewProps) {
-    const { isPaid, license } = useLicense();
+    const { isPaid } = useLicense();
     const { isAdmin } = useAuth();
-    const isAdmiral = isPaid && license?.variant === 'admiral';
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -98,14 +97,14 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
-                            {isAdmiral && (
+                            {isPaid && (
                                 <TabsHighlightItem value="routing">
                                     <TabsTrigger value="routing">
                                         <ArrowLeftRight className="w-4 h-4 mr-1.5" />Routing
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
-                            {isAdmiral && (
+                            {isPaid && (
                                 <TabsHighlightItem value="federation">
                                     <TabsTrigger value="federation">
                                         <Network className="w-4 h-4 mr-1.5" />Federation
@@ -207,18 +206,18 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         <DeploymentsTab />
                     </TabsContent>
                 )}
-                {isAdmiral && (
+                {isPaid && (
                     <TabsContent value="routing">
-                        <AdmiralGate>
+                        <PaidGate>
                             <RoutingTab canManage={isAdmin} />
-                        </AdmiralGate>
+                        </PaidGate>
                     </TabsContent>
                 )}
-                {isAdmiral && (
+                {isPaid && (
                     <TabsContent value="federation">
-                        <AdmiralGate>
+                        <PaidGate>
                             <FederationTab canManage={isAdmin} />
-                        </AdmiralGate>
+                        </PaidGate>
                     </TabsContent>
                 )}
                 <TabsContent value="actions">

@@ -67,17 +67,16 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
     const [cordonReason, setCordonReason] = useState('');
     const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
-    const { isPaid, license } = useLicense();
+    const { isPaid } = useLicense();
     const { isAdmin, can } = useAuth();
     const { nodes: registryNodes } = useNodes();
-    const isAdmiral = isPaid && license?.variant === 'admiral';
     const registryNode = registryNodes.find(n => n.id === node.id);
     const canEdit = Boolean(isAdmin && onEdit && registryNode);
     const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default);
-    // Cordon is Admiral-tier AND requires node:manage, matching the backend guard
-    // (requirePermission('node:manage','node',id) + requireAdmiral). Gating on tier
+    // Cordon is a paid feature AND requires node:manage, matching the backend guard
+    // (requirePermission('node:manage','node',id) + requirePaid). Gating on tier
     // alone would surface the control to deployer/viewer/auditor users whose calls 403.
-    const canCordon = isAdmiral && can('node:manage', 'node', String(node.id));
+    const canCordon = isPaid && can('node:manage', 'node', String(node.id));
     const showMenu = canEdit || canDelete || canCordon;
 
     const isOnline = node.status === 'online';

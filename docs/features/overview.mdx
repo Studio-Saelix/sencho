@@ -29,7 +29,7 @@ Full in-browser Monaco editor for `compose.yaml` and `.env` files with syntax hi
 
 ### Stack file explorer
 
-Browse, edit, upload, and manage files inside a stack's directory from the dashboard. Read-only browsing and text-file viewing are available on every tier; upload, download, edit, folder creation, and file deletion are Skipper or Admiral features. [Learn more →](/features/stack-file-explorer)
+Browse, edit, upload, and manage files inside a stack's directory from the dashboard. Read-only browsing and text-file viewing are open to every role; upload, download, edit, folder creation, and file deletion require the admin role. [Learn more →](/features/stack-file-explorer)
 
 ### Deploy progress
 
@@ -45,15 +45,15 @@ Browse pre-configured application templates. Filter by category (Media, Automati
 
 ### Atomic deployments
 
-Sencho snapshots your compose and environment files before applying changes. If containers crash after deploy, the previous configuration is restored automatically. Skipper or Admiral. [Learn more →](/features/atomic-deployments)
+Sencho snapshots your compose and environment files before applying changes. If containers crash after deploy, the previous configuration is restored automatically. [Learn more →](/features/atomic-deployments)
 
 ### Deploy enforcement
 
-Block deploys that violate a scan policy before `docker compose up` runs, with an admin bypass path and a full audit trail. The pre-flight gate enumerates images and rejects deploys when any image meets or exceeds the policy's severity threshold; drift detection continues post-deploy and on schedule. Skipper or Admiral. [Learn more →](/features/deploy-enforcement)
+Block deploys that violate a scan policy before `docker compose up` runs, with an admin bypass path and a full audit trail. The pre-flight gate enumerates images and rejects deploys when any image meets or exceeds the policy's severity threshold; drift detection continues post-deploy and on schedule. Admiral. [Learn more →](/features/deploy-enforcement)
 
 ### Blueprints
 
-Fleet-wide compose templates that Sencho keeps in sync across the nodes you choose. One declaration covers many nodes via label selectors, drift detection always runs, and stateful blueprints get confirmation prompts before first deploy and before eviction. Skipper or Admiral. [Learn more →](/features/blueprint-model)
+Fleet-wide compose templates that Sencho keeps in sync across the nodes you choose. One declaration covers many nodes via label selectors, drift detection always runs, and stateful blueprints get confirmation prompts before first deploy and before eviction. Admiral. [Learn more →](/features/blueprint-model)
 
 ### Git sources
 
@@ -61,7 +61,7 @@ Link a stack to a Git repository and keep `compose.yaml` in sync via manual pull
 
 ### Stack labels
 
-Tag your stacks with custom colored labels like `production`, `staging`, or `media-server`. Filter the sidebar by label, identify stacks at a glance, and organize your infrastructure visually. Bulk-action a label (deploy, stop, or restart every stack tagged with it) on Skipper or Admiral. [Learn more →](/features/stack-labels)
+Tag your stacks with custom colored labels like `production`, `staging`, or `media-server`. Filter the sidebar by label, identify stacks at a glance, and organize your infrastructure visually. Bulk-action a label to deploy, stop, or restart every stack tagged with it. [Learn more →](/features/stack-labels)
 
 ## Observability
 
@@ -125,11 +125,11 @@ When several Sencho instances run as a fleet, the control instance is the source
 
 ### Fleet Secrets
 
-Centralized, encrypted, versioned env-var bundles you can push to labeled nodes' stacks. Bundles are encrypted at rest with AES-256-GCM, every save bumps a version, and every push records a per-node diff in the audit log using overlay merge semantics. Skipper or Admiral. [Learn more →](/features/fleet-secrets)
+Centralized, encrypted, versioned env-var bundles you can push to labeled nodes' stacks. Bundles are encrypted at rest with AES-256-GCM, every save bumps a version, and every push records a per-node diff in the audit log using overlay merge semantics. Admiral. [Learn more →](/features/fleet-secrets)
 
 ### Fleet-wide backups
 
-Create point-in-time snapshots of every compose file and environment file across all nodes. Snapshots are stored centrally and can be browsed by node and stack. Restore individual stacks from any snapshot with optional one-click redeploy, even to remote nodes. Manual snapshots are available on every tier; scheduled fleet snapshots are Skipper or Admiral. [Learn more →](/features/fleet-backups)
+Create point-in-time snapshots of every compose file and environment file across all nodes. Snapshots are stored centrally and can be browsed by node and stack. Restore individual stacks from any snapshot with optional one-click redeploy, even to remote nodes. Both manual and scheduled fleet snapshots are available on every tier. [Learn more →](/features/fleet-backups)
 
 ### Remote updates
 
@@ -137,7 +137,7 @@ Check for outdated nodes and trigger over-the-air updates from the Fleet View. W
 
 ### Scheduled operations
 
-Automate recurring maintenance tasks like stack restarts, fleet snapshots, and system prunes on a cron schedule. Every execution is logged with full history so you always know what ran and when. Scheduled scans, updates, and snapshots are available on Skipper and Admiral; other scheduled actions remain Admiral only. [Learn more →](/features/scheduled-operations)
+Automate recurring maintenance tasks like stack restarts, fleet snapshots, system prunes, scans, and image updates on a cron schedule. Every execution is logged with full history so you always know what ran and when. [Learn more →](/features/scheduled-operations)
 
 ## Security & Identity
 
@@ -147,11 +147,11 @@ Protect your Sencho account with a time-based one-time password (TOTP) from an a
 
 ### RBAC & user management
 
-Create viewer accounts with read-only access to dashboards, logs, and file contents, while keeping deploy and edit permissions locked to admins. Skipper supports two roles (Admin and Viewer); Admiral adds three more (Deployer, Node Admin, Auditor) plus scoped permissions per stack or node. [Learn more →](/features/rbac)
+Create unlimited accounts with read-only Viewer access to dashboards, logs, and file contents, while keeping deploy and edit permissions locked to admins. Community includes the Admin and Viewer roles; Admiral adds three more (Deployer, Node Admin, Auditor) plus scoped permissions per stack or node. [Learn more →](/features/rbac)
 
 ### SSO & LDAP authentication
 
-Authenticate with your existing identity provider. Custom OIDC (Authelia, Keycloak, Authentik, any spec-compliant OIDC provider) is available on every tier. Skipper adds preset providers for Google, GitHub, and Okta. Admiral adds LDAP / Active Directory for enterprise directories. SSO works alongside password authentication and auto-provisions accounts on first login with configurable role mapping. [Learn more →](/features/sso)
+Authenticate with your existing identity provider. Custom OIDC (Authelia, Keycloak, Authentik, any spec-compliant OIDC provider) and preset providers for Google, GitHub, and Okta are available on every tier. Admiral adds LDAP / Active Directory for enterprise directories. SSO works alongside password authentication and auto-provisions accounts on first login with configurable role mapping. [Learn more →](/features/sso)
 
 ### API tokens
 
@@ -159,7 +159,7 @@ Generate scoped API tokens for CI/CD pipelines, scripts, and automation workflow
 
 ### Vulnerability scanning
 
-Scan container images for known CVEs with [Trivy](https://trivy.dev). Install Trivy with one click from Settings → Security on first use; the [setup guide](/operations/trivy-setup) covers bind-mounted and air-gapped alternatives. Manual scanning, secret and misconfiguration detection, scan comparison, and CVE suppressions are available on every tier; scheduled scans, scan policies that gate deploys, SBOM generation, and SARIF export are available on Skipper and Admiral. Auto-update of the managed Trivy binary is Skipper. [Learn more →](/features/vulnerability-scanning)
+Scan container images for known CVEs with [Trivy](https://trivy.dev). Install Trivy with one click from Settings → Security on first use; the [setup guide](/operations/trivy-setup) covers bind-mounted and air-gapped alternatives. Manual scanning, secret and misconfiguration detection, scan comparison, scheduled scans, and CVE suppressions are available on every tier; scan policies that gate deploys, SBOM generation, SARIF export, and auto-update of the managed Trivy binary are Admiral. [Learn more →](/features/vulnerability-scanning)
 
 ### CVE suppressions
 
@@ -173,11 +173,11 @@ Store credentials for private Docker registries: Docker Hub organizations, GHCR,
 
 ### Auto-Update Policies
 
-Review pending container updates across your fleet with risk badges (`Safe · patch`, `Review · minor`, `Blocked · major`, `Digest rebuild`) and one-line changelog previews on a single board. The hero counts pending updates and tells you how many are ready to apply without human review; stacks with a major version bump are surfaced as a separate count for review. Skipper or Admiral. [Learn more →](/features/auto-update-policies)
+Review pending container updates across your fleet with risk badges (`Safe · patch`, `Review · minor`, `Blocked · major`, `Digest rebuild`) and one-line changelog previews on a single board. The hero counts pending updates and tells you how many are ready to apply without human review; stacks with a major version bump are surfaced as a separate count for review. [Learn more →](/features/auto-update-policies)
 
 ### Auto-Heal Policies
 
-Automatically restart containers that fail Docker healthchecks for longer than a specified threshold. Each policy ships with safety rails: a cooldown period, hourly restart cap, recent-user-action suppression, and auto-disable on repeated restart failures. Skipper or Admiral. [Learn more →](/features/auto-heal-policies)
+Automatically restart containers that fail Docker healthchecks for longer than a specified threshold. Each policy ships with safety rails: a cooldown period, hourly restart cap, recent-user-action suppression, and auto-disable on repeated restart failures. [Learn more →](/features/auto-heal-policies)
 
 ### Webhooks
 
@@ -201,4 +201,4 @@ When you manage multiple nodes running different Sencho versions, the dashboard 
 
 ### Licensing & billing
 
-Sencho is free for personal use with the Community tier. Skipper and Admiral unlock RBAC, webhooks, fleet backups, atomic deployments, and advanced fleet features. Manage your license, view subscription details, and access the billing portal from Settings. [Learn more →](/features/licensing)
+Community is the complete self-hosted control plane, free forever. Admiral adds governance, security, and fleet control for teams: advanced RBAC, the audit log, Fleet Secrets, deploy enforcement, Blueprints, Sencho Mesh, and more. Manage your license, view subscription details, and access the billing portal from Settings. [Learn more →](/features/licensing)

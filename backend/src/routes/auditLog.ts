@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService, AUDIT_ANOMALY_HISTORY_CAP } from '../services/DatabaseService';
 import { annotateEntries, computeAuditStats, HISTORY_WINDOW_MS } from '../services/AuditAnomalyService';
-import { requireAdmiral } from '../middleware/tierGates';
+import { requirePaid } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import { isDebugEnabled } from '../utils/debug';
 import { escapeCsvField } from '../utils/csv';
@@ -10,7 +10,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 export const auditLogRouter = Router();
 
 auditLogRouter.get('/', async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   if (!requirePermission(req, res, 'system:audit')) return;
 
   try {
@@ -48,7 +48,7 @@ auditLogRouter.get('/', async (req: Request, res: Response): Promise<void> => {
 });
 
 auditLogRouter.get('/stats', async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   if (!requirePermission(req, res, 'system:audit')) return;
 
   try {
@@ -64,7 +64,7 @@ auditLogRouter.get('/stats', async (req: Request, res: Response): Promise<void> 
 });
 
 auditLogRouter.get('/export', async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   if (!requirePermission(req, res, 'system:audit')) return;
 
   try {

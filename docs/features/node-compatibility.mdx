@@ -94,7 +94,7 @@ If you expect a node to support a feature that is being gated, the fastest fix i
 
 ## Interaction with license tiers
 
-Some features need both a license tier (Skipper or Admiral) **and** node capability support. The two gates evaluate in this order:
+Some features need both an Admiral license **and** node capability support. The two gates evaluate in this order:
 
 1. The license gate is checked first. On the wrong tier, the feature's entry point (sidebar item, top-nav button, settings section) is hidden entirely, so you never reach the panel.
 2. If you are on the right tier but the active node does not advertise the capability, the entry point is visible but the panel is replaced by the capability lock card.
