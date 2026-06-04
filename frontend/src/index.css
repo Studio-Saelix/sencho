@@ -5,225 +5,109 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ─────────────────────────────────────────────────────────────
-   LIGHT THEME
+   THEME ENGINE
+   Theme is an attribute on <html> (data-theme = dim · oled · light);
+   accent is a second attribute (data-accent = one of eight hues).
+   Surfaces, ink and borders derive from a handful of raw lightness
+   vars per theme, so the live knobs (--border-boost, --glow) modulate
+   every hairline and the page glow through calc(). The accent sets
+   --brand everywhere and tints the ambient glow.
+
+   :root carries the shared + computed tokens AND the Dim defaults, so
+   a document with no data-theme renders Dim (the default theme).
+   [data-theme="oled"] and [data-theme="light"] override from there.
 ───────────────────────────────────────────────────────────── */
 :root {
-  --background: oklch(0.97 0 0);
-  --foreground: oklch(0.15 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.15 0 0);
-  --popover: oklch(1 0 0 / 0.92);
-  --popover-foreground: oklch(0.15 0 0);
-  --primary: oklch(0.15 0 0);
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0 0 0 / 0.05);
-  --secondary-foreground: oklch(0.15 0 0);
-  --muted: oklch(0 0 0 / 0.04);
-  --muted-foreground: oklch(0.50 0 0);
-  --accent: oklch(0 0 0 / 0.06);
-  --accent-foreground: oklch(0.15 0 0);
-  --destructive: oklch(0.63 0.18 20);
-  --destructive-foreground: oklch(1 0 0);
-  --border: oklch(0 0 0 / 0.10);
-  --input: oklch(0.97 0 0);
-  --ring: oklch(0.50 0.14 200);
+  color-scheme: dark;
 
-  /* Brand: technical cyan, the signature accent */
-  --brand: oklch(0.50 0.14 200);
-  --brand-foreground: oklch(1 0 0);
-  --brand-muted: oklch(0.50 0.14 200 / 0.12);
+  /* Live knobs (overwritten on <html> by the pre-paint script / useTheme) */
+  --border-boost: 0;   /* signed offset added to every border L */
+  --glow: 0.16;        /* ambient top-glow alpha */
+  --contrast: 0;       /* master contrast: spreads page, ink and borders, signed by --ink-dir */
 
-  /* Glass: frosted surface system */
-  --glass: oklch(1 0 0);
-  --glass-border: oklch(0 0 0 / 0.10);
-  --glass-highlight: oklch(0 0 0 / 0.06);
+  /* Accent default: cyan (overridden by [data-accent]) */
+  --accent-h: 196;
+  --accent-c: 0.130;
 
-  /* Semantic status colors */
-  --success: oklch(0.65 0.16 155);
-  --success-foreground: oklch(1 0 0);
-  --success-muted: oklch(0.65 0.16 155 / 0.12);
-  --warning: oklch(0.75 0.14 75);
-  --warning-foreground: oklch(0.20 0 0);
-  --warning-muted: oklch(0.75 0.14 75 / 0.12);
-  /* --info: TOAST USE ONLY. Not part of the §17 five-slot working palette.
-     New components must consume --brand, --success, --warning, --destructive,
-     or surface/ink tokens instead. */
-  --info: oklch(0.62 0.14 250);
-  --info-foreground: oklch(1 0 0);
-  --info-muted: oklch(0.62 0.14 250 / 0.12);
-  --update: oklch(0.62 0.22 320);
-  --update-foreground: oklch(1 0 0);
-  --update-muted: oklch(0.62 0.22 320 / 0.12);
-  --destructive-muted: oklch(0.63 0.18 20 / 0.12);
+  /* ---- Computed surfaces (flat neutral ladder per theme). The page tone
+     spreads away from the cards as --contrast rises. ---- */
+  --background: oklch(calc(var(--bg) - var(--ink-dir) * var(--contrast) * 0.03) 0 0);
+  --card:       oklch(var(--card-l) 0 0);
+  --band:       oklch(var(--band-l) 0 0);
+  --well:       oklch(var(--well-l) 0 0);
+
+  /* ---- Computed borders (opaque grey, directionally lit). --border-boost and
+     --contrast both lift every hairline through one calc(). ---- */
+  --card-border:       oklch(calc(var(--bb) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05)) 0 0);
+  --card-border-top:   oklch(calc(var(--bt) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05)) 0 0);
+  --card-border-hover: oklch(calc(var(--bh) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05)) 0 0);
+  --hairline:          oklch(calc(var(--hl) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05)) 0 0);
+  --border:            var(--card-border);
+  --sidebar-border:    var(--card-border);
+
+  /* ---- Computed ink tiers. --contrast pushes each tier toward its extreme so
+     secondary text crisps up as it rises. ---- */
+  --stat-value:    oklch(calc(var(--val)   + var(--ink-dir) * var(--contrast) * 0.04)  0 0);
+  --stat-title:    oklch(calc(var(--title) + var(--ink-dir) * var(--contrast) * 0.055) 0 0);
+  --stat-subtitle: oklch(calc(var(--sub)   + var(--ink-dir) * var(--contrast) * 0.07)  0 0);
+  --stat-icon:     oklch(calc(var(--icon)  + var(--ink-dir) * var(--contrast) * 0.06)  0 0);
+
+  /* ---- Computed brand (the accent is the one data color) ---- */
+  --brand:            oklch(var(--accent-l) var(--accent-c) var(--accent-h));
+  --brand-foreground: var(--brand-fg);
+  --brand-muted:      oklch(var(--accent-l) var(--accent-c) var(--accent-h) / 0.16);
+  --ring:             var(--brand);
+  --sidebar-ring:     var(--brand);
+
+  /* Glass surface = the card tone; borders use the opaque hairline */
+  --glass: var(--card);
+
+  /* Ambient glow tracks the accent hue so the whole page tints with it */
+  --glow-color: oklch(var(--glow-l) var(--glow-c) var(--accent-h) / var(--glow));
 
   /* Charts: cyan leads as the primary data color, amber for peaks, rose for errors */
   --chart-1: var(--brand);
   --chart-2: var(--warning);
   --chart-3: var(--destructive);
-  --chart-4: oklch(0.70 0 0);
-  --chart-5: oklch(0.45 0 0);
 
   /* Sparkline / data-line styling (centralized) */
   --data-line-width: 1.25px;
   --data-peak: var(--warning);
 
-  /* Sidebar */
-  --sidebar: oklch(0.98 0 0 / 0.80);
-  --sidebar-foreground: oklch(0.15 0 0);
-  --sidebar-primary: oklch(0.15 0 0);
-  --sidebar-primary-foreground: oklch(1 0 0);
-  --sidebar-accent: oklch(0 0 0 / 0.06);
-  --sidebar-accent-foreground: oklch(0.15 0 0);
-  --sidebar-border: oklch(0 0 0 / 0.10);
-  --sidebar-ring: oklch(0.50 0.14 200);
-
-  /* Stat hierarchy: text brightness tiers */
-  --stat-value: oklch(0.15 0 0);
-  --stat-title: oklch(0.40 0 0);
-  --stat-subtitle: oklch(0.50 0 0);
-  --stat-icon: oklch(0.60 0 0);
-
-  /* Card borders: directional lighting */
-  --card-border: oklch(0 0 0 / 0.08);
-  --card-border-top: oklch(0 0 0 / 0.12);
-  --card-border-hover: oklch(0 0 0 / 0.15);
-
-  /* Label palette: ten raw hues preserved for existing assignments */
-  --label-teal: oklch(0.55 0.12 192);
-  --label-teal-bg: oklch(0.55 0.12 192 / 0.12);
-  --label-blue: oklch(0.55 0.14 250);
-  --label-blue-bg: oklch(0.55 0.14 250 / 0.12);
-  --label-purple: oklch(0.55 0.14 300);
-  --label-purple-bg: oklch(0.55 0.14 300 / 0.12);
-  --label-rose: oklch(0.55 0.16 10);
-  --label-rose-bg: oklch(0.55 0.16 10 / 0.12);
-  --label-amber: oklch(0.60 0.16 60);
-  --label-amber-bg: oklch(0.60 0.16 60 / 0.12);
-  --label-green: oklch(0.55 0.15 150);
-  --label-green-bg: oklch(0.55 0.15 150 / 0.12);
-  --label-orange: oklch(0.58 0.16 45);
-  --label-orange-bg: oklch(0.58 0.16 45 / 0.12);
-  --label-pink: oklch(0.58 0.16 340);
-  --label-pink-bg: oklch(0.58 0.16 340 / 0.12);
-  --label-cyan: oklch(0.58 0.12 210);
-  --label-cyan-bg: oklch(0.58 0.12 210 / 0.12);
-  --label-slate: oklch(0.50 0.01 250);
-  --label-slate-bg: oklch(0.50 0.01 250 / 0.12);
-
-  /* Semantic label roles: new labels should consume these */
-  --label-env: var(--label-teal);
-  --label-env-bg: var(--label-teal-bg);
-  --label-role: var(--label-blue);
-  --label-role-bg: var(--label-blue-bg);
-  --label-owner: var(--label-green);
-  --label-owner-bg: var(--label-green-bg);
-  --label-risk: var(--label-rose);
-  --label-risk-bg: var(--label-rose-bg);
-  --label-custom: var(--label-amber);
-  --label-custom-bg: var(--label-amber-bg);
-
-  /* Fleet Action card action-class chip / blast-dot colors.
-     Closed set per audit §18.3: destructive (rose) / transformative (purple) / maintenance (amber).
-     Two of the three reuse existing semantic tokens; transformative gets its own
-     alias so component code does not reach for --label-purple directly. */
+  /* Fleet Action card transformative chip (reuses the purple label hue) */
   --action-transformative: var(--label-purple);
 
-  /* Chart grid & axis */
-  --chart-grid: oklch(0 0 0 / 0.06);
-  --chart-tick: oklch(0 0 0 / 0.45);
+  /* ─────────────── Dim defaults (the default theme) ─────────────── */
+  /* Raw lightness vars */
+  --bg: 0.160;  --card-l: 0.212;  --band-l: 0.190;  --well-l: 0.128;
+  --bb: 0.320;  --bt: 0.400;  --bh: 0.460;  --hl: 0.300;  --border-dir: 1;
+  --val: 0.970; --title: 0.800; --sub: 0.605; --icon: 0.480;  --ink-dir: 1;
+  --accent-l: 0.745; --brand-fg: oklch(0.15 0 0);
+  --glow-l: 0.55; --glow-c: 0.085;
 
-  /* Typography */
-  --font-sans: 'Geist', sans-serif;
-  --font-serif: 'Instrument Serif', Georgia, serif;
-  --font-display: 'Instrument Serif', Georgia, serif;
-  --font-mono: 'Geist Mono', monospace;
-
-  /* Shape */
-  --radius: 0.5rem;
-
-  /* Shadows: subtle, glass depth comes from blur not shadow */
-  --shadow-x: 0px;
-  --shadow-y: 1px;
-  --shadow-blur: 2px;
-  --shadow-spread: 0px;
-  --shadow-opacity: 0.10;
-  --shadow-color: hsl(0 0% 0%);
-  --shadow-2xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.05);
-  --shadow-xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.05);
-  --shadow-sm: 0px 1px 2px 0px hsl(0 0% 0% / 0.08);
-  --shadow: 0px 1px 2px 0px hsl(0 0% 0% / 0.08), 0px 1px 2px -1px hsl(0 0% 0% / 0.08);
-  --shadow-md: 0px 1px 2px 0px hsl(0 0% 0% / 0.10), 0px 2px 4px -1px hsl(0 0% 0% / 0.10);
-  --shadow-lg: 0px 1px 2px 0px hsl(0 0% 0% / 0.10), 0px 4px 6px -1px hsl(0 0% 0% / 0.10);
-  --shadow-xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.10), 0px 8px 10px -1px hsl(0 0% 0% / 0.10);
-  --shadow-2xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.25);
-
-  /* Material simulation: inherent depth */
-  --card-bevel: inset 0 1px 0 0 oklch(1 0 0 / 0.04), 0 1px 2px 0 oklch(0 0 0 / 0.05);
-  --button-inner-glow: inset 0 1px 0 0 oklch(1 0 0 / 0.04);
-  --chrome-top-highlight: inset 0 1px 0 0 oklch(1 0 0 / 0.45);
-
-  /* Motion timing */
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
-  --duration-fast: 150ms;
-  --duration-base: 220ms;
-  --duration-slow: 350ms;
-
-  --tracking-normal: 0em;
-  --spacing: 0.25rem;
-
-  /* Density: comfortable defaults. Overridden under .density-compact. */
-  --density-scale: 1;            /* proportional scale for fixed dimensions */
-  --density-row-y: 0.75rem;      /* py-3 */
-  --density-row-x: 1.25rem;      /* px-5 */
-  --density-cell-y: 0.5rem;      /* py-2 */
-  --density-tile-y: 1rem;        /* py-4 */
-  --density-gap: 1rem;           /* gap-4 */
-
-  /* Terminal (dark well even in light theme) */
-  --terminal-bg: oklch(0.12 0 0);
-  --terminal-fg: oklch(0.85 0 0);
-  --terminal-cursor: oklch(1 0 0);
-  --terminal-cursor-accent: oklch(0 0 0);
-  --terminal-selection: oklch(1 0 0 / 0.3);
-}
-
-/* ─────────────────────────────────────────────────────────────
-   DARK THEME
-───────────────────────────────────────────────────────────── */
-.dark {
-  --background: oklch(0.08 0 0);
+  /* Dark non-derivable tokens (shared by Dim & OLED) */
   --foreground: oklch(0.94 0 0);
-  --card: oklch(0.12 0 0);
   --card-foreground: oklch(0.94 0 0);
   --popover: oklch(0.14 0 0 / 0.82);
   --popover-foreground: oklch(0.94 0 0);
   --primary: oklch(0.98 0 0);
   --primary-foreground: oklch(0.10 0 0);
-  --secondary: oklch(0.12 0 0);
+  --secondary: oklch(var(--card-l) 0 0);
   --secondary-foreground: oklch(0.94 0 0);
-  --muted: oklch(0.12 0 0);
+  --muted: oklch(var(--card-l) 0 0);
   --muted-foreground: oklch(0.45 0 0);
   --accent: oklch(1 0 0 / 0.06);
   --accent-foreground: oklch(0.94 0 0);
   --destructive: oklch(0.72 0.18 20);
   --destructive-foreground: oklch(0.94 0 0);
-  --border: oklch(1 0 0 / 0.06);
-  --input: oklch(0.12 0 0);
-  --ring: oklch(0.78 0.11 195);
-
-  /* Brand: desaturated teal accent */
-  --brand: oklch(0.78 0.11 195);
-  --brand-foreground: oklch(0.05 0 0);
-  --brand-muted: oklch(0.78 0.11 195 / 0.12);
+  --destructive-muted: oklch(0.72 0.18 20 / 0.15);
+  --input: oklch(var(--card-l) 0 0);
 
   /* Glass: solid surface system (no blur on static surfaces) */
-  --glass: oklch(0.12 0 0);
-  --glass-border: oklch(1 0 0 / 0.06);
+  --glass-border: var(--card-border);
   --glass-highlight: oklch(1 0 0 / 0.06);
 
-  /* Semantic status colors */
+  /* Semantic status colors (dark set) */
   --success: oklch(0.78 0.16 155);
   --success-foreground: oklch(0.10 0 0);
   --success-muted: oklch(0.78 0.16 155 / 0.15);
@@ -237,41 +121,16 @@
   --update: oklch(0.72 0.20 320);
   --update-foreground: oklch(0.10 0 0);
   --update-muted: oklch(0.72 0.20 320 / 0.15);
-  --destructive-muted: oklch(0.72 0.18 20 / 0.15);
 
-  /* Charts: cyan leads as the primary data color, amber for peaks, rose for errors */
-  --chart-1: var(--brand);
-  --chart-2: var(--warning);
-  --chart-3: var(--destructive);
-  --chart-4: oklch(0.55 0 0);
-  --chart-5: oklch(0.80 0 0);
-
-  /* Sparkline / data-line styling (centralized) */
-  --data-line-width: 1.25px;
-  --data-peak: var(--warning);
-
-  /* Sidebar */
-  --sidebar: oklch(0.08 0 0 / 0.80);
+  /* Sidebar (tracks the page tone; borders use the shared hairline) */
+  --sidebar: oklch(var(--bg) 0 0 / 0.80);
   --sidebar-foreground: oklch(0.94 0 0);
   --sidebar-primary: oklch(0.98 0 0);
   --sidebar-primary-foreground: oklch(0.10 0 0);
   --sidebar-accent: oklch(1 0 0 / 0.07);
   --sidebar-accent-foreground: oklch(0.94 0 0);
-  --sidebar-border: oklch(1 0 0 / 0.06);
-  --sidebar-ring: oklch(0.78 0.11 195);
 
-  /* Stat hierarchy: text brightness tiers */
-  --stat-value: oklch(0.93 0 0);
-  --stat-title: oklch(0.55 0 0);
-  --stat-subtitle: oklch(0.45 0 0);
-  --stat-icon: oklch(0.35 0 0);
-
-  /* Card borders: directional lighting */
-  --card-border: oklch(1 0 0 / 0.07);
-  --card-border-top: oklch(1 0 0 / 0.14);
-  --card-border-hover: oklch(1 0 0 / 0.14);
-
-  /* Label palette: ten raw hues preserved for existing assignments */
+  /* Label palette: ten raw hues preserved for existing assignments (dark) */
   --label-teal: oklch(0.75 0.10 192);
   --label-teal-bg: oklch(0.75 0.10 192 / 0.15);
   --label-blue: oklch(0.72 0.12 250);
@@ -305,28 +164,18 @@
   --label-custom: var(--label-amber);
   --label-custom-bg: var(--label-amber-bg);
 
-  /* Fleet Action card action-class chip / blast-dot colors (dark theme). */
-  --action-transformative: var(--label-purple);
-
-  /* Chart grid & axis */
+  /* Chart neutrals + grid/axis (dark) */
+  --chart-4: oklch(0.55 0 0);
+  --chart-5: oklch(0.80 0 0);
   --chart-grid: oklch(1 0 0 / 0.05);
   --chart-tick: oklch(1 0 0 / 0.40);
 
-  /* Typography */
-  --font-sans: 'Geist', sans-serif;
-  --font-serif: 'Instrument Serif', Georgia, serif;
-  --font-display: 'Instrument Serif', Georgia, serif;
-  --font-mono: 'Geist Mono', monospace;
-
-  /* Shape */
-  --radius: 0.5rem;
-
-  /* Material simulation: inherent depth */
+  /* Material simulation: inherent depth (dark) */
   --card-bevel: inset 0 1px 0 0 oklch(1 0 0 / 0.05);
   --button-inner-glow: inset 0 1px 0 0 oklch(1 0 0 / 0.06);
   --chrome-top-highlight: inset 0 1px 0 0 oklch(1 0 0 / 0.08);
 
-  /* Shadows: near-zero, depth comes from surface tone */
+  /* Shadows: near-zero, depth comes from surface tone (dark) */
   --shadow-x: 0px;
   --shadow-y: 1px;
   --shadow-blur: 2px;
@@ -342,9 +191,179 @@
   --shadow-xl: 0px 8px 10px -1px hsl(0 0% 0% / 0.20);
   --shadow-2xl: 0px 12px 20px -2px hsl(0 0% 0% / 0.30);
 
-  /* Terminal (recessed well, matches page background)
-     --terminal-fg/cursor/selection: inherited from :root (both themes use a dark terminal) */
-  --terminal-bg: oklch(0.08 0 0);
+  /* Terminal (recessed well, tracks the theme's well tone) */
+  --terminal-bg: oklch(var(--well-l) 0 0);
+  --terminal-fg: oklch(0.85 0 0);
+  --terminal-cursor: oklch(1 0 0);
+  --terminal-cursor-accent: oklch(0 0 0);
+  --terminal-selection: oklch(1 0 0 / 0.3);
+
+  /* ─────────────── Shared (theme-independent) ─────────────── */
+  /* Typography. Display is the locked signature face; the interface (sans) and
+     data (mono) faces are user-swappable via --ui-font / --mono-font, and
+     --type-scale multiplies the root font-size (see the html rule below). */
+  --type-scale: 1;
+  --ui-font: 'Geist';
+  --mono-font: 'Geist Mono';
+  --font-sans: var(--ui-font), system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: var(--mono-font), ui-monospace, monospace;
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-display: 'Instrument Serif', Georgia, serif;
+
+  /* Shape */
+  --radius: 0.5rem;
+
+  /* Motion timing */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --duration-fast: 150ms;
+  --duration-base: 220ms;
+  --duration-slow: 350ms;
+
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
+
+  /* Density: comfortable defaults. Overridden under .density-compact. */
+  --density-scale: 1;
+  --density-row-y: 0.75rem;
+  --density-row-x: 1.25rem;
+  --density-cell-y: 0.5rem;
+  --density-tile-y: 1rem;
+  --density-gap: 1rem;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ACCENTS (hue + chroma only; lightness comes from the theme)
+───────────────────────────────────────────────────────────── */
+/* A tighter, well-spaced wheel: every pair is >=40deg apart and pushed
+   chromatic so the hues stay distinct at the accent lightness. Kept clear of
+   success(155) / warning(75) / destructive(20). Steel is the near-neutral. */
+[data-accent="cyan"]    { --accent-h: 196; --accent-c: 0.130; }
+[data-accent="blue"]    { --accent-h: 252; --accent-c: 0.165; }
+[data-accent="violet"]  { --accent-h: 298; --accent-c: 0.190; }
+[data-accent="magenta"] { --accent-h: 344; --accent-c: 0.180; }
+[data-accent="orange"]  { --accent-h: 42;  --accent-c: 0.165; }
+[data-accent="amber"]   { --accent-h: 88;  --accent-c: 0.165; }
+[data-accent="lime"]    { --accent-h: 132; --accent-c: 0.195; }
+[data-accent="steel"]   { --accent-h: 250; --accent-c: 0.040; }
+
+/* ─────────────────────────────────────────────────────────────
+   OLED: true black for power-saving panels. Only the raw surface,
+   ink and glow vars change; the dark non-derivable tokens inherit
+   from :root, and the opaque-grey borders keep cards from merging
+   into the black the way 6%-white hairlines did.
+───────────────────────────────────────────────────────────── */
+[data-theme="oled"] {
+  --bg: 0.035;  --card-l: 0.105;  --band-l: 0.072;  --well-l: 0.020;
+  --bb: 0.262;  --bt: 0.345;  --bh: 0.405;  --hl: 0.235;  --border-dir: 1;
+  --val: 0.950; --title: 0.780; --sub: 0.575; --icon: 0.445;  --ink-dir: 1;
+  --accent-l: 0.745; --brand-fg: oklch(0.11 0 0);
+  --glow-l: 0.46; --glow-c: 0.085;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   LIGHT: the existing light theme. Borders are opaque and
+   directionally lit (the lit top edge is lighter, sides darker,
+   so --border-dir flips to -1).
+───────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* Raw lightness vars */
+  --bg: 0.965;  --card-l: 1.000;  --band-l: 0.972;  --well-l: 0.945;
+  --bb: 0.855;  --bt: 0.910;  --bh: 0.780;  --hl: 0.885;  --border-dir: -1;
+  --val: 0.190; --title: 0.400; --sub: 0.500; --icon: 0.620;  --ink-dir: -1;
+  --accent-l: 0.525; --brand-fg: oklch(0.99 0 0);
+  --glow-l: 0.90; --glow-c: 0.040;
+
+  /* Light non-derivable tokens */
+  --foreground: oklch(0.15 0 0);
+  --card-foreground: oklch(0.15 0 0);
+  --popover: oklch(1 0 0 / 0.92);
+  --popover-foreground: oklch(0.15 0 0);
+  --primary: oklch(0.15 0 0);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0 0 0 / 0.05);
+  --secondary-foreground: oklch(0.15 0 0);
+  --muted: oklch(0 0 0 / 0.04);
+  --muted-foreground: oklch(0.50 0 0);
+  --accent: oklch(0 0 0 / 0.06);
+  --accent-foreground: oklch(0.15 0 0);
+  --destructive: oklch(0.63 0.18 20);
+  --destructive-foreground: oklch(1 0 0);
+  --destructive-muted: oklch(0.63 0.18 20 / 0.12);
+  --input: oklch(0.97 0 0);
+
+  --glass-border: var(--card-border);
+  --glass-highlight: oklch(0 0 0 / 0.06);
+
+  --success: oklch(0.65 0.16 155);
+  --success-foreground: oklch(1 0 0);
+  --success-muted: oklch(0.65 0.16 155 / 0.12);
+  --warning: oklch(0.75 0.14 75);
+  --warning-foreground: oklch(0.20 0 0);
+  --warning-muted: oklch(0.75 0.14 75 / 0.12);
+  --info: oklch(0.62 0.14 250);
+  --info-foreground: oklch(1 0 0);
+  --info-muted: oklch(0.62 0.14 250 / 0.12);
+  --update: oklch(0.62 0.22 320);
+  --update-foreground: oklch(1 0 0);
+  --update-muted: oklch(0.62 0.22 320 / 0.12);
+
+  --sidebar: oklch(0.98 0 0 / 0.80);
+  --sidebar-foreground: oklch(0.15 0 0);
+  --sidebar-primary: oklch(0.15 0 0);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0 0 0 / 0.06);
+  --sidebar-accent-foreground: oklch(0.15 0 0);
+
+  /* Label palette (light) */
+  --label-teal: oklch(0.55 0.12 192);
+  --label-teal-bg: oklch(0.55 0.12 192 / 0.12);
+  --label-blue: oklch(0.55 0.14 250);
+  --label-blue-bg: oklch(0.55 0.14 250 / 0.12);
+  --label-purple: oklch(0.55 0.14 300);
+  --label-purple-bg: oklch(0.55 0.14 300 / 0.12);
+  --label-rose: oklch(0.55 0.16 10);
+  --label-rose-bg: oklch(0.55 0.16 10 / 0.12);
+  --label-amber: oklch(0.60 0.16 60);
+  --label-amber-bg: oklch(0.60 0.16 60 / 0.12);
+  --label-green: oklch(0.55 0.15 150);
+  --label-green-bg: oklch(0.55 0.15 150 / 0.12);
+  --label-orange: oklch(0.58 0.16 45);
+  --label-orange-bg: oklch(0.58 0.16 45 / 0.12);
+  --label-pink: oklch(0.58 0.16 340);
+  --label-pink-bg: oklch(0.58 0.16 340 / 0.12);
+  --label-cyan: oklch(0.58 0.12 210);
+  --label-cyan-bg: oklch(0.58 0.12 210 / 0.12);
+  --label-slate: oklch(0.50 0.01 250);
+  --label-slate-bg: oklch(0.50 0.01 250 / 0.12);
+
+  /* Chart neutrals + grid/axis (light) */
+  --chart-4: oklch(0.70 0 0);
+  --chart-5: oklch(0.45 0 0);
+  --chart-grid: oklch(0 0 0 / 0.06);
+  --chart-tick: oklch(0 0 0 / 0.45);
+
+  /* Material simulation (light) */
+  --card-bevel: inset 0 1px 0 0 oklch(1 0 0 / 0.04), 0 1px 2px 0 oklch(0 0 0 / 0.05);
+  --button-inner-glow: inset 0 1px 0 0 oklch(1 0 0 / 0.04);
+  --chrome-top-highlight: inset 0 1px 0 0 oklch(1 0 0 / 0.45);
+
+  /* Shadows (light) */
+  --shadow-opacity: 0.10;
+  --shadow-2xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.05);
+  --shadow-xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.05);
+  --shadow-sm: 0px 1px 2px 0px hsl(0 0% 0% / 0.08);
+  --shadow: 0px 1px 2px 0px hsl(0 0% 0% / 0.08), 0px 1px 2px -1px hsl(0 0% 0% / 0.08);
+  --shadow-md: 0px 1px 2px 0px hsl(0 0% 0% / 0.10), 0px 2px 4px -1px hsl(0 0% 0% / 0.10);
+  --shadow-lg: 0px 1px 2px 0px hsl(0 0% 0% / 0.10), 0px 4px 6px -1px hsl(0 0% 0% / 0.10);
+  --shadow-xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.10), 0px 8px 10px -1px hsl(0 0% 0% / 0.10);
+  --shadow-2xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.25);
+
+  /* Terminal stays a dark well even in the light theme */
+  --terminal-bg: oklch(0.12 0 0);
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -400,6 +419,10 @@
   --color-card-border-top: var(--card-border-top);
   --color-card-border-hover: var(--card-border-hover);
 
+  --color-band: var(--band);
+  --color-well: var(--well);
+  --color-hairline: var(--hairline);
+
   --color-chart-grid: var(--chart-grid);
   --color-chart-tick: var(--chart-tick);
 
@@ -445,24 +468,39 @@
    BASE STYLES
 ───────────────────────────────────────────────────────────── */
 @layer base {
-  :root {
-    color-scheme: dark;
-  }
-
   * {
     @apply border-border outline-ring/50;
   }
 
   body {
     @apply text-foreground;
+    /* Ambient top-center glow tracks the accent hue and the --glow knob. Shows
+       on screens whose root is transparent (e.g. Login). Full-screen app shells
+       that paint an opaque --background must use .app-canvas instead, or they
+       occlude this. */
     background:
       radial-gradient(
-        circle at 50% 0%,
-        oklch(0.95 0.02 60 / 0.3),
-        transparent
+        ellipse 156% 106% at 50% -6%,
+        var(--glow-color),
+        transparent 70%
       ),
       var(--background);
+    background-attachment: fixed;
   }
+}
+
+/* The page canvas: opaque --background base plus the ambient accent glow. Use on
+   full-screen app shells (EditorLayout, the loading wrapper) that would otherwise
+   paint a flat bg-background over the body glow and hide it entirely. */
+.app-canvas {
+  background:
+    radial-gradient(
+      ellipse 156% 106% at 50% -6%,
+      var(--glow-color),
+      transparent 70%
+    ),
+    var(--background);
+  background-attachment: fixed;
 }
 
 /* Density: compact mode compresses row/cell padding by ~50%. */
@@ -475,17 +513,6 @@ body.density-compact {
   --density-gap: 0.75rem;
 }
 
-/* Dark mode: teal-tinted ambient glow */
-.dark body {
-  background:
-    radial-gradient(
-      circle at 50% 0%,
-      oklch(0.25 0.05 250 / 0.15),
-      transparent
-    ),
-    var(--background);
-}
-
 /* ─────────────────────────────────────────────────────────────
    TYPOGRAPHY & RENDERING
 ───────────────────────────────────────────────────────────── */
@@ -495,6 +522,12 @@ body,
   height: 100%;
   width: 100%;
   overflow: hidden;
+}
+
+/* Text-size control: one root multiplier scales the whole rem-based type ramp.
+   Layout px is untouched; only rem-sized text grows/shrinks. */
+html {
+  font-size: calc(16px * var(--type-scale));
 }
 
 body {

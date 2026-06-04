@@ -1,11 +1,19 @@
 import { Combobox } from '@/components/ui/combobox';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Slider } from '@/components/ui/slider';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import { useDensity } from '@/hooks/use-density';
 import type { Density } from '@/hooks/use-density';
 import { useDeployFeedbackEnabled } from '@/hooks/use-deploy-feedback-enabled';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
+import { useTheme, THEME_MODE_OPTIONS, ACCENTS, CONTRAST, BORDER_BOOST, GLOW, TYPE_SCALE } from '@/hooks/use-theme';
+import { AccentPicker } from '@/components/theme/AccentPicker';
+import { ThemePreview } from '@/components/theme/ThemePreview';
+import { TypeChips } from '@/components/theme/TypeChips';
+import { UI_FONT_OPTIONS, MONO_FONT_OPTIONS } from '@/components/theme/typeOptions';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
+import { SettingsActions, SettingsSecondaryButton } from './SettingsActions';
 
 const DENSITY_OPTIONS: { value: Density; label: string }[] = [
     { value: 'comfortable', label: 'Comfortable' },
@@ -17,13 +25,152 @@ const DENSITY_DESCRIPTIONS: Record<Density, string> = {
     compact: 'Tighter rows and tiles. Fits more on screen for dense dashboards.',
 };
 
+const fmtSigned = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(2)}`;
+
 export function AppearanceSection() {
     const [density, setDensity] = useDensity();
     const [isEnabled, setEnabled] = useDeployFeedbackEnabled();
     const [diffPreviewEnabled, setDiffPreviewEnabled] = useComposeDiffPreviewEnabled();
+    const {
+        theme, accent, borderBoost, glow, contrast, uiFont, monoFont, typeScale,
+        setTheme, setAccent, setBorderBoost, setGlow, setContrast, setUiFont, setMonoFont, setTypeScale,
+    } = useTheme();
+    const accentLabel = ACCENTS.find((a) => a.id === accent)?.label ?? 'Cyan';
 
     return (
         <div className="flex flex-col gap-10">
+            <SettingsSection title="Theme" kicker="this browser">
+                <div className="pt-3">
+                    <ThemePreview />
+                </div>
+
+                <SettingsField
+                    label="Mode"
+                    helper="Dim lifts surfaces off black; OLED is true black; Light inverts; Auto follows your OS."
+                >
+                    <SegmentedControl
+                        value={theme}
+                        options={THEME_MODE_OPTIONS}
+                        onChange={setTheme}
+                        ariaLabel="Theme mode"
+                    />
+                </SettingsField>
+
+                <SettingsField
+                    label="Accent"
+                    helper={`The one data color, used for charts, rails, and focus. Currently ${accentLabel}.`}
+                    align="start"
+                >
+                    <AccentPicker value={accent} onChange={setAccent} />
+                </SettingsField>
+
+                <SettingsField
+                    label="Contrast"
+                    helper="Master contrast: spreads the page, ink, and borders together. Pair high contrast with OLED for the crispest panel."
+                >
+                    <div className="flex items-center gap-3">
+                        <Slider
+                            value={[contrast]}
+                            min={CONTRAST.min}
+                            max={CONTRAST.max}
+                            step={CONTRAST.step}
+                            onValueChange={([v]) => setContrast(v)}
+                            aria-label="Contrast"
+                        />
+                        <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                            {fmtSigned(contrast)}
+                        </span>
+                    </div>
+                </SettingsField>
+
+                <SettingsField
+                    label="Border brightness"
+                    helper="Lift or soften every hairline so separation reads exactly how you like it."
+                >
+                    <div className="flex items-center gap-3">
+                        <Slider
+                            value={[borderBoost]}
+                            min={BORDER_BOOST.min}
+                            max={BORDER_BOOST.max}
+                            step={BORDER_BOOST.step}
+                            onValueChange={([v]) => setBorderBoost(v)}
+                            aria-label="Border brightness"
+                        />
+                        <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                            {fmtSigned(borderBoost)}
+                        </span>
+                    </div>
+                </SettingsField>
+
+                <SettingsField
+                    label="Ambient glow"
+                    helper="Intensity of the accent-tinted glow behind the page."
+                >
+                    <div className="flex items-center gap-3">
+                        <Slider
+                            value={[glow]}
+                            min={GLOW.min}
+                            max={GLOW.max}
+                            step={GLOW.step}
+                            onValueChange={([v]) => setGlow(v)}
+                            aria-label="Ambient glow"
+                        />
+                        <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                            {glow.toFixed(2)}
+                        </span>
+                    </div>
+                </SettingsField>
+
+                <SettingsActions>
+                    <SettingsSecondaryButton
+                        onClick={() => {
+                            setContrast(CONTRAST.default);
+                            setBorderBoost(BORDER_BOOST.default);
+                            setGlow(GLOW.default);
+                        }}
+                    >
+                        Reset fine-tune
+                    </SettingsSecondaryButton>
+                </SettingsActions>
+            </SettingsSection>
+
+            <SettingsSection title="Typography" kicker="this browser">
+                <SettingsField
+                    label="Interface font"
+                    helper="The sans face for body, labels, nav, and buttons. Display headings stay Instrument Serif."
+                    align="start"
+                >
+                    <TypeChips value={uiFont} options={UI_FONT_OPTIONS} onChange={setUiFont} ariaLabel="Interface font" />
+                </SettingsField>
+
+                <SettingsField
+                    label="Data font"
+                    helper="The mono face for terminal, stats, codes, and timestamps."
+                    align="start"
+                >
+                    <TypeChips value={monoFont} options={MONO_FONT_OPTIONS} onChange={setMonoFont} ariaLabel="Data font" />
+                </SettingsField>
+
+                <SettingsField
+                    label="Text size"
+                    helper="Scales the whole interface from a single root multiplier. Default 1.00×."
+                >
+                    <div className="flex items-center gap-3">
+                        <Slider
+                            value={[typeScale]}
+                            min={TYPE_SCALE.min}
+                            max={TYPE_SCALE.max}
+                            step={TYPE_SCALE.step}
+                            onValueChange={([v]) => setTypeScale(v)}
+                            aria-label="Text size"
+                        />
+                        <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                            {typeScale.toFixed(2)}×
+                        </span>
+                    </div>
+                </SettingsField>
+            </SettingsSection>
+
             <SettingsSection title="Display" kicker="this browser">
                 <SettingsField
                     label="Density"
