@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin } from '../middleware/tierGates';
+import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
 
 // Strict allowlist of keys readable and writable via the generic settings
 // API. This is the single source of truth for what the endpoint exposes:
@@ -25,6 +25,12 @@ const ALLOWED_SETTING_KEYS = new Set([
   'mesh_auto_recreate',
   'scan_history_per_image_limit',
 ]);
+
+// Keys whose write requires the Admiral variant, not just an admin role.
+// audit_retention_days configures the Admiral-only audit log (the audit-log
+// routes are requireAdmiral and the UI only shows this field to Admiral
+// operators), so a lower-tier admin must not be able to set it.
+const ADMIRAL_ONLY_SETTING_KEYS = new Set(['audit_retention_days']);
 
 // Bulk PATCH schema. All keys optional; present keys are fully validated.
 const SettingsPatchSchema = z.object({
@@ -71,6 +77,7 @@ settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
       res.status(400).json({ error: `Invalid or disallowed setting key: ${key}` });
       return;
     }
+    if (ADMIRAL_ONLY_SETTING_KEYS.has(key) && !requireAdmiral(req, res)) return;
     if (value === undefined || value === null) {
       res.status(400).json({ error: 'Setting value is required' });
       return;
@@ -109,11 +116,24 @@ settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
 settingsRouter.patch('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
+    // Reject unknown/disallowed keys outright rather than letting Zod silently
+    // strip them. This keeps the bulk path fail-closed and consistent with the
+    // single-key POST, so a client sending a stale or disallowed key (e.g. an
+    // auth_* secret) gets a 400, not a misleading 200.
+    const body = req.body;
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      const unknownKeys = Object.keys(body).filter(k => !ALLOWED_SETTING_KEYS.has(k));
+      if (unknownKeys.length > 0) {
+        res.status(400).json({ error: `Invalid or disallowed setting key(s): ${unknownKeys.join(', ')}` });
+        return;
+      }
+    }
     const parsed = SettingsPatchSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
       return;
     }
+    if (Object.keys(parsed.data).some(k => ADMIRAL_ONLY_SETTING_KEYS.has(k)) && !requireAdmiral(req, res)) return;
     const db = DatabaseService.getInstance();
     const updateMany = db.getDb().transaction((entries: [string, string][]) => {
       for (const [k, v] of entries) {
