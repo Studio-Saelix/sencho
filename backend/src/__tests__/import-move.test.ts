@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, afterAll, vi } from 'vitest';
 import fs from 'fs';
+import { promises as fsPromises } from 'fs';
 import path from 'path';
 
 const { tmpRoot } = vi.hoisted(() => {
@@ -103,6 +104,36 @@ describe('FileSystemService.importCandidateIntoStack', () => {
     expect(fs.existsSync(path.join(tmpRoot, 'compose.yml'))).toBe(true);
     expect(fs.readFileSync(path.join(tmpRoot, 'taken', 'compose.yaml'), 'utf-8')).toContain('existing');
     fs.rmSync(path.join(tmpRoot, 'compose.yml'), { force: true });
+  });
+
+  it('does not clobber a destination that appears between the existence check and the move', async () => {
+    // Simulate the TOCTOU race: the existence precheck sees nothing, but the
+    // destination (with a same-named compose file) exists by the time the move
+    // creates it. The non-recursive mkdir must reject rather than merge and let
+    // the rename overwrite the existing file.
+    const dest = path.join(tmpRoot, 'racewin');
+    fs.mkdirSync(dest, { recursive: true });
+    fs.writeFileSync(path.join(dest, 'docker-compose.yml'), 'services:\n  existing: {}\n');
+    fs.writeFileSync(path.join(tmpRoot, 'docker-compose.yml'), COMPOSE);
+    // Force only the destination existence precheck to report "absent".
+    const accessSpy = vi
+      .spyOn(fsPromises, 'access')
+      .mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 'ENOENT' }));
+    try {
+      await expect(
+        FileSystemService.getInstance().importCandidateIntoStack(
+          { location: 'docker-compose.yml', composeFile: 'docker-compose.yml', status: 'loose-root' },
+          'racewin',
+        ),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
+      // The pre-existing file is intact and the source loose file is untouched.
+      expect(fs.readFileSync(path.join(dest, 'docker-compose.yml'), 'utf-8')).toContain('existing');
+      expect(fs.existsSync(path.join(tmpRoot, 'docker-compose.yml'))).toBe(true);
+    } finally {
+      accessSpy.mockRestore();
+      fs.rmSync(dest, { recursive: true, force: true });
+      fs.rmSync(path.join(tmpRoot, 'docker-compose.yml'), { force: true });
+    }
   });
 
   it('rejects an invalid destination name without touching the filesystem', async () => {

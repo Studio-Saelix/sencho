@@ -612,7 +612,11 @@ export class FileSystemService {
 
     if (candidate.status === 'loose-root') {
       const realSource = await this.realPathWithinBase(source);
-      await fsPromises.mkdir(destDir, { recursive: true });
+      // Non-recursive mkdir is the atomic no-overwrite guard: if the destination
+      // appeared between the access() precheck above and here, this throws
+      // EEXIST (mapped to a 409 conflict) instead of merging into the existing
+      // directory and letting the rename clobber a same-named file.
+      await fsPromises.mkdir(destDir);
       await fsPromises.rename(realSource, path.join(destDir, candidate.composeFile));
       return;
     }
