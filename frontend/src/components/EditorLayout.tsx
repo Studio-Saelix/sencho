@@ -315,7 +315,7 @@ export default function EditorLayout() {
         className="rounded-lg w-full"
         onClick={() => openCreateDialog('empty')}
       >
-        <Plus className="w-4 h-4 mr-2" />
+        <Plus className="w-4 h-4" />
         Create Stack
       </Button>
       <CreateStackDialog
