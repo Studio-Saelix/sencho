@@ -30,7 +30,8 @@ permissionsRouter.get('/me', authMiddleware, (req: Request, res: Response): void
       globalRole,
       globalPermissions,
       scopedPermissions,
-      isAdmiral: LicenseService.getInstance().getVariant() === 'admiral',
+      isAdmiral: LicenseService.getInstance().getTier() === 'paid'
+        && LicenseService.getInstance().getVariant() === 'admiral',
     });
   } catch (error) {
     console.error('[Permissions] Error:', error);

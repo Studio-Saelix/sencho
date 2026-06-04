@@ -401,7 +401,42 @@ describe('GET /api/permissions/me', () => {
     expect(Array.isArray(res.body.globalPermissions)).toBe(true);
     expect(res.body.globalPermissions).toContain('stack:read');
     expect(res.body.globalPermissions).toContain('system:users');
-    expect(typeof res.body.isAdmiral).toBe('boolean');
+    // beforeAll mocks a paid admiral license.
+    expect(res.body.isAdmiral).toBe(true);
+  });
+
+  it('reports isAdmiral=false when the admiral variant is no longer on a paid tier', async () => {
+    // An expired or downgraded admiral license keeps variant='admiral' but the
+    // effective tier drops to community. isAdmiral must track the effective tier
+    // (mirroring the requireAdmiral guard), not the lingering variant, or the
+    // frontend would unlock admiral-only surfaces that the API then 403s.
+    const { LicenseService } = await import('../services/LicenseService');
+    const svc = LicenseService.getInstance();
+    vi.spyOn(svc, 'getTier').mockReturnValue('community');
+    try {
+      const res = await request(app)
+        .get('/api/permissions/me')
+        .set('Authorization', `Bearer ${adminToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.isAdmiral).toBe(false);
+    } finally {
+      vi.spyOn(svc, 'getTier').mockReturnValue('paid');
+    }
+  });
+
+  it('reports isAdmiral=false for a paid non-admiral (skipper) license', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const svc = LicenseService.getInstance();
+    vi.spyOn(svc, 'getVariant').mockReturnValue('skipper');
+    try {
+      const res = await request(app)
+        .get('/api/permissions/me')
+        .set('Authorization', `Bearer ${adminToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.isAdmiral).toBe(false);
+    } finally {
+      vi.spyOn(svc, 'getVariant').mockReturnValue('admiral');
+    }
   });
 
   it('returns 401 when not authenticated', async () => {
