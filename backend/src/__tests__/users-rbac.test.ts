@@ -467,6 +467,31 @@ describe('GET /api/permissions/me', () => {
     db.deleteRoleAssignmentsByUser(id);
     db.deleteUser(id);
   });
+
+  it('omits scoped permissions on the Community tier even when assignments exist', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const db = DatabaseService.getInstance();
+    const svc = LicenseService.getInstance();
+    const hash = await bcrypt.hash('password123', 1);
+    const id = db.addUser({ username: 'permcheck-community', password_hash: hash, role: 'viewer' });
+    db.addRoleAssignment({ user_id: id, role: 'deployer', resource_type: 'stack', resource_id: 'my-stack' });
+    const user = db.getUserById(id)!;
+    const token = authToken('permcheck-community', 'viewer', user.token_version);
+
+    // Scoped grants only take effect on paid; a downgraded instance must not
+    // advertise per-resource permissions the API will then 403.
+    vi.spyOn(svc, 'getTier').mockReturnValue('community');
+    const res = await request(app)
+      .get('/api/permissions/me')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.scopedPermissions).toEqual({});
+
+    // Cleanup
+    vi.spyOn(svc, 'getTier').mockReturnValue('paid');
+    db.deleteRoleAssignmentsByUser(id);
+    db.deleteUser(id);
+  });
 });
 
 // ---- PUT /api/auth/password ----
