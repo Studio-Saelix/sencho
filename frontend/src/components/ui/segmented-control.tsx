@@ -16,6 +16,7 @@ interface SegmentedControlProps<T extends string> {
   onChange: (next: T) => void;
   ariaLabel?: string;
   iconOnly?: boolean;
+  fullWidth?: boolean;
   className?: string;
 }
 
@@ -25,6 +26,7 @@ export function SegmentedControl<T extends string>({
   onChange,
   ariaLabel,
   iconOnly,
+  fullWidth,
   className,
 }: SegmentedControlProps<T>) {
   const buttonsRef = useRef<(HTMLButtonElement | null)[]>([]);
@@ -61,6 +63,7 @@ export function SegmentedControl<T extends string>({
       aria-label={ariaLabel}
       className={cn(
         'inline-flex items-center rounded-md border border-card-border bg-card p-0.5',
+        fullWidth && 'flex w-full',
         className,
       )}
     >
@@ -89,6 +92,7 @@ export function SegmentedControl<T extends string>({
             onKeyDown={(e) => handleKeyDown(e, index)}
             className={cn(
               'flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50',
+              fullWidth && 'flex-1 justify-center',
               active
                 ? 'bg-brand/10 text-brand'
                 : 'text-stat-subtitle hover:text-stat-value',

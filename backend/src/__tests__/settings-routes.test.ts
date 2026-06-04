@@ -55,10 +55,67 @@ describe('GET /api/settings', () => {
     expect(res.body.auth_jwt_secret).toBeUndefined();
   });
 
-  it('allows non-admin users to read settings', async () => {
-    // Settings is read-only for non-admins; write is admin-gated separately.
-    const res = await request(app).get('/api/settings').set('Cookie', viewerCookie);
-    expect(res.status).toBe(200);
+  describe('credential projection (leak prevention)', () => {
+    // Seeded leak-probe values are reset afterward so the shared test DB does
+    // not carry them into later suites (matches the cleanup convention used by
+    // the mesh_auto_recreate write test below).
+    afterAll(() => {
+      const db = DatabaseService.getInstance();
+      for (const k of [
+        'cloud_backup_access_key',
+        'cloud_backup_secret_key',
+        'cloud_backup_endpoint',
+        'cloud_backup_bucket',
+        'some_future_setting',
+      ]) {
+        db.updateGlobalSetting(k, '');
+      }
+      db.updateGlobalSetting('trivy_auto_update', '0');
+      db.updateGlobalSetting('mesh_auto_recreate', '0');
+    });
+
+    it('never returns credentials or other non-allowlisted keys, even to admins', async () => {
+      // Cloud backup config is stored in global_settings by the cloud-backup
+      // route (access key plaintext, secret key encrypted). The generic settings
+      // GET projects an allowlist, so these credentials and any other key written
+      // to the table are never disclosed here.
+      const db = DatabaseService.getInstance();
+      db.updateGlobalSetting('cloud_backup_access_key', 'AKIA-must-not-leak');
+      db.updateGlobalSetting('cloud_backup_secret_key', 'cipher-must-not-leak');
+      db.updateGlobalSetting('cloud_backup_endpoint', 'https://s3.example.com');
+      db.updateGlobalSetting('cloud_backup_bucket', 'private-bucket');
+      db.updateGlobalSetting('trivy_auto_update', '1');
+      // A key that is neither allowlisted nor obviously sensitive: the allowlist
+      // must still exclude it. This locks the fail-closed contract that is the
+      // reason the GET uses an allowlist rather than a denylist.
+      db.updateGlobalSetting('some_future_setting', 'should-not-appear');
+      db.updateGlobalSetting('host_cpu_limit', '80');
+      db.updateGlobalSetting('mesh_auto_recreate', '1');
+
+      const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.cloud_backup_access_key).toBeUndefined();
+      expect(res.body.cloud_backup_secret_key).toBeUndefined();
+      expect(res.body.cloud_backup_endpoint).toBeUndefined();
+      expect(res.body.cloud_backup_bucket).toBeUndefined();
+      expect(res.body.trivy_auto_update).toBeUndefined();
+      expect(res.body.some_future_setting).toBeUndefined();
+      // Allowlisted keys still come through. Two structurally different keys (a
+      // numeric and an enum-shaped one) prove the projection passes the whole
+      // allowlist, not just one key.
+      expect(res.body.host_cpu_limit).toBe('80');
+      expect(res.body.mesh_auto_recreate).toBe('1');
+    });
+
+    it('allows non-admin users to read settings without leaking credentials', async () => {
+      // Settings is read-only for non-admins; write is admin-gated separately.
+      // The leak matters most here: a viewer must never receive backup creds.
+      DatabaseService.getInstance().updateGlobalSetting('cloud_backup_access_key', 'AKIA-viewer-must-not-see');
+      const res = await request(app).get('/api/settings').set('Cookie', viewerCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.cloud_backup_access_key).toBeUndefined();
+      expect(res.body.auth_password_hash).toBeUndefined();
+    });
   });
 });
 
@@ -191,5 +248,96 @@ describe('PATCH /api/settings (bulk update)', () => {
       .set('Cookie', adminCookie)
       .send({});
     expect(res.status).toBe(200);
+  });
+
+  it('rejects a PATCH with unknown or disallowed keys (400) and writes nothing', async () => {
+    const before = DatabaseService.getInstance().getGlobalSettings().host_cpu_limit;
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ host_cpu_limit: 65, auth_jwt_secret: 'pwned' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid or disallowed setting key/);
+    // Fail-closed: the allowlisted key in the same body must not be written.
+    expect(DatabaseService.getInstance().getGlobalSettings().host_cpu_limit).toBe(before);
+  });
+
+  it('rejects a PATCH whose only key is a private auth secret (was a silent 200 no-op before)', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ auth_jwt_secret: 'pwned' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid or disallowed setting key/);
+    // The auth secret must never be written through the settings API.
+    expect(DatabaseService.getInstance().getGlobalSettings().auth_jwt_secret).not.toBe('pwned');
+  });
+});
+
+describe('Admiral-only setting keys (audit_retention_days)', () => {
+  // audit_retention_days configures the Admiral-only audit log, so its write is
+  // gated by requireAdmiral in addition to the admin role. beforeAll mocks a
+  // paid Admiral license; individual tests override the variant to simulate an
+  // admin whose license is not Admiral.
+  it('allows an Admiral admin to write audit_retention_days', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ audit_retention_days: 120 });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().audit_retention_days).toBe('120');
+  });
+
+  it('rejects an audit_retention_days PATCH from a non-Admiral admin (403) and does not apply it', async () => {
+    const before = DatabaseService.getInstance().getGlobalSettings().audit_retention_days;
+    const { LicenseService } = await import('../services/LicenseService');
+    const spy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
+    try {
+      const res = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ audit_retention_days: 200 });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
+      expect(DatabaseService.getInstance().getGlobalSettings().audit_retention_days).toBe(before);
+    } finally {
+      spy.mockReturnValue('admiral');
+    }
+  });
+
+  it('rejects an audit_retention_days single-key POST from a non-Admiral admin (403) and does not apply it', async () => {
+    const before = DatabaseService.getInstance().getGlobalSettings().audit_retention_days;
+    const { LicenseService } = await import('../services/LicenseService');
+    const spy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
+    try {
+      const res = await request(app)
+        .post('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ key: 'audit_retention_days', value: '300' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
+      expect(DatabaseService.getInstance().getGlobalSettings().audit_retention_days).toBe(before);
+    } finally {
+      spy.mockReturnValue('admiral');
+    }
+  });
+
+  it('still lets a non-Admiral admin write non-Admiral keys via PATCH and POST (gate is per-key)', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const spy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
+    try {
+      const patchRes = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ host_cpu_limit: 55 });
+      expect(patchRes.status).toBe(200);
+      const postRes = await request(app)
+        .post('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ key: 'host_ram_limit', value: '55' });
+      expect(postRes.status).toBe(200);
+    } finally {
+      spy.mockReturnValue('admiral');
+    }
   });
 });

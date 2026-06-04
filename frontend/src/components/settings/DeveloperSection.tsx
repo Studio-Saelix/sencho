@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { Input } from '@/components/ui/input';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useLicense } from '@/context/LicenseContext';
+import { useAuth } from '@/context/AuthContext';
 import { RefreshCw } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -41,8 +41,10 @@ const DEFAULT_DEVELOPER: DeveloperFields = {
 };
 
 export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
-    const { isPaid, license } = useLicense();
+    const { isAdmin, permissions } = useAuth();
     const { activeNode } = useNodes();
+    const readOnly = !isAdmin;
+    const isAdmiral = permissions?.isAdmiral ?? false;
     const [settings, setSettings] = useState<DeveloperFields>({ ...DEFAULT_DEVELOPER });
     const serverSettingsRef = useRef<DeveloperFields>({ ...DEFAULT_DEVELOPER });
     const [isLoading, setIsLoading] = useState(false);
@@ -75,19 +77,14 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
         const fetchSettings = async () => {
             setIsLoading(true);
             try {
-                const isRemote = activeNode?.type === 'remote';
                 const nodeRes = await apiFetch('/settings');
-                const localRes = isRemote ? await apiFetch('/settings', { localOnly: true }) : nodeRes;
                 const nodeData: Record<string, string> = nodeRes.ok ? await nodeRes.json() : {};
-                const localData: Record<string, string> = (isRemote && localRes.ok)
-                    ? await localRes.json()
-                    : nodeData;
                 const safe: DeveloperFields = {
-                    developer_mode: (localData.developer_mode as '0' | '1') ?? DEFAULT_SETTINGS.developer_mode,
-                    metrics_retention_hours: localData.metrics_retention_hours ?? DEFAULT_SETTINGS.metrics_retention_hours,
-                    log_retention_days: localData.log_retention_days ?? DEFAULT_SETTINGS.log_retention_days,
-                    audit_retention_days: localData.audit_retention_days ?? DEFAULT_SETTINGS.audit_retention_days,
-                    scan_history_per_image_limit: localData.scan_history_per_image_limit ?? DEFAULT_SETTINGS.scan_history_per_image_limit,
+                    developer_mode: (nodeData.developer_mode as '0' | '1') ?? DEFAULT_SETTINGS.developer_mode,
+                    metrics_retention_hours: nodeData.metrics_retention_hours ?? DEFAULT_SETTINGS.metrics_retention_hours,
+                    log_retention_days: nodeData.log_retention_days ?? DEFAULT_SETTINGS.log_retention_days,
+                    audit_retention_days: nodeData.audit_retention_days ?? DEFAULT_SETTINGS.audit_retention_days,
+                    scan_history_per_image_limit: nodeData.scan_history_per_image_limit ?? DEFAULT_SETTINGS.scan_history_per_image_limit,
                 };
                 setSettings(safe);
                 serverSettingsRef.current = { ...safe };
@@ -118,7 +115,6 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
                 body: JSON.stringify(payload),
-                localOnly: true,
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
@@ -140,7 +136,7 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
     if (isLoading) return <SectionSkeleton />;
 
     return (
-        <div className="flex flex-col gap-10">
+        <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Diagnostics">
                 <SettingsField
                     label="Developer mode"
@@ -206,7 +202,7 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
                     </div>
                 </SettingsField>
 
-                {isPaid && license?.variant === 'admiral' && (
+                {isAdmiral && (
                     <SettingsField
                         label="Audit log"
                         helper="How long to keep audit trail entries."
@@ -226,18 +222,20 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
                 )}
             </SettingsSection>
 
-            <SettingsActions hint={hasChanges ? 'unsaved changes' : undefined}>
-                <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges}>
-                    {isSaving ? (
-                        <>
-                            <RefreshCw className="w-4 h-4 animate-spin" />
-                            Saving
-                        </>
-                    ) : (
-                        'Save settings'
-                    )}
-                </SettingsPrimaryButton>
+            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? 'unsaved changes' : undefined)}>
+                {!readOnly && (
+                    <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges}>
+                        {isSaving ? (
+                            <>
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                Saving
+                            </>
+                        ) : (
+                            'Save settings'
+                        )}
+                    </SettingsPrimaryButton>
+                )}
             </SettingsActions>
-        </div>
+        </fieldset>
     );
 }

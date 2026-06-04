@@ -89,7 +89,7 @@ function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOver }: N
     return (
         <button
             type="button"
-            className={cn(chipClass, 'focus-visible:ring-2 focus-visible:ring-brand/50 focus-visible:outline-none')}
+            className={cn(chipClass, 'focus-visible:ring-2 focus-visible:ring-brand/50 focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed')}
             onClick={startEdit}
         >
             <span>{value || '0'}</span>
@@ -111,7 +111,7 @@ function TogglePill({ checked, onChange }: TogglePillProps) {
             aria-checked={checked}
             onClick={() => onChange(!checked)}
             className={cn(
-                'inline-flex items-center justify-center rounded-md border px-2.5 py-1 font-mono text-xs uppercase tracking-[0.18em] transition-colors min-w-[60px] focus-visible:ring-2 focus-visible:ring-brand/50 focus-visible:outline-none',
+                'inline-flex items-center justify-center rounded-md border px-2.5 py-1 font-mono text-xs uppercase tracking-[0.18em] transition-colors min-w-[60px] focus-visible:ring-2 focus-visible:ring-brand/50 focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed',
                 checked
                     ? 'border-success/30 bg-success/10 text-success hover:bg-success/15'
                     : 'border-card-border bg-card text-stat-subtitle hover:text-stat-value',
@@ -148,6 +148,7 @@ const DEFAULT_SYSTEM: SystemFields = {
 export function SystemSection({ onDirtyChange }: SystemSectionProps) {
     const { activeNode } = useNodes();
     const { isAdmin } = useAuth();
+    const readOnly = !isAdmin;
     const [settings, setSettings] = useState<SystemFields>({ ...DEFAULT_SYSTEM });
     const serverSettingsRef = useRef<SystemFields>({ ...DEFAULT_SYSTEM });
     const [isLoading, setIsLoading] = useState(false);
@@ -239,7 +240,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
     if (isLoading) return <SettingsSkeleton />;
 
     return (
-        <div className="flex flex-col gap-10">
+        <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Host thresholds">
                 <SettingsField
                     label="CPU limit"
@@ -342,18 +343,20 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                 </SettingsSection>
             )}
 
-            <SettingsActions hint={hasChanges ? `${dirtyCount} unsaved` : undefined}>
-                <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges}>
-                    {isSaving ? (
-                        <>
-                            <RefreshCw className="w-4 h-4 animate-spin" />
-                            Saving
-                        </>
-                    ) : (
-                        'Save limits'
-                    )}
-                </SettingsPrimaryButton>
+            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
+                {!readOnly && (
+                    <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges}>
+                        {isSaving ? (
+                            <>
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                Saving
+                            </>
+                        ) : (
+                            'Save limits'
+                        )}
+                    </SettingsPrimaryButton>
+                )}
             </SettingsActions>
-        </div>
+        </fieldset>
     );
 }
