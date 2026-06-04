@@ -3,9 +3,6 @@ import {
     Settings,
     LogOut,
     ExternalLink,
-    Monitor,
-    Sun,
-    Moon,
     User,
     Loader2,
     BookOpen,
@@ -15,7 +12,6 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { SegmentedControl } from '@/components/ui/segmented-control';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { apiFetch } from '@/lib/api';
@@ -23,19 +19,9 @@ import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { TierBadge } from './TierBadge';
 
-type Theme = 'light' | 'dark' | 'auto';
-
 interface UserProfileDropdownProps {
-    theme: Theme;
-    setTheme: (theme: Theme) => void;
     onOpenSettings: () => void;
 }
-
-const THEME_OPTIONS = [
-    { value: 'auto' as const, label: 'Auto', icon: Monitor },
-    { value: 'light' as const, label: 'Light', icon: Sun },
-    { value: 'dark' as const, label: 'Dark', icon: Moon },
-];
 
 function getInitials(username: string | undefined): string {
     if (!username) return '';
@@ -48,7 +34,7 @@ function getInitials(username: string | undefined): string {
     return trimmed.slice(0, 2).toUpperCase();
 }
 
-export function UserProfileDropdown({ theme, setTheme, onOpenSettings }: UserProfileDropdownProps) {
+export function UserProfileDropdown({ onOpenSettings }: UserProfileDropdownProps) {
     const { logout, user, isAdmin } = useAuth();
     const { license } = useLicense();
     const [billingLoading, setBillingLoading] = useState(false);
@@ -169,20 +155,6 @@ export function UserProfileDropdown({ theme, setTheme, onOpenSettings }: UserPro
                         href="https://github.com/studio-saelix/sencho/issues"
                         external
                         onClick={closeMenu}
-                    />
-                </div>
-
-                {/* Appearance */}
-                <div className="flex items-center justify-between gap-3 border-t border-card-border/60 px-[var(--density-row-x)] py-[var(--density-row-y)]">
-                    <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-                        Appearance
-                    </span>
-                    <SegmentedControl
-                        value={theme}
-                        options={THEME_OPTIONS}
-                        onChange={setTheme}
-                        iconOnly
-                        ariaLabel="Theme"
                     />
                 </div>
 
