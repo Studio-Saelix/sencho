@@ -1,11 +1,14 @@
 import { cn } from '@/lib/utils';
 import { ACCENTS, type AccentId } from '@/hooks/use-theme';
+import { useRovingRadio } from './useRovingRadio';
 
 interface AccentPickerProps {
     value: AccentId;
     onChange: (accent: AccentId) => void;
     className?: string;
 }
+
+const ACCENT_IDS = ACCENTS.map((a) => a.id);
 
 /**
  * The eight swappable accent hues as a swatch grid. Each dot renders the accent
@@ -14,9 +17,10 @@ interface AccentPickerProps {
  * and Settings → Appearance.
  */
 export function AccentPicker({ value, onChange, className }: AccentPickerProps) {
+    const itemProps = useRovingRadio(ACCENT_IDS, value, onChange);
     return (
         <div role="radiogroup" aria-label="Accent" className={cn('grid grid-cols-4 gap-2', className)}>
-            {ACCENTS.map((a) => {
+            {ACCENTS.map((a, i) => {
                 const color = `oklch(0.745 ${a.c} ${a.h})`;
                 const active = a.id === value;
                 return (
@@ -28,6 +32,7 @@ export function AccentPicker({ value, onChange, className }: AccentPickerProps) 
                         aria-label={a.label}
                         title={a.label}
                         onClick={() => onChange(a.id)}
+                        {...itemProps(i)}
                         className={cn(
                             'flex h-8 items-center justify-center rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50',
                             active ? 'border-card-border-hover bg-card' : 'border-card-border hover:bg-accent',

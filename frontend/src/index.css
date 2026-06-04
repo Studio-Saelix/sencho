@@ -30,27 +30,31 @@
   --accent-c: 0.130;
 
   /* ---- Computed surfaces (flat neutral ladder per theme). The page tone
-     spreads away from the cards as --contrast rises. ---- */
-  --background: oklch(calc(var(--bg) - var(--ink-dir) * var(--contrast) * 0.03) 0 0);
+     spreads away from the cards as --contrast rises; clamp keeps it in gamut
+     and always a hair below --card so page/card separation never collapses
+     (matters at high contrast in Light, where --card is pure white). ---- */
+  --background: oklch(clamp(0, var(--bg) - var(--ink-dir) * var(--contrast) * 0.03, var(--card-l) - 0.012) 0 0);
   --card:       oklch(var(--card-l) 0 0);
   --band:       oklch(var(--band-l) 0 0);
   --well:       oklch(var(--well-l) 0 0);
 
   /* ---- Computed borders (opaque grey, directionally lit). --border-boost and
-     --contrast both lift every hairline through one calc(). ---- */
-  --card-border:       oklch(calc(var(--bb) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05)) 0 0);
-  --card-border-top:   oklch(calc(var(--bt) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05)) 0 0);
-  --card-border-hover: oklch(calc(var(--bh) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05)) 0 0);
-  --hairline:          oklch(calc(var(--hl) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05)) 0 0);
+     --contrast both lift every hairline through one expression; clamp keeps
+     them in gamut and below pure white so the lit edge never merges into a
+     white card in Light at the low end of the knobs. ---- */
+  --card-border:       oklch(clamp(0, var(--bb) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05), 0.97) 0 0);
+  --card-border-top:   oklch(clamp(0, var(--bt) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05), 0.97) 0 0);
+  --card-border-hover: oklch(clamp(0, var(--bh) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05), 0.97) 0 0);
+  --hairline:          oklch(clamp(0, var(--hl) + var(--border-dir) * (var(--border-boost) + var(--contrast) * 0.05), 0.97) 0 0);
   --border:            var(--card-border);
   --sidebar-border:    var(--card-border);
 
   /* ---- Computed ink tiers. --contrast pushes each tier toward its extreme so
-     secondary text crisps up as it rises. ---- */
-  --stat-value:    oklch(calc(var(--val)   + var(--ink-dir) * var(--contrast) * 0.04)  0 0);
-  --stat-title:    oklch(calc(var(--title) + var(--ink-dir) * var(--contrast) * 0.055) 0 0);
-  --stat-subtitle: oklch(calc(var(--sub)   + var(--ink-dir) * var(--contrast) * 0.07)  0 0);
-  --stat-icon:     oklch(calc(var(--icon)  + var(--ink-dir) * var(--contrast) * 0.06)  0 0);
+     secondary text crisps up as it rises; clamp keeps every tier in gamut. ---- */
+  --stat-value:    oklch(clamp(0, var(--val)   + var(--ink-dir) * var(--contrast) * 0.04,  1) 0 0);
+  --stat-title:    oklch(clamp(0, var(--title) + var(--ink-dir) * var(--contrast) * 0.055, 1) 0 0);
+  --stat-subtitle: oklch(clamp(0, var(--sub)   + var(--ink-dir) * var(--contrast) * 0.07,  1) 0 0);
+  --stat-icon:     oklch(clamp(0, var(--icon)  + var(--ink-dir) * var(--contrast) * 0.06,  1) 0 0);
 
   /* ---- Computed brand (the accent is the one data color) ---- */
   --brand:            oklch(var(--accent-l) var(--accent-c) var(--accent-h));

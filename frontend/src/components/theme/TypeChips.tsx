@@ -1,5 +1,6 @@
 import { cn } from '@/lib/utils';
 import type { TypeChipOption } from './typeOptions';
+import { useRovingRadio } from './useRovingRadio';
 
 interface TypeChipsProps<T extends string> {
     value: T;
@@ -24,13 +25,14 @@ export function TypeChips<T extends string>({
     ariaLabel,
     className,
 }: TypeChipsProps<T>) {
+    const itemProps = useRovingRadio(options.map((o) => o.id), value, onChange);
     return (
         <div
             role="radiogroup"
             aria-label={ariaLabel}
             className={cn('grid gap-2', columns === 4 ? 'grid-cols-4' : 'grid-cols-3', className)}
         >
-            {options.map((o) => {
+            {options.map((o, i) => {
                 const active = o.id === value;
                 return (
                     <button
@@ -40,6 +42,7 @@ export function TypeChips<T extends string>({
                         aria-checked={active}
                         title={o.name}
                         onClick={() => onChange(o.id)}
+                        {...itemProps(i)}
                         className={cn(
                             'flex flex-col items-center justify-center gap-1.5 rounded-md border px-2 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50',
                             active
