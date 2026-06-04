@@ -36,7 +36,7 @@ function baseProps(node: FleetNode) {
 beforeEach(() => {
   useNodesMock.mockReturnValue({ nodes: [] });
   useAuthMock.mockReturnValue({ isAdmin: true, can: vi.fn(() => true) });
-  useLicenseMock.mockReturnValue({ isPaid: false, license: null });
+  useLicenseMock.mockReturnValue({ isPaid: false });
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -55,24 +55,24 @@ describe('NodeCard', () => {
     expect(screen.queryByText('Running')).not.toBeInTheDocument();
   });
 
-  it('hides the actions menu for a non-admiral user', () => {
-    useLicenseMock.mockReturnValue({ isPaid: true, license: { variant: 'skipper' } });
+  it('hides the actions menu for a free-tier user', () => {
+    useLicenseMock.mockReturnValue({ isPaid: false });
     render(<NodeCard {...baseProps(onlineNode())} />);
     expect(screen.queryByRole('button', { name: 'Node actions' })).not.toBeInTheDocument();
   });
 
-  it('exposes the actions menu (cordon entry point) for an admiral admin', () => {
-    useLicenseMock.mockReturnValue({ isPaid: true, license: { variant: 'admiral' } });
+  it('exposes the actions menu (cordon entry point) for a paid admin', () => {
+    useLicenseMock.mockReturnValue({ isPaid: true });
     render(<NodeCard {...baseProps(onlineNode())} />);
     // With no edit/delete affordances wired, the menu renders iff cordon is
-    // allowed: isAdmiral && can('node:manage'). The admin's can() returns true.
+    // allowed: isPaid && can('node:manage'). The admin's can() returns true.
     expect(screen.getByRole('button', { name: 'Node actions' })).toBeInTheDocument();
   });
 
   it('exposes the cordon control for a node-admin via the node:manage permission', async () => {
     const can = vi.fn((action: string) => action === 'node:manage');
     useAuthMock.mockReturnValue({ isAdmin: false, can });
-    useLicenseMock.mockReturnValue({ isPaid: true, license: { variant: 'admiral' } });
+    useLicenseMock.mockReturnValue({ isPaid: true });
     render(<NodeCard {...baseProps(onlineNode())} />);
 
     await userEvent.click(screen.getByRole('button', { name: 'Node actions' }));
@@ -80,18 +80,18 @@ describe('NodeCard', () => {
     expect(can).toHaveBeenCalledWith('node:manage', 'node', '2');
   });
 
-  it('hides the cordon control from an admiral user lacking node:manage', () => {
+  it('hides the cordon control from a paid user lacking node:manage', () => {
     useAuthMock.mockReturnValue({ isAdmin: false, can: vi.fn(() => false) });
-    useLicenseMock.mockReturnValue({ isPaid: true, license: { variant: 'admiral' } });
+    useLicenseMock.mockReturnValue({ isPaid: true });
     render(<NodeCard {...baseProps(onlineNode())} />);
-    // Admiral tier alone must not surface cordon to a deployer/viewer/auditor.
+    // The paid tier alone must not surface cordon to a deployer/viewer/auditor.
     expect(screen.queryByRole('button', { name: 'Node actions' })).not.toBeInTheDocument();
   });
 
   it('shows Uncordon when the node is already cordoned', async () => {
     const can = vi.fn((action: string) => action === 'node:manage');
     useAuthMock.mockReturnValue({ isAdmin: false, can });
-    useLicenseMock.mockReturnValue({ isPaid: true, license: { variant: 'admiral' } });
+    useLicenseMock.mockReturnValue({ isPaid: true });
     render(<NodeCard {...baseProps({ ...onlineNode(), cordoned: true, cordoned_reason: 'patching' })} />);
 
     await userEvent.click(screen.getByRole('button', { name: 'Node actions' }));

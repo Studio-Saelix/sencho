@@ -6,7 +6,7 @@ import DockerController from '../services/DockerController';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
-import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
+import { requireAdmin, requireBody } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { VALID_LABEL_COLORS, MAX_LABELS_PER_NODE } from '../helpers/constants';
@@ -166,7 +166,6 @@ labelsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response):
 });
 
 labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requireAdmin(req, res)) return;
   if (!requireBody(req, res)) return;
   try {

@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { RegistryService } from '../services/RegistryService';
-import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
+import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { parseIntParam } from '../utils/parseIntParam';
 
@@ -27,7 +27,7 @@ export const registriesRouter = Router();
 registriesRouter.get('/', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     res.json(RegistryService.getInstance().getAll());
   } catch (error) {
@@ -39,7 +39,7 @@ registriesRouter.get('/', (req: Request, res: Response): void => {
 registriesRouter.post('/', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const { name, url, type, username, secret, aws_region } = req.body;
 
@@ -76,7 +76,7 @@ registriesRouter.post('/', (req: Request, res: Response): void => {
 registriesRouter.put('/:id', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'registry ID');
     if (id === null) return;
@@ -114,7 +114,7 @@ registriesRouter.put('/:id', (req: Request, res: Response): void => {
 registriesRouter.delete('/:id', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'registry ID');
     if (id === null) return;
@@ -133,7 +133,7 @@ registriesRouter.delete('/:id', (req: Request, res: Response): void => {
 registriesRouter.post('/:id/test', async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'registry ID');
     if (id === null) return;
@@ -149,7 +149,7 @@ registriesRouter.post('/:id/test', async (req: Request, res: Response): Promise<
 registriesRouter.post('/test', async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const { type, url, username, secret, aws_region } = req.body;
 

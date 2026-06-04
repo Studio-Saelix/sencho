@@ -1,6 +1,6 @@
 /**
  * Tests for User Management, RBAC permissions, token versioning (session invalidation),
- * scoped role assignments, password management, seat limits, and last-admin protection.
+ * scoped role assignments, password management, and last-admin protection.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
@@ -32,11 +32,9 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
-  // Mock LicenseService to return paid/admiral for RBAC tests
+  // Mock LicenseService to return the paid tier for RBAC tests
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
 });
@@ -125,6 +123,32 @@ describe('POST /api/users', () => {
       .send({ username: 'fromtoken', password: 'password123', role: 'viewer' });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('SCOPE_DENIED');
+  });
+
+  it('creates an advanced-role user on the paid tier (201)', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({ username: 'paid-deployer', password: 'password123', role: 'deployer' });
+    expect(res.status).toBe(201);
+    expect(res.body.role).toBe('deployer');
+    DatabaseService.getInstance().deleteUser(res.body.id);
+  });
+
+  it('blocks an advanced-role user on the Community tier (403 PAID_REQUIRED)', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const svc = LicenseService.getInstance();
+    vi.spyOn(svc, 'getTier').mockReturnValue('community');
+    try {
+      const res = await request(app)
+        .post('/api/users')
+        .set('Authorization', `Bearer ${adminToken()}`)
+        .send({ username: 'community-deployer', password: 'password123', role: 'deployer' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PAID_REQUIRED');
+    } finally {
+      vi.spyOn(svc, 'getTier').mockReturnValue('paid');
+    }
   });
 });
 
@@ -387,6 +411,22 @@ describe('Scoped Role Assignments', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
   });
+
+  it('POST /api/users/:id/roles is blocked on the Community tier (PAID_REQUIRED)', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const svc = LicenseService.getInstance();
+    vi.spyOn(svc, 'getTier').mockReturnValue('community');
+    try {
+      const res = await request(app)
+        .post(`/api/users/${targetUserId}/roles`)
+        .set('Authorization', `Bearer ${adminToken()}`)
+        .send({ role: 'deployer', resource_type: 'stack', resource_id: 'community-stack' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PAID_REQUIRED');
+    } finally {
+      vi.spyOn(svc, 'getTier').mockReturnValue('paid');
+    }
+  });
 });
 
 // ---- GET /api/permissions/me ----
@@ -401,42 +441,6 @@ describe('GET /api/permissions/me', () => {
     expect(Array.isArray(res.body.globalPermissions)).toBe(true);
     expect(res.body.globalPermissions).toContain('stack:read');
     expect(res.body.globalPermissions).toContain('system:users');
-    // beforeAll mocks a paid admiral license.
-    expect(res.body.isAdmiral).toBe(true);
-  });
-
-  it('reports isAdmiral=false when the admiral variant is no longer on a paid tier', async () => {
-    // An expired or downgraded admiral license keeps variant='admiral' but the
-    // effective tier drops to community. isAdmiral must track the effective tier
-    // (mirroring the requireAdmiral guard), not the lingering variant, or the
-    // frontend would unlock admiral-only surfaces that the API then 403s.
-    const { LicenseService } = await import('../services/LicenseService');
-    const svc = LicenseService.getInstance();
-    vi.spyOn(svc, 'getTier').mockReturnValue('community');
-    try {
-      const res = await request(app)
-        .get('/api/permissions/me')
-        .set('Authorization', `Bearer ${adminToken()}`);
-      expect(res.status).toBe(200);
-      expect(res.body.isAdmiral).toBe(false);
-    } finally {
-      vi.spyOn(svc, 'getTier').mockReturnValue('paid');
-    }
-  });
-
-  it('reports isAdmiral=false for a paid non-admiral (skipper) license', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    const svc = LicenseService.getInstance();
-    vi.spyOn(svc, 'getVariant').mockReturnValue('skipper');
-    try {
-      const res = await request(app)
-        .get('/api/permissions/me')
-        .set('Authorization', `Bearer ${adminToken()}`);
-      expect(res.status).toBe(200);
-      expect(res.body.isAdmiral).toBe(false);
-    } finally {
-      vi.spyOn(svc, 'getVariant').mockReturnValue('admiral');
-    }
   });
 
   it('returns 401 when not authenticated', async () => {
@@ -460,6 +464,31 @@ describe('GET /api/permissions/me', () => {
     expect(res.body.scopedPermissions['stack:my-stack']).toBeDefined();
 
     // Cleanup
+    db.deleteRoleAssignmentsByUser(id);
+    db.deleteUser(id);
+  });
+
+  it('omits scoped permissions on the Community tier even when assignments exist', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const db = DatabaseService.getInstance();
+    const svc = LicenseService.getInstance();
+    const hash = await bcrypt.hash('password123', 1);
+    const id = db.addUser({ username: 'permcheck-community', password_hash: hash, role: 'viewer' });
+    db.addRoleAssignment({ user_id: id, role: 'deployer', resource_type: 'stack', resource_id: 'my-stack' });
+    const user = db.getUserById(id)!;
+    const token = authToken('permcheck-community', 'viewer', user.token_version);
+
+    // Scoped grants only take effect on paid; a downgraded instance must not
+    // advertise per-resource permissions the API will then 403.
+    vi.spyOn(svc, 'getTier').mockReturnValue('community');
+    const res = await request(app)
+      .get('/api/permissions/me')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.scopedPermissions).toEqual({});
+
+    // Cleanup
+    vi.spyOn(svc, 'getTier').mockReturnValue('paid');
     db.deleteRoleAssignmentsByUser(id);
     db.deleteUser(id);
   });
@@ -524,37 +553,41 @@ describe('PUT /api/auth/password', () => {
   });
 });
 
-// ---- Seat Limit Enforcement ----
+// ---- User creation is uncapped on every tier ----
 
-describe('Seat limit enforcement', () => {
-  it('rejects new admin when seat limit reached', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: 1, maxViewers: null });
-
-    const res = await request(app)
+describe('User creation seat caps', () => {
+  it('creates additional admins and viewers without a seat cap', async () => {
+    const adminRes = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken()}`)
       .send({ username: 'extraadmin', password: 'password123', role: 'admin' });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toContain('maximum');
+    expect(adminRes.status).toBe(201);
 
-    // Restore mock
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
-  });
-
-  it('rejects new viewer when viewer seat limit reached', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: 0 });
-
-    const res = await request(app)
+    const viewerRes = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken()}`)
       .send({ username: 'extraviewer', password: 'password123', role: 'viewer' });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toContain('maximum');
+    expect(viewerRes.status).toBe(201);
 
-    // Restore mock
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
+    const db = DatabaseService.getInstance();
+    db.deleteUser(db.getUserByUsername('extraadmin')!.id);
+    db.deleteUser(db.getUserByUsername('extraviewer')!.id);
+  });
+
+  it('creates additional users on the Community tier (no seat cap)', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const svc = LicenseService.getInstance();
+    vi.spyOn(svc, 'getTier').mockReturnValue('community');
+    try {
+      const res = await request(app)
+        .post('/api/users')
+        .set('Authorization', `Bearer ${adminToken()}`)
+        .send({ username: 'communityviewer', password: 'password123', role: 'viewer' });
+      expect(res.status).toBe(201);
+      DatabaseService.getInstance().deleteUser(DatabaseService.getInstance().getUserByUsername('communityviewer')!.id);
+    } finally {
+      vi.spyOn(svc, 'getTier').mockReturnValue('paid');
+    }
   });
 });
 
@@ -598,35 +631,13 @@ describe('Last-admin protection', () => {
   });
 });
 
-// ---- Seat Limit Enforcement On Promotion ----
+// ---- Role Promotion (uncapped) ----
 
-describe('Seat limit enforcement on role promotion', () => {
-  it('rejects promoting a viewer to admin when the admin seat limit is reached', async () => {
-    const db = DatabaseService.getInstance();
-    const hash = await bcrypt.hash('password123', 1);
-    const viewerId = db.addUser({ username: 'promoteme', password_hash: hash, role: 'viewer' });
-
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: 1, maxViewers: null });
-
-    const res = await request(app)
-      .put(`/api/users/${viewerId}`)
-      .set('Authorization', `Bearer ${adminToken()}`)
-      .send({ role: 'admin' });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toContain('maximum');
-    // The role must remain unchanged when the cap blocks the promotion.
-    expect(db.getUser(viewerId)!.role).toBe('viewer');
-
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
-    db.deleteUser(viewerId);
-  });
-
-  it('allows promoting a viewer to admin when admin seats are unlimited', async () => {
+describe('Role promotion', () => {
+  it('promotes a viewer to admin without a seat cap', async () => {
     const db = DatabaseService.getInstance();
     const hash = await bcrypt.hash('password123', 1);
     const viewerId = db.addUser({ username: 'promoteok', password_hash: hash, role: 'viewer' });
-    // Global beforeAll mock already returns unlimited seats; the gate must not over-block.
     const res = await request(app)
       .put(`/api/users/${viewerId}`)
       .set('Authorization', `Bearer ${adminToken()}`)

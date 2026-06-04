@@ -52,8 +52,9 @@ afterAll(() => {
 
 beforeEach(() => {
     vi.restoreAllMocks();
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
+    // Webhooks are free; run at the Community tier to prove the trigger and the
+    // management routes work without a paid license.
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
 });
 
 describe('POST /api/webhooks/:id/trigger: uniform unauthenticated 404 (M1, H3)', () => {
@@ -83,23 +84,6 @@ describe('POST /api/webhooks/:id/trigger: uniform unauthenticated 404 (M1, H3)',
 
         expect(res.status).toBe(404);
         expect(res.body).toEqual(expected);
-    });
-
-    it('returns the same 404 when the licence tier is not paid', async () => {
-        const { id, secret } = createWebhook();
-        vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-        const body = '{}';
-
-        const res = await request(app)
-            .post(`/api/webhooks/${id}/trigger`)
-            .set('Content-Type', 'application/json')
-            .set('X-Webhook-Signature', sign(body, secret))
-            .send(body);
-
-        expect(res.status).toBe(404);
-        expect(res.body).toEqual(expected);
-        // The forbidden code from the prior surface must not leak.
-        expect(res.body.code).toBeUndefined();
     });
 
     it('returns the same 404 when the X-Webhook-Signature header is missing', async () => {

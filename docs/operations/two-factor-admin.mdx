@@ -60,7 +60,7 @@ Two separate toggles let you change this, and they are independent:
 | Toggle | Where it lives | Tier | What it does |
 |--------|----------------|------|--------------|
 | **Require 2FA on SSO sign-in** | Each user's own **Settings · Account · Two-factor authentication** section | All tiers | Per-user opt-in. When on, that one user's SSO sign-ins also require a TOTP after the SSO flow returns. Helper text: `By default, SSO logins skip the second factor. Enforce it here to require both.` |
-| **Require MFA** (per provider) | The provider config under **Settings · SSO** | Admiral (LDAP), Skipper (preset OIDC), Community (Custom OIDC) | Admin-set, fleet-wide for that provider. When on, every SSO-provisioned user must enrol TOTP after their first successful sign-in before they can use the rest of the console. |
+| **Require MFA** (per provider) | The provider config under **Settings · SSO** | Admiral (LDAP), Community (Custom OIDC and preset OIDC) | Admin-set, fleet-wide for that provider. When on, every SSO-provisioned user must enrol TOTP after their first successful sign-in before they can use the rest of the console. |
 
 The per-user toggle decides *whether a TOTP is asked for on every SSO sign-in*. The per-provider toggle decides *whether new SSO users are forced to enrol TOTP at all*. Both can be on at once: the per-provider toggle ensures enrolment, the per-user toggle then asks for the TOTP on every sign-in.
 

@@ -164,11 +164,11 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 
 ## License tier shows the wrong name
 
-**Symptom:** The license card in **Settings > License** shows the wrong tier name (e.g. "Sencho Skipper" when you purchased Admiral).
+**Symptom:** The license card in **Settings > License** shows a tier that does not match what you purchased.
 
-**Cause:** Older versions of Sencho could misidentify certain license variant names from the payment provider.
+**Cause:** The tier is read from your license at validation time. A stale cached value can show after the key was activated but before the next validation cycle ran.
 
-**Fix:** Update to the latest version of Sencho and restart. The correct tier name will appear automatically in **Settings > License**.
+**Fix:** Deactivate and re-activate the key in **Settings > License**, then restart the Sencho container. The tier is re-read on the next validation and the correct name appears automatically. If it still does not match, email `licensing@sencho.io` with your order ID.
 
 ---
 
@@ -192,7 +192,7 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 **Checks in order:**
 
 1. Open **Settings > License** and verify it shows your license as **active** with the correct tier name.
-2. If the tier shows "Skipper" but you purchased Admiral, this is the same variant identification issue described above. Update Sencho to the latest version to resolve it.
+2. If the tier name does not match what you purchased, see [License tier shows the wrong name](#license-tier-shows-the-wrong-name) above.
 3. If the tier shows correctly but features are still locked, restart the Sencho container.
 
 ---
@@ -203,18 +203,17 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 
 **Possible causes:**
 
-- **Lifetime license:** Lifetime licenses do not have a billing portal. This is expected behavior. In the latest version, the **Manage Subscription** button is hidden for lifetime licenses.
 - **Network issues:** If your Sencho instance cannot reach the internet, the billing portal URL cannot be fetched. Check your instance's outbound connectivity and try again.
 
 ---
 
 ## Paid features return 403 on remote nodes
 
-**Symptom:** A Skipper or Admiral feature works on the local node but returns a 403 error when you switch to a remote node.
+**Symptom:** An Admiral feature works on the local node but returns a 403 error when you switch to a remote node.
 
 **Checks in order:**
 
-1. **Is your primary instance licensed?** Open **Profile > Settings > License** on the primary instance and verify it shows an active Skipper or Admiral license. Remote nodes inherit the primary's tier; if the primary is on Community, all remote nodes will be Community too.
+1. **Is your primary instance licensed?** Open **Profile > Settings > License** on the primary instance and verify it shows an active Admiral license. Remote nodes inherit the primary's tier; if the primary is on Community, all remote nodes will be Community too.
 2. **Is the remote node's token valid?** An expired or revoked token prevents the license tier from being transmitted. Regenerate the token on the remote instance and update the node config on the primary.
 3. **Is the remote node running an up-to-date version of Sencho?** Distributed license enforcement requires both the primary and remote instances to be on a compatible version. Update the remote node if it's outdated.
 4. **Are you accessing the remote node directly?** If you navigate directly to the remote Sencho instance's URL (bypassing the primary), it uses its own local license. License inheritance only works through the primary's proxy.
@@ -300,10 +299,6 @@ If you need to clean up unused *user-created* networks, use the **Prune Dead Net
 ## Network topology is empty
 
 **Symptom:** Switching to the **Topology** view mode on the Networks tab shows "No user-created networks found" even though you have running containers.
-
-<Note>
-  Network Topology requires a Skipper or Admiral license.
-</Note>
 
 **Possible causes:**
 
@@ -472,9 +467,8 @@ docker compose pull && docker compose up -d
 
 **Checks:**
 
-1. **License tier**: Labels require a Skipper or Admiral license. Verify your tier in **Profile > Settings > License**.
-2. **At least one label must exist**: Labels are managed in **Profile > Settings > Labels**. Create at least one label before assigning it to stacks.
-3. **Downgrade**: If you downgraded from a paid tier to Community, the label UI is hidden but your data is preserved. Upgrading again restores all labels and assignments.
+1. **At least one label must exist**: Labels are managed in **Profile > Settings > Labels**. Create at least one label before assigning it to stacks.
+2. **Assignments are saved**: Open the stack's context menu, choose **Labels**, and confirm the label is checked. Pills appear in the sidebar once at least one label is assigned.
 
 ---
 
@@ -486,7 +480,6 @@ docker compose pull && docker compose up -d
 
 1. **Stack name match**: The stack name in the routing rule must match exactly. Stack names are case-sensitive and correspond to the directory name in your compose folder.
 2. **Rule is enabled**: Check that the route's toggle is turned on in **Profile > Settings > Routing**.
-3. **License tier**: Notification Routing requires a Skipper or Admiral license.
 
 ---
 

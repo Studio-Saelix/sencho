@@ -52,7 +52,7 @@ interface UseViewNavigationStateOptions {
 export function useViewNavigationState(options?: UseViewNavigationStateOptions) {
   const { onNavigateToDashboard } = options ?? {};
   const { isAdmin, can } = useAuth();
-  const { isPaid, license } = useLicense();
+  const { isPaid } = useLicense();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
 
@@ -108,18 +108,18 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     // The aggregated Logs feed crosses every managed stack, so it is an
     // admin-only operator view (the backend gates the same routes on admin).
     if (isAdmin) items.push({ value: 'global-observability', label: 'Logs', icon: Activity });
-    if (isPaid && isAdmin) {
+    if (isAdmin) {
       items.push({ value: 'auto-updates', label: 'Auto-Update', icon: RefreshCw });
       items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
     }
-    if (isPaid && license?.variant === 'admiral') {
+    if (isPaid) {
       if (isAdmin) items.push({ value: 'host-console', label: 'Console', icon: Terminal });
       if (can('system:audit')) items.push({ value: 'audit-log', label: 'Audit', icon: ScrollText });
     }
     return isRemote
       ? items.filter(i => !HUB_ONLY_VIEWS.has(i.value))
       : items;
-  }, [isAdmin, isPaid, license?.variant, can, isRemote]);
+  }, [isAdmin, isPaid, can, isRemote]);
 
   useEffect(() => {
     // Redirect off a view the active context can't reach: a hub-only view while

@@ -7,9 +7,9 @@ vi.mock('@/lib/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }));
 
-const useAuthMock = vi.fn();
-vi.mock('@/context/AuthContext', () => ({
-  useAuth: () => useAuthMock(),
+const useLicenseMock = vi.fn();
+vi.mock('@/context/LicenseContext', () => ({
+  useLicense: () => useLicenseMock(),
 }));
 
 vi.mock('@/lib/utils', async () => {
@@ -38,7 +38,7 @@ function statusJson(status: number, payload: unknown = {}): Response {
 
 beforeEach(() => {
   apiFetchMock.mockReset();
-  useAuthMock.mockReset();
+  useLicenseMock.mockReset();
 });
 
 afterEach(() => {
@@ -46,8 +46,8 @@ afterEach(() => {
 });
 
 describe('useMeshDataPlane', () => {
-  it('does not fetch /mesh/status when the session is non-Admiral', async () => {
-    useAuthMock.mockReturnValue({ permissions: { isAdmiral: false } });
+  it('does not fetch /mesh/status when the session is on the free tier', async () => {
+    useLicenseMock.mockReturnValue({ isPaid: false });
     const { result } = renderHook(() => useMeshDataPlane());
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
@@ -56,8 +56,8 @@ describe('useMeshDataPlane', () => {
     expect(result.current.loading).toBe(false);
   });
 
-  it('fetches once on mount and surfaces the localDataPlane payload for Admiral', async () => {
-    useAuthMock.mockReturnValue({ permissions: { isAdmiral: true } });
+  it('fetches once on mount and surfaces the localDataPlane payload for a paid tier', async () => {
+    useLicenseMock.mockReturnValue({ isPaid: true });
     apiFetchMock.mockResolvedValue(okJson({
       localDataPlane: { ok: true, reason: null, lastChecked: 1000 },
     }));
@@ -71,7 +71,7 @@ describe('useMeshDataPlane', () => {
   });
 
   it('keeps status null on a 403 response without raising an error', async () => {
-    useAuthMock.mockReturnValue({ permissions: { isAdmiral: true } });
+    useLicenseMock.mockReturnValue({ isPaid: true });
     apiFetchMock.mockResolvedValue(statusJson(403, { error: 'forbidden' }));
 
     const { result } = renderHook(() => useMeshDataPlane());
@@ -82,7 +82,7 @@ describe('useMeshDataPlane', () => {
   });
 
   it('falls back to null when the response omits localDataPlane', async () => {
-    useAuthMock.mockReturnValue({ permissions: { isAdmiral: true } });
+    useLicenseMock.mockReturnValue({ isPaid: true });
     apiFetchMock.mockResolvedValue(okJson({ nodes: [] }));
 
     const { result } = renderHook(() => useMeshDataPlane());

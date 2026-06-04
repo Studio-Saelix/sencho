@@ -3,10 +3,6 @@ title: "Auto-Heal Policies"
 description: "Restart containers that fail their Docker healthcheck or crash, with per-policy thresholds and a built-in safety rail set."
 ---
 
-<Note>
-  Auto-Heal Policies require a **Skipper** or **Admiral** license.
-</Note>
-
 ## Overview
 
 Auto-Heal Policies restart a container when it stays broken for longer than you allow. A policy acts on two conditions:
@@ -24,7 +20,6 @@ Policies live next to your stack-level alert rules in the stack's **Monitor** sh
 
 - For **healthcheck-based** healing, containers must declare a `HEALTHCHECK` in the Dockerfile or a `healthcheck` block in `docker-compose.yml` so they report a Docker health status. **Crash-based** healing needs no healthcheck: any container that exits with a non-zero code qualifies.
 - You must be signed in as an admin.
-- A Skipper or Admiral license.
 
 <Note>
   Crash healing acts on crashes Sencho observes while it is running. A container that crashed before Sencho started is left for you to inspect rather than restarted automatically.
@@ -142,6 +137,6 @@ The dashboard's **Configuration status** card surfaces an **Auto-heal policies**
   </Accordion>
 
   <Accordion title="I cannot see the Auto-heal tab on a stack">
-    Auto-Heal Policies require a Skipper or Admiral license and an admin sign-in. If the **Auto-heal** tab is not present on the **Monitor** sheet, confirm your license tier under **Settings → License** and that you are signed in as an admin.
+    Configuring Auto-Heal Policies requires an admin sign-in. If the **Auto-heal** tab is not present on the **Monitor** sheet, confirm you are signed in as an admin.
   </Accordion>
 </AccordionGroup>

@@ -34,7 +34,7 @@ function ResourceLink({ icon, title, blurb, href, external = true }: ResourceLin
 }
 
 export function SupportSection() {
-    const { isPaid, license } = useLicense();
+    const { isPaid } = useLicense();
 
     return (
         <div className="flex flex-col gap-10">
@@ -63,13 +63,9 @@ export function SupportSection() {
                     <div className="pt-3 grid gap-3">
                         <ResourceLink
                             icon={<Mail className="w-4 h-4" />}
-                            title={license?.variant === 'admiral' ? 'Priority email support' : 'Email support'}
-                            blurb={
-                                license?.variant === 'admiral'
-                                    ? 'Direct support with responses within 24 hours'
-                                    : 'Reach our support team directly'
-                            }
-                            href={license?.variant === 'admiral' ? 'mailto:support@sencho.io' : 'mailto:licensing@sencho.io'}
+                            title="Priority email support"
+                            blurb="Direct support with responses within 24 hours"
+                            href="mailto:support@sencho.io"
                             external={false}
                         />
                     </div>
@@ -80,7 +76,7 @@ export function SupportSection() {
                 <SettingsCallout
                     icon={<Crown className="h-4 w-4" />}
                     title="Need faster support?"
-                    subtitle="Skipper and Admiral tiers include direct email support and priority issue handling."
+                    subtitle="Admiral includes direct email support and priority issue handling."
                     action={
                         <SettingsPrimaryButton
                             size="sm"

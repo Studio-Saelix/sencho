@@ -96,11 +96,10 @@ describe('authMiddleware', () => {
 // ─── Protected endpoint: console-token ───────────────────────────────────────
 
 describe('POST /api/system/console-token', () => {
-  // Console-token requires Admiral tier — mock LicenseService for the happy-path test
+  // Console-token requires the paid tier — mock LicenseService for the happy-path test
   beforeAll(async () => {
     const { LicenseService } = await import('../services/LicenseService');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
   });
 
   afterAll(() => {

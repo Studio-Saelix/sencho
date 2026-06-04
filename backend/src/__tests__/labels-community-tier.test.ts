@@ -1,8 +1,6 @@
 /**
- * Confirms Stack Labels CRUD + per-stack assignment is reachable on the
- * Community tier. The per-label bulk-action endpoint stays Skipper+ and is
- * exercised here too to guard against an accidental gate removal in the
- * future.
+ * Confirms Stack Labels CRUD + per-stack assignment + the per-label
+ * bulk-action endpoint are all reachable on the Community tier.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -241,16 +239,25 @@ describe('Stack Labels Developer Mode logging', () => {
   });
 });
 
-describe('Stack Labels bulk-action endpoint stays Skipper+', () => {
+describe('Stack Labels bulk-action endpoint is available on Community', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('POST /api/labels/:id/action returns 403 on community', async () => {
+  it('POST /api/labels/:id/action is reachable on community (no longer paid-gated)', async () => {
     mockTier('community');
-    const res = await request(app)
-      .post('/api/labels/1/action')
+    const created = await request(app)
+      .post('/api/labels')
       .set('Authorization', authHeader)
-      .send({ action: 'deploy' });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+      .send({ name: 'bulk-action-free', color: 'teal' });
+    expect(created.status).toBe(201);
+
+    const res = await request(app)
+      .post(`/api/labels/${created.body.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'restart' });
+
+    // No stacks are assigned to the label, so the bulk action succeeds with an
+    // empty result instead of the old 403 PAID_REQUIRED.
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
   });
 });

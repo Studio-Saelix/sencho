@@ -58,7 +58,6 @@ interface UseStackActionsOptions {
   activeNode: Node | null | undefined;
   setActiveNode: (node: Node) => void;
   nodes: Node[];
-  isPaid: boolean;
   runWithLog: (
     params: { stackName: string; action: ActionVerb },
     run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>,
@@ -128,7 +127,6 @@ export function useStackActions(options: UseStackActionsOptions) {
     activeNode,
     setActiveNode,
     nodes,
-    isPaid,
     runWithLog,
     diffPreviewEnabled,
   } = options;
@@ -295,7 +293,6 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const loadBackupState = async (filename: string, signal?: AbortSignal) => {
-    if (!isPaid) return;
     try {
       const backupRes = await apiFetch(`/stacks/${filename}/backup`, { signal });
       if (signal?.aborted) return;
@@ -575,13 +572,11 @@ export function useStackActions(options: UseStackActionsOptions) {
         const conts = await containersRes.json();
         editorState.setContainers(Array.isArray(conts) ? conts : []);
       }
-      if (isPaid) {
-        try {
-          const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
-          if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
-        } catch {
-          /* ignore */
-        }
+      try {
+        const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
+        if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
+      } catch {
+        /* ignore */
       }
       return { ok: true };
     } catch (error) {
@@ -591,7 +586,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const deployError = error as StackActionError;
       const errorMessage = deployError.message || 'Failed to deploy stack';
       toast.error(
-        isPaid && deployError.rolledBack === true
+        deployError.rolledBack === true
           ? `${errorMessage} - automatically rolled back to previous version.`
           : errorMessage,
       );
@@ -963,7 +958,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         editorState.setContainers(Array.isArray(conts) ? conts : []);
       }
       if (action === 'update') stackListState.fetchImageUpdates();
-      if (action === 'deploy' && isPaid) {
+      if (action === 'deploy') {
         try {
           const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
           if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
@@ -976,7 +971,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const actionError = error as StackActionError;
       const msg = actionError.message || `Failed to ${action} stack`;
       toast.error(
-        action === 'deploy' && isPaid && actionError.rolledBack === true
+        action === 'deploy' && actionError.rolledBack === true
           ? `${msg} - automatically rolled back to previous version.`
           : msg,
       );

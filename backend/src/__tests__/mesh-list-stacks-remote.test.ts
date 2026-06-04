@@ -92,7 +92,6 @@ describe('MeshService.listStacksOnNode dispatch (F8)', () => {
         expect(init.method).toBe('GET');
         expect(init.headers['Authorization']).toBe('Bearer remote-tok');
         expect(init.headers).toHaveProperty('x-sencho-tier');
-        expect(init.headers).toHaveProperty('x-sencho-variant');
 
         db.deleteNode(remoteNodeId);
     });

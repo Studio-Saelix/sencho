@@ -110,7 +110,7 @@ Clicking **Deploy** runs the following sequence:
 2. **Directory creation.** A new directory is created under `COMPOSE_DIR/<stack-name>` on the active node.
 3. **File generation.** Sencho writes `compose.yaml` (rendered from the template, with your port and volume overrides) and a `.env` file (when you configured environment variables).
 4. **Policy gate.** Any [deploy-enforcement policies](/features/deploy-enforcement) configured on the node run against the generated compose. If a rule blocks the deploy, the directory is cleaned up and you get the rule's reason.
-5. **`docker compose up -d`.** On Skipper and Admiral the deploy is **atomic**: any container that fails to start triggers an automatic rollback to the previous state. On Community the deploy is non-atomic.
+5. **`docker compose up -d`.** The deploy is **atomic**: any container that fails to start triggers an automatic rollback to the previous state.
 6. **Outcome.**
    - On success, you are switched to the editor for the new stack and a success toast confirms the deploy.
    - On failure, Sencho parses the error. Most failures (image pull, port collision, volume permission, compose validation) trigger a clean rollback: the stack is brought down and the directory is removed. A small set of failures that point to live containers (for example, a startup that crashes after the container is running) leave the stack on disk so you can inspect it. The error toast tells you which.

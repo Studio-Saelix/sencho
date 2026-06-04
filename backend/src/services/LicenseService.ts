@@ -5,15 +5,7 @@ import type {
     LicenseInfo,
     LicenseStatus,
     LicenseTier,
-    LicenseVariant,
-    SeatLimits,
 } from './license-types';
-import { isLicenseVariant, normalizeVariant } from './license-normalize';
-
-const SEAT_LIMITS: Record<string, SeatLimits> = {
-    skipper: { maxAdmins: 1, maxViewers: 3 },
-    admiral: { maxAdmins: null, maxViewers: null },
-};
 
 interface LemonSqueezyActivationResponse {
     activated: boolean;
@@ -77,56 +69,36 @@ const VALIDATION_INTERVAL_MS = 72 * 60 * 60 * 1000; // 72 hours
 const OFFLINE_GRACE_DAYS = 30;
 
 /**
- * Lemon Squeezy catalog identifiers Sencho is willing to honor. Without these
- * checks, a license issued for any other LS store or product could activate
+ * Lemon Squeezy catalog identifiers Sencho is willing to honor. Without this
+ * check, a license issued for any other LS store or product could activate
  * Sencho, because LS's /licenses/validate endpoint returns valid: true for
  * any well-formed license key regardless of which product it belongs to.
  *
- * The validate response contains store_id / product_id / variant_id under
- * meta; resolveSenchoVariantFromMeta() rejects any combination not listed
- * here. variant_id also serves as the canonical source for tier resolution,
- * replacing the older substring match against variant_name / product_name.
- *
- * If a new tier or billing cadence is added in the LS dashboard, this map
- * must be updated in the same release.
+ * The validate response carries store_id / product_id under meta;
+ * isSenchoLicenseMeta() rejects any license that is not the Sencho paid
+ * product. If the paid product changes in the LS dashboard, update this in
+ * the same release.
  */
 export const SENCHO_LS_STORE_ID = 321715;
-export const SENCHO_LS_PRODUCT_ID_SKIPPER = 924135;
 export const SENCHO_LS_PRODUCT_ID_ADMIRAL = 924153;
-const SENCHO_LS_PRODUCT_IDS: ReadonlySet<number> = new Set([
-    SENCHO_LS_PRODUCT_ID_SKIPPER,
-    SENCHO_LS_PRODUCT_ID_ADMIRAL,
-]);
-const SENCHO_LS_VARIANT_TO_TYPE: ReadonlyMap<number, Exclude<LicenseVariant, null>> = new Map([
-    [1453178, 'skipper'], // Skipper Monthly
-    [1453197, 'skipper'], // Skipper Annual
-    [1453198, 'skipper'], // Skipper Lifetime
-    [1453209, 'admiral'], // Admiral Monthly
-    [1453212, 'admiral'], // Admiral Annual
-    [1453217, 'admiral'], // Admiral Lifetime
-]);
 
 /**
- * Resolve a Lemon Squeezy validate / activate response's meta block to a
- * Sencho variant. Returns null when the meta is missing, the store does not
- * match, the product is not a Sencho product, or the variant is unknown.
- *
- * Callers must reject the activation/validation when this returns null.
- * Persisting any state from a non-matching response would let foreign LS
- * licenses unlock paid features.
+ * True only when a Lemon Squeezy validate / activate meta block belongs to
+ * the Sencho paid product. Callers must reject the activation/validation
+ * when this returns false; persisting state from a non-matching response
+ * would let a foreign LS license unlock paid features.
  */
-export function resolveSenchoVariantFromMeta(
-    meta: { store_id?: number; product_id?: number; variant_id?: number } | undefined,
-): Exclude<LicenseVariant, null> | null {
-    if (!meta) return null;
-    if (meta.store_id !== SENCHO_LS_STORE_ID) return null;
-    if (meta.product_id === undefined || !SENCHO_LS_PRODUCT_IDS.has(meta.product_id)) return null;
-    if (meta.variant_id === undefined) return null;
-    return SENCHO_LS_VARIANT_TO_TYPE.get(meta.variant_id) ?? null;
+export function isSenchoLicenseMeta(
+    meta: { store_id?: number; product_id?: number } | undefined,
+): boolean {
+    if (!meta) return false;
+    if (meta.store_id !== SENCHO_LS_STORE_ID) return false;
+    if (meta.product_id !== SENCHO_LS_PRODUCT_ID_ADMIRAL) return false;
+    return true;
 }
 
-// Short TTL for the proxy-headers cache. The remote-node proxy reads tier
-// and variant on every forwarded request; without caching, each call hits
+// Short TTL for the proxy-headers cache. The remote-node proxy reads the
+// tier on every forwarded request; without caching, each call hits
 // system_state 5+ times. Every license_status write goes through
 // setLicenseStatus() which invalidates the cache, so the TTL is a safety
 // net against any future bypass rather than a load-bearing freshness bound.
@@ -134,14 +106,14 @@ const PROXY_HEADERS_CACHE_TTL_MS = 30_000;
 
 /**
  * Single in-tree license service. Owns Lemon Squeezy validation and
- * exposes the tier / variant / seat-limit API consumed across the
- * backend. See `docs/internal/adrs/2026-05-02-collapse-entitlement-provider.md`
+ * exposes the tier API consumed across the backend. See
+ * `docs/internal/adrs/2026-05-02-collapse-entitlement-provider.md`
  * for the conditions that would justify reintroducing an interface seam.
  */
 export class LicenseService {
     private static instance: LicenseService;
     private validationTimer: ReturnType<typeof setInterval> | null = null;
-    private cachedProxyHeaders: { value: { tier: LicenseTier; variant: LicenseVariant }; expiresAt: number } | null = null;
+    private cachedProxyHeaders: { value: { tier: LicenseTier }; expiresAt: number } | null = null;
 
     private constructor() { }
 
@@ -233,110 +205,18 @@ export class LicenseService {
     }
 
     /**
-     * Resolve Lemon Squeezy metadata to the internal variant type from string
-     * metadata. Used as a fallback when license_variant_id is unavailable.
-     *
-     * With the catalog guard in resolveSenchoVariantFromMeta(), every new
-     * activation stores license_variant_id, so production callers always hit
-     * the variant_id path in getVariant(). This substring fallback is retained
-     * for test fixtures that drive getVariant() without a variant_id present.
-     * Once the per-Directive-20 cleanup branch lands, this method and its two
-     * call sites can be deleted.
-     */
-    private resolveVariantType(variantName: string, productName?: string): 'skipper' | 'admiral' {
-        const combined = `${variantName} ${productName || ''}`.toLowerCase();
-        if (combined.includes('team') || combined.includes('admiral')) return 'admiral';
-        if (combined.includes('personal') || combined.includes('skipper')) return 'skipper';
-        return 'skipper';
-    }
-
-    /**
-     * Persist variant metadata from a Lemon Squeezy response to the DB.
-     *
-     * When `resolvedType` is supplied (always, in production paths via
-     * resolveSenchoVariantFromMeta), it wins over the legacy substring match
-     * against variant_name / product_name. The substring fallback is kept for
-     * tests that exercise the legacy path and as a defensive default; new
-     * activations always carry a resolved type.
-     */
-    private storeVariantMeta(
-        db: DatabaseService,
-        meta: { variant_name?: string; variant_id?: number; product_name?: string },
-        resolvedType?: Exclude<LicenseVariant, null>,
-    ): void {
-        if (meta.variant_name) {
-            db.setSystemState('license_variant_name', meta.variant_name);
-            const type = resolvedType ?? this.resolveVariantType(meta.variant_name, meta.product_name);
-            db.setSystemState('license_variant_type', type);
-        }
-        if (meta.variant_id) {
-            db.setSystemState('license_variant_id', String(meta.variant_id));
-        }
-    }
-
-    /**
-     * Get the license variant (skipper or admiral) from stored metadata.
-     * Trial and active licenses both resolve via Lemon Squeezy metadata stored by activate();
-     * trial-granted variant is whatever Lemon Squeezy returned for the trial variant.
-     *
-     * Self-healing: on every call, cross-checks the stored variant_type against what
-     * resolveVariantType() produces from the current product/variant names. If they
-     * disagree (e.g. stale cache from a previous buggy version), re-resolves and
-     * persists the corrected value.
-     */
-    public getVariant(): LicenseVariant {
-        const db = DatabaseService.getInstance();
-        const variantIdStr = db.getSystemState('license_variant_id');
-        const storedType = db.getSystemState('license_variant_type');
-
-        // Prefer variant_id-based resolution. variant_id is a stable LS catalog
-        // identifier, while variant_name / product_name are display strings that
-        // can be edited in the LS dashboard. Activation already rejected any
-        // unrecognized variant_id, so a hit here is always trustworthy.
-        if (variantIdStr) {
-            const variantId = parseInt(variantIdStr, 10);
-            if (Number.isFinite(variantId)) {
-                const fromId = SENCHO_LS_VARIANT_TO_TYPE.get(variantId);
-                if (fromId) {
-                    if (fromId !== storedType) {
-                        db.setSystemState('license_variant_type', fromId);
-                    }
-                    return fromId;
-                }
-            }
-        }
-
-        // Fall back to name-based resolution for any state without a
-        // variant_id (test fixtures, partial DB writes from older code paths).
-        const variantName = db.getSystemState('license_variant_name');
-        const productName = db.getSystemState('license_product_name') || undefined;
-        if (variantName) {
-            const resolved = this.resolveVariantType(variantName, productName);
-            if (resolved !== storedType) {
-                db.setSystemState('license_variant_type', resolved);
-            }
-            return resolved;
-        }
-
-        // No source metadata available; trust the stored type if it parses.
-        if (isLicenseVariant(storedType)) return normalizeVariant(storedType);
-
-        return null;
-    }
-
-    /**
-     * Tier + variant snapshot for the remote-node proxy headers, cached for
+     * Tier snapshot for the remote-node proxy headers, cached for
      * a short window to spare the proxy hot path from re-running getTier()
-     * and getVariant() on every forwarded request. All license-status writes
-     * route through setLicenseStatus(), which invalidates this cache, so
-     * tier changes take effect within one proxy call.
+     * on every forwarded request. All license-status writes route through
+     * setLicenseStatus(), which invalidates this cache, so tier changes take
+     * effect within one proxy call.
      */
-    public getProxyHeaders(): { tier: LicenseTier; variant: LicenseVariant } {
+    public getProxyHeaders(): { tier: LicenseTier } {
         const now = Date.now();
         if (this.cachedProxyHeaders && this.cachedProxyHeaders.expiresAt > now) {
             return this.cachedProxyHeaders.value;
         }
-        const value = { tier: this.getTier(), variant: this.getVariant() };
+        const value = { tier: this.getTier() };
         this.cachedProxyHeaders = { value, expiresAt: now + PROXY_HEADERS_CACHE_TTL_MS };
         return value;
     }
@@ -351,15 +231,6 @@ export class LicenseService {
     private setLicenseStatus(status: LicenseStatus): void {
         DatabaseService.getInstance().setSystemState('license_status', status);
         this.cachedProxyHeaders = null;
-    }
-
-    /**
-     * Get seat limits for the current license variant.
-     */
-    public getSeatLimits(): SeatLimits {
-        const variant = this.getVariant();
-        if (!variant) return { maxAdmins: 1, maxViewers: 0 }; // community
-        return SEAT_LIMITS[variant] || SEAT_LIMITS.skipper;
     }
 
     /**
@@ -384,7 +255,6 @@ export class LicenseService {
         return {
             tier: this.getTier(),
             status,
-            variant: this.getVariant(),
             customerName: db.getSystemState('license_customer_name'),
             productName: db.getSystemState('license_product_name'),
             maskedKey: key ? `****-****-****-${key.slice(-4)}` : null,
@@ -421,8 +291,7 @@ export class LicenseService {
             // Reject licenses that don't belong to the Sencho LS catalog.
             // LS's /activate succeeds for any product in any store, so without
             // this check a license bought elsewhere could unlock Sencho.
-            const variantType = resolveSenchoVariantFromMeta(data.meta);
-            if (variantType === null) {
+            if (!isSenchoLicenseMeta(data.meta)) {
                 console.warn('[License] Activation rejected: license does not match the Sencho catalog.');
                 return { success: false, error: 'This license key is not valid for Sencho.' };
             }
@@ -460,9 +329,6 @@ export class LicenseService {
             }
             if (data.meta?.product_name) {
                 db.setSystemState('license_product_name', data.meta.product_name);
-            }
-            if (data.meta) {
-                this.storeVariantMeta(db, data.meta, variantType);
             }
             if (data.meta?.customer_id) {
                 db.setSystemState('customer_id', String(data.meta.customer_id));
@@ -574,8 +440,7 @@ export class LicenseService {
             // entry (e.g. variant_id removed, product moved). Same defense as
             // activate(): without this, any LS license can pass periodic
             // validation and keep paid features unlocked.
-            const variantType = resolveSenchoVariantFromMeta(data.meta);
-            if (variantType === null) {
+            if (!isSenchoLicenseMeta(data.meta)) {
                 this.setLicenseStatus('disabled');
                 console.warn('[License] Validation rejected: license does not match the Sencho catalog.');
                 return { success: false, error: 'License is not valid for Sencho.' };
@@ -612,9 +477,6 @@ export class LicenseService {
             }
             if (data.meta?.product_name) {
                 db.setSystemState('license_product_name', data.meta.product_name);
-            }
-            if (data.meta) {
-                this.storeVariantMeta(db, data.meta, variantType);
             }
             if (data.meta?.customer_id && !db.getSystemState('customer_id')) {
                 db.setSystemState('customer_id', String(data.meta.customer_id));

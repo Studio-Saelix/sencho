@@ -21,7 +21,7 @@ Sencho is built by a single maintainer. Volunteer responses target:
 - Feature requests: triaged but not always replied to individually; check the roadmap
 - Discussions questions: community-first; the maintainer joins when possible
 
-There is no SLA. Paid tiers (Skipper, Admiral) get priority for licensing-related issues through the email above. A formal paid-support tier may follow 1.0.
+There is no SLA. The paid Admiral tier gets priority for licensing-related issues through the email above. A formal paid-support tier may follow 1.0.
 
 ## What is in scope
 

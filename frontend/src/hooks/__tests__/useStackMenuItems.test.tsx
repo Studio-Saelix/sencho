@@ -9,8 +9,6 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     stackStatus: 'running',
     hasPort: true,
     isBusy: false,
-    isPaid: true,
-    isAdmiral: false,
     isAdmin: true,
     canDelete: true,
     canEditLabels: true,
@@ -50,10 +48,10 @@ describe('useStackMenuItems', () => {
     expect(inspect.items.some(i => i.icon === BellRing)).toBe(true);
   });
 
-  it('hides Auto-Heal when !isPaid', () => {
-    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: false })));
+  it('always includes Auto-Heal in Inspect', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx()));
     const inspect = result.current.find(g => g.id === 'inspect')!;
-    expect(inspect.items.find(i => i.id === 'auto-heal')).toBeUndefined();
+    expect(inspect.items.find(i => i.id === 'auto-heal')).toBeDefined();
   });
 
   it('hides Open App unless running + hasPort', () => {
@@ -85,25 +83,24 @@ describe('useStackMenuItems', () => {
   });
 
   it('does not show an auto-update entry; Schedule task is the auto-update path', () => {
-    const paid = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: true })));
-    const community = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: false })));
-    for (const r of [paid, community]) {
+    const admin = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isAdmin: true })));
+    const viewer = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isAdmin: false })));
+    for (const r of [admin, viewer]) {
       const groups = r.result.current;
       expect(groups.some(g => g.items.some(i => i.id === 'auto-update'))).toBe(false);
     }
-    const lifecycle = paid.result.current.find(g => g.id === 'lifecycle')!;
+    const lifecycle = admin.result.current.find(g => g.id === 'lifecycle')!;
     expect(lifecycle.items.some(i => i.id === 'schedule')).toBe(true);
   });
 
-  it('hides Schedule task when paid but not admin', () => {
-    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isPaid: true, isAdmin: false })));
+  it('hides Schedule task when not admin', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isAdmin: false })));
     const lifecycle = result.current.find(g => g.id === 'lifecycle');
     expect(lifecycle?.items.some(i => i.id === 'schedule')).toBeFalsy();
   });
 
-  it('keeps label assignment available when !isPaid', () => {
+  it('keeps label assignment available for any tier', () => {
     const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({
-      isPaid: false,
       labels: [{ id: 1, node_id: 0, name: 'prod', color: 'teal' }],
     })));
     const organize = result.current.find(g => g.id === 'organize')!;

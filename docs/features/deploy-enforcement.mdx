@@ -6,7 +6,7 @@ description: "Block deploys that violate a scan policy before docker compose up 
 Deploy enforcement is the pre-flight half of Sencho's vulnerability workflow. When a [scan policy](/features/vulnerability-scanning#scan-policies) with **Block on deploy** enabled matches a stack, Sencho scans every image referenced by the stack's compose file before starting any container. If any image meets or exceeds the policy's severity threshold, the deploy is rejected and the stack never starts. Detection always continues post-deploy and on a schedule, so images that develop new vulnerabilities after the initial deploy still surface through alerts.
 
 <Note>
-  Deploy enforcement and scan policies require a **Skipper** or **Admiral** license.
+  Deploy enforcement and scan policies require an **Admiral** license.
 </Note>
 
 ## Configuring a block policy

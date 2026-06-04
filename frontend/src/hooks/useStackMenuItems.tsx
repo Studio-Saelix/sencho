@@ -18,7 +18,7 @@ import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sid
 
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
-    stackStatus, hasPort, isBusy, isPaid, isAdmin, canDelete, canEditLabels, isPinned, labels,
+    stackStatus, hasPort, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
@@ -30,10 +30,8 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
 
     const inspect: MenuItem[] = [
       { id: 'alerts', label: 'Alerts', icon: BellRing, shortcut: 'A', onSelect: openAlertSheet },
+      { id: 'auto-heal', label: 'Auto-Heal', icon: Activity, shortcut: 'H', onSelect: openAutoHeal },
     ];
-    if (isPaid) {
-      inspect.push({ id: 'auto-heal', label: 'Auto-Heal', icon: Activity, shortcut: 'H', onSelect: openAutoHeal });
-    }
     inspect.push({ id: 'check-updates', label: 'Check updates', icon: RefreshCw, shortcut: 'U', onSelect: checkUpdates });
     if (stackStatus === 'running' && hasPort) {
       inspect.push({ id: 'open-app', label: 'Open App', icon: ArrowUpRight, shortcut: '↗', onSelect: openStackApp });
@@ -68,7 +66,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     if (showStop) lifecycle.push({ id: 'stop', label: 'Stop', icon: Square, shortcut: '⌘.', onSelect: stop, disabled: isBusy });
     if (showRestart) lifecycle.push({ id: 'restart', label: 'Restart', icon: RotateCw, shortcut: '⌘R', onSelect: restart, disabled: isBusy });
     if (showUpdate) lifecycle.push({ id: 'update', label: 'Update', icon: Download, shortcut: '⌘↑', onSelect: update, disabled: isBusy });
-    if (isPaid && isAdmin) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
+    if (isAdmin) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
     if (lifecycle.length > 0) groups.push({ id: 'lifecycle', items: lifecycle });
 
     if (canDelete) {
@@ -80,7 +78,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
 
     return groups;
   }, [
-    stackStatus, hasPort, isBusy, isPaid, isAdmin, canDelete, canEditLabels, isPinned, labels,
+    stackStatus, hasPort, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
     showDeploy, showStop, showRestart, showUpdate,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel, openScheduleTask,

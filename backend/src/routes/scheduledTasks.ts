@@ -3,7 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService, type ScheduledTask } from '../services/DatabaseService';
 import { SchedulerService } from '../services/SchedulerService';
 import { NotificationService } from '../services/NotificationService';
-import { requirePaid, requireAdmin } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { escapeCsvField } from '../utils/csv';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
@@ -120,7 +120,6 @@ export const scheduledTasksRouter = Router();
 
 scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     let tasks = DatabaseService.getInstance().getScheduledTasks();
     // The Scheduled Operations view manages every task type, so it lists all of
@@ -154,7 +153,6 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
 
 scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run } = req.body;
 
@@ -229,7 +227,6 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
 
 scheduledTasksRouter.get('/:id', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'task ID');
     if (id === null) return;
@@ -244,7 +241,6 @@ scheduledTasksRouter.get('/:id', (req: Request, res: Response): void => {
 
 scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'task ID');
     if (id === null) return;
@@ -326,7 +322,6 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
 
 scheduledTasksRouter.delete('/:id', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'task ID');
     if (id === null) return;
@@ -347,7 +342,6 @@ scheduledTasksRouter.delete('/:id', (req: Request, res: Response): void => {
 
 scheduledTasksRouter.patch('/:id/toggle', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'task ID');
     if (id === null) return;
@@ -377,7 +371,6 @@ scheduledTasksRouter.patch('/:id/toggle', (req: Request, res: Response): void =>
 
 scheduledTasksRouter.post('/:id/run', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'task ID');
     if (id === null) return;
@@ -407,7 +400,6 @@ scheduledTasksRouter.post('/:id/run', (req: Request, res: Response): void => {
 
 scheduledTasksRouter.get('/:id/runs/export', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'task ID');
     if (id === null) return;
@@ -442,7 +434,6 @@ scheduledTasksRouter.get('/:id/runs/export', (req: Request, res: Response): void
 
 scheduledTasksRouter.get('/:id/runs', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'task ID');
     if (id === null) return;

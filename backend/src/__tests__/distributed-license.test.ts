@@ -24,24 +24,21 @@ const signToken = (payload: Record<string, unknown>, expiresIn: string | number 
   jwt.sign(payload, TEST_JWT_SECRET, { expiresIn: expiresIn as jwt.SignOptions['expiresIn'] });
 
 // We need a Paid-gated route that doesn't depend on Docker or remote nodes.
-// /api/webhooks is Paid-gated and just reads from the DB; returns an empty array
-// if no webhooks exist.
-const PAID_ROUTE = '/api/webhooks';
+// /api/webhooks/... triggers are public, but the management routes are
+// admin-gated, so we use a Paid-gated route that just reads from the DB.
+// /api/audit-log is paid-gated and reads from the DB.
+const PAID_ROUTE = '/api/audit-log';
 
-// For Admiral routes, /api/audit-log is Admiral-gated and reads from the DB.
-const ADMIRAL_ROUTE = '/api/audit-log';
-
-// ─── authMiddleware: proxyTier/proxyVariant propagation ─────────────────────
+// ─── authMiddleware: proxyTier propagation ──────────────────────────────────
 
 describe('authMiddleware - distributed license headers', () => {
-  it('sets proxyTier/proxyVariant for node_proxy tokens with valid tier headers', async () => {
+  it('sets proxyTier for node_proxy tokens with a valid tier header', async () => {
     const token = signToken({ scope: 'node_proxy' });
     // Hit a Paid-gated route with tier assertion - should be allowed
     const res = await request(app)
       .get(PAID_ROUTE)
       .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', 'skipper');
+      .set('x-sencho-tier', 'paid');
 
     // Should NOT get 403 PAID_REQUIRED; the proxy tier assertion grants access
     expect(res.status).not.toBe(403);
@@ -49,12 +46,11 @@ describe('authMiddleware - distributed license headers', () => {
 
   it('ignores tier headers for user session tokens', async () => {
     const token = signToken({ username: TEST_USERNAME, role: 'admin' });
-    // Even with tier headers set, a user session should use local license (community)
+    // Even with a tier header set, a user session should use the local license (community)
     const res = await request(app)
       .get(PAID_ROUTE)
       .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', 'admiral');
+      .set('x-sencho-tier', 'paid');
 
     // Local license is community in test env → should get 403
     expect(res.status).toBe(403);
@@ -66,8 +62,7 @@ describe('authMiddleware - distributed license headers', () => {
     const res = await request(app)
       .get(PAID_ROUTE)
       .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'enterprise')  // invalid value
-      .set('x-sencho-variant', 'mega');     // invalid value
+      .set('x-sencho-tier', 'enterprise');  // invalid value
 
     // Invalid tier header → proxyTier not set → falls back to local (community) → 403
     expect(res.status).toBe(403);
@@ -94,8 +89,7 @@ describe('requirePaid - distributed license', () => {
     const res = await request(app)
       .get(PAID_ROUTE)
       .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', '');
+      .set('x-sencho-tier', 'paid');
 
     expect(res.status).not.toBe(403);
   });
@@ -122,66 +116,15 @@ describe('requirePaid - distributed license', () => {
   });
 });
 
-// ─── requireAdmiral guard ───────────────────────────────────────────────────
-
-describe('requireAdmiral - distributed license', () => {
-  it('allows access when proxy asserts paid tier with admiral variant', async () => {
-    const token = signToken({ scope: 'node_proxy' });
-    const res = await request(app)
-      .get(ADMIRAL_ROUTE)
-      .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', 'admiral');
-
-    expect(res.status).not.toBe(403);
-  });
-
-  it('blocks when proxy asserts paid tier with skipper variant', async () => {
-    const token = signToken({ scope: 'node_proxy' });
-    const res = await request(app)
-      .get(ADMIRAL_ROUTE)
-      .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', 'skipper');
-
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('ADMIRAL_REQUIRED');
-  });
-
-  it('blocks when proxy asserts community tier', async () => {
-    const token = signToken({ scope: 'node_proxy' });
-    const res = await request(app)
-      .get(ADMIRAL_ROUTE)
-      .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'community');
-
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
-  });
-
-  it('blocks when proxy asserts paid tier with empty variant', async () => {
-    const token = signToken({ scope: 'node_proxy' });
-    const res = await request(app)
-      .get(ADMIRAL_ROUTE)
-      .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', '');
-
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('ADMIRAL_REQUIRED');
-  });
-});
-
 // ─── Security: header injection prevention ──────────────────────────────────
 
 describe('Security - tier header injection', () => {
   it('cannot elevate access via tier headers on a user session', async () => {
     const token = signToken({ username: TEST_USERNAME, role: 'admin' });
     const res = await request(app)
-      .get(ADMIRAL_ROUTE)
+      .get(PAID_ROUTE)
       .set('Authorization', `Bearer ${token}`)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', 'admiral');
+      .set('x-sencho-tier', 'paid');
 
     // User session → tier headers ignored → local community tier → 403
     expect(res.status).toBe(403);
@@ -190,8 +133,7 @@ describe('Security - tier header injection', () => {
   it('cannot elevate access via tier headers without any auth', async () => {
     const res = await request(app)
       .get(PAID_ROUTE)
-      .set('x-sencho-tier', 'paid')
-      .set('x-sencho-variant', 'admiral');
+      .set('x-sencho-tier', 'paid');
 
     expect(res.status).toBe(401);
   });

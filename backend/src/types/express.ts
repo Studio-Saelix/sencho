@@ -1,5 +1,5 @@
 import type { UserRole, ApiTokenScope, ApiToken } from '../services/DatabaseService';
-import type { LicenseTier, LicenseVariant } from '../services/license-types';
+import type { LicenseTier } from '../services/license-types';
 
 // Extend Express Request type for user and node context.
 // This file is imported for its side effects only (ambient declaration).
@@ -15,8 +15,6 @@ declare global {
       rawBody?: Buffer;
       /** License tier asserted by the main instance on proxied requests. Only set for trusted node_proxy tokens. */
       proxyTier?: LicenseTier;
-      /** License variant asserted by the main instance on proxied requests. Only set for trusted node_proxy tokens. */
-      proxyVariant?: LicenseVariant;
       /** User ID carried by a scoped `mfa_pending` token. Only set while the user is completing the MFA challenge. */
       mfaPendingUserId?: number;
       /** True when the pending MFA session originated from an SSO login (LDAP or OIDC) rather than a password login. */

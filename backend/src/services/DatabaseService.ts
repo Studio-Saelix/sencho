@@ -2668,14 +2668,6 @@ export class DatabaseService {
         return (this.db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").get() as { count: number })?.count || 0;
     }
 
-    public getViewerCount(): number {
-        return (this.db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'viewer'").get() as { count: number })?.count || 0;
-    }
-
-    public getNonAdminCount(): number {
-        return (this.db.prepare("SELECT COUNT(*) as count FROM users WHERE role != 'admin'").get() as { count: number })?.count || 0;
-    }
-
     public bumpTokenVersion(userId: number): void {
         this.db.prepare('UPDATE users SET token_version = token_version + 1, updated_at = ? WHERE id = ?').run(Date.now(), userId);
     }

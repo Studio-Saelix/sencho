@@ -9,7 +9,7 @@ import { ComposeService } from '../services/ComposeService';
 import { NotificationService } from '../services/NotificationService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
-import { effectiveTier, requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -118,7 +118,6 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Respo
 
 imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(_req, res)) return;
-  if (!requirePaid(_req, res)) return;
 
   const db = DatabaseService.getInstance();
   const nodes = db.getNodes();
@@ -198,7 +197,6 @@ export const autoUpdateRouter = Router();
 
 autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const { target } = req.body as { target?: string };
     console.log(`[AutoUpdate] Execute requested: target="${sanitizeForLog(target || '')}"`);
@@ -226,7 +224,7 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
     const imageUpdateService = ImageUpdateService.getInstance();
     const compose = ComposeService.getInstance(req.nodeId);
     const db = DatabaseService.getInstance();
-    const atomic = effectiveTier(req) === 'paid';
+    const atomic = true;
     const results: string[] = [];
 
     for (const stackName of stackNames) {

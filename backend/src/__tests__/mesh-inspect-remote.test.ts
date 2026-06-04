@@ -94,7 +94,6 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         const headers = (call[1] as { headers: Record<string, string> }).headers;
         expect(headers['Authorization']).toBe('Bearer remote-tok');
         expect(headers).toHaveProperty('x-sencho-tier');
-        expect(headers).toHaveProperty('x-sencho-variant');
 
         db.deleteNode(remoteNodeId);
     });

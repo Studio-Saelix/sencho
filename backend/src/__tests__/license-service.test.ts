@@ -1,6 +1,6 @@
 /**
- * Tests for LicenseService: variant resolution, tier computation, lifetime detection,
- * and getLicenseInfo() output across all license states.
+ * Tests for LicenseService: tier computation, lifetime detection, and
+ * getLicenseInfo() output across all license states.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -25,8 +25,7 @@ function setLicenseState(overrides: Record<string, string>) {
   const keys = [
     'license_status', 'license_key', 'license_valid_until',
     'license_last_validated', 'license_customer_name',
-    'license_product_name', 'license_variant_name',
-    'license_variant_type', 'license_variant_id',
+    'license_product_name',
     'billing_portal_url', 'billing_portal_expires',
   ];
   for (const key of keys) {
@@ -36,92 +35,6 @@ function setLicenseState(overrides: Record<string, string>) {
     db.setSystemState(key, value);
   }
 }
-
-describe('LicenseService.getVariant()', () => {
-  it('returns null for trial status with no stored variant metadata', () => {
-    // Trial status without LS-issued variant metadata resolves to null; a real
-    // LS-issued trial would carry variant_name and resolve through the normal path.
-    setLicenseState({ license_status: 'trial' });
-    expect(svc.getVariant()).toBeNull();
-  });
-
-  it('returns "admiral" for trial with LS-stored Admiral variant metadata', () => {
-    setLicenseState({ license_status: 'trial', license_variant_name: 'Admiral Monthly', license_product_name: 'Sencho Admiral' });
-    expect(svc.getVariant()).toBe('admiral');
-  });
-
-  it('returns null when no variant name is stored', () => {
-    setLicenseState({ license_status: 'active' });
-    expect(svc.getVariant()).toBeNull();
-  });
-
-  it('reads pre-resolved variant type from DB (admiral)', () => {
-    setLicenseState({ license_status: 'active', license_variant_type: 'admiral' });
-    expect(svc.getVariant()).toBe('admiral');
-  });
-
-  it('reads pre-resolved variant type from DB (skipper)', () => {
-    setLicenseState({ license_status: 'active', license_variant_type: 'skipper' });
-    expect(svc.getVariant()).toBe('skipper');
-  });
-
-  it('falls back to name resolution and persists type (Team -> admiral)', () => {
-    setLicenseState({ license_status: 'active', license_variant_name: 'Team' });
-    expect(svc.getVariant()).toBe('admiral');
-    expect(DatabaseService.getInstance().getSystemState('license_variant_type')).toBe('admiral');
-  });
-
-  it('falls back to name resolution and persists type (Personal -> skipper)', () => {
-    setLicenseState({ license_status: 'active', license_variant_name: 'Personal' });
-    expect(svc.getVariant()).toBe('skipper');
-    expect(DatabaseService.getInstance().getSystemState('license_variant_type')).toBe('skipper');
-  });
-
-  it('maps "Admiral" variant name to "admiral"', () => {
-    setLicenseState({ license_status: 'active', license_variant_name: 'Admiral' });
-    expect(svc.getVariant()).toBe('admiral');
-  });
-
-  it('maps "Admiral Lifetime" variant name to "admiral"', () => {
-    setLicenseState({ license_status: 'active', license_variant_name: 'Admiral Lifetime' });
-    expect(svc.getVariant()).toBe('admiral');
-  });
-
-  it('maps "Skipper" variant name to "skipper"', () => {
-    setLicenseState({ license_status: 'active', license_variant_name: 'Skipper' });
-    expect(svc.getVariant()).toBe('skipper');
-  });
-
-  it('maps "Skipper Lifetime" variant name to "skipper"', () => {
-    setLicenseState({ license_status: 'active', license_variant_name: 'Skipper Lifetime' });
-    expect(svc.getVariant()).toBe('skipper');
-  });
-
-  it('defaults unknown variant names to "skipper"', () => {
-    setLicenseState({ license_status: 'active', license_variant_name: 'Unknown Variant' });
-    expect(svc.getVariant()).toBe('skipper');
-  });
-
-  it('resolves from product_name when variant_name has no tier info (Admiral)', () => {
-    setLicenseState({
-      license_status: 'active',
-      license_variant_name: 'Lifetime',
-      license_product_name: 'Sencho Admiral',
-    });
-    expect(svc.getVariant()).toBe('admiral');
-    expect(DatabaseService.getInstance().getSystemState('license_variant_type')).toBe('admiral');
-  });
-
-  it('resolves from product_name when variant_name has no tier info (Skipper)', () => {
-    setLicenseState({
-      license_status: 'active',
-      license_variant_name: 'Monthly',
-      license_product_name: 'Sencho Skipper',
-    });
-    expect(svc.getVariant()).toBe('skipper');
-    expect(DatabaseService.getInstance().getSystemState('license_variant_type')).toBe('skipper');
-  });
-});
 
 describe('LicenseService.getTier()', () => {
   it('returns "community" when no status is set', () => {
@@ -230,11 +143,10 @@ describe('LicenseService.getLicenseInfo() - isLifetime', () => {
 });
 
 describe('LicenseService.getLicenseInfo() - full scenarios', () => {
-  it('returns correct info for an Admiral lifetime license', () => {
+  it('returns correct info for a paid lifetime license', () => {
     setLicenseState({
       license_status: 'active',
       license_key: 'ABCD-EFGH-IJKL-MN5D',
-      license_variant_name: 'Admiral Lifetime',
       license_customer_name: 'Test User',
       license_product_name: 'Sencho Admiral',
       license_last_validated: Date.now().toString(),
@@ -242,7 +154,6 @@ describe('LicenseService.getLicenseInfo() - full scenarios', () => {
     const info = svc.getLicenseInfo();
     expect(info.tier).toBe('paid');
     expect(info.status).toBe('active');
-    expect(info.variant).toBe('admiral');
     expect(info.isLifetime).toBe(true);
     expect(info.trialDaysRemaining).toBeNull();
     expect(info.customerName).toBe('Test User');
@@ -250,22 +161,20 @@ describe('LicenseService.getLicenseInfo() - full scenarios', () => {
     expect(info.maskedKey).toBe('****-****-****-MN5D');
   });
 
-  it('returns correct info for a Skipper subscription', () => {
+  it('returns correct info for a paid subscription', () => {
     const future = new Date();
     future.setDate(future.getDate() + 30);
     setLicenseState({
       license_status: 'active',
       license_key: 'ABCD-EFGH-IJKL-SK5D',
-      license_variant_name: 'Skipper Monthly',
       license_customer_name: 'Another User',
-      license_product_name: 'Sencho Skipper',
+      license_product_name: 'Sencho Admiral',
       license_valid_until: future.toISOString(),
       license_last_validated: Date.now().toString(),
     });
     const info = svc.getLicenseInfo();
     expect(info.tier).toBe('paid');
     expect(info.status).toBe('active');
-    expect(info.variant).toBe('skipper');
     expect(info.isLifetime).toBe(false);
     expect(info.trialDaysRemaining).toBeNull();
     expect(info.customerName).toBe('Another User');

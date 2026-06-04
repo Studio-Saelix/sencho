@@ -12,7 +12,6 @@ import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { requirePermission, checkPermission } from '../middleware/permissions';
-import { requirePaid, effectiveTier } from '../middleware/tierGates';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
 import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
@@ -348,7 +347,7 @@ async function runStackBulkOp(
           code: 'policy_blocked',
         };
       }
-      const atomic = effectiveTier(req) === 'paid';
+      const atomic = true;
       await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
       DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
       NotificationService.getInstance().broadcastEvent({
@@ -422,13 +421,6 @@ stacksRouter.post('/bulk', async (req: Request, res: Response) => {
   if (!stackNames.every(s => typeof s === 'string')) {
     return res.status(400).json({ error: 'stackNames must be an array of strings' });
   }
-
-  // Bulk update is paid-only by deliberate asymmetry with the single-stack
-  // POST /:stackName/update, which is open to all tiers (atomic backup is
-  // separately gated by effectiveTier inside the route). The bulk fan-out
-  // amplifies blast radius enough that we want a hard tier check here even
-  // though the per-stack route does not.
-  if (action === 'update' && !requirePaid(req, res)) return;
 
   const typedAction = action as BulkLifecycleAction;
   const typedNames = Array.from(new Set(stackNames as string[]));
@@ -928,7 +920,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
-    const atomic = effectiveTier(req) === 'paid';
+    const atomic = true;
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
     invalidateNodeCaches(req.nodeId);
@@ -1188,7 +1180,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
     const skipScan = req.body?.skip_scan === true;
     const debug = isDebugEnabled();
-    const atomic = effectiveTier(req) === 'paid';
+    const atomic = true;
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
     await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
@@ -1237,7 +1229,6 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
 stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
-  if (!requirePaid(req, res)) return;
   // Rollback restores files and re-deploys, so it must hold the same per-stack
   // lock deploy/update use. Without it a rollback racing an in-flight deploy
   // would mutate the compose files and run a second `docker compose up` against
@@ -1272,10 +1263,6 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
 });
 
 stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
-  // Backup metadata exists only to drive the paid-only Rollback affordance, so
-  // the read is gated to paid to match the frontend, which only fetches it when
-  // the instance is licensed.
-  if (!requirePaid(req, res)) return;
   try {
     const stackName = req.params.stackName as string;
     const fsSvc = FileSystemService.getInstance(req.nodeId);
@@ -1292,10 +1279,9 @@ stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
   // Triggers a server-side backup of the stack's managed files: the same
   // rollback snapshot a deploy takes. Exposed so a scheduled backup can run on
   // a remote node through the proxy path, and so an operator can capture an
-  // on-demand snapshot. Paid-gated to match the rollback feature it feeds.
+  // on-demand snapshot.
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
-  if (!requirePaid(req, res)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   // The backup slot is shared with the pre-deploy rollback snapshot, so hold the
   // stack-op lock to keep a backup from interleaving with a concurrent

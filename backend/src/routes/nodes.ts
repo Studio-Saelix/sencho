@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
-import { requireAdmin, requireAdmiral, requirePaid } from '../middleware/tierGates';
+import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { enrollmentLimiter } from '../middleware/rateLimiters';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -359,7 +359,7 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;
@@ -398,7 +398,7 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;

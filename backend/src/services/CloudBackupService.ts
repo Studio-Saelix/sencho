@@ -21,7 +21,7 @@ import { LicenseService } from './LicenseService';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 
-// Cloud backup is opt-in (Skipper+ feature) and the AWS SDK v3 client pulls
+// Cloud backup is opt-in (paid feature) and the AWS SDK v3 client pulls
 // in dozens of @smithy/* and @aws-sdk/middleware-* packages, so installs
 // without cloud backup configured pay a real boot-parse cost they never use.
 // The package is declared as an optionalDependency: present in the default
@@ -185,8 +185,9 @@ export class CloudBackupService {
         const licenseKey = db.getSystemState('license_key');
         if (!licenseKey) return { success: false, error: 'No license key found. Activate an Admiral license first.' };
 
-        const variant = LicenseService.getInstance().getVariant();
-        if (variant !== 'admiral') return { success: false, error: 'Sencho Cloud Backup requires the Admiral tier.' };
+        if (LicenseService.getInstance().getTier() !== 'paid') {
+            return { success: false, error: 'Sencho Cloud Backup requires the Admiral tier.' };
+        }
 
         const apiBase = process.env.SENCHO_CLOUD_BACKUP_API || SENCHO_CLOUD_BACKUP_API_DEFAULT;
         try {

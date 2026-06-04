@@ -40,7 +40,7 @@ It runs as a single container on your hardware and gives you a UI for the work y
 
 A Sencho instance is autonomous. To manage another machine, you install a second Sencho on it and connect them with a long-lived API token; the primary dashboard then acts as an authenticated HTTP and WebSocket proxy across your fleet. Use TLS, a VPN, or a private network for any untrusted link. Each node still uses its local Docker socket (see Quick start), but Sencho does not require SSH and does not expose a remote Docker socket on the network. For nodes behind NAT or strict firewalls, the Pilot Agent establishes a single outbound WebSocket tunnel to the primary, so the remote host opens no inbound port at all.
 
-Most capabilities are free in the Community tier. A few advanced automation and fleet-control features ship in paid tiers; pricing lives at [sencho.io/pricing](https://sencho.io/pricing).
+Most capabilities are free in the Community tier. A few advanced governance, security, and fleet-control features ship in the paid Admiral tier; pricing lives at [sencho.io/pricing](https://sencho.io/pricing).
 
 ## What Sencho is not (yet)
 
@@ -55,7 +55,7 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 
 ---
 
-**Tier coverage:** All bullets below are available in the free Community tier unless marked with `(Skipper)` for paid mid-tier or `(Admiral)` for paid top-tier. Full breakdown at [sencho.io/pricing](https://sencho.io/pricing).
+**Tier coverage:** All bullets below are available in the free Community tier unless marked `(Admiral)`. Full breakdown at [sencho.io/pricing](https://sencho.io/pricing).
 
 ## Capabilities
 
@@ -82,19 +82,19 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 - Node compatibility checks before deploying
 
 ### Automation
-- [Auto-heal policies](https://docs.sencho.io/features/auto-heal-policies) for failed containers **(Skipper)**
-- [Auto-update policies](https://docs.sencho.io/features/auto-update-policies) for image rollouts **(Skipper)**
-- [Scheduled operations](https://docs.sencho.io/features/scheduled-operations) on cron **(Skipper)**
-- [Blueprints](https://docs.sencho.io/features/blueprint-model): declarative fleet templates with drift detection **(Skipper)**
-- [Webhooks](https://docs.sencho.io/features/webhooks) on stack lifecycle events **(Skipper)**
-- Encrypted [Fleet Secrets](https://docs.sencho.io/features/fleet-secrets) pushed to labeled nodes **(Skipper)**
+- [Auto-heal policies](https://docs.sencho.io/features/auto-heal-policies) for failed containers
+- [Auto-update policies](https://docs.sencho.io/features/auto-update-policies) for image rollouts
+- [Scheduled operations](https://docs.sencho.io/features/scheduled-operations) on cron
+- [Webhooks](https://docs.sencho.io/features/webhooks) on stack lifecycle events
+- [Blueprints](https://docs.sencho.io/features/blueprint-model): declarative fleet templates with drift detection **(Admiral)**
+- Encrypted [Fleet Secrets](https://docs.sencho.io/features/fleet-secrets) pushed to labeled nodes **(Admiral)**
 
 ### Security
 - [SSO](https://docs.sencho.io/features/sso): custom OIDC, presets for Google, GitHub, and Okta, plus LDAP and Active Directory
 - [Two-factor authentication](https://docs.sencho.io/features/two-factor-authentication) with TOTP and backup codes
-- [RBAC](https://docs.sencho.io/features/rbac) with five roles: admin (full control), viewer (read-only), deployer (deploy and restart, no edits), node-admin (admin scoped to specific nodes), and auditor (read-only with audit-log access)
-- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy on every tier with VEX-based suppression; SARIF export and SBOM upload **(Skipper)**
-- [Private registries](https://docs.sencho.io/features/private-registries) **(Admiral)** and [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) **(Skipper)** for non-compliant images
+- [RBAC](https://docs.sencho.io/features/rbac) with admin (full control) and viewer (read-only) roles; deployer, node-admin, and auditor roles plus scoped permissions **(Admiral)**
+- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy on every tier with VEX-based suppression; SARIF export and SBOM upload **(Admiral)**
+- [Private registries](https://docs.sencho.io/features/private-registries) and [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) for non-compliant images **(Admiral)**
 - [API tokens](https://docs.sencho.io/features/api-tokens) for automation
 
 ### Operations

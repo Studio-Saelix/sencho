@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmiral, requireAdmin, requireBody } from '../middleware/tierGates';
+import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
 import {
     DatabaseService,
     type BlueprintSelector,
@@ -455,7 +455,7 @@ blueprintsRouter.get('/:id/preview', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const id = parseIntParam(req, res, 'id');

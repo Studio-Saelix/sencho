@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 
@@ -30,7 +30,6 @@ function proxyEntitlementUntil(req: Request): number {
 }
 
 autoHealRouter.get('/policies', authMiddleware, (req: Request, res: Response): void => {
-  if (!requirePaid(req, res)) return;
   const stackName = typeof req.query.stackName === 'string' ? req.query.stackName : undefined;
   try {
     const db = DatabaseService.getInstance();
@@ -52,7 +51,6 @@ autoHealRouter.get('/policies', authMiddleware, (req: Request, res: Response): v
 
 autoHealRouter.post('/policies', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   const parsed = AutoHealPolicyCreateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' });
@@ -85,7 +83,6 @@ autoHealRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
 
 autoHealRouter.patch('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   const id = parseIntParam(req, res, 'id');
   if (id === null) return;
   const parsed = AutoHealPolicyUpdateSchema.safeParse(req.body);
@@ -107,7 +104,6 @@ autoHealRouter.patch('/policies/:id', authMiddleware, (req: Request, res: Respon
 
 autoHealRouter.delete('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   const id = parseIntParam(req, res, 'id');
   if (id === null) return;
   try {
@@ -123,7 +119,6 @@ autoHealRouter.delete('/policies/:id', authMiddleware, (req: Request, res: Respo
 });
 
 autoHealRouter.get('/policies/:id/history', authMiddleware, (req: Request, res: Response): void => {
-  if (!requirePaid(req, res)) return;
   const id = parseIntParam(req, res, 'id');
   if (id === null) return;
   const limit = Math.min(parseInt(String(req.query.limit ?? '50'), 10) || 50, 100);

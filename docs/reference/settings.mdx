@@ -139,12 +139,12 @@ Activate, view, or deactivate the license for this Sencho control plane. The mas
 
 | Element | Description |
 |---------|-------------|
-| **Plan** | The active tier (Sencho Community, Sencho Skipper, Sencho Admiral, or Sencho Admiral (Trial)) with a tier badge. |
+| **Plan** | The active tier (Sencho Community, Sencho Admiral, or Sencho Admiral (Trial)) with a tier badge. |
 | **Customer** | The customer name on file with Lemon Squeezy (paid plans only). |
-| **Product** | The product variant (paid plans only). |
+| **Product** | The product (paid plans only). |
 | **License key** | The active key, masked to the last four characters. |
 | **Trial countdown** | Days remaining. Visible only while a trial is active. |
-| **Manage subscription** | Opens the Lemon Squeezy customer portal (subscription plans only; not shown for lifetime). |
+| **Manage subscription** | Opens the Lemon Squeezy customer portal to update payment, view invoices, or cancel. |
 | **Deactivate** | Releases the key from this instance and reverts to Community features. |
 | **See pricing** | Direct link to the pricing page; visible on Community or when an existing license has expired. |
 
@@ -155,7 +155,7 @@ See [Licensing & Billing](/features/licensing) for the full walkthrough includin
 ## Users
 
 <Note>
-  User management requires a Sencho Skipper or Admiral license and admin role. Community supports a single admin account only.
+  User management requires an admin role. Community supports unlimited accounts with the Admin and Viewer roles.
 </Note>
 
 **Scope:** Global
@@ -173,8 +173,8 @@ Create and manage user accounts with role-based access. The masthead publishes a
 
 | Role | Tier | Description |
 |------|------|-------------|
-| **Admin** | Skipper+ | Full access to all features |
-| **Viewer** | Skipper+ | Read-only access to stacks and nodes |
+| **Admin** | Community | Full access to all features |
+| **Viewer** | Community | Read-only access to stacks and nodes |
 | **Deployer** | Admiral | Can view stacks and trigger deployments |
 | **Node Admin** | Admiral | Full stack and node management, no system settings |
 | **Auditor** | Admiral | Read-only plus audit log access |
@@ -186,7 +186,7 @@ See [RBAC & User Management](/features/rbac) for details on what each role can a
 ## SSO
 
 <Note>
-  Custom OIDC is available on Community; preset providers (Google, GitHub, Okta) require Skipper; LDAP / Active Directory requires Admiral.
+  Custom OIDC and the preset providers (Google, GitHub, Okta) are available on Community; LDAP / Active Directory requires Admiral.
 </Note>
 
 **Scope:** Global, admin-only
@@ -322,7 +322,7 @@ At least one agent must be enabled for stack alerts to deliver notifications. Se
 ## Routing
 
 <Note>
-  Notification Routing requires a Sencho Skipper or Admiral license.
+  Creating, editing, and deleting routes is admin-only.
 </Note>
 
 **Scope:** Global, admin-only
@@ -350,7 +350,7 @@ See [Notification Routing](/features/alerts-notifications#notification-routing) 
 ## Webhooks
 
 <Note>
-  Webhooks require a Sencho Skipper or Admiral license.
+  Managing webhooks is admin-only.
 </Note>
 
 **Scope:** Global
@@ -374,7 +374,7 @@ See [Webhooks](/features/webhooks) for the full walkthrough including authentica
 ## Labels
 
 <Note>
-  Label organization (create, edit, assign, remove) is available on every tier. Bulk label actions (apply or remove a label across multiple stacks in one operation) require Skipper or Admiral.
+  Label organization (create, edit, assign, remove) and bulk label actions (apply or remove a label across multiple stacks in one operation) are available on every tier.
 </Note>
 
 **Scope:** Per-node
@@ -388,7 +388,7 @@ See [Stack Labels](/features/stack-labels) for the full walkthrough.
 ## Security
 
 <Note>
-  Security is admin-only. The Trivy installer and CVE/misconfig suppressions are available on all tiers; scan policies and the **Auto-update Trivy** toggle require Sencho Skipper or Admiral (the toggle also requires a managed Trivy binary).
+  Security is admin-only. The Trivy installer and CVE/misconfig suppressions are available on all tiers; scan policies and the **Auto-update Trivy** toggle require an Admiral license (the toggle also requires a managed Trivy binary).
 </Note>
 
 **Scope:** Per-node
@@ -406,7 +406,7 @@ Manage the Trivy scanner, scan policies, suppressions, and acknowledgements that
 | **Status** | `Installed (managed)` when Sencho manages the binary, `Installed (host)` when an existing host binary is being reused, or empty when nothing is detected. |
 | **Version** | The current Trivy version, when installed. |
 | **Install / Update / Uninstall** | Lifecycle actions for the managed binary. Uninstall asks for confirmation. |
-| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires Skipper and a managed Trivy binary. |
+| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires Admiral and a managed Trivy binary. |
 
 ### Scan policies
 
@@ -472,7 +472,7 @@ See [App Store](/features/app-store#custom-template-registry) for more on custom
 
 **Scope:** Global
 
-Links to help resources, with additional channels for Skipper and Admiral operators.
+Links to help resources, with an additional channel for Admiral operators.
 
 ### Resources (all tiers)
 
@@ -481,12 +481,11 @@ Links to help resources, with additional channels for Skipper and Admiral operat
 | **Documentation** | Opens docs.sencho.io. |
 | **GitHub Issues** | Report bugs and request features on GitHub. |
 
-### Paid tier support
+### Admiral support
 
 | Channel | Tier | Description |
 |---------|------|-------------|
-| **Email Support** | Skipper | Direct email support. |
-| **Priority Email Support** | Admiral | Responses within 24 hours. |
+| **Priority Email Support** | Admiral | Direct email support with responses within 24 hours. |
 
 Community operators see an upgrade callout with a link to the pricing page in place of the support channels.
 
@@ -501,7 +500,7 @@ Displays instance information at a glance.
 | Field | Description |
 |-------|-------------|
 | **Version** | Current Sencho version. |
-| **Tier** | Community, Skipper, or Admiral badge. |
+| **Tier** | Community or Admiral badge. |
 | **License Status** | active, trial, expired, or community. |
 | **Instance ID** | First eight characters of the unique identifier for this Sencho control plane (used by the license server to identify it). |
 

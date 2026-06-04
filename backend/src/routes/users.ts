@@ -1,9 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcrypt';
 import { DatabaseService, type UserRole, type ResourceType } from '../services/DatabaseService';
-import { LicenseService } from '../services/LicenseService';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireAdmiral } from '../middleware/tierGates';
+import { requirePaid, requireAdmin } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { BCRYPT_SALT_ROUNDS, MIN_PASSWORD_LENGTH } from '../helpers/constants';
 import { isDebugEnabled } from '../utils/debug';
@@ -17,29 +16,11 @@ const VALID_USER_ROLES: UserRole[] = ['admin', 'viewer', 'deployer', 'node-admin
 const VALID_ASSIGNMENT_ROLES: UserRole[] = ['admin', 'viewer', 'deployer', 'node-admin'];
 const VALID_RESOURCE_TYPES: ResourceType[] = ['stack', 'node'];
 
-// Roles that require an Admiral license. Viewer and admin are available on
-// all paid tiers; the rest need variant=admiral for per-resource scoping to
-// be meaningful.
-function roleRequiresAdmiral(role: UserRole): boolean {
+// Roles that require a paid license. Viewer and admin are available on the
+// free tier; the advanced roles unlock per-resource scoping that is only
+// meaningful on paid.
+function roleRequiresPaid(role: UserRole): boolean {
   return role === 'deployer' || role === 'node-admin' || role === 'auditor';
-}
-
-// Returns a seat-limit error message if adding an account of `role` would
-// exceed the current license seat caps, or null when within limits. Counts are
-// read at call time so the check reflects live state. Used by both user
-// creation and admin promotion so the cap cannot be bypassed via role change.
-// Seat caps gate new seat acquisition only (creation, and promotion to admin);
-// reducing privilege by demoting an admin is never blocked on the viewer cap.
-function seatLimitError(role: UserRole, db: DatabaseService): string | null {
-  const seatLimits = LicenseService.getInstance().getSeatLimits();
-  if (role === 'admin') {
-    if (seatLimits.maxAdmins !== null && db.getAdminCount() >= seatLimits.maxAdmins) {
-      return `Your license allows a maximum of ${seatLimits.maxAdmins} admin account${seatLimits.maxAdmins === 1 ? '' : 's'}. Upgrade to Admiral for unlimited accounts.`;
-    }
-  } else if (seatLimits.maxViewers !== null && db.getNonAdminCount() >= seatLimits.maxViewers) {
-    return `Your license allows a maximum of ${seatLimits.maxViewers} viewer account${seatLimits.maxViewers === 1 ? '' : 's'}. Upgrade to Admiral for unlimited accounts.`;
-  }
-  return null;
 }
 
 export const usersRouter = Router();
@@ -65,7 +46,6 @@ usersRouter.get('/', authMiddleware, async (req: Request, res: Response): Promis
 usersRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const { username, password, role } = req.body;
 
@@ -86,19 +66,12 @@ usersRouter.post('/', authMiddleware, async (req: Request, res: Response): Promi
       res.status(400).json({ error: 'Role must be "admin", "viewer", "deployer", "node-admin", or "auditor"' });
       return;
     }
-    if (roleRequiresAdmiral(role) && !requireAdmiral(req, res)) return;
+    if (roleRequiresPaid(role) && !requirePaid(req, res)) return;
 
     const db = DatabaseService.getInstance();
     const existing = db.getUserByUsername(username);
     if (existing) {
       res.status(409).json({ error: 'A user with this username already exists' });
-      return;
-    }
-
-    // Enforce seat limits based on license variant.
-    const seatError = seatLimitError(role, db);
-    if (seatError) {
-      res.status(403).json({ error: seatError });
       return;
     }
 
@@ -148,22 +121,10 @@ usersRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Pro
         res.status(400).json({ error: 'Role must be "admin", "viewer", "deployer", "node-admin", or "auditor"' });
         return;
       }
-      if (roleRequiresAdmiral(role) && !requireAdmiral(req, res)) return;
+      if (roleRequiresPaid(role) && !requirePaid(req, res)) return;
       if (user.username === req.user!.username && role !== user.role) {
         res.status(400).json({ error: 'Cannot change your own role' });
         return;
-      }
-      // Promoting a non-admin to admin consumes an admin seat; enforce the cap
-      // here the same way user creation does, so a role change cannot exceed it.
-      if (role === 'admin' && user.role !== 'admin') {
-        const seatError = seatLimitError('admin', db);
-        if (isDebugEnabled()) {
-          console.log('[Users:diag] admin-promotion id=', id, 'blocked=', seatError !== null, 'actor=', sanitizeForLog(req.user!.username));
-        }
-        if (seatError) {
-          res.status(403).json({ error: seatError });
-          return;
-        }
       }
       updates.role = role;
     }
@@ -265,12 +226,12 @@ usersRouter.post('/:id/mfa/reset', authMiddleware, (req: Request, res: Response)
   }
 });
 
-// --- Scoped Role Assignments (Admiral) ---
+// --- Scoped Role Assignments (paid) ---
 
 usersRouter.get('/:id/roles', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
     const db = DatabaseService.getInstance();
@@ -289,7 +250,7 @@ usersRouter.get('/:id/roles', authMiddleware, (req: Request, res: Response): voi
 usersRouter.post('/:id/roles', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
     const { role, resource_type, resource_id } = req.body;
@@ -333,7 +294,7 @@ usersRouter.post('/:id/roles', authMiddleware, (req: Request, res: Response): vo
 usersRouter.delete('/:id/roles/:assignId', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requireAdmiral(req, res)) return;
+  if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
     const assignId = parseInt(req.params.assignId as string, 10);

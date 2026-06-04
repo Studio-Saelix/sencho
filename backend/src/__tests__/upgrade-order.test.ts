@@ -46,19 +46,17 @@ describe('WebSocket upgrade dispatch order', () => {
     sessionCookie = `sencho_token=${token}`;
 
     // Existing /api/mesh/proxy-tunnel scope tests assume the receiver
-    // license clears the Admiral check. Set the license to Admiral so
+    // license clears the paid check. Set the license to active (paid) so
     // the credential-only assertions below still hold; the dedicated
     // license-gating describe block flips and restores per-test.
     DatabaseService.getInstance().setSystemState('license_status', 'active');
-    DatabaseService.getInstance().setSystemState('license_variant_type', 'admiral');
   });
 
   afterAll(async () => {
-    // Clear the Admiral state beforeAll set so this file does not leak
+    // Clear the paid state beforeAll set so this file does not leak
     // license context into other tests sharing the same test DB.
     const { DatabaseService } = await import('../services/DatabaseService');
     DatabaseService.getInstance().setSystemState('license_status', 'community');
-    DatabaseService.getInstance().setSystemState('license_variant_type', '');
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });
@@ -235,49 +233,35 @@ describe('WebSocket upgrade dispatch order', () => {
     });
   });
 
-  describe('/api/mesh/proxy-tunnel Admiral entitlement gating', () => {
-    // Admiral entitlement on the WS data plane is decided against the
+  describe('/api/mesh/proxy-tunnel paid entitlement gating', () => {
+    // Paid entitlement on the WS data plane is decided against the
     // *central's* asserted tier, matching the HTTP mesh routes
-    // (requireAdmiral in routes/mesh.ts reads req.proxyTier from forwarded
+    // (requirePaid in routes/mesh.ts reads req.proxyTier from forwarded
     // headers off the node_proxy credential). The WS dispatcher trusts
-    // x-sencho-tier / x-sencho-variant only when the upgrade carries a
-    // node_proxy JWT; when no headers are present, or when the credential
-    // is a full-admin api_token (no central is asserting tier), it falls
-    // back to the receiver's own license. These tests pin both branches:
-    // (a) the trusted-header path accepts an Admiral central even on a
-    //     Community receiver, and rejects a Community central on an
-    //     Admiral receiver;
+    // x-sencho-tier only when the upgrade carries a node_proxy JWT; when no
+    // header is present, or when the credential is a full-admin api_token
+    // (no central is asserting tier), it falls back to the receiver's own
+    // license. These tests pin both branches:
+    // (a) the trusted-header path accepts a paid central even on a
+    //     Community receiver, and rejects a Community central on a
+    //     paid receiver;
     // (b) the local-fallback path keeps the receiver-license check intact
     //     for full-admin api_token upgrades and for header-less node_proxy
     //     upgrades.
 
-    async function setLicense(status: string, variantType: string | null): Promise<void> {
+    async function setLicense(status: string): Promise<void> {
       const { DatabaseService } = await import('../services/DatabaseService');
       DatabaseService.getInstance().setSystemState('license_status', status);
-      if (variantType === null) {
-        DatabaseService.getInstance().setSystemState('license_variant_type', '');
-      } else {
-        DatabaseService.getInstance().setSystemState('license_variant_type', variantType);
-      }
     }
 
     afterEach(async () => {
-      // Restore the Admiral state beforeAll established so subsequent
+      // Restore the paid state beforeAll established so subsequent
       // tests in this file (and the proxy-tunnel scope block) keep passing.
-      await setLicense('active', 'admiral');
+      await setLicense('active');
     });
 
     it('rejects a node_proxy Bearer with HTTP 403 when no tier headers and the receiver license is community', async () => {
-      await setLicense('community', null);
-      const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
-      const ws = connect('/api/mesh/proxy-tunnel', { bearer: nodeProxyToken });
-      const outcome = await waitForOutcome(ws);
-      expect(outcome.kind).toBe('unexpected');
-      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
-    });
-
-    it('rejects a node_proxy Bearer with HTTP 403 when no tier headers and the receiver license is paid but Skipper (not Admiral)', async () => {
-      await setLicense('active', 'skipper');
+      await setLicense('community');
       const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
       const ws = connect('/api/mesh/proxy-tunnel', { bearer: nodeProxyToken });
       const outcome = await waitForOutcome(ws);
@@ -286,7 +270,7 @@ describe('WebSocket upgrade dispatch order', () => {
     });
 
     it('rejects a full-admin api_token with HTTP 403 when the receiver license is community (forwarded headers ignored on api_token path)', async () => {
-      await setLicense('community', null);
+      await setLicense('community');
       const { DatabaseService } = await import('../services/DatabaseService');
       const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
       const rawToken = createTestApiToken({
@@ -299,42 +283,31 @@ describe('WebSocket upgrade dispatch order', () => {
       // local-entitlement credential, not a node_proxy forwarder.
       const ws = connect('/api/mesh/proxy-tunnel', {
         bearer: rawToken,
-        extraHeaders: { 'x-sencho-tier': 'paid', 'x-sencho-variant': 'admiral' },
+        extraHeaders: { 'x-sencho-tier': 'paid' },
       });
       const outcome = await waitForOutcome(ws);
       expect(outcome.kind).toBe('unexpected');
       if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
     });
 
-    it('accepts a node_proxy Bearer asserting paid+admiral via forwarded headers even when the receiver license is community', async () => {
-      await setLicense('community', null);
+    it('accepts a node_proxy Bearer asserting paid via forwarded headers even when the receiver license is community', async () => {
+      await setLicense('community');
       const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
       const ws = connect('/api/mesh/proxy-tunnel', {
         bearer: nodeProxyToken,
-        extraHeaders: { 'x-sencho-tier': 'paid', 'x-sencho-variant': 'admiral' },
+        extraHeaders: { 'x-sencho-tier': 'paid' },
       });
       const outcome = await waitForOutcome(ws);
       expect(outcome.kind).toBe('open');
       try { ws.terminate(); } catch { /* ignore */ }
     });
 
-    it('rejects a node_proxy Bearer asserting community via forwarded headers even when the receiver license is Admiral', async () => {
-      // Receiver state is already Admiral (set by beforeAll / afterEach).
+    it('rejects a node_proxy Bearer asserting community via forwarded headers even when the receiver license is paid', async () => {
+      // Receiver state is already paid (set by beforeAll / afterEach).
       const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
       const ws = connect('/api/mesh/proxy-tunnel', {
         bearer: nodeProxyToken,
         extraHeaders: { 'x-sencho-tier': 'community' },
-      });
-      const outcome = await waitForOutcome(ws);
-      expect(outcome.kind).toBe('unexpected');
-      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
-    });
-
-    it('rejects a node_proxy Bearer asserting paid+skipper via forwarded headers (paid but not Admiral)', async () => {
-      const nodeProxyToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
-      const ws = connect('/api/mesh/proxy-tunnel', {
-        bearer: nodeProxyToken,
-        extraHeaders: { 'x-sencho-tier': 'paid', 'x-sencho-variant': 'skipper' },
       });
       const outcome = await waitForOutcome(ws);
       expect(outcome.kind).toBe('unexpected');

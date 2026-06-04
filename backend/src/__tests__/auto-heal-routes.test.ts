@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
 import { generateApiToken } from '../utils/apiTokenFormat';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER } from '../services/license-headers';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -58,7 +58,6 @@ beforeAll(async () => {
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ LicenseService } = await import('../services/LicenseService'));
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
 
     const viewerHash = await bcrypt.hash('password123', 1);
     DatabaseService.getInstance().addUser({ username: 'route-viewer', password_hash: viewerHash, role: 'viewer' });
@@ -70,7 +69,6 @@ beforeEach(() => {
     DatabaseService.getInstance().getDb().prepare('DELETE FROM auto_heal_history').run();
     DatabaseService.getInstance().getDb().prepare('DELETE FROM auto_heal_policies').run();
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
 });
 
 afterAll(() => {
@@ -79,15 +77,15 @@ afterAll(() => {
 });
 
 describe('/api/auto-heal routes', () => {
-    it('rejects Community tier access', async () => {
+    it('allows Community tier access', async () => {
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
 
         const res = await request(app)
             .get('/api/auto-heal/policies')
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`);
 
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body)).toBe(true);
     });
 
     it('marks trusted proxy-created policies with a lease on a Community runtime node', async () => {
@@ -98,7 +96,6 @@ describe('/api/auto-heal routes', () => {
             .post('/api/auto-heal/policies')
             .set('Authorization', `Bearer ${proxyToken}`)
             .set(PROXY_TIER_HEADER, 'paid')
-            .set(PROXY_VARIANT_HEADER, 'admiral')
             .send({
                 stack_name: 'proxy-runtime-stack',
                 unhealthy_duration_mins: 5,
@@ -108,7 +105,7 @@ describe('/api/auto-heal routes', () => {
         expect(res.body.proxy_entitled_until).toBeGreaterThan(Date.now());
     });
 
-    it('allows admins to create node-scoped policies on paid tier', async () => {
+    it('allows admins to create node-scoped policies', async () => {
         const res = await request(app)
             .post('/api/auto-heal/policies')
             .set('Authorization', `Bearer ${userToken(TEST_USERNAME)}`)

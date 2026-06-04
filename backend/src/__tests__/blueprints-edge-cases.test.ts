@@ -50,8 +50,6 @@ beforeAll(async () => {
     ({ BlueprintService } = await import('../services/BlueprintService'));
 
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
     ({ app } = await import('../index'));
     adminCookie = await loginAsTestAdmin(app);
@@ -62,8 +60,6 @@ afterAll(() => cleanupTestDb(tmpDir));
 beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
     // Reset developer mode so the diagnostics matrix below is order-independent.
     DatabaseService.getInstance().updateGlobalSetting('developer_mode', '0');
     const db = DatabaseService.getInstance().getDb();

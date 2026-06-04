@@ -28,7 +28,6 @@ interface RemoteSearchFailure {
 export interface StackListProps {
   files: string[];
   isLoading: boolean;
-  isPaid: boolean;
   selectedFile: string | null;
   searchQuery: string;
   stackLabelMap: Record<string, Label[]>;
@@ -118,7 +117,7 @@ interface StackListBulkProps {
 
 export function StackList(props: StackListProps & StackListBulkProps) {
   const {
-    files, isLoading, isPaid, selectedFile, searchQuery, stackLabelMap, stackStatuses,
+    files, isLoading, selectedFile, searchQuery, stackLabelMap, stackStatuses,
     stackUpdates, gitSourcePendingMap, pinnedFiles, isCollapsed, toggleCollapse,
     isBusy, getDisplayName, onSelectFile, buildMenuCtx,
     bulkMode, selectedFiles, onToggleSelect,
@@ -179,7 +178,6 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                     status={stackStatuses[file] ?? 'unknown'}
                     isBusy={isBusy(file)}
                     isActive={selectedFile === file}
-                    isPaid={isPaid}
                     labels={stackLabelMap[file] ?? []}
                     hasUpdate={!!stackUpdates[file]}
                     hasGitPending={!!gitSourcePendingMap[file]}

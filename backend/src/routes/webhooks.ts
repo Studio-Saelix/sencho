@@ -1,9 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService, type WebhookAction } from '../services/DatabaseService';
 import { WebhookService } from '../services/WebhookService';
-import { LicenseService } from '../services/LicenseService';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { webhookTriggerLimiter } from '../middleware/rateLimiters';
 
 const VALID_WEBHOOK_ACTIONS: readonly WebhookAction[] = ['deploy', 'restart', 'stop', 'start', 'pull', 'git-pull'];
@@ -16,7 +15,6 @@ function isWebhookAction(value: unknown): value is WebhookAction {
 export const webhooksRouter = Router();
 
 webhooksRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   try {
     const webhooks = DatabaseService.getInstance().getWebhooks();
     const svc = WebhookService.getInstance();
@@ -29,7 +27,6 @@ webhooksRouter.get('/', authMiddleware, async (req: Request, res: Response): Pro
 
 webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const { name, stack_name, action, enabled, node_id } = req.body;
     if (!name || !stack_name || !action) {
@@ -75,7 +72,6 @@ webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
 
 webhooksRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseInt(req.params.id as string, 10);
     const webhook = DatabaseService.getInstance().getWebhook(id);
@@ -119,7 +115,6 @@ webhooksRouter.put('/:id', authMiddleware, async (req: Request, res: Response): 
 
 webhooksRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseInt(req.params.id as string, 10);
     DatabaseService.getInstance().deleteWebhook(id);
@@ -131,7 +126,6 @@ webhooksRouter.delete('/:id', authMiddleware, async (req: Request, res: Response
 });
 
 webhooksRouter.get('/:id/history', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseInt(req.params.id as string, 10);
     const executions = DatabaseService.getInstance().getWebhookExecutions(id);
@@ -145,17 +139,17 @@ webhooksRouter.get('/:id/history', authMiddleware, async (req: Request, res: Res
 // Public: authenticated via HMAC signature, not session cookie.
 //
 // Every unauthenticated rejection returns the same 404 with the same body so
-// callers cannot enumerate webhook ids or fingerprint the instance's licence
-// tier from the response surface. Successful authentication still returns 202.
+// callers cannot enumerate webhook ids from the response surface. Successful
+// authentication still returns 202.
 //
 // The handler also runs the HMAC computation on every path (using a decoy
 // secret and an empty buffer when the real ones are missing) so the wall-
 // clock cost of a reject path matches the wall-clock cost of a real-shape
 // wrong-secret path. Without this, repeated near-rate-limit probes with a
 // large attacker-controlled body could distinguish a valid-and-enabled
-// webhook id on a paid tier from the other reject cases via response
-// latency. Timing now depends only on the size of the request body, which
-// the attacker already controls and which reveals nothing webhook-specific.
+// webhook id from the other reject cases via response latency. Timing now
+// depends only on the size of the request body, which the attacker already
+// controls and which reveals nothing webhook-specific.
 webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, res: Response): Promise<void> => {
   const unauthenticated = (): void => {
     res.status(404).json({ error: 'Webhook not found or signature invalid' });
@@ -165,7 +159,6 @@ webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, 
     const db = DatabaseService.getInstance();
     const webhook = db.getWebhook(id);
 
-    const tier = LicenseService.getInstance().getTier();
     const signature = req.headers['x-webhook-signature'] as string | undefined;
 
     // Unconditional HMAC. The decoy secret keeps the work non-skippable when
@@ -182,7 +175,6 @@ webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, 
     const sigOk = svc.validateSignature(payload, secretForHmac, signature ?? '');
 
     if (!webhook || !webhook.enabled) return unauthenticated();
-    if (tier !== 'paid') return unauthenticated();
     if (!signature) return unauthenticated();
     if (!req.rawBody) return unauthenticated();
     if (!sigOk) return unauthenticated();
@@ -208,9 +200,8 @@ webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, 
     // Pass the already-loaded webhook through so execute() never re-fetches
     // by id. If an admin deletes the row between this line and the async
     // dispatch the action still completes and recordExecution swallows the
-    // FK error from the CASCADE. atomic is unconditionally true: the tier
-    // gate above already rejected any caller without a Skipper/Admiral
-    // licence, so the deploy/pull paths always run in atomic mode here.
+    // FK error from the CASCADE. atomic is unconditionally true, so the
+    // deploy/pull paths always run in atomic mode here.
     svc.execute(webhook, action, triggerSource, true).catch(err => {
       console.error(`[Webhooks] Execution error for webhook ${id}:`, err);
     });

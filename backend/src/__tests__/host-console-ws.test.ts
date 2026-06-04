@@ -21,11 +21,10 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
   beforeAll(async () => {
     vi.restoreAllMocks();
     tmpDir = await setupTestDb();
-    // Host console requires paid + admiral; mock the license so the tier gate
+    // Host console requires the paid tier; mock the license so the tier gate
     // passes for the admin/accepted cases. Individual tests override as needed.
     const { LicenseService } = await import('../services/LicenseService');
     getTierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
     const mod = await import('../index');
     server = mod.server;
     await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -79,8 +78,8 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     expect(await expectRejected(ws)).toBe(403);
   });
 
-  it('rejects an admin on a sub-Admiral tier (403)', async () => {
-    getTierSpy.mockReturnValueOnce('free');
+  it('rejects an admin on the Community tier (403)', async () => {
+    getTierSpy.mockReturnValueOnce('community');
     const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${adminToken()}` } });
     expect(await expectRejected(ws)).toBe(403);
   });

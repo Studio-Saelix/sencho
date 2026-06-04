@@ -38,19 +38,18 @@ beforeEach(() => {
   apiFetchMock.mockReset();
   apiFetchMock.mockImplementation(() => Promise.resolve(okJson({
     tier: 'community',
-    variant: null,
-    notifications: { agents: {}, alertRules: 0, routingRules: { count: 0, enabledCount: 0, locked: true, requiredTier: 'skipper' } },
+    notifications: { agents: {}, alertRules: 0, routingRules: { count: 0, enabledCount: 0, locked: true } },
     automation: {
       autoHeal: { total: 0, enabled: 0 },
       autoUpdate: { enabled: 0, total: 0 },
-      scheduledTasks: { total: 0, enabled: 0, locked: true, requiredTier: 'admiral' },
-      webhooks: { total: 0, enabled: 0, locked: true, requiredTier: 'skipper' },
+      scheduledTasks: { total: 0, enabled: 0, locked: true },
+      webhooks: { total: 0, enabled: 0, locked: true },
     },
     security: {
       mfaEnabled: null,
       ssoEnabled: false,
       ssoProvider: null,
-      scanPolicies: { total: 0, enabled: 0, locked: true, requiredTier: 'skipper' },
+      scanPolicies: { total: 0, enabled: 0, locked: true },
     },
     thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false },
     backup: { provider: 'disabled', autoUpload: false, locked: false },

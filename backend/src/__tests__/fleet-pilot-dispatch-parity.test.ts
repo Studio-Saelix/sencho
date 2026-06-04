@@ -98,7 +98,6 @@ function mockFetch(handler: (url: string, init?: RequestInit) => Response | Prom
 
 function mockPaidTier() {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
 }
 
 function seedLabel(nodeId: number, name: string): number {

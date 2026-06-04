@@ -2,9 +2,9 @@ import type { Request, Response } from 'express';
 import { DatabaseService, type UserRole, type ResourceType } from '../services/DatabaseService';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
-import { effectiveVariant } from './tierGates';
+import { effectiveTier } from './tierGates';
 
-// --- Scoped RBAC Permission Engine (Admiral) ---
+// --- Scoped RBAC Permission Engine (paid) ---
 
 export type PermissionAction =
   | 'stack:read' | 'stack:edit' | 'stack:deploy' | 'stack:create' | 'stack:delete'
@@ -34,7 +34,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, PermissionAction[]> = {
   ],
 };
 
-/** Core permission resolver. Admin bypasses all checks; scoped assignments only apply on Admiral. */
+/** Core permission resolver. Admin bypasses all checks; scoped assignments only apply on the paid tier. */
 export function checkPermission(
   req: Request,
   action: PermissionAction,
@@ -51,7 +51,7 @@ export function checkPermission(
   if (ROLE_PERMISSIONS[globalRole]?.includes(action)) return true;
 
   if (!resourceType || !resourceId) return false;
-  if (effectiveVariant(req) !== 'admiral') return false;
+  if (effectiveTier(req) !== 'paid') return false;
 
   const assignments = DatabaseService.getInstance().getRoleAssignments(req.user.userId, resourceType, resourceId);
   if (isDebugEnabled()) console.log('[RBAC:diag] Scoped assignments found:', assignments.length, 'for user:', req.user.userId);

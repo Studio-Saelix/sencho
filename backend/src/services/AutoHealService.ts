@@ -6,7 +6,7 @@ import { ContainerHealthSnapshot } from './DockerEventService';
 import { LicenseService } from './LicenseService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER } from './license-headers';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 
@@ -111,14 +111,12 @@ export class AutoHealService {
     }
 
     /**
-     * From a paid controlling instance, ping each enrolled remote node's auto-heal
-     * list endpoint so the remote renews its proxy entitlement lease. Without this,
-     * a Community-tier remote stops evaluating its policies a few minutes after the
-     * operator last opened the Auto-Heal sheet. Best-effort and per-node isolated:
-     * a single unreachable node never blocks the others or throws.
+     * Ping each enrolled remote node's auto-heal list endpoint so the remote
+     * renews its proxy entitlement lease, keeping its policies evaluating
+     * between operator visits to the Auto-Heal sheet. Best-effort and per-node
+     * isolated: a single unreachable node never blocks the others or throws.
      */
     private async refreshRemoteLeases(): Promise<void> {
-        if (LicenseService.getInstance().getTier() !== 'paid') return;
         const remotes = DatabaseService.getInstance().getNodes().filter(n => n.type === 'remote');
         if (remotes.length === 0) return;
 
@@ -148,7 +146,6 @@ export class AutoHealService {
                     headers: {
                         'Authorization': `Bearer ${target.apiToken}`,
                         [PROXY_TIER_HEADER]: proxyHeaders.tier,
-                        [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
                     },
                     signal: AbortSignal.timeout(LEASE_REFRESH_TIMEOUT_MS),
                 });
@@ -186,19 +183,15 @@ export class AutoHealService {
         if (this.isProcessing) return;
         this.isProcessing = true;
         try {
-            const localPaid = LicenseService.getInstance().getTier() === 'paid';
             const db = DatabaseService.getInstance();
 
             // Evaluate only on local nodes (remote nodes self-monitor via their own instance)
             const nodes = db.getNodes().filter(n => n.type === 'local');
-            const now = Date.now();
             if (isDebugEnabled()) {
-                console.log(`[AutoHeal:diag] evaluate: ${nodes.length} local node(s), localPaid=${localPaid}`);
+                console.log(`[AutoHeal:diag] evaluate: ${nodes.length} local node(s)`);
             }
             for (const node of nodes) {
-                const policies = db.getAutoHealPolicies(undefined, node.id).filter(p =>
-                    p.enabled === 1 && (localPaid || p.proxy_entitled_until > now)
-                );
+                const policies = db.getAutoHealPolicies(undefined, node.id).filter(p => p.enabled === 1);
                 this.pruneInactivePolicyHistory(node.id, policies);
                 if (policies.length === 0) continue;
                 if (isDebugEnabled()) {

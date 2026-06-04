@@ -3,78 +3,56 @@
  * and validate(). Without this guard, any LS license (from any store, any
  * product) returns valid: true on /v1/licenses/validate and unlocks Sencho.
  *
- * The pure-function tests below exercise resolveSenchoVariantFromMeta()
- * directly. The activate() / validate() tests mock axios and DatabaseService
- * so we can drive each rejection branch and assert that no DB writes happen
- * on a non-matching response.
+ * The pure-function tests below exercise isSenchoLicenseMeta() directly. The
+ * activate() / validate() tests mock axios and DatabaseService so we can drive
+ * each rejection branch and assert that no DB writes happen on a non-matching
+ * response.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
-    resolveSenchoVariantFromMeta,
+    isSenchoLicenseMeta,
     SENCHO_LS_STORE_ID,
-    SENCHO_LS_PRODUCT_ID_SKIPPER,
     SENCHO_LS_PRODUCT_ID_ADMIRAL,
 } from '../services/LicenseService';
 
-// LS catalog used in the live store. Tests reference these directly so a future
-// catalog change forces an explicit test update rather than silently passing.
-const VARIANT_SKIPPER_MONTHLY = 1453178;
-const VARIANT_SKIPPER_ANNUAL = 1453197;
-const VARIANT_SKIPPER_LIFETIME = 1453198;
-const VARIANT_ADMIRAL_MONTHLY = 1453209;
-const VARIANT_ADMIRAL_ANNUAL = 1453212;
-const VARIANT_ADMIRAL_LIFETIME = 1453217;
+// The retired Skipper product id. Greenfield: it is no longer honored, so the
+// guard must reject it. Referenced explicitly so a future catalog change forces
+// an intentional test update.
+const RETIRED_SKIPPER_PRODUCT_ID = 924135;
 
-const buildMeta = (overrides: Partial<{ store_id: number; product_id: number; variant_id: number }> = {}) => ({
+const buildMeta = (overrides: Partial<{ store_id: number; product_id: number }> = {}) => ({
     store_id: SENCHO_LS_STORE_ID,
-    product_id: SENCHO_LS_PRODUCT_ID_SKIPPER,
-    variant_id: VARIANT_SKIPPER_MONTHLY,
+    product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL,
     ...overrides,
 });
 
-describe('resolveSenchoVariantFromMeta()', () => {
-    it('returns null for undefined meta', () => {
-        expect(resolveSenchoVariantFromMeta(undefined)).toBeNull();
+describe('isSenchoLicenseMeta()', () => {
+    it('returns false for undefined meta', () => {
+        expect(isSenchoLicenseMeta(undefined)).toBe(false);
     });
 
-    it('returns null when store_id is missing', () => {
-        expect(resolveSenchoVariantFromMeta({ product_id: SENCHO_LS_PRODUCT_ID_SKIPPER, variant_id: VARIANT_SKIPPER_MONTHLY })).toBeNull();
+    it('returns false when store_id is missing', () => {
+        expect(isSenchoLicenseMeta({ product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL })).toBe(false);
     });
 
-    it('returns null when store_id does not match the Sencho store', () => {
-        expect(resolveSenchoVariantFromMeta(buildMeta({ store_id: 999999 }))).toBeNull();
+    it('returns false when store_id does not match the Sencho store', () => {
+        expect(isSenchoLicenseMeta(buildMeta({ store_id: 999999 }))).toBe(false);
     });
 
-    it('returns null when product_id is missing', () => {
-        expect(resolveSenchoVariantFromMeta({ store_id: SENCHO_LS_STORE_ID, variant_id: VARIANT_SKIPPER_MONTHLY })).toBeNull();
+    it('returns false when product_id is missing', () => {
+        expect(isSenchoLicenseMeta({ store_id: SENCHO_LS_STORE_ID })).toBe(false);
     });
 
-    it('returns null when product_id is not a recognized Sencho product', () => {
-        expect(resolveSenchoVariantFromMeta(buildMeta({ product_id: 555555 }))).toBeNull();
+    it('returns false when product_id is not the Sencho paid product', () => {
+        expect(isSenchoLicenseMeta(buildMeta({ product_id: 555555 }))).toBe(false);
     });
 
-    it('returns null when variant_id is missing', () => {
-        expect(resolveSenchoVariantFromMeta({ store_id: SENCHO_LS_STORE_ID, product_id: SENCHO_LS_PRODUCT_ID_SKIPPER })).toBeNull();
+    it('returns false for the retired Skipper product (greenfield)', () => {
+        expect(isSenchoLicenseMeta(buildMeta({ product_id: RETIRED_SKIPPER_PRODUCT_ID }))).toBe(false);
     });
 
-    it('returns null when variant_id is unknown', () => {
-        expect(resolveSenchoVariantFromMeta(buildMeta({ variant_id: 1 }))).toBeNull();
-    });
-
-    it.each([
-        ['Skipper Monthly', VARIANT_SKIPPER_MONTHLY],
-        ['Skipper Annual', VARIANT_SKIPPER_ANNUAL],
-        ['Skipper Lifetime', VARIANT_SKIPPER_LIFETIME],
-    ])('resolves %s variant to skipper', (_label, variantId) => {
-        expect(resolveSenchoVariantFromMeta(buildMeta({ product_id: SENCHO_LS_PRODUCT_ID_SKIPPER, variant_id: variantId }))).toBe('skipper');
-    });
-
-    it.each([
-        ['Admiral Monthly', VARIANT_ADMIRAL_MONTHLY],
-        ['Admiral Annual', VARIANT_ADMIRAL_ANNUAL],
-        ['Admiral Lifetime', VARIANT_ADMIRAL_LIFETIME],
-    ])('resolves %s variant to admiral', (_label, variantId) => {
-        expect(resolveSenchoVariantFromMeta(buildMeta({ product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL, variant_id: variantId }))).toBe('admiral');
+    it('returns true for the Sencho paid (Admiral) product', () => {
+        expect(isSenchoLicenseMeta(buildMeta())).toBe(true);
     });
 });
 
@@ -138,16 +116,16 @@ describe('LicenseService.activate() - catalog ID guard', () => {
         expect(mockSetSystemState).not.toHaveBeenCalledWith('license_status', 'active');
     });
 
-    it('rejects activation when product_id is not a Sencho product', async () => {
+    it('rejects activation when product_id is not the Sencho paid product', async () => {
         mockAxiosPost.mockResolvedValueOnce(buildActivationResponse(buildMeta({ product_id: 555555 })));
         const result = await svc.activate('OTHER-PRODUCT-KEY');
         expect(result.success).toBe(false);
         expect(mockSetSystemState).not.toHaveBeenCalledWith('license_status', 'active');
     });
 
-    it('rejects activation when variant_id is unknown', async () => {
-        mockAxiosPost.mockResolvedValueOnce(buildActivationResponse(buildMeta({ variant_id: 1 })));
-        const result = await svc.activate('UNKNOWN-VARIANT-KEY');
+    it('rejects activation for a retired Skipper-product license (greenfield)', async () => {
+        mockAxiosPost.mockResolvedValueOnce(buildActivationResponse(buildMeta({ product_id: RETIRED_SKIPPER_PRODUCT_ID })));
+        const result = await svc.activate('OLD-SKIPPER-KEY');
         expect(result.success).toBe(false);
         expect(mockSetSystemState).not.toHaveBeenCalledWith('license_status', 'active');
     });
@@ -162,10 +140,9 @@ describe('LicenseService.activate() - catalog ID guard', () => {
                 license_key: { id: 1, status: 'active', key: 'k', activation_limit: 1, activation_usage: 1, created_at: '2026-01-01', expires_at: null },
                 meta: {
                     store_id: SENCHO_LS_STORE_ID,
-                    product_id: SENCHO_LS_PRODUCT_ID_SKIPPER,
-                    variant_id: VARIANT_SKIPPER_MONTHLY,
-                    variant_name: 'Skipper Monthly',
-                    product_name: 'Sencho Skipper',
+                    product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL,
+                    variant_name: 'Admiral Monthly',
+                    product_name: 'Sencho Admiral',
                 },
                 // instance: omitted on purpose
             },
@@ -185,7 +162,6 @@ describe('LicenseService.activate() - catalog ID guard', () => {
                 meta: {
                     store_id: SENCHO_LS_STORE_ID,
                     product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL,
-                    variant_id: VARIANT_ADMIRAL_LIFETIME,
                     variant_name: 'Admiral Lifetime',
                     product_name: 'Sencho Admiral',
                 },
@@ -206,32 +182,17 @@ describe('LicenseService.activate() - catalog ID guard', () => {
         expect(mockSetSystemState).not.toHaveBeenCalled();
     });
 
-    it('succeeds and stores admiral variant for an Admiral Lifetime license', async () => {
+    it('succeeds and goes active for a valid Sencho paid license', async () => {
         mockAxiosPost.mockResolvedValueOnce(buildActivationResponse({
             store_id: SENCHO_LS_STORE_ID,
             product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL,
-            variant_id: VARIANT_ADMIRAL_LIFETIME,
             variant_name: 'Admiral Lifetime',
             product_name: 'Sencho Admiral',
         }));
         const result = await svc.activate('GOOD-ADMIRAL-KEY');
         expect(result.success).toBe(true);
         expect(mockSetSystemState).toHaveBeenCalledWith('license_status', 'active');
-        expect(mockSetSystemState).toHaveBeenCalledWith('license_variant_type', 'admiral');
-        expect(mockSetSystemState).toHaveBeenCalledWith('license_variant_id', String(VARIANT_ADMIRAL_LIFETIME));
-    });
-
-    it('succeeds and stores skipper variant for a Skipper Monthly license', async () => {
-        mockAxiosPost.mockResolvedValueOnce(buildActivationResponse({
-            store_id: SENCHO_LS_STORE_ID,
-            product_id: SENCHO_LS_PRODUCT_ID_SKIPPER,
-            variant_id: VARIANT_SKIPPER_MONTHLY,
-            variant_name: 'Skipper Monthly',
-            product_name: 'Sencho Skipper',
-        }));
-        const result = await svc.activate('GOOD-SKIPPER-KEY');
-        expect(result.success).toBe(true);
-        expect(mockSetSystemState).toHaveBeenCalledWith('license_variant_type', 'skipper');
+        expect(mockSetSystemState).toHaveBeenCalledWith('license_key', 'GOOD-ADMIRAL-KEY');
     });
 });
 
@@ -278,14 +239,12 @@ describe('LicenseService.validate() - catalog ID guard', () => {
         mockAxiosPost.mockResolvedValueOnce(buildValidationResponse({
             store_id: SENCHO_LS_STORE_ID,
             product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL,
-            variant_id: VARIANT_ADMIRAL_ANNUAL,
             variant_name: 'Admiral Annual',
             product_name: 'Sencho Admiral',
         }));
         const result = await svc.validate();
         expect(result.success).toBe(true);
         expect(mockSetSystemState).toHaveBeenCalledWith('license_status', 'active');
-        expect(mockSetSystemState).toHaveBeenCalledWith('license_variant_type', 'admiral');
     });
 
     it('marks the license expired when LS reports key_status=expired even with matching meta', async () => {
@@ -295,10 +254,9 @@ describe('LicenseService.validate() - catalog ID guard', () => {
                 license_key: { id: 1, status: 'expired', key: 'k', activation_limit: 1, activation_usage: 1, created_at: '2026-01-01', expires_at: '2026-04-01' },
                 meta: {
                     store_id: SENCHO_LS_STORE_ID,
-                    product_id: SENCHO_LS_PRODUCT_ID_SKIPPER,
-                    variant_id: VARIANT_SKIPPER_MONTHLY,
-                    variant_name: 'Skipper Monthly',
-                    product_name: 'Sencho Skipper',
+                    product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL,
+                    variant_name: 'Admiral Monthly',
+                    product_name: 'Sencho Admiral',
                 },
             },
         });
@@ -317,7 +275,6 @@ describe('LicenseService.validate() - catalog ID guard', () => {
                 meta: {
                     store_id: SENCHO_LS_STORE_ID,
                     product_id: SENCHO_LS_PRODUCT_ID_ADMIRAL,
-                    variant_id: VARIANT_ADMIRAL_LIFETIME,
                     variant_name: 'Admiral Lifetime',
                     product_name: 'Sencho Admiral',
                 },

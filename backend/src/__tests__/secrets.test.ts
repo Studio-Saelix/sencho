@@ -76,8 +76,6 @@ beforeAll(async () => {
 
     const { LicenseService } = await import('../services/LicenseService');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
     ({ app } = await import('../index'));
 });

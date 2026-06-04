@@ -37,7 +37,7 @@ import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cach
 import { activeBulkActions } from './labels';
 import { runLocalLabelStop, type LabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
@@ -586,7 +586,6 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
     const userId = req.user?.userId ?? 0;
     const ls = LicenseService.getInstance();
     const localTier = ls.getTier();
-    const localVariant = ls.getVariant();
 
     const results = await Promise.allSettled(
       nodes.map(async (node: Node): Promise<FleetNodeConfiguration> => {
@@ -596,7 +595,7 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
             name: node.name,
             type: 'local',
             status: 'online',
-            configuration: buildLocalConfigurationStatus(node.id, userId, localTier, localVariant),
+            configuration: buildLocalConfigurationStatus(node.id, userId, localTier),
           };
         }
 
@@ -612,7 +611,6 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
               headers: {
                 ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}),
                 [PROXY_TIER_HEADER]: localTier,
-                [PROXY_VARIANT_HEADER]: localVariant ?? '',
               },
               signal: AbortSignal.timeout(10000),
             },
@@ -1557,7 +1555,7 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
   }
 });
 
-// ─── Fleet Snapshots (manual: Community; scheduled: Skipper+) ───
+// ─── Fleet Snapshots (manual and scheduled: every tier) ───
 
 fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
@@ -1764,9 +1762,9 @@ async function remoteStackError(action: string, res: Awaited<ReturnType<typeof f
 }
 
 // Builds the base URL + proxy headers for a remote node, or null when the node
-// has no reachable target. Tier/variant headers describe the central instance
-// and stay unconditional; the Bearer header is gated on a non-empty token
-// because pilot-loopback dispatch carries auth via the tunnel.
+// has no reachable target. The tier header describes the central instance and
+// stays unconditional; the Bearer header is gated on a non-empty token because
+// pilot-loopback dispatch carries auth via the tunnel.
 function buildRemoteProxyContext(node: Node): RemoteProxyContext | null {
   const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
   if (!proxyTarget) return null;
@@ -1774,7 +1772,6 @@ function buildRemoteProxyContext(node: Node): RemoteProxyContext | null {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     [PROXY_TIER_HEADER]: proxyHeaders.tier,
-    [PROXY_VARIANT_HEADER]: proxyHeaders.variant ?? '',
   };
   if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
   return { baseUrl: proxyTarget.apiUrl.replace(/\/$/, ''), headers };

@@ -21,7 +21,6 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 
 interface StackAlert {
     id?: number;
@@ -129,22 +128,16 @@ function actionLabel(action: AutoHealHistoryEntry['action']): string {
 }
 
 export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'alerts' }: StackAlertSheetProps) {
-    const { isPaid } = useLicense();
-    // Per Sencho convention: paid features hide their trigger entirely. Community users
-    // never see the Auto-heal tab, and a stray initialTab='auto-heal' falls back to alerts.
-    const effectiveInitialTab: MonitorTab = !isPaid && initialTab === 'auto-heal' ? 'alerts' : initialTab;
-    const [activeTab, setActiveTab] = useState<MonitorTab>(effectiveInitialTab);
+    const [activeTab, setActiveTab] = useState<MonitorTab>(initialTab);
 
     useEffect(() => {
-        if (open) setActiveTab(effectiveInitialTab);
-    }, [open, effectiveInitialTab, stackName]);
+        if (open) setActiveTab(initialTab);
+    }, [open, initialTab, stackName]);
 
-    const tabs = isPaid
-        ? [
-            { id: 'alerts', label: 'Alerts' },
-            { id: 'auto-heal', label: 'Auto-heal' },
-        ]
-        : [{ id: 'alerts', label: 'Alerts' }];
+    const tabs = [
+        { id: 'alerts', label: 'Alerts' },
+        { id: 'auto-heal', label: 'Auto-heal' },
+    ];
 
     return (
         <SystemSheet
@@ -159,7 +152,7 @@ export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'a
             size="md"
         >
             {activeTab === 'alerts' && <AlertsTab stackName={stackName} />}
-            {activeTab === 'auto-heal' && isPaid && <AutoHealTab stackName={stackName} open={open} />}
+            {activeTab === 'auto-heal' && <AutoHealTab stackName={stackName} open={open} />}
         </SystemSheet>
     );
 }

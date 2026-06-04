@@ -11,7 +11,7 @@ import {
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
-import { PROXY_TIER_HEADER, PROXY_VARIANT_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER } from './license-headers';
 import { LicenseService } from './LicenseService';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeployScan } from '../helpers/policyGate';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
@@ -442,7 +442,6 @@ export class BlueprintService {
         return {
             Authorization: `Bearer ${apiToken}`,
             [PROXY_TIER_HEADER]: proxy.tier,
-            [PROXY_VARIANT_HEADER]: proxy.variant ?? '',
             'Content-Type': 'application/json',
         };
     }

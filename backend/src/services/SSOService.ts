@@ -12,7 +12,6 @@ import {
 } from 'openid-client';
 import { DatabaseService, User, AuthProvider } from './DatabaseService';
 import { CryptoService } from './CryptoService';
-import { LicenseService } from './LicenseService';
 import { CacheService } from './CacheService';
 import { isDebugEnabled } from '../utils/debug';
 
@@ -589,19 +588,7 @@ export class SSOService {
 
             // Sync role from identity provider on every login
             if (params.role !== existing.role) {
-                if (params.role === 'admin') {
-                    const seatLimits = LicenseService.getInstance().getSeatLimits();
-                    if (seatLimits.maxAdmins === null || db.getAdminCount() < seatLimits.maxAdmins) {
-                        updates.role = params.role;
-                    } else if (debug) {
-                        console.debug('[SSO:debug] Admin seat limit reached; keeping current role for existing user', {
-                            userId: existing.id, username: existing.username,
-                        });
-                    }
-                } else {
-                    // Always allow demotion (e.g., removed from admin group)
-                    updates.role = params.role;
-                }
+                updates.role = params.role;
             }
 
             if (Object.keys(updates).length > 0) {
@@ -611,16 +598,7 @@ export class SSOService {
             return db.getUser(existing.id) || existing;
         }
 
-        // Check seat limits
-        let { role } = params;
-        const seatLimits = LicenseService.getInstance().getSeatLimits();
-        if (role === 'admin' && seatLimits.maxAdmins !== null && db.getAdminCount() >= seatLimits.maxAdmins) {
-            console.warn(`[SSO] Admin seat limit reached; provisioning ${params.preferredUsername} as viewer instead of admin`);
-            role = 'viewer';
-        }
-        if (role === 'viewer' && seatLimits.maxViewers !== null && db.getViewerCount() >= seatLimits.maxViewers) {
-            throw new Error('User seat limit reached. Contact your administrator to increase your license.');
-        }
+        const { role } = params;
 
         // Generate unique username
         let username = params.preferredUsername.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);

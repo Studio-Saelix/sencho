@@ -67,7 +67,7 @@ Each row gives you everything you need to read the stack at a glance, in a fixed
 Click the **Bulk mode** icon next to **Create Stack** (or press <kbd>B</kbd>) to enter selection mode. A checkbox appears at the left of every row, and a sticky toolbar slides in just above the list:
 
 - **Start**, **Stop**, **Restart** apply the action to every selected stack.
-- **Update** pulls the latest images for every selected stack and requires a **Skipper** or **Admiral** license.
+- **Update** pulls the latest images for every selected stack.
 
 Click rows to toggle their selection. The toolbar header shows a running count. Click the **×** in the corner of the toolbar to clear the selection, and click the icon again (or press <kbd>B</kbd>) to leave bulk mode.
 
@@ -85,7 +85,7 @@ Right-click any stack (or open the kebab that appears on hover) for its context 
 - **Destructive**: **Delete**.
 
 <Note>
-  **Auto-Heal** requires a **Skipper** or **Admiral** license; configuring policies (add, toggle, delete) also requires an **admin** role. **Schedule task** requires a **Skipper** or **Admiral** license and an **admin** role.
+  Configuring **Auto-Heal** policies (add, toggle, delete) requires an **admin** role. **Schedule task** also requires an **admin** role.
 </Note>
 
 <Frame>
@@ -113,7 +113,7 @@ On macOS, use <kbd>Cmd</kbd> in place of <kbd>Ctrl</kbd>.
 | Key | Action |
 |-----|--------|
 | <kbd>A</kbd> | Open the alerts sheet |
-| <kbd>H</kbd> | Open the auto-heal sheet (Skipper or Admiral) |
+| <kbd>H</kbd> | Open the auto-heal sheet |
 | <kbd>U</kbd> | Check for image updates |
 | <kbd>P</kbd> | Pin or unpin the stack |
 | <kbd>B</kbd> | Toggle bulk mode |
@@ -144,9 +144,9 @@ The footer surfaces the most recent stack lifecycle event on the node. Each tick
     Click the **+** icon to the right of the search box to bring them back. The chip row collapses to a thin **−** / **+** toggle, and the state is remembered in your browser, so an earlier collapse persists across reloads until you expand it again.
   </Accordion>
   <Accordion title="Schedule task is missing from the right-click menu">
-    Scheduling requires a **Skipper** or **Admiral** license and an **admin** role. Ask an admin on this node to schedule the task for you, or sign in with an admin account.
+    Scheduling requires an **admin** role. Ask an admin on this node to schedule the task for you, or sign in with an admin account.
   </Accordion>
   <Accordion title="Auto-Heal panel opens but Add Policy and the toggles are missing">
-    Reading existing Auto-Heal policies only needs a **Skipper** or **Admiral** license, so the panel still opens for non-admin operators on paid tiers. Adding, enabling, disabling, or deleting policies also requires the **admin** role. Sign in with an admin account, or ask an admin on this node to make the change.
+    Reading existing Auto-Heal policies is open to every operator, so the panel still opens for non-admins. Adding, enabling, disabling, or deleting policies requires the **admin** role. Sign in with an admin account, or ask an admin on this node to make the change.
   </Accordion>
 </AccordionGroup>

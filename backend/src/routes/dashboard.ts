@@ -1,9 +1,9 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService, type StackRestartSummary } from '../services/DatabaseService';
 import { CloudBackupService } from '../services/CloudBackupService';
-import { effectiveTier, effectiveVariant } from '../middleware/tierGates';
+import { effectiveTier } from '../middleware/tierGates';
 import { isDebugEnabled } from '../utils/debug';
-import type { LicenseTier, LicenseVariant } from '../services/license-types';
+import type { LicenseTier } from '../services/license-types';
 
 export const dashboardRouter = Router();
 
@@ -14,23 +14,22 @@ interface AgentStatus {
 
 export interface ConfigurationStatus {
   tier: LicenseTier;
-  variant: LicenseVariant;
   notifications: {
     agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus };
     alertRules: number;
-    routingRules: { count: number; enabledCount: number; locked: boolean; requiredTier: 'skipper' };
+    routingRules: { count: number; enabledCount: number; locked: boolean };
   };
   automation: {
     autoHeal: { total: number; enabled: number };
     autoUpdate: { enabled: number; total: number };
-    scheduledTasks: { total: number; enabled: number; locked: boolean; requiredTier: 'admiral' };
-    webhooks: { total: number; enabled: number; locked: boolean; requiredTier: 'skipper' };
+    scheduledTasks: { total: number; enabled: number; locked: boolean };
+    webhooks: { total: number; enabled: number; locked: boolean };
   };
   security: {
     mfaEnabled: boolean | null;
     ssoEnabled: boolean;
     ssoProvider: string | null;
-    scanPolicies: { total: number; enabled: number; locked: boolean; requiredTier: 'skipper' };
+    scanPolicies: { total: number; enabled: number; locked: boolean };
   };
   thresholds: {
     cpuLimit: number;
@@ -50,11 +49,9 @@ export function buildLocalConfigurationStatus(
   nodeId: number,
   userId: number,
   tier: LicenseTier,
-  variant: LicenseVariant,
 ): ConfigurationStatus {
   const db = DatabaseService.getInstance();
   const isPaid = tier === 'paid';
-  const isAdmiral = isPaid && variant === 'admiral';
 
   const agents = db.getAgents(nodeId);
   const agentByType = (type: 'discord' | 'slack' | 'webhook'): AgentStatus => {
@@ -90,7 +87,6 @@ export function buildLocalConfigurationStatus(
 
   return {
     tier,
-    variant,
     notifications: {
       agents: {
         discord: agentByType('discord'),
@@ -98,11 +94,11 @@ export function buildLocalConfigurationStatus(
         webhook: agentByType('webhook'),
       },
       alertRules,
+      // Notification routing is available on every tier.
       routingRules: {
         count: notifRoutes.length,
         enabledCount: notifRoutes.filter(r => r.enabled).length,
-        locked: !isPaid,
-        requiredTier: 'skipper',
+        locked: false,
       },
     },
     automation: {
@@ -114,28 +110,28 @@ export function buildLocalConfigurationStatus(
         enabled: autoUpdateEnabled,
         total: autoUpdateTotal,
       },
+      // Scheduled operations are available on every tier.
       scheduledTasks: {
         total: scheduledTasks.length,
         enabled: scheduledTasks.filter(t => t.enabled === 1).length,
-        locked: !isAdmiral,
-        requiredTier: 'admiral',
+        locked: false,
       },
+      // Webhooks are available on every tier.
       webhooks: {
         total: webhooks.length,
         enabled: webhooks.filter(w => w.enabled).length,
-        locked: !isPaid,
-        requiredTier: 'skipper',
+        locked: false,
       },
     },
     security: {
       mfaEnabled: mfaRow ? mfaRow.enabled === 1 : null,
       ssoEnabled: !!enabledSso,
       ssoProvider: enabledSso?.provider ?? null,
+      // Scan policies (deploy enforcement) require a paid license.
       scanPolicies: {
         total: scanPolicies.length,
         enabled: scanPolicies.filter(p => p.enabled === 1).length,
         locked: !isPaid,
-        requiredTier: 'skipper',
       },
     },
     thresholds: {
@@ -147,8 +143,8 @@ export function buildLocalConfigurationStatus(
     },
     backup: {
       // Cloud Backup has a per-provider tier: Custom S3 is open to every
-      // tier; Sencho Cloud Backup requires Admiral. The row is rendered for
-      // every tier because Custom S3 is universally configurable, so no
+      // tier; Sencho Cloud Backup requires a paid license. The row is rendered
+      // for every tier because Custom S3 is universally configurable, so no
       // dashboard-level lock is meaningful.
       provider: cloudProvider,
       autoUpload: cloudAutoUpload,
@@ -165,9 +161,8 @@ dashboardRouter.get('/configuration', (req: Request, res: Response): void => {
     const nodeId = req.nodeId ?? 0;
     const userId = req.user?.userId ?? 0;
     const tier = effectiveTier(req);
-    const variant = effectiveVariant(req);
 
-    const payload = buildLocalConfigurationStatus(nodeId, userId, tier, variant);
+    const payload = buildLocalConfigurationStatus(nodeId, userId, tier);
     if (debug) {
       console.debug(
         `[Dashboard:debug] /configuration built in ${Date.now() - startedAt} ms (nodeId=${nodeId})`,

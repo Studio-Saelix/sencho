@@ -9,7 +9,6 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { CapabilityGate } from './CapabilityGate';
 import { PaidGate } from './PaidGate';
-import { AdmiralGate } from './AdmiralGate';
 import { Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
 import { useMastheadStats } from './settings/MastheadStatsContext';
@@ -46,7 +45,7 @@ interface SSOProviderConfig {
     oidcEmailClaim?: string;
 }
 
-// Ordered by tier: Custom OIDC (Community) → preset OIDC (Skipper) → LDAP/AD (Admiral).
+// Ordered by tier: free OIDC (Custom + presets) first, then LDAP/AD (paid).
 // The ordering reinforces the free → paid progression in the UI.
 const PROVIDERS = [
     { id: 'oidc_custom', label: 'Custom OIDC', type: 'oidc' as const },
@@ -397,7 +396,7 @@ function ProviderCard({ providerId, type, label, initialConfig, onSave }: {
 }
 
 // Mirrors the backend tier split in ssoConfig.ts requireTierForProvider: Custom OIDC
-// is free, preset OIDC (Google/GitHub/Okta) requires Skipper+, LDAP requires Admiral.
+// and preset OIDC (Google/GitHub/Okta) are free, LDAP/AD requires the paid plan.
 function ProviderCardWithGate(props: {
     providerId: string;
     type: 'ldap' | 'oidc';
@@ -406,11 +405,10 @@ function ProviderCardWithGate(props: {
     onSave: () => void;
 }) {
     const card = <ProviderCard {...props} />;
-    if (props.providerId === 'oidc_custom') return card;
     if (props.providerId === 'ldap') {
-        return <AdmiralGate>{card}</AdmiralGate>;
+        return <PaidGate>{card}</PaidGate>;
     }
-    return <PaidGate>{card}</PaidGate>;
+    return card;
 }
 
 export function SSOSection() {

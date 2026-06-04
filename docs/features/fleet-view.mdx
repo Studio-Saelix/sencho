@@ -43,13 +43,13 @@ The Fleet view is a tab strip. Four tab triggers are visible to every tier; the 
 | Tab | Tier | What it does |
 |-----|------|--------------|
 | **Overview** | Community | The grid or topology view of every node and its health. Covered in the next section. |
-| **Snapshots** | Community (manual) / Skipper (scheduled) | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
+| **Snapshots** | Community | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
 | **Status** | Community | One card per node summarising which automations and security features are configured. Covered below. |
-| **Deployments** | Skipper | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
+| **Deployments** | Admiral | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Admiral | Cross-node service routing via Sencho Mesh. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Admiral | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
 | **Fleet Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |
-| **Secrets** | Skipper | Encrypted env-var bundles you push to labeled nodes. See [Fleet Secrets](/features/fleet-secrets). |
+| **Secrets** | Admiral | Encrypted env-var bundles you push to labeled nodes. See [Fleet Secrets](/features/fleet-secrets). |
 
 ### Action buttons
 
@@ -133,7 +133,7 @@ The graph is interactive: drag the canvas to pan, scroll to zoom, drag a node to
 
 The graph re-lays out only when nodes are added, removed, or change type. Live metric updates on existing nodes do not move the layout, so an operator who has dragged nodes into a custom arrangement keeps it.
 
-#### Topology layout modes (Skipper+)
+#### Topology layout modes
 
 A toolbar at the top of the topology canvas offers three layouts. Pick the one that matches how you reason about your fleet.
 
@@ -191,7 +191,7 @@ Online nodes render a two-column summary grid with up to eight rows:
 |-----|---------------|------------|
 | **Agents** | Active notification agents, formatted `<n> active` or `None` | Always |
 | **Alert rules** | Per-stack alert rule count, formatted `<n> rule(s)` | Always |
-| **Auto-heal** | Enabled / total auto-heal policies, formatted `<enabled>/<total>` | Skipper or Admiral |
+| **Auto-heal** | Enabled / total auto-heal policies, formatted `<enabled>/<total>` | Always |
 | **Webhooks** | Active outbound webhooks, formatted `<n> active` | Always (when not gated) |
 | **MFA** | `On`, `Off`, or `Not set` | Local node only |
 | **Scanning** | Active vulnerability-scan policies, formatted `<n> policy/policies` | Always (when not gated) |

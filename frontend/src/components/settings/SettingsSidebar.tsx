@@ -16,17 +16,15 @@ interface SettingsSidebarProps {
 }
 
 export function SettingsSidebar({ currentSection, onSectionChange, dirtyFlags, onOpenPalette }: SettingsSidebarProps) {
-    const { isAdmin, permissions } = useAuth();
+    const { isAdmin } = useAuth();
     const { isPaid } = useLicense();
     const { activeNode } = useNodes();
 
-    const isAdmiral = permissions?.isAdmiral ?? false;
     const isRemote = activeNode?.type === 'remote';
 
     const visibility: VisibilityContext = {
         isAdmin,
         isPaid,
-        isAdmiral,
         isRemote,
     };
 

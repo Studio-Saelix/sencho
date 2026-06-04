@@ -7,7 +7,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import {
   Bell, Zap, Shield, HardDrive, WifiOff, CheckCircle2, RefreshCw,
 } from 'lucide-react';
-import { useLicense } from '@/context/LicenseContext';
 import { useFleetSyncStatus } from '@/hooks/useFleetSyncStatus';
 import { STICKY_CONTROL_IDENTITY_MISMATCH, type FleetSyncStatus } from '@/lib/fleetSyncApi';
 import type { ConfigurationStatusPayload } from '@/components/dashboard';
@@ -92,9 +91,8 @@ function PolicySyncRow({ state }: { state: PolicySyncState }) {
   );
 }
 
-function NodeCard({ node, isPaid, policySyncState }: {
+function NodeCard({ node, policySyncState }: {
   node: FleetNodeConfiguration;
-  isPaid: boolean;
   policySyncState: PolicySyncState | null;
 }) {
   const isRemote = node.type === 'remote';
@@ -143,12 +141,10 @@ function NodeCard({ node, isPaid, policySyncState }: {
             value={agentCount === 0 ? 'None' : `${agentCount} active`} />
           <SummaryRow icon={Bell} label="Alert rules"
             value={formatCount(notifications.alertRules, 'rule')} />
-          {isPaid && (
-            <SummaryRow icon={Zap} label="Auto-heal"
-              value={automation.autoHeal.total === 0
-                ? 'None'
-                : `${automation.autoHeal.enabled}/${automation.autoHeal.total}`} />
-          )}
+          <SummaryRow icon={Zap} label="Auto-heal"
+            value={automation.autoHeal.total === 0
+              ? 'None'
+              : `${automation.autoHeal.enabled}/${automation.autoHeal.total}`} />
           {!automation.webhooks.locked && (
             <SummaryRow icon={Zap} label="Webhooks"
               value={formatCount(automation.webhooks.enabled, 'active')} />
@@ -175,7 +171,6 @@ function NodeCard({ node, isPaid, policySyncState }: {
 }
 
 export function FleetConfiguration() {
-  const { isPaid } = useLicense();
   const { statuses: syncStatuses } = useFleetSyncStatus();
   const [nodes, setNodes] = useState<FleetNodeConfiguration[]>([]);
   const [loading, setLoading] = useState(true);
@@ -256,7 +251,6 @@ export function FleetConfiguration() {
         <NodeCard
           key={node.id}
           node={node}
-          isPaid={isPaid}
           policySyncState={syncStateByNode.get(node.id) ?? null}
         />
       ))}

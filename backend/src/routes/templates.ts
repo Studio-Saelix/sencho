@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';
-import { effectiveTier, requireAdmin } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import { templateService } from '../services/TemplateService';
 import { FileSystemService } from '../services/FileSystemService';
@@ -134,7 +134,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         }
         return;
       }
-      const atomic = effectiveTier(req) === 'paid';
+      const atomic = true;
       await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
       invalidateNodeCaches(req.nodeId);
       console.log(`[Templates] Deploy completed: ${stackName}`);

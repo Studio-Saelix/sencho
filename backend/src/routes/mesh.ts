@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { MeshError, MeshService, type MeshGlobalAlias, type MeshRegenSummary } from '../services/MeshService';
-import { requireAdmin, requireAdmiral } from '../middleware/tierGates';
+import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 
@@ -14,7 +14,7 @@ function actorFor(req: Request): string {
 }
 
 meshRouter.get('/status', async (_req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(_req, res)) return;
+    if (!requirePaid(_req, res)) return;
     try {
         const mesh = MeshService.getInstance();
         const status = await mesh.getStatus();
@@ -33,7 +33,7 @@ meshRouter.get('/status', async (_req: Request, res: Response): Promise<void> =>
  * path was opt-out + opt-in for every meshed stack on that node.
  */
 meshRouter.post('/regen-overrides', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const actor = actorFor(req);
     let summary: MeshRegenSummary | null = null;
@@ -67,7 +67,7 @@ meshRouter.post('/regen-overrides', async (req: Request, res: Response): Promise
 });
 
 meshRouter.post('/nodes/:nodeId/enable', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
@@ -80,7 +80,7 @@ meshRouter.post('/nodes/:nodeId/enable', async (req: Request, res: Response): Pr
 });
 
 meshRouter.post('/nodes/:nodeId/disable', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
@@ -100,7 +100,7 @@ meshRouter.post('/nodes/:nodeId/disable', async (req: Request, res: Response): P
  * cross-fleet alias cache without violating the local-only Dockerode rule.
  */
 meshRouter.get('/local-services/:stackName', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
     try {
@@ -120,7 +120,7 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
  * stacks deployed on the remote pilot rather than central's own list.
  */
 meshRouter.get('/local-stacks', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     try {
         const stacks = await MeshService.getInstance().listLocalStacks();
         res.json({ stacks });
@@ -155,7 +155,7 @@ function parsePortAlias(entry: unknown): MeshGlobalAlias | null {
  * Sencho's default node id.
  */
 meshRouter.put('/local-override/:stackName', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
     const body = req.body as { aliases?: unknown; portAliases?: unknown };
@@ -207,7 +207,7 @@ meshRouter.put('/local-override/:stackName', async (req: Request, res: Response)
  * linger on the deploying node.
  */
 meshRouter.delete('/local-override/:stackName', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
     try {
@@ -220,7 +220,7 @@ meshRouter.delete('/local-override/:stackName', async (req: Request, res: Respon
 });
 
 meshRouter.get('/nodes/:nodeId/stacks', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
     try {
@@ -240,7 +240,7 @@ meshRouter.get('/nodes/:nodeId/stacks', async (req: Request, res: Response): Pro
 });
 
 meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-in', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     const stackName = req.params.stackName as string;
@@ -267,7 +267,7 @@ meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-in', async (req: Request, 
 });
 
 meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-out', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     const stackName = req.params.stackName as string;
@@ -282,7 +282,7 @@ meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-out', async (req: Request,
 });
 
 meshRouter.get('/aliases', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     try {
         const aliases = await MeshService.getInstance().listAliases();
         res.json({ aliases });
@@ -293,7 +293,7 @@ meshRouter.get('/aliases', async (req: Request, res: Response): Promise<void> =>
 });
 
 meshRouter.get('/aliases/:alias/diagnostic', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     try {
         const diag = await MeshService.getInstance().getRouteDiagnostic(req.params.alias as string);
         res.json(diag);
@@ -303,7 +303,7 @@ meshRouter.get('/aliases/:alias/diagnostic', async (req: Request, res: Response)
 });
 
 meshRouter.post('/aliases/:alias/test', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     try {
         const sourceNodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const result = await MeshService.getInstance().testUpstream(req.params.alias as string, sourceNodeId);
@@ -314,7 +314,7 @@ meshRouter.post('/aliases/:alias/test', async (req: Request, res: Response): Pro
 });
 
 meshRouter.get('/nodes/:nodeId/diagnostic', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
     try {
@@ -326,7 +326,7 @@ meshRouter.get('/nodes/:nodeId/diagnostic', async (req: Request, res: Response):
 });
 
 meshRouter.get('/activity', (req: Request, res: Response): void => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     const alias = typeof req.query.alias === 'string' ? req.query.alias : undefined;
     const source = typeof req.query.source === 'string' ? (req.query.source as 'pilot' | 'mesh') : undefined;
     const level = typeof req.query.level === 'string' ? (req.query.level as 'info' | 'warn' | 'error') : undefined;
@@ -336,7 +336,7 @@ meshRouter.get('/activity', (req: Request, res: Response): void => {
 });
 
 meshRouter.get('/activity/stream', (req: Request, res: Response): void => {
-    if (!requireAdmiral(req, res)) return;
+    if (!requirePaid(req, res)) return;
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');

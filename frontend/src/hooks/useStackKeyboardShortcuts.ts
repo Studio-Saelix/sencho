@@ -52,7 +52,7 @@ export function useStackKeyboardShortcuts(
       if (key === 'a') {
         e.preventDefault();
         ctx.openAlertSheet();
-      } else if (key === 'h' && ctx.isPaid) {
+      } else if (key === 'h') {
         e.preventDefault();
         ctx.openAutoHeal();
       } else if (key === 'u') {
@@ -67,6 +67,5 @@ export function useStackKeyboardShortcuts(
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }

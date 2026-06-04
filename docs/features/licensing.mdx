@@ -3,7 +3,7 @@ title: Licensing & Billing
 description: How Sencho licensing works, including trials, activation, and subscription management.
 ---
 
-Sencho uses an open-core model. The **Community** tier is free forever with unlimited nodes. Paid tiers unlock advanced features: **Skipper** for solo operators and **Admiral** for teams.
+Sencho uses an open-core model. **Community** is the complete self-hosted control plane, free forever with unlimited nodes. **Admiral** adds governance, security, and fleet control for teams.
 
 <Tip>
   *Our tier names are inspired by the meaning of Sencho (船長), because you're the captain of your container fleet.*
@@ -11,64 +11,48 @@ Sencho uses an open-core model. The **Community** tier is free forever with unli
 
 ## Plans
 
-| Tier | Annual (per mo, billed yearly) | Monthly | Founder Lifetime | Seats |
-|------|--------------------------------|---------|------------------|-------|
-| **Community** | Free | Free | Free | 1 admin |
-| **Skipper** | $5.75 | $9.99 | $149 | 1 admin + 3 viewers |
-| **Admiral** | $20.75 | $39.99 | $499 | Unlimited |
+| Tier | Annual (per mo, billed yearly) | Monthly | Seats |
+|------|--------------------------------|---------|-------|
+| **Community** | Free | Free | Unlimited |
+| **Admiral** | $8.25 | $12 | Unlimited |
 
-For larger deployments, an **Enterprise** tier is available with custom pricing, including SLA, priority support, security questionnaires, and custom contracts. Contact [licensing@sencho.io](mailto:licensing@sencho.io) or see [the pricing page](https://sencho.io/pricing) for details.
-
-**Founder Lifetime** is an Early Access offer available for a limited time. Once the window closes, only the Monthly and Annual cycles remain.
+See [the pricing page](https://sencho.io/pricing) for current pricing.
 
 ### Feature breakdown
 
-**Community** includes:
+**Community** is the complete self-hosted control plane. It includes:
 
 - Unlimited nodes, the Monaco compose editor, the full stack file explorer (browse, view, edit, upload, download, rename, chmod, delete; admin role for writes), and the App Store with 199+ one-click templates
 - Real-time container stats, global logs, the interactive network topology graph, and stack labels
 - Git sources for compose stacks
 - Multi-node management in both Proxy and Pilot Agent modes
-- Manual fleet snapshots (create, browse, restore, delete) and Remote OTA node updates (per-node and **Update all**)
-- Fleet Actions tab (stop stacks fleet-wide by label, bulk-assign labels to many stacks on a node, prune Docker resources fleet-wide; admin role required)
-- Custom S3-compatible backup target (bring your own AWS S3, Cloudflare R2, MinIO, Backblaze B2, or Wasabi bucket)
-- Vulnerability scanning: install, update, and uninstall Trivy, on-demand scans for vulnerabilities, secrets, and misconfigurations, plus scan comparison
-- CVE suppressions
-- Alert rules with Discord, Slack, and webhook targets
-- Two-factor authentication (TOTP plus backup codes)
-- Custom OIDC single sign-on (works with Authelia, Keycloak, Authentik, Zitadel, Pocket ID, or any spec-compliant OIDC provider)
-
-**Skipper** includes everything in Community, plus:
-
 - Fleet View with search, sort, filter, and node-card drill-down
-- Webhooks (incoming, to trigger deploys from CI/CD)
-- Notification routing (per-stack and per-category rules to Discord, Slack, or any webhook)
-- Atomic deployments with rollback
-- Auto-update policies for stack images
-- Auto-heal policies
-- Scheduled operations across the full action catalog (lifecycle, updates, scans, snapshots, prune)
-- Scan policies with `block_on_deploy` deploy enforcement, SBOM (SPDX, CycloneDX), and SARIF export
-- Auto-update of the managed Trivy binary
+- Manual and scheduled fleet snapshots (create, browse, restore, delete) and Remote OTA node updates (per-node and **Update all**)
+- Fleet Actions tab (stop stacks fleet-wide by label, bulk-assign labels to many stacks on a node, prune Docker resources fleet-wide; admin role required), plus fleet-wide bulk Sencho restart
 - Bulk actions on a label (deploy, stop, or restart every stack tagged with it)
-- Fleet-wide bulk Sencho restart
-- Blueprints and Fleet Secrets
-- Preset SSO for Google, GitHub, and Okta
-- Viewer accounts (1 admin plus 3 viewers)
+- Atomic deployments with automatic rollback, and one-click rollback to the previous deployment
+- Auto-update policies for stack images and auto-heal policies for failed containers
+- Scheduled operations across the full action catalog (lifecycle, updates, scans, snapshots, prune)
+- Webhooks (incoming, to trigger deploys from CI/CD) and notification routing (per-stack and per-category rules to Discord, Slack, or any webhook)
+- Custom S3-compatible backup target (bring your own AWS S3, Cloudflare R2, MinIO, Backblaze B2, or Wasabi bucket)
+- Vulnerability scanning: install, update, and uninstall Trivy, on-demand scans for vulnerabilities, secrets, and misconfigurations, scan comparison, and CVE suppressions
+- Alert rules with Discord, Slack, and webhook targets
+- API tokens for CI/CD pipelines and scripts (admin role required)
+- Unlimited accounts with the Admin and Viewer roles
+- Two-factor authentication (TOTP plus backup codes)
+- Single sign-on with Custom OIDC (Authelia, Keycloak, Authentik, Zitadel, Pocket ID, or any spec-compliant OIDC provider) and preset providers for Google, GitHub, and Okta
 
-**Admiral** includes everything in Skipper, plus:
+**Admiral** adds governance, security, and fleet control for teams. It includes everything in Community, plus:
 
-- Unlimited admin and viewer accounts with the full role set (deployer, node-admin, auditor)
-- LDAP / Active Directory authentication
-- Audit log with CSV export
-- Host Console (a browser-based terminal on the Sencho host)
-- API tokens for CI/CD scripts
-- Private and custom registry credentials
-- Sencho Mesh (cross-node container networking)
-- Sencho Cloud Backup
+- **Governance:** advanced RBAC roles (Deployer, Node Admin, Auditor), scoped permissions per stack or node, and the audit log with CSV export
+- **Security:** Fleet Secrets, private and custom registry credentials, deploy enforcement (scan policies with `block_on_deploy`), SBOM (SPDX, CycloneDX) and SARIF export, auto-update of the managed Trivy binary, and LDAP / Active Directory authentication
+- **Fleet operations:** node labels, node cordon, Blueprints, and Sencho Mesh (cross-node container networking)
+- **Managed continuity:** Sencho Cloud Backup (a managed, off-site snapshot allowance)
+- **Operator access:** the Host Console (a browser-based terminal on the Sencho host)
 
 ## Free trial
 
-Sencho offers a **14-day Admiral trial** so you can evaluate the flagship features (Host Console, Sencho Mesh, LDAP / Active Directory, audit log, unlimited accounts) with your real infrastructure before committing. The trial is offered on the monthly and annual Admiral plans; the Founder Lifetime plan does not include a trial.
+Sencho offers a **14-day Admiral trial** so you can evaluate the flagship features (Host Console, Sencho Mesh, LDAP / Active Directory, audit log, advanced RBAC) with your real infrastructure before committing. The trial is offered on the monthly and annual Admiral plans.
 
 To start a trial:
 
@@ -103,7 +87,7 @@ Sencho validates the key and unlocks your tier. If activation fails, the toast s
 When a license is active, **Settings → License** opens on the **Plan** section. The page masthead at the top exposes three stat pills, and the section below lists the metadata for the active license.
 
 <Frame>
-  <img src="/images/licensing/license-admiral-active.png" alt="License page showing an Admiral lifetime plan with the masthead stat strip listing SCOPE, PLAN, and DURATION, then the Plan section with the Customer, Product, and masked License key fields and the Deactivate button" />
+  <img src="/images/licensing/license-admiral-active.png" alt="License page showing an active Sencho Admiral license, with the Plan section listing the Customer, Product, and masked License key fields and a Deactivate button" />
 </Frame>
 
 The masthead pills are:
@@ -111,19 +95,19 @@ The masthead pills are:
 | Pill | Meaning |
 |------|---------|
 | **SCOPE** | Reads `operator` when you are signed in as an admin. |
-| **PLAN** | The current tier: `community`, `skipper`, or `admiral`. Trial licenses show the trial tier (typically `admiral`). |
-| **DURATION** / **RENEWS** / **TRIAL** / **STATUS** | `DURATION: lifetime` for lifetime licenses, `RENEWS: <date>` for active subscriptions, `TRIAL: Xd left` for trials, and `STATUS: expired` for expired licenses. |
+| **PLAN** | The current tier: `community` or `admiral`. Trial licenses show `admiral`. |
+| **RENEWS** / **TRIAL** / **STATUS** | `RENEWS: <date>` for active subscriptions, `TRIAL: Xd left` for trials, and `STATUS: expired` for expired licenses. |
 
 The **Plan** card lists:
 
 - **Tier name** (e.g. `Sencho Admiral`) with a short status line, such as "Active license on this control plane", "Trial: X days remaining", or "Your license has expired."
 - **Customer**: the customer name on the purchase.
-- **Product**: the purchased product variant (e.g. `Sencho Admiral`).
+- **Product**: the purchased product (e.g. `Sencho Admiral`).
 - **License key**: the last four characters of your key, displayed as `****-****-****-XXXX`. The full key is never re-displayed after activation.
 
 ## Managing your subscription
 
-When the license is an active subscription (not lifetime), the Plan section action row exposes **Manage subscription** alongside **Deactivate**. **Manage subscription** opens the billing portal in a new tab, where you can update your payment method, view invoices, cancel, or switch plans.
+When the license is an active subscription, the Plan section action row exposes **Manage subscription** alongside **Deactivate**. **Manage subscription** opens the billing portal in a new tab, where you can update your payment method, view invoices, cancel, or switch plans.
 
 The same portal is reachable from the profile menu in the top-right corner of the app:
 
@@ -131,11 +115,7 @@ The same portal is reachable from the profile menu in the top-right corner of th
   <img src="/images/licensing/profile-menu.png" alt="Profile dropdown popover showing an identity header with the admin role and Admiral tier badges, a navigation strip with Settings, Documentation, and Feedback entries, an Appearance theme picker, and a Log Out button" />
 </Frame>
 
-Click your initials in the top-right corner to open the popover. For active subscription licenses, a **Billing** row appears between **Settings** and **Documentation** that opens the same portal as **Manage subscription**. Lifetime licenses have no recurring subscription to manage, so the **Billing** row is hidden.
-
-### Lifetime licenses
-
-Lifetime licenses have no recurring subscription, so the **Manage subscription** button and the profile menu **Billing** row are both hidden, and the masthead shows `DURATION: lifetime` instead of a renewal date. Deactivation, multi-node enforcement, and periodic validation work the same as for subscription licenses.
+Click your initials in the top-right corner to open the popover. For active subscription licenses, a **Billing** row appears between **Settings** and **Documentation** that opens the same portal as **Manage subscription**.
 
 ## License validation
 
@@ -150,7 +130,6 @@ The License page renders differently depending on the license status:
 | **Community** | `Sencho Community` with "Free tier with the core experience." | Visible | Visible |
 | **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a paid key can replace the trial) | Hidden |
 | **Active subscription** | Tier name with Customer, Product, License key, plus `Manage subscription` and `Deactivate` | Hidden | Hidden |
-| **Active lifetime** | Tier name with Customer, Product, License key, plus `Deactivate` only | Hidden | Hidden |
 | **Expired** | `Sencho Community` with "Your license has expired. Renew to restore paid features." and a destructive **Status: Expired** field | Visible | Visible |
 | **Disabled** | `Sencho Community` with "Your license has been disabled. Contact support for assistance." | Visible | Visible |
 

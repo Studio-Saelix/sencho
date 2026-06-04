@@ -8,7 +8,7 @@ A **Blueprint** bundles a `docker-compose.yml` with a node selector and a drift 
 Blueprints live under **Fleet · Deployments**.
 
 <Note>
-  Blueprints require a Sencho **Skipper** or **Admiral** license. Creating, editing, and withdrawing blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a single node requires Admiral.
+  Blueprints require a Sencho **Admiral** license. Creating, editing, withdrawing, and pinning blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet.
 </Note>
 
 <Frame caption="Fleet · Deployments catalog with blueprint tiles, the All / Drifted / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right.">
@@ -47,7 +47,7 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 
 | Requirement | Detail |
 |---|---|
-| License tier | **Skipper** or **Admiral** to read, create, edit, and withdraw blueprints. **Admiral** to pin a blueprint to a node from the Federation tab. |
+| License tier | **Admiral** to read, create, edit, withdraw, and pin blueprints. |
 | User role | **Admin** to create, edit, withdraw, accept, and pin. Operators and viewers can read the catalog and the detail sheet. |
 | Nodes | At least one node that the selector resolves to. Remote nodes need a healthy proxy connection; see [Multi-node management](/features/multi-node) and [Pilot Agent](/features/pilot-agent) for enrollment. |
 | Compose YAML | Valid `docker-compose.yml`, 96 KiB or fewer. |
@@ -251,7 +251,7 @@ Both events route through the standard alert pipeline. Configure delivery channe
 
 ## Security and trust boundaries
 
-**Who can do what.** The license tier and the user role together determine the available actions. Reading the catalog, the detail sheet, and the deployment status requires Skipper or Admiral. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role on top of the tier. Pinning a blueprint requires Admiral plus the admin role.
+**Who can do what.** The license tier and the user role together determine the available actions. Reading the catalog, the detail sheet, and the deployment status requires Admiral. Creating, editing, withdrawing, accepting a stateful deploy, applying on demand, and pinning a blueprint require the admin role on top of the Admiral tier.
 
 **The marker file is the trust root.** The reconciler will only deploy into, modify, or withdraw a directory that carries a `.blueprint.json` marker whose blueprint ID matches. A pre-existing directory with no marker, or a marker referencing a different blueprint, surfaces as **Name conflict** and is never modified.
 

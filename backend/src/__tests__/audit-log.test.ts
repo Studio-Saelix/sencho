@@ -32,11 +32,9 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
-  // Mock LicenseService to return paid/admiral for audit log access
+  // Mock LicenseService to return the paid tier for audit log access
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
 });
@@ -414,10 +412,9 @@ describe('DatabaseService audit methods', () => {
 // ---- API endpoint tests ----
 
 describe('GET /api/audit-log', () => {
-  it('returns 403 without Admiral license', async () => {
+  it('returns 403 without a paid license', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValueOnce(null);
 
     const res = await request(app)
       .get('/api/audit-log')
@@ -567,10 +564,9 @@ describe('GET /api/audit-log', () => {
 });
 
 describe('GET /api/audit-log/stats', () => {
-  it('returns 403 without Admiral license', async () => {
+  it('returns 403 without a paid license', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValueOnce(null);
 
     const res = await request(app)
       .get('/api/audit-log/stats')
@@ -595,10 +591,9 @@ describe('GET /api/audit-log/stats', () => {
 });
 
 describe('GET /api/audit-log/export', () => {
-  it('returns 403 without Admiral license', async () => {
+  it('returns 403 without a paid license', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValueOnce(null);
 
     const res = await request(app)
       .get('/api/audit-log/export?format=json')

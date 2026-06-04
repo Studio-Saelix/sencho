@@ -4,15 +4,15 @@
  *
  * These guard the same boundary the NodeCard cordon control renders against, so
  * a UI gate and a route guard cannot silently drift apart. Cordon/uncordon
- * require Admiral tier AND the node:manage permission (held by admin and
+ * require the paid tier AND the node:manage permission (held by admin and
  * node-admin roles). The guard order is:
  *   rejectApiTokenScope (SCOPE_DENIED) -> requirePermission (PERMISSION_DENIED)
- *   -> requireAdmiral (PAID_REQUIRED / ADMIRAL_REQUIRED) -> invalid-id 400
+ *   -> requirePaid (PAID_REQUIRED) -> invalid-id 400
  *   -> reason 400 (cordon only) -> 404.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
-import type { LicenseTier, LicenseVariant } from '../services/license-types';
+import type { LicenseTier } from '../services/license-types';
 import type { UserRole } from '../services/DatabaseService';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_USERNAME } from './helpers/setupTestDb';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
@@ -26,9 +26,8 @@ let adminUserId: number;
 const roleCookie: Record<string, string> = {};
 let counter = 0;
 
-function setLicense(tier: LicenseTier, variant: LicenseVariant): void {
+function setLicense(tier: LicenseTier): void {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue(tier);
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue(variant);
 }
 
 function seedNode(): { id: number; name: string } {
@@ -60,8 +59,6 @@ beforeAll(async () => {
     ({ LicenseService } = await import('../services/LicenseService'));
 
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-    vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
     ({ app } = await import('../index'));
     adminCookie = await loginAsTestAdmin(app);
@@ -79,8 +76,7 @@ afterAll(() => cleanupTestDb(tmpDir));
 
 beforeEach(() => {
     vi.restoreAllMocks();
-    setLicense('paid', 'admiral');
-    vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
+    setLicense('paid');
     DatabaseService.getInstance().getDb().prepare('DELETE FROM nodes WHERE is_default = 0').run();
 });
 
@@ -119,19 +115,8 @@ describe('POST /api/nodes/:id/cordon authorization', () => {
         },
     );
 
-    it('rejects an admin on a Skipper license with ADMIRAL_REQUIRED', async () => {
-        setLicense('paid', 'skipper');
-        const node = seedNode();
-        const res = await request(app)
-            .post(`/api/nodes/${node.id}/cordon`)
-            .set('Cookie', adminCookie)
-            .send({});
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('ADMIRAL_REQUIRED');
-    });
-
     it('rejects an admin on a Community license with PAID_REQUIRED', async () => {
-        setLicense('community', null);
+        setLicense('community');
         const node = seedNode();
         const res = await request(app)
             .post(`/api/nodes/${node.id}/cordon`)
@@ -205,8 +190,8 @@ describe('POST /api/nodes/:id/cordon authorization', () => {
         expect(res.body.cordoned_reason).toBeNull();
     });
 
-    it('checks node:manage before the tier gate (Skipper viewer gets PERMISSION_DENIED, not ADMIRAL_REQUIRED)', async () => {
-        setLicense('paid', 'skipper');
+    it('checks node:manage before the tier gate (Community viewer gets PERMISSION_DENIED, not PAID_REQUIRED)', async () => {
+        setLicense('community');
         const node = seedNode();
         const res = await request(app)
             .post(`/api/nodes/${node.id}/cordon`)
@@ -258,15 +243,15 @@ describe('POST /api/nodes/:id/uncordon authorization', () => {
         },
     );
 
-    it('rejects an admin on a Skipper license with ADMIRAL_REQUIRED', async () => {
-        setLicense('paid', 'skipper');
+    it('rejects an admin on a Community license with PAID_REQUIRED', async () => {
+        setLicense('community');
         const node = seedCordonedNode();
         const res = await request(app)
             .post(`/api/nodes/${node.id}/uncordon`)
             .set('Cookie', adminCookie)
             .send({});
         expect(res.status).toBe(403);
-        expect(res.body.code).toBe('ADMIRAL_REQUIRED');
+        expect(res.body.code).toBe('PAID_REQUIRED');
     });
 
     it('rejects a full-admin API token with SCOPE_DENIED', async () => {

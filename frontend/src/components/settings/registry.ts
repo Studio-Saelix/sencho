@@ -16,7 +16,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroupMeta[] = [
     { id: 'advanced', label: 'Advanced', glyph: '\u25C7' },
 ];
 
-export type TierGate = 'skipper' | 'admiral' | null;
+export type TierGate = 'paid' | null;
 export type Scope = 'global' | 'node';
 
 export interface SettingsItemMeta {
@@ -67,7 +67,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         label: 'Users',
         description: 'Operators, role assignments, and access scopes.',
         keywords: ['operators', 'team', 'rbac', 'roles', 'permissions'],
-        tier: 'skipper',
+        tier: null,
         scope: 'global',
         adminOnly: true,
         hiddenOnRemote: true,
@@ -109,7 +109,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         label: 'Registries',
         description: 'Private Docker registries and pull credentials.',
         keywords: ['docker', 'ghcr', 'ecr', 'private', 'pull', 'auth'],
-        tier: 'admiral',
+        tier: 'paid',
         scope: 'global',
         adminOnly: true,
         hiddenOnRemote: true,
@@ -150,7 +150,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         label: 'Routing',
         description: 'Rules that steer alerts to the right channel based on severity or label.',
         keywords: ['rules', 'routing', 'channels', 'severity', 'labels'],
-        tier: 'skipper',
+        tier: null,
         scope: 'global',
         adminOnly: true,
         hiddenOnRemote: true,
@@ -161,7 +161,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         label: 'Webhooks',
         description: 'Incoming HMAC-signed HTTP triggers that run stack actions from CI/CD pipelines.',
         keywords: ['webhook', 'incoming', 'trigger', 'ci', 'cd', 'pipeline', 'deploy', 'hmac', 'signature', 'action'],
-        tier: 'skipper',
+        tier: null,
         scope: 'global',
         hiddenOnRemote: true,
     },
@@ -245,7 +245,6 @@ export interface VisibilityContext {
     isRemote: boolean;
     isAdmin: boolean;
     isPaid: boolean;
-    isAdmiral: boolean;
 }
 
 export function isItemVisible(item: SettingsItemMeta, ctx: VisibilityContext): boolean {
@@ -255,7 +254,5 @@ export function isItemVisible(item: SettingsItemMeta, ctx: VisibilityContext): b
 }
 
 export function isItemLocked(item: SettingsItemMeta, ctx: VisibilityContext): boolean {
-    if (item.tier === 'skipper') return !ctx.isPaid;
-    if (item.tier === 'admiral') return !ctx.isAdmiral;
-    return false;
+    return item.tier === 'paid' ? !ctx.isPaid : false;
 }

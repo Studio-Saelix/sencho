@@ -1,7 +1,6 @@
 import { useCallback } from 'react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
-import { useLicense } from '@/context/LicenseContext';
 
 export type BulkAction = 'start' | 'stop' | 'restart' | 'update';
 
@@ -30,18 +29,12 @@ interface BulkResponse {
 }
 
 export function useBulkStackActions() {
-  const { isPaid } = useLicense();
-
   const runBulk = useCallback(async (
     action: BulkAction,
     files: string[],
     cbs?: BulkCallbacks,
   ) => {
     if (files.length === 0) return;
-    if (action === 'update' && !isPaid) {
-      toast.error('Bulk update requires a Skipper license.');
-      return;
-    }
 
     cbs?.onBefore?.(files);
 
@@ -83,7 +76,7 @@ export function useBulkStackActions() {
       console.error('Bulk action failed:', err);
       toast.error(`Bulk ${action} failed: ${(err as Error).message}`);
     }
-  }, [isPaid]);
+  }, []);
 
-  return { runBulk, isPaid };
+  return { runBulk };
 }

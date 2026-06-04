@@ -12,7 +12,7 @@ const {
   mockUpdateScheduledTask, mockCleanupOldTaskRuns, mockGetScheduledTask, mockGetNodes, mockGetNode,
   mockCreateSnapshot, mockInsertSnapshotFiles, mockClearStackUpdateStatus,
   mockMarkStaleRunsAsFailed, mockDeleteOldScans,
-  mockGetTier, mockGetVariant, mockGetProxyHeaders,
+  mockGetTier, mockGetProxyHeaders,
   mockGetContainersByStack, mockRestartContainer, mockPruneSystem,
   mockUpdateStack,
   mockGetStacks, mockGetStackContent, mockGetEnvContent,
@@ -42,8 +42,7 @@ const {
   mockMarkStaleRunsAsFailed: vi.fn().mockReturnValue(0),
   mockDeleteOldScans: vi.fn().mockReturnValue(0),
   mockGetTier: vi.fn().mockReturnValue('paid'),
-  mockGetVariant: vi.fn().mockReturnValue('admiral'),
-  mockGetProxyHeaders: vi.fn().mockReturnValue({ tier: 'paid', variant: 'admiral' }),
+  mockGetProxyHeaders: vi.fn().mockReturnValue({ tier: 'paid' }),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
   mockRestartContainer: vi.fn().mockResolvedValue(undefined),
   mockPruneSystem: vi.fn().mockResolvedValue({ success: true, reclaimedBytes: 0 }),
@@ -102,7 +101,6 @@ vi.mock('../services/LicenseService', () => ({
   LicenseService: {
     getInstance: () => ({
       getTier: mockGetTier,
-      getVariant: mockGetVariant,
       getProxyHeaders: mockGetProxyHeaders,
     }),
   },
@@ -196,12 +194,11 @@ import { SchedulerService } from '../services/SchedulerService';
 beforeEach(() => {
   vi.clearAllMocks();
   // clearAllMocks only clears call history, not implementations, so restore the
-  // mocks that individual tests mutate (tier, variant, node lookup, proxy
-  // target) to their documented defaults. Without this a test that points
-  // getNode at a remote node or drops the tier leaks that state into every
-  // later test in the file.
+  // mocks that individual tests mutate (tier, node lookup, proxy target) to
+  // their documented defaults. Without this a test that points getNode at a
+  // remote node or drops the tier leaks that state into every later test in the
+  // file.
   mockGetTier.mockReturnValue('paid');
-  mockGetVariant.mockReturnValue('admiral');
   mockGetNode.mockReturnValue({ id: 1, name: 'local', type: 'local', status: 'online' });
   mockGetProxyTarget.mockReturnValue(null);
   // Default: the scan-policy gate allows. Individual tests override to a block.
@@ -265,7 +262,7 @@ describe('SchedulerService - calculateRunsWithin', () => {
 
 // ── License gating ─────────────────────────────────────────────────────
 
-describe('SchedulerService - license gating', () => {
+describe('SchedulerService - scheduled tasks run on every tier', () => {
   function makeTask(overrides: Partial<any> = {}) {
     return {
       id: 1,
@@ -281,19 +278,20 @@ describe('SchedulerService - license gating', () => {
     };
   }
 
-  it('skips all tasks when tier is not pro', async () => {
+  it('runs tasks on the Community tier (no paid gate)', async () => {
     mockGetTier.mockReturnValue('community');
     mockGetDueScheduledTasks.mockReturnValue([makeTask()]);
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }]);
 
     const svc = SchedulerService.getInstance();
     await (svc as any).tick();
 
-    expect(mockCreateScheduledTaskRun).not.toHaveBeenCalled();
+    await new Promise(r => setTimeout(r, 50));
+    expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
   });
 
-  it('allows update tasks for non-admiral pro', async () => {
-    mockGetTier.mockReturnValue('paid');
-    mockGetVariant.mockReturnValue('individual');
+  it('runs update tasks on the Community tier', async () => {
+    mockGetTier.mockReturnValue('community');
     mockGetDueScheduledTasks.mockReturnValue([makeTask({ action: 'update' })]);
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
     mockCheckImage.mockResolvedValue({ hasUpdate: false });
@@ -306,22 +304,8 @@ describe('SchedulerService - license gating', () => {
     expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
   });
 
-  it('executes restart tasks for non-admiral pro (Skipper)', async () => {
-    mockGetTier.mockReturnValue('paid');
-    mockGetVariant.mockReturnValue('individual');
-    mockGetDueScheduledTasks.mockReturnValue([makeTask({ action: 'restart' })]);
-    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }]);
-
-    const svc = SchedulerService.getInstance();
-    await (svc as any).tick();
-
-    await new Promise(r => setTimeout(r, 50));
-    expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
-  });
-
-  it('allows snapshot tasks for non-admiral pro (Skipper)', async () => {
-    mockGetTier.mockReturnValue('paid');
-    mockGetVariant.mockReturnValue('individual');
+  it('runs snapshot tasks on the Community tier', async () => {
+    mockGetTier.mockReturnValue('community');
     mockGetDueScheduledTasks.mockReturnValue([makeTask({ action: 'snapshot', target_type: 'fleet' })]);
 
     const svc = SchedulerService.getInstance();
@@ -331,9 +315,8 @@ describe('SchedulerService - license gating', () => {
     expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
   });
 
-  it('allows all actions for admiral (pro + team)', async () => {
+  it('runs tasks on the paid tier', async () => {
     mockGetTier.mockReturnValue('paid');
-    mockGetVariant.mockReturnValue('admiral');
     mockGetDueScheduledTasks.mockReturnValue([makeTask({ action: 'restart' })]);
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }]);
 
@@ -350,7 +333,6 @@ describe('SchedulerService - license gating', () => {
 describe('SchedulerService - concurrent task prevention', () => {
   it('does not execute a task that is already in runningTasks', async () => {
     mockGetTier.mockReturnValue('paid');
-    mockGetVariant.mockReturnValue('admiral');
     mockGetDueScheduledTasks.mockReturnValue([{
       id: 42,
       name: 'running-task',
@@ -375,7 +357,6 @@ describe('SchedulerService - concurrent task prevention', () => {
 
   it('removes task from runningTasks after completion', async () => {
     mockGetTier.mockReturnValue('paid');
-    mockGetVariant.mockReturnValue('admiral');
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }]);
 
     const svc = SchedulerService.getInstance();
@@ -629,12 +610,9 @@ describe('SchedulerService - executeUpdate', () => {
     expect(mockClearStackUpdateStatus).toHaveBeenCalledWith(1, 'web-app');
   });
 
-  it('does not run a scheduled update on the community tier', async () => {
-    // Scheduled tasks are paid-only at every entry point (the tick tier check and
-    // the manual-run route both require paid), and executeTask guards again, so a
-    // community licence never runs the update. Hub-driven updates to a community
-    // remote worker take a different path (the /auto-update/execute route, which
-    // derives atomicity from the proxy tier header) and are unaffected.
+  it('runs a scheduled update on the community tier (no paid gate)', async () => {
+    // Scheduled tasks are free, so a community licence runs the update like any
+    // other tier.
     mockGetTier.mockReturnValue('community');
     mockGetScheduledTask.mockReturnValue({
       id: 82,
@@ -647,14 +625,16 @@ describe('SchedulerService - executeUpdate', () => {
       created_by: 'admin',
       last_status: null,
     });
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
+    mockCheckImage.mockResolvedValue({ hasUpdate: true });
 
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(82);
 
-    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure' }),
+      expect.objectContaining({ status: 'success' }),
     );
   });
 
@@ -1280,7 +1260,6 @@ describe('SchedulerService - scheduled scan notifications', () => {
 describe('SchedulerService - cleanup', () => {
   it('calls cleanupOldTaskRuns(30) on every tick', async () => {
     mockGetTier.mockReturnValue('paid');
-    mockGetVariant.mockReturnValue('admiral');
     mockGetDueScheduledTasks.mockReturnValue([]);
 
     const svc = SchedulerService.getInstance();
@@ -1294,18 +1273,17 @@ describe('SchedulerService - cleanup', () => {
 
 describe('SchedulerService - isProcessing guard', () => {
   it('skips tick if already processing', async () => {
-    mockGetTier.mockReturnValue('paid');
-
     const svc = SchedulerService.getInstance();
     (svc as any).isProcessing = true;
 
     await (svc as any).tick();
 
-    expect(mockGetTier).not.toHaveBeenCalled();
+    // Short-circuits before fetching due tasks (the first DB call inside tick).
+    expect(mockGetDueScheduledTasks).not.toHaveBeenCalled();
   });
 
   it('resets isProcessing after tick completes (even on error)', async () => {
-    mockGetTier.mockImplementationOnce(() => { throw new Error('boom'); });
+    mockGetDueScheduledTasks.mockImplementationOnce(() => { throw new Error('boom'); });
 
     const svc = SchedulerService.getInstance();
     await (svc as any).tick();
@@ -1489,7 +1467,6 @@ describe('SchedulerService - executeUpdateRemote', () => {
         headers: expect.objectContaining({
           'Authorization': 'Bearer test-token',
           'x-sencho-tier': 'paid',
-          'x-sencho-variant': 'admiral',
         }),
         body: JSON.stringify({ target: 'web-app' }),
       })
@@ -1606,9 +1583,8 @@ describe('SchedulerService - lifecycle actions', () => {
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
   });
 
-  it('non-admiral paid tier executes lifecycle actions', async () => {
+  it('paid tier executes lifecycle actions', async () => {
     mockGetTier.mockReturnValue('paid');
-    mockGetVariant.mockReturnValue('standard');
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop'));
     mockGetDueScheduledTasks.mockReturnValue([makeLifecycleTask('auto_stop')]);
 
@@ -1630,7 +1606,6 @@ describe('SchedulerService - lifecycle remote proxy', () => {
   const remoteHeaders = expect.objectContaining({
     'Authorization': 'Bearer tkn',
     'x-sencho-tier': 'paid',
-    'x-sencho-variant': 'admiral',
   });
 
   function stubRemote(okBody: unknown = { success: true }) {
@@ -1783,17 +1758,16 @@ describe('SchedulerService - lifecycle remote proxy', () => {
 
 // ── Unpaid-tier guard in executeTask ────────────────────────────────────
 
-describe('SchedulerService - unpaid tier guard', () => {
-  it('records a failed run and does not execute when the licence is not paid', async () => {
+describe('SchedulerService - community tier runs lifecycle actions', () => {
+  it('executes a lifecycle action and records success on the community tier', async () => {
     mockGetTier.mockReturnValue('community');
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop'));
     await SchedulerService.getInstance().triggerTask(300);
-    expect(mockRunCommand).not.toHaveBeenCalled();
-    // The skip is visible in run history rather than silently dropped.
+    expect(mockRunCommand).toHaveBeenCalled();
     expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('paid licence') }),
+      expect.objectContaining({ status: 'success' }),
     );
   });
 });

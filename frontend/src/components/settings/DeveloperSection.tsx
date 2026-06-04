@@ -3,6 +3,7 @@ import { Input } from '@/components/ui/input';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/context/AuthContext';
+import { useLicense } from '@/context/LicenseContext';
 import { RefreshCw } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -41,10 +42,10 @@ const DEFAULT_DEVELOPER: DeveloperFields = {
 };
 
 export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
-    const { isAdmin, permissions } = useAuth();
+    const { isAdmin } = useAuth();
+    const { isPaid } = useLicense();
     const { activeNode } = useNodes();
     const readOnly = !isAdmin;
-    const isAdmiral = permissions?.isAdmiral ?? false;
     const [settings, setSettings] = useState<DeveloperFields>({ ...DEFAULT_DEVELOPER });
     const serverSettingsRef = useRef<DeveloperFields>({ ...DEFAULT_DEVELOPER });
     const [isLoading, setIsLoading] = useState(false);
@@ -202,7 +203,7 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
                     </div>
                 </SettingsField>
 
-                {isAdmiral && (
+                {isPaid && (
                     <SettingsField
                         label="Audit log"
                         helper="How long to keep audit trail entries."

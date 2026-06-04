@@ -16,10 +16,9 @@ let app: import('express').Express;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
-  // Mock LicenseService so Admiral-gated endpoints accept requests
+  // Mock LicenseService so paid-gated endpoints accept requests
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
   ({ app } = await import('../index'));
 });
 

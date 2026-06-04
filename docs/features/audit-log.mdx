@@ -4,7 +4,7 @@ description: Track every mutating action on your Sencho instance with a searchab
 ---
 
 <Note>
-  The Audit Log requires a Sencho **Admiral** license. Skipper and Community do not include this feature.
+  The Audit Log requires a Sencho **Admiral** license.
 </Note>
 
 <Note>
@@ -170,7 +170,7 @@ Sensitive database values (such as remote node API tokens) are encrypted at rest
 
 <AccordionGroup>
   <Accordion title="The Audit tab is missing from the sidebar">
-    The tab is visible only on **Admiral**, and only to users whose role grants the `system:audit` permission. By default that means **Admin** or **Auditor**. If your license is Community or Skipper, the tab is gated by the audit-log capability and will not render. If you are signed in as a Deployer or Viewer on an Admiral instance, ask an admin to assign you the Auditor role from **Settings · Users**.
+    The Audit log requires an **Admiral** license, and the tab is shown only to users whose role grants the `system:audit` permission. By default that means **Admin** or **Auditor**. If you are signed in as a Deployer or Viewer on an Admiral instance, ask an admin to assign you the Auditor role from **Settings · Users**.
   </Accordion>
   <Accordion title="Stream view shows everything but I want to filter to a specific user, action, or date">
     Filters live in **Table view only**. Toggle the segmented control in the card header from **Stream** to **Table** and the search box, method dropdown, and From / To date pickers will appear above the grid. Switching back to Stream clears the filter strip but does not remember the last filter.

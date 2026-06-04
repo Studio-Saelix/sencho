@@ -62,7 +62,6 @@ describe('MeshService.removeOverrideFromNode (remote dispatch)', () => {
         expect(init.method).toBe('DELETE');
         expect(init.headers['Authorization']).toBe('Bearer remote-tok');
         expect(init.headers).toHaveProperty('x-sencho-tier');
-        expect(init.headers).toHaveProperty('x-sencho-variant');
 
         db.deleteNode(remoteNodeId);
     });

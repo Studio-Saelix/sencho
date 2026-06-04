@@ -3,7 +3,7 @@
  *
  * The route flips the global `trivy_auto_update` setting that the scheduler
  * reads every 24h to decide whether to pull newer Trivy binary releases.
- * It must be reachable only by an admin on a paid (Skipper or Admiral) tier.
+ * It must be reachable only by an admin on a paid (Admiral) tier.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
@@ -22,8 +22,6 @@ beforeAll(async () => {
 
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('admiral');
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);

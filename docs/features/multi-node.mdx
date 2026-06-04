@@ -169,7 +169,7 @@ The Nodes table surfaces routing, status, and per-node automation at a glance fo
 | **Mode** | `-` for the local node; `Proxy` or `Pilot Agent` badge for remotes, with an icon matching the mode. |
 | **Endpoint** | `docker.sock` for local; the full Sencho API URL for proxy nodes; `tunnel (seen X ago)` or `tunnel (waiting)` for pilot agents. |
 | **Status** | `Online`, `Offline`, or `Unknown` badge. |
-| **Labels** | Per-node label palette. On Skipper and Admiral the cell shows the picker (an empty cell reads `No labels` with an Add label control); on Community the cell shows a single dash. |
+| **Labels** | Per-node label palette. On Admiral the cell shows the picker (an empty cell reads `No labels` with an Add label control); on Community the cell shows a single dash. |
 | **Schedules** | Number of active scheduled tasks targeting this node, plus a `next X` countdown to the next run. Click the count or the calendar icon in the Actions column to filter the Schedules view to that node. |
 | **Updates** | `Auto` if at least one enabled `Auto-update Stack` or `Auto-update All Stacks` schedule targets the node; `Off` otherwise. A pulsing dot and count appear when stacks have pending image updates. |
 | **Actions** | **View Schedules**, **Test Connection**, **Edit Node**, and **Delete Node** icon buttons. The local row hides Delete because the local node cannot be removed. |
@@ -198,7 +198,7 @@ Panels that manage control-plane concerns (Account, License, Users, SSO, API Tok
 
 ## License enforcement across nodes
 
-When the control instance has a paid license (Skipper or Admiral), all remote nodes inherit that license tier for proxied requests. You do not activate a license on each remote node separately.
+When the control instance has an Admiral license, all remote nodes inherit that license tier for proxied requests. You do not activate a license on each remote node separately.
 
 ### How it works
 
@@ -206,8 +206,8 @@ The control instance asserts its license tier on every proxied request. Remote n
 
 This means:
 
-- **Paid control plane → remote nodes**: Skipper and Admiral features work on every remote node, governed by the control instance's license.
-- **Community control plane → remote nodes**: Paid features are blocked on remote nodes, even if a remote node has its own paid license. The control instance's tier is authoritative for proxied requests.
+- **Admiral control plane → remote nodes**: Admiral features work on every remote node, governed by the control instance's license.
+- **Community control plane → remote nodes**: Admiral features are blocked on remote nodes, even if a remote node has its own Admiral license. The control instance's tier is authoritative for proxied requests.
 - **Direct access to a node**: If you load a remote Sencho instance in your browser directly (not through the control plane), it uses its own local license tier.
 
 <Note>
@@ -319,7 +319,7 @@ Sencho takes the opposite approach: infrastructure-level encryption (VPN, revers
     The bearer token saved for the row no longer matches what the remote will accept. This usually means somebody clicked **Generate Token** on the remote (which invalidates the previous token) or the row was saved with a typo. Generate a fresh token on the remote, click the pencil icon on the row in the control instance, paste the new token into the API Token field, and save.
   </Accordion>
   <Accordion title="A paid feature is blocked when I switch to a remote node">
-    The control instance's license tier is authoritative for proxied requests, so a Community control plane gates Skipper and Admiral features on every remote, even if the remote itself has its own paid license. Activate a paid license on the control instance to lift the gate fleet-wide. The reverse case (paid control plane, Community remote) works automatically because the control plane's tier is what the remote trusts.
+    The control instance's license tier is authoritative for proxied requests, so a Community control plane gates Admiral features on every remote, even if the remote itself has its own Admiral license. Activate an Admiral license on the control instance to lift the gate fleet-wide. The reverse case (Admiral control plane, Community remote) works automatically because the control plane's tier is what the remote trusts.
   </Accordion>
   <Accordion title="Settings panels disappear when I switch to a remote">
     That is intentional. Account, License, Users, SSO, API Tokens, Registries, Cloud Backup, Nodes, Routing, and Webhooks are control-plane concerns and are hidden while a remote node is selected. Switch back to **Local** from the node switcher to manage them. The full list of which panels are per-node, per-browser, and control-plane-only lives in the [What Settings apply per node](#what-settings-apply-per-node) table above.

@@ -101,8 +101,6 @@ beforeAll(async () => {
 
   // Default: paid tier so most tests pass the tier gate
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);
@@ -123,8 +121,6 @@ beforeEach(() => {
   // overrides via mockReturnValueOnce don't accumulate across tests.
   vi.restoreAllMocks();
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-  vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
-  vi.spyOn(LicenseService.getInstance(), 'getSeatLimits').mockReturnValue({ maxAdmins: null, maxViewers: null });
 });
 
 // ── GET /:stackName/files ─────────────────────────────────────────────────────

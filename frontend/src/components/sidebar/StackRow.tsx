@@ -15,7 +15,6 @@ interface StackRowProps {
   status: StackRowStatus;
   isBusy: boolean;
   isActive: boolean;
-  isPaid: boolean;
   labels: Label[];
   hasUpdate: boolean;
   hasGitPending: boolean;
