@@ -13,15 +13,11 @@ import {
 import '@xyflow/react/dist/style.css';
 import { Boxes, Globe, Server, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { SystemSheet } from '@/components/ui/system-sheet';
 import { buildStackTopologyGraph } from '@/lib/mesh-topology-layout';
 import type { MeshAlias, MeshNodeStatus } from '@/types/mesh';
 
 interface Props {
-    open: boolean;
-    onOpenChange: (open: boolean) => void;
     nodeId: number | null;
-    nodeName: string | null;
     stackName: string | null;
     status: MeshNodeStatus[];
     aliases: MeshAlias[];
@@ -119,15 +115,12 @@ const nodeTypes: NodeTypes = {
     stackConsumer: StackConsumerCard,
 };
 
-export function MeshStackTopologySheet({
-    open,
-    onOpenChange,
-    nodeId,
-    nodeName,
-    stackName,
-    status,
-    aliases,
-}: Props) {
+/**
+ * Read-only ReactFlow view of a single stack's published aliases and the meshed
+ * peers that can reach them. Rendered inside the alias route sheet's Topology
+ * tab; carries no sheet chrome of its own.
+ */
+export function MeshStackTopologyView({ nodeId, stackName, status, aliases }: Props) {
     const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<Node>([]);
     const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
@@ -169,64 +162,46 @@ export function MeshStackTopologySheet({
         return aliases.filter((a) => a.nodeId === nodeId && a.stackName === stackName).length;
     }, [nodeId, stackName, aliases]);
 
-    const consumerCount = useMemo(() => {
-        if (nodeId === null) return 0;
-        return status.filter((s) => s.enabled && s.nodeId !== nodeId).length;
-    }, [nodeId, status]);
-
-    const meta = `${stackAliasCount} ${stackAliasCount === 1 ? 'alias' : 'aliases'} · ${consumerCount} ${consumerCount === 1 ? 'consumer' : 'consumers'}`;
-    const crumbName = stackName ?? '';
-    const ownerName = nodeName ?? '';
-
     return (
-        <SystemSheet
-            open={open}
-            onOpenChange={onOpenChange}
-            crumb={['Fleet', 'Mesh', ownerName, 'topology']}
-            name={crumbName}
-            meta={meta}
-            size="lg"
-        >
-            <div className="space-y-3">
-                <p className="text-sm text-stat-subtitle leading-snug">
-                    Aliases this stack publishes and the meshed nodes that can reach them. Edge styling
-                    reflects each consumer's tunnel state.
-                </p>
-                <p className="text-xs text-stat-subtitle leading-snug">
-                    Consumer nodes are meshed peers that could reach this stack's aliases via DNS.
-                    Whether a container on a consumer actually dials an alias depends on that consumer's
-                    own opt-in stacks.
-                </p>
+        <div className="space-y-3">
+            <p className="text-sm text-stat-subtitle leading-snug">
+                Aliases this stack publishes and the meshed nodes that can reach them. Edge styling
+                reflects each consumer's tunnel state.
+            </p>
+            <p className="text-xs text-stat-subtitle leading-snug">
+                Consumer nodes are meshed peers that could reach this stack's aliases via DNS.
+                Whether a container on a consumer actually dials an alias depends on that consumer's
+                own opt-in stacks.
+            </p>
 
-                {stackAliasCount === 0 ? (
-                    <div className="rounded border border-dashed border-card-border bg-card/50 p-8 text-center">
-                        <Boxes className="w-10 h-10 text-stat-subtitle mx-auto mb-3" strokeWidth={1.5} />
-                        <div className="text-sm font-display italic mb-1">No published mesh services</div>
-                        <div className="text-xs text-stat-subtitle">
-                            This stack is in the mesh but exposes no service ports for other meshed stacks to reach.
-                        </div>
+            {stackAliasCount === 0 ? (
+                <div className="rounded border border-dashed border-card-border bg-card/50 p-8 text-center">
+                    <Boxes className="w-10 h-10 text-stat-subtitle mx-auto mb-3" strokeWidth={1.5} />
+                    <div className="text-sm font-display italic mb-1">No published mesh services</div>
+                    <div className="text-xs text-stat-subtitle">
+                        This stack is in the mesh but exposes no service ports for other meshed stacks to reach.
                     </div>
-                ) : (
-                    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-                        <div className="h-[420px] w-full">
-                            <ReactFlow
-                                nodes={flowNodes}
-                                edges={flowEdges}
-                                onNodesChange={onNodesChange}
-                                onEdgesChange={onEdgesChange}
-                                nodeTypes={nodeTypes}
-                                fitView
-                                fitViewOptions={{ padding: 0.2, minZoom: 0.4 }}
-                                proOptions={{ hideAttribution: true }}
-                                nodesConnectable={false}
-                                className="bg-background"
-                            >
-                                <Background gap={20} size={1} className="opacity-30" />
-                            </ReactFlow>
-                        </div>
+                </div>
+            ) : (
+                <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+                    <div className="h-[420px] w-full">
+                        <ReactFlow
+                            nodes={flowNodes}
+                            edges={flowEdges}
+                            onNodesChange={onNodesChange}
+                            onEdgesChange={onEdgesChange}
+                            nodeTypes={nodeTypes}
+                            fitView
+                            fitViewOptions={{ padding: 0.2, minZoom: 0.4 }}
+                            proOptions={{ hideAttribution: true }}
+                            nodesConnectable={false}
+                            className="bg-background"
+                        >
+                            <Background gap={20} size={1} className="opacity-30" />
+                        </ReactFlow>
                     </div>
-                )}
-            </div>
-        </SystemSheet>
+                </div>
+            )}
+        </div>
     );
 }
