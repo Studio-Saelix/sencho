@@ -193,3 +193,71 @@ describe('PATCH /api/settings (bulk update)', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('Admiral-only setting keys (audit_retention_days)', () => {
+  // audit_retention_days configures the Admiral-only audit log, so its write is
+  // gated by requireAdmiral in addition to the admin role. beforeAll mocks a
+  // paid Admiral license; individual tests override the variant to simulate an
+  // admin whose license is not Admiral.
+  it('allows an Admiral admin to write audit_retention_days', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ audit_retention_days: 120 });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().audit_retention_days).toBe('120');
+  });
+
+  it('rejects an audit_retention_days PATCH from a non-Admiral admin (403) and does not apply it', async () => {
+    const before = DatabaseService.getInstance().getGlobalSettings().audit_retention_days;
+    const { LicenseService } = await import('../services/LicenseService');
+    const spy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
+    try {
+      const res = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ audit_retention_days: 200 });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
+      expect(DatabaseService.getInstance().getGlobalSettings().audit_retention_days).toBe(before);
+    } finally {
+      spy.mockReturnValue('admiral');
+    }
+  });
+
+  it('rejects an audit_retention_days single-key POST from a non-Admiral admin (403) and does not apply it', async () => {
+    const before = DatabaseService.getInstance().getGlobalSettings().audit_retention_days;
+    const { LicenseService } = await import('../services/LicenseService');
+    const spy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
+    try {
+      const res = await request(app)
+        .post('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ key: 'audit_retention_days', value: '300' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('ADMIRAL_REQUIRED');
+      expect(DatabaseService.getInstance().getGlobalSettings().audit_retention_days).toBe(before);
+    } finally {
+      spy.mockReturnValue('admiral');
+    }
+  });
+
+  it('still lets a non-Admiral admin write non-Admiral keys via PATCH and POST (gate is per-key)', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const spy = vi.spyOn(LicenseService.getInstance(), 'getVariant').mockReturnValue('skipper');
+    try {
+      const patchRes = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ host_cpu_limit: 55 });
+      expect(patchRes.status).toBe(200);
+      const postRes = await request(app)
+        .post('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ key: 'host_ram_limit', value: '55' });
+      expect(postRes.status).toBe(200);
+    } finally {
+      spy.mockReturnValue('admiral');
+    }
+  });
+});
