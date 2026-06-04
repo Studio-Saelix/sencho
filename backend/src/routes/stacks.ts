@@ -290,6 +290,58 @@ stacksRouter.get('/import/scan', async (req: Request, res: Response) => {
   }
 });
 
+// Move a discovered import candidate into its own stack directory so Sencho
+// picks it up. The single write path of the guided import flow: it relocates a
+// loose or nested compose file on disk and never captures it into a store. The
+// source is re-derived from a fresh scan and matched by location, so the client
+// cannot point the move at an arbitrary path.
+stacksRouter.post('/import/move', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:create')) return;
+  const { location, name } = req.body as { location?: unknown; name?: unknown };
+  if (typeof location !== 'string' || !location) {
+    return res.status(400).json({ error: 'A candidate location is required' });
+  }
+  if (typeof name !== 'string' || !isValidStackName(name.trim())) {
+    return res.status(400).json({ error: 'Name must be alphanumeric, hyphens, or underscores only' });
+  }
+  const destName = name.trim();
+  try {
+    const fsSvc = FileSystemService.getInstance(req.nodeId);
+    const match = (await fsSvc.findImportCandidates()).find((c) => c.location === location);
+    if (!match) {
+      return res.status(404).json({ error: 'That compose file was not found. Rescan and try again.' });
+    }
+    if (match.status === 'listed') {
+      return res.status(400).json({ error: 'That stack is already in place.' });
+    }
+    await fsSvc.importCandidateIntoStack(
+      { location: match.location, composeFile: match.composeFile, status: match.status },
+      destName,
+    );
+    invalidateNodeCaches(req.nodeId);
+    dlog(`[Stacks] Imported compose file into stack: ${sanitizeForLog(destName)}`);
+    res.json({ name: destName });
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    // A destination that already exists (our own DEST_EXISTS) or that appeared
+    // between the existence check and the rename (EEXIST/ENOTEMPTY) is a clean
+    // conflict, not a server error.
+    if (code === 'DEST_EXISTS' || code === 'EEXIST' || code === 'ENOTEMPTY') {
+      return res.status(409).json({ error: `A stack named "${destName}" already exists` });
+    }
+    if (code === 'INVALID_PATH' || code === 'INVALID_STACK_NAME') {
+      return res.status(400).json({ error: 'Invalid path' });
+    }
+    // The candidate vanished between the scan above and the move (e.g. deleted
+    // on disk): treat it like a stale candidate rather than a server fault.
+    if (code === 'ENOENT') {
+      return res.status(404).json({ error: 'That compose file was not found. Rescan and try again.' });
+    }
+    console.error('Failed to import compose file into stack:', error);
+    res.status(500).json({ error: 'Failed to move the compose file into place' });
+  }
+});
+
 type BulkLifecycleAction = 'start' | 'stop' | 'restart' | 'update';
 const VALID_BULK_ACTIONS: ReadonlySet<BulkLifecycleAction> = new Set(['start', 'stop', 'restart', 'update']);
 const BULK_PARALLELISM = 4;

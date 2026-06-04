@@ -33,12 +33,12 @@ Sencho creates a new directory inside `COMPOSE_DIR` with the chosen seed file. Y
 
 ### Import existing files
 
-If you already have compose files on disk, the **Import** tab helps you land your first stack without reading the rest of this page. It scans your compose directory and lists every compose file it finds, with a dry preview of each file's services, ports, volumes, and env files. The scan is read only: it never moves, writes, or changes any of your files.
+If you already have compose files on disk, the **Import** tab helps you land your first stack without reading the rest of this page. It scans your compose directory and lists every compose file it finds, with a dry preview of each file's services, ports, volumes, and env files. Scanning is read only: it never moves, writes, or changes anything. The only change to disk is the **Move into place** action below, which you trigger per file and confirm before it runs.
 
 Each result shows where the file sits:
 
 - **In sidebar**: the file is in its own subfolder inside the compose directory, so it is already a stack. Expand it to preview its services, or open it directly in the sidebar.
-- **Needs move**: the file is loose at the root of the compose directory, or one folder too deep, so it will not show up as a stack on its own. Sencho shows the exact path to move it to (its own subfolder inside the compose directory) and a **Rescan** button. Move the file there, click **Rescan**, and it appears.
+- **Needs move**: the file is loose at the root of the compose directory, or one folder too deep, so it will not show up as a stack on its own. Expand it, give the stack a name, and click **Move into place** to relocate it into its own subfolder; confirm the move, and it appears as a stack. The file stays a plain compose file on disk that you own. Moving a loose root file relocates only that file, so anything it references by a relative path (such as a root `.env`) stays where it is. You can also arrange the file by hand and click **Rescan** instead.
 
 The top of the panel shows the directory Sencho is scanning and a reminder of the path rule: each stack lives in its own subfolder, and the host mount path must match the path inside the container so relative volume paths resolve. See [Configuration](/getting-started/configuration) for the full explanation.
 

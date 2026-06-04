@@ -60,6 +60,16 @@ export interface ImportCandidateRaw {
   oversized: boolean;
 }
 
+/**
+ * An import candidate that can be moved into place: a loose-root or nested
+ * compose file, never one already listed as a stack. Derived from
+ * ImportCandidateRaw so the relationship stays compile-time linked and the
+ * 'listed' exclusion survives any future status additions.
+ */
+export type MovableImportCandidate = Pick<ImportCandidateRaw, 'location' | 'composeFile'> & {
+  status: Exclude<ImportCandidateRaw['status'], 'listed'>;
+};
+
 // Strips at most one trailing slash. The upstream validator
 // (isValidRelativeStackPath) rejects any '//' sequence, so a string reaching
 // this helper can carry at most one trailing slash, and a single slice is
@@ -562,6 +572,69 @@ export class FileSystemService {
     }
 
     return candidates;
+  }
+
+  /**
+   * Move a discovered import candidate into its own top-level stack directory so
+   * auto-discovery (getStacks) picks it up. This is the single write path of the
+   * guided import flow and only runs on an explicit, per-file user action.
+   *
+   * A `loose-root` file is moved into <base>/<destName>/<composeFile>: only the
+   * chosen compose file moves, so sibling files referenced by a relative path
+   * (e.g. a root .env) stay where they are. A `nested` stack directory
+   * (<parent>/<child>) is promoted whole to <base>/<destName>, preserving its
+   * .env and any other files.
+   *
+   * Never overwrites: a pre-existing destination is a conflict. Source and
+   * destination are both confirmed to resolve inside the compose directory
+   * before the rename, mirroring readComposeCandidate / resolveSafeStackPath.
+   */
+  async importCandidateIntoStack(
+    candidate: MovableImportCandidate,
+    destName: string,
+  ): Promise<void> {
+    const destDir = this.resolveStackDir(destName); // validates name + containment
+
+    // No overwrite: the destination stack must not already exist. ENOENT is the
+    // expected happy path; any other access error (e.g. EACCES) should surface.
+    try {
+      await fsPromises.access(destDir);
+      throw Object.assign(new Error(`A stack named "${destName}" already exists`), { code: 'DEST_EXISTS' });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === 'DEST_EXISTS') throw error;
+      if (code !== 'ENOENT') throw error;
+    }
+
+    // The on-disk source the candidate points at, confirmed within the base.
+    const source = path.resolve(this.baseDir, candidate.location);
+    this.assertWithinBase(source);
+
+    if (candidate.status === 'loose-root') {
+      const realSource = await this.realPathWithinBase(source);
+      await fsPromises.mkdir(destDir, { recursive: true });
+      await fsPromises.rename(realSource, path.join(destDir, candidate.composeFile));
+      return;
+    }
+
+    // nested: promote the whole child directory (<parent>/<child>) one level up.
+    const sourceDir = path.dirname(source);
+    this.assertWithinBase(sourceDir);
+    const realSourceDir = await this.realPathWithinBase(sourceDir);
+    await fsPromises.rename(realSourceDir, destDir);
+  }
+
+  /**
+   * Resolve symlinks and confirm the real target is still inside the compose
+   * directory before a write moves it, so a symlinked source cannot relocate a
+   * file from outside the base. Returns the canonical path to operate on.
+   */
+  private async realPathWithinBase(p: string): Promise<string> {
+    const real = await fsPromises.realpath(p);
+    if (!isPathWithinBase(real, this.baseDir)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    return real;
   }
 
   async migrateFlatToDirectory(): Promise<void> {
