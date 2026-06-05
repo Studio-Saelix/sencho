@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.89.0](https://github.com/Studio-Saelix/sencho/compare/v0.88.2...v0.89.0) (2026-06-05)
+
+
+### Added
+
+* **appearance:** add theme, accent, contrast, and typography personalization ([#1307](https://github.com/Studio-Saelix/sencho/issues/1307)) ([c0a2520](https://github.com/Studio-Saelix/sencho/commit/c0a252026d3d7a3d2afef7f7a5e3b71caa35adbc))
+* **mesh:** refine the Routing tab and add per-route removal ([#1311](https://github.com/Studio-Saelix/sencho/issues/1311)) ([81858a0](https://github.com/Studio-Saelix/sencho/commit/81858a0bb0df43251cea214e121358e69a31aa03))
+* **pricing:** collapse to two tiers ([#1309](https://github.com/Studio-Saelix/sencho/issues/1309)) ([865d792](https://github.com/Studio-Saelix/sencho/commit/865d792874ba42af23cfe4708c89d9f4f2517c8f))
+
+
+### Fixed
+
+* **settings:** reflect role, tier, and node scope in settings panels ([#1300](https://github.com/Studio-Saelix/sencho/issues/1300)) ([0683aa9](https://github.com/Studio-Saelix/sencho/commit/0683aa93955f25071accfe6c78e76dcf8d078003))
+* **settings:** serialize GET /api/settings from an allowlist ([#1299](https://github.com/Studio-Saelix/sencho/issues/1299)) ([4596a90](https://github.com/Studio-Saelix/sencho/commit/4596a90474b3a1266d2df187674aa0dc16223fa4))
+* **ui:** center create-stack label and drop duplicate plus on mesh CTA ([#1310](https://github.com/Studio-Saelix/sencho/issues/1310)) ([9d30550](https://github.com/Studio-Saelix/sencho/commit/9d3055049feb388ddca939b3c9537519221b5b56))
+
 ## [0.88.2](https://github.com/Studio-Saelix/sencho/compare/v0.88.1...v0.88.2) (2026-06-03)
 
 
