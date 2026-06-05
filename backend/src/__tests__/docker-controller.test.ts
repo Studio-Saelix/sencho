@@ -316,6 +316,49 @@ describe('DockerController - getDiskUsage', () => {
     expect(usage.reclaimableContainers).toBe(0);
     expect(usage.reclaimableVolumes).toBe(0);
   });
+
+  it('counts only prune-eligible container states (created/exited/dead)', async () => {
+    // `docker container prune` removes stopped containers (created/exited/dead).
+    // Paused and restarting containers survive it, so counting them would leave
+    // a residue the banner can never clear no matter which prune runs.
+    mockDocker.df.mockResolvedValue({
+      Images: [],
+      Volumes: [],
+      Containers: [
+        { State: 'exited', SizeRw: 200 },      // prunable
+        { State: 'created', SizeRw: 50 },      // prunable
+        { State: 'dead', SizeRw: 25 },         // prunable
+        { State: 'paused', SizeRw: 1000 },     // survives prune
+        { State: 'restarting', SizeRw: 1000 }, // survives prune
+        { State: 'running', SizeRw: 1000 },    // in use
+      ],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage();
+
+    expect(usage.reclaimableContainers).toBe(275);
+    expect(usage.reclaimableContainerCount).toBe(3);
+  });
+
+  it('sizes stopped containers by the writable layer (SizeRw), not SizeRootFs', async () => {
+    // SizeRootFs includes the read-only image layers, which removing a
+    // container never frees. A stopped container that wrote nothing reclaims 0.
+    mockDocker.df.mockResolvedValue({
+      Images: [],
+      Volumes: [],
+      Containers: [
+        { State: 'exited', SizeRw: 0, SizeRootFs: 500_000_000 }, // wrote nothing
+        { State: 'exited', SizeRw: 1_500, SizeRootFs: 900_000 }, // writable layer only
+      ],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage();
+
+    expect(usage.reclaimableContainers).toBe(1_500);
+    expect(usage.reclaimableContainerCount).toBe(2);
+  });
 });
 
 // ── pruneSystem ────────────────────────────────────────────────────────

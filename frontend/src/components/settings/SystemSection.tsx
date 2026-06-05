@@ -133,7 +133,7 @@ function SettingsSkeleton() {
     );
 }
 
-type SystemFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'docker_janitor_gb' | 'global_crash' | 'prune_on_update' | 'mesh_auto_recreate'>;
+type SystemFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'docker_janitor_gb' | 'global_crash' | 'prune_on_update' | 'mesh_auto_recreate' | 'reclaim_hero'>;
 
 const DEFAULT_SYSTEM: SystemFields = {
     host_cpu_limit: DEFAULT_SETTINGS.host_cpu_limit,
@@ -144,6 +144,7 @@ const DEFAULT_SYSTEM: SystemFields = {
     global_crash: DEFAULT_SETTINGS.global_crash,
     prune_on_update: DEFAULT_SETTINGS.prune_on_update,
     mesh_auto_recreate: DEFAULT_SETTINGS.mesh_auto_recreate,
+    reclaim_hero: DEFAULT_SETTINGS.reclaim_hero,
 };
 
 export function SystemSection({ onDirtyChange }: SystemSectionProps) {
@@ -166,6 +167,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
         if (settings.global_crash !== baseline.global_crash) n++;
         if (settings.prune_on_update !== baseline.prune_on_update) n++;
         if (settings.mesh_auto_recreate !== baseline.mesh_auto_recreate) n++;
+        if (settings.reclaim_hero !== baseline.reclaim_hero) n++;
         return n;
     }, [settings]);
 
@@ -202,6 +204,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                     global_crash: (nodeData.global_crash as '0' | '1') ?? DEFAULT_SETTINGS.global_crash,
                     prune_on_update: (nodeData.prune_on_update as '0' | '1') ?? DEFAULT_SETTINGS.prune_on_update,
                     mesh_auto_recreate: (nodeData.mesh_auto_recreate as '0' | '1') ?? DEFAULT_SETTINGS.mesh_auto_recreate,
+                    reclaim_hero: (nodeData.reclaim_hero as '0' | '1') ?? DEFAULT_SETTINGS.reclaim_hero,
                 };
                 setSettings(safe);
                 serverSettingsRef.current = { ...safe };
@@ -328,6 +331,15 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                     <TogglePill
                         checked={settings.prune_on_update === '1'}
                         onChange={(next) => onSettingChange('prune_on_update', next ? '1' : '0')}
+                    />
+                </SettingsField>
+                <SettingsField
+                    label="Show reclaimable-space banner"
+                    helper="Show the reclaimable-space banner at the top of the Resource Hub when this node has unused images, stopped containers, or dangling volumes to clear. On by default."
+                >
+                    <TogglePill
+                        checked={settings.reclaim_hero === '1'}
+                        onChange={(next) => onSettingChange('reclaim_hero', next ? '1' : '0')}
                     />
                 </SettingsField>
             </SettingsSection>

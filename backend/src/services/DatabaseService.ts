@@ -1256,6 +1256,7 @@ export class DatabaseService {
         stmt.run('deploy_block_honor_suppressions', '0');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
+        stmt.run('reclaim_hero', '1');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;

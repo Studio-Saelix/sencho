@@ -102,6 +102,32 @@ type ResourceFilter = 'all' | 'managed' | 'unmanaged';
 type PruneTarget = 'containers' | 'images' | 'networks' | 'volumes';
 type PruneScope = 'managed' | 'all';
 
+// Per-node, per-browser snooze for the reclaim banner. We store the reclaimable
+// byte total at the moment of dismissal; the banner returns only once the node's
+// reclaimable total grows past that snapshot, so a stable residue stays hidden.
+const heroDismissKey = (nodeId: string | number | undefined) => `sencho.reclaimHeroDismissed.${nodeId ?? 'local'}`;
+
+function readHeroDismissed(nodeId: string | number | undefined): number | null {
+    try {
+        const raw = localStorage.getItem(heroDismissKey(nodeId));
+        if (raw === null) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : null;
+    } catch {
+        // localStorage is unavailable (private mode / blocked); treat as
+        // not-dismissed so the banner still shows.
+        return null;
+    }
+}
+
+function writeHeroDismissed(nodeId: string | number | undefined, bytes: number): void {
+    try {
+        localStorage.setItem(heroDismissKey(nodeId), String(bytes));
+    } catch {
+        // Best-effort: if the write fails the banner simply reappears next load.
+    }
+}
+
 // ── Filter Toggle - Segmented Control ─────────────────────────────────────────
 
 interface FilterToggleProps {
@@ -367,6 +393,12 @@ export default function ResourcesView() {
     // Modal states
     const [confirmPrune, setConfirmPrune] = useState<{ target: PruneTarget; scope: PruneScope } | null>(null);
     const [confirmDelete, setConfirmDelete] = useState<{ type: 'images' | 'volumes' | 'networks'; id: string; name?: string } | null>(null);
+    const [confirmReclaim, setConfirmReclaim] = useState(false);
+
+    // Reclaim banner visibility: the per-node opt-out setting (loaded in
+    // fetchAllData) and the per-browser dismiss snapshot for the active node.
+    const [reclaimHeroEnabled, setReclaimHeroEnabled] = useState(true);
+    const [heroDismissedBytes, setHeroDismissedBytes] = useState<number | null>(null);
 
     // Network create/inspect state
     const [showCreateNetwork, setShowCreateNetwork] = useState(false);
@@ -399,11 +431,12 @@ export default function ResourcesView() {
         const generation = ++fetchGenerationRef.current;
         setIsLoading(true);
         try {
-            const [usageRes, resourcesRes, orphansRes, summariesRes] = await Promise.all([
+            const [usageRes, resourcesRes, orphansRes, summariesRes, settingsRes] = await Promise.all([
                 apiFetch('/system/docker-df'),
                 apiFetch('/system/resources'),
                 apiFetch('/system/orphans'),
                 apiFetch('/security/image-summaries').catch(() => null),
+                apiFetch('/settings').catch(() => null),
             ]);
 
             // Resolve every body before the staleness check so a stale
@@ -412,9 +445,15 @@ export default function ResourcesView() {
             const resourcesData = resourcesRes.ok ? await resourcesRes.json() : null;
             const orphansData = orphansRes.ok ? await orphansRes.json() : null;
             const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
+            const settingsData = settingsRes && settingsRes.ok ? await settingsRes.json() : null;
 
             if (fetchGenerationRef.current !== generation) return;
 
+            // Set unconditionally: a failed /settings (settingsData null) must
+            // reset to the default-on state for this node, not inherit the
+            // previously active node's value. undefined !== '0' is true, so a
+            // missing key or failed fetch fails open toward showing the banner.
+            setReclaimHeroEnabled(settingsData?.reclaim_hero !== '0');
             if (usageData) setUsage(usageData);
             if (resourcesData) {
                 setImages(resourcesData.images ?? []);
@@ -436,6 +475,11 @@ export default function ResourcesView() {
     };
 
     useEffect(() => { fetchAllData(); }, [activeNode]);
+
+    // Load the per-node reclaim-banner dismiss snapshot when the node changes.
+    useEffect(() => {
+        setHeroDismissedBytes(readHeroDismissed(activeNode?.id));
+    }, [activeNode?.id]);
 
     // Cancel an in-flight scan poll on unmount or node switch; its result
     // belongs to the node it started on.
@@ -682,21 +726,78 @@ export default function ResourcesView() {
         + (usage?.reclaimableContainers ?? 0)
         + (usage?.reclaimableVolumes ?? 0);
 
+    // Banner shows while the opt-out is on and the operator has not dismissed
+    // this (or a larger) reclaimable total. A stable residue stays hidden; a
+    // fresh pile pushes the total past the snapshot and the banner returns.
+    const heroVisible = isAdmin && reclaimHeroEnabled
+        && (heroDismissedBytes === null || totalReclaimableBytes > heroDismissedBytes);
+
     const handleReviewAndPrune = () => {
-        setConfirmPrune({ target: 'images', scope: 'all' });
+        setConfirmReclaim(true);
+    };
+
+    const handleDismissHero = () => {
+        writeHeroDismissed(activeNode?.id, totalReclaimableBytes);
+        setHeroDismissedBytes(totalReclaimableBytes);
+    };
+
+    // "Review & prune" reclaims everything the banner advertises. Order matters:
+    // volumes first, while stopped containers still hold a reference to their
+    // named volumes, so the prune only removes volumes that are already dangling
+    // and a stopped stack's data is never cascaded into deletion. Containers
+    // next, then images, so images a stopped container pinned become reclaimable.
+    // Each failed target is reported by name and its server error logged (never a
+    // false success); the reclaimed figure is shown only when the daemon reports
+    // one (the containerd image store returns 0).
+    const handleReclaimAll = async () => {
+        setIsActioning(true);
+        const loadingId = toast.loading('Reclaiming disk space...');
+        const order: PruneTarget[] = ['volumes', 'containers', 'images'];
+        let reclaimed = 0;
+        const failed: PruneTarget[] = [];
+        try {
+            for (const target of order) {
+                try {
+                    const res = await apiFetch('/system/prune/system', {
+                        method: 'POST',
+                        body: JSON.stringify({ target, scope: 'all' }),
+                    });
+                    const data = await res.json().catch(() => null);
+                    if (!res.ok) throw new Error(data?.error || `Failed to prune ${target}`);
+                    if (typeof data?.reclaimedBytes === 'number') reclaimed += data.reclaimedBytes;
+                } catch (err) {
+                    console.error(`Failed to prune ${target}`, err);
+                    failed.push(target);
+                }
+            }
+            const reclaimedLabel = reclaimed > 0 ? ` Freed ${formatBytes(reclaimed)}.` : '';
+            if (failed.length === order.length) {
+                toast.error('Failed to reclaim disk space.');
+            } else if (failed.length > 0) {
+                toast.warning(`Could not prune: ${failed.join(', ')}.${reclaimedLabel}`);
+            } else {
+                toast.success(`Reclaimed unused images, stopped containers, and dangling volumes.${reclaimedLabel}`);
+            }
+            await fetchAllData();
+        } finally {
+            toast.dismiss(loadingId);
+            setIsActioning(false);
+            setConfirmReclaim(false);
+        }
     };
 
     return (
         <div className="p-6 h-full overflow-auto text-foreground flex flex-col gap-6 animate-in fade-in-0 duration-300">
 
             {/* Reclaim hero */}
-            {usage && isAdmin && (
+            {heroVisible && usage && (
                 <ReclaimHero
                     bytes={totalReclaimableBytes}
                     imageCount={usage.reclaimableImageCount}
                     containerCount={usage.reclaimableContainerCount}
                     volumeCount={usage.reclaimableVolumeCount}
                     onReview={handleReviewAndPrune}
+                    onDismiss={handleDismissHero}
                     disabled={isLoading}
                 />
             )}
@@ -1260,6 +1361,39 @@ export default function ResourcesView() {
                         </>
                     )}
                 </p>
+            </ConfirmModal>
+
+            {/* Reclaim Confirm (banner "Review & prune") */}
+            <ConfirmModal
+                open={confirmReclaim}
+                onOpenChange={(open) => !open && setConfirmReclaim(false)}
+                variant="destructive"
+                kicker="RESOURCES · PRUNE · IRREVERSIBLE"
+                title="Reclaim disk space"
+                hint="AFFECTS external Docker resources"
+                confirmLabel={isActioning ? 'Reclaiming...' : `Reclaim ${formatBytes(totalReclaimableBytes)}`}
+                confirming={isActioning}
+                onConfirm={handleReclaimAll}
+            >
+                <div className="space-y-3 text-sm text-stat-subtitle">
+                    <p>
+                        Removes every unused image, stopped container, and dangling volume on this node, including those from{' '}
+                        <span className="font-medium text-stat-value">external projects not managed by Sencho</span>.
+                    </p>
+                    {usage && (
+                        <ul className="flex flex-col gap-1 font-mono text-[12px] text-stat-subtitle/90">
+                            {usage.reclaimableImageCount > 0 && (
+                                <li>{usage.reclaimableImageCount} {usage.reclaimableImageCount === 1 ? 'unused image' : 'unused images'} · {formatBytes(usage.reclaimableImages)}</li>
+                            )}
+                            {usage.reclaimableContainerCount > 0 && (
+                                <li>{usage.reclaimableContainerCount} {usage.reclaimableContainerCount === 1 ? 'stopped container' : 'stopped containers'} · {formatBytes(usage.reclaimableContainers)}</li>
+                            )}
+                            {usage.reclaimableVolumeCount > 0 && (
+                                <li>{usage.reclaimableVolumeCount} {usage.reclaimableVolumeCount === 1 ? 'dangling volume' : 'dangling volumes'} · {formatBytes(usage.reclaimableVolumes)}</li>
+                            )}
+                        </ul>
+                    )}
+                </div>
             </ConfirmModal>
 
             {/* Delete Confirm */}
