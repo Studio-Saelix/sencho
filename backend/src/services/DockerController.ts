@@ -263,6 +263,16 @@ class DockerController {
     };
   }
 
+  // Prune ONLY dangling (untagged) images. Distinct from pruneSystem('images'),
+  // which uses { dangling: { 'false': true } } to remove every unused image.
+  // Used by the prune-on-update flow to reclaim the layers a pull/recreate
+  // orphans, without touching tagged images for stopped stacks.
+  public async pruneDanglingImages(): Promise<{ success: boolean; reclaimedBytes: number }> {
+    const filters: Record<string, string[] | Record<string, boolean>> = { dangling: { 'true': true } };
+    const r = await this.docker.pruneImages({ filters });
+    return { success: true, reclaimedBytes: r.SpaceReclaimed || 0 };
+  }
+
   public async getImages() {
     const data = await this.docker.listImages({ all: false });
     return this.validateApiData<any[]>(data);

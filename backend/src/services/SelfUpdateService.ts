@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import DockerController from './DockerController';
+import { DatabaseService } from './DatabaseService';
 import { disableCapability } from './CapabilityRegistry';
 import { isDebugEnabled } from '../utils/debug';
 
@@ -37,6 +38,35 @@ export function findDataDirHost(mounts: ReadonlyArray<DockerMount>): string | nu
     !!m.Source,
   );
   return match?.Source ?? null;
+}
+
+/**
+ * Build the shell command the helper container runs to recreate Sencho. Kept as
+ * a pure, exported function so the prune-on-update branch is unit-testable.
+ *
+ * The recreate writes the error file only on failure; the optional dangling
+ * prune runs only on success, so the two branches never overlap. The prune
+ * suppresses its own output and `|| true`, so it can never alter $ec or be
+ * mistaken for an update error.
+ */
+export function buildSelfUpdateComposeCmd(
+  fFlags: string[],
+  serviceName: string,
+  stderrTmp: string,
+  errorFile: string,
+  pruneOnUpdate: boolean,
+): string {
+  return [
+    'sleep 3',
+    ['docker compose', ...fFlags, 'up -d --force-recreate', serviceName, `2>${stderrTmp}`].join(' '),
+    'ec=$?',
+    `if [ $ec -ne 0 ]; then { echo "exit=$ec"; cat ${stderrTmp}; } > ${errorFile} 2>/dev/null; fi`,
+    ...(pruneOnUpdate
+      ? [`if [ $ec -eq 0 ]; then docker image prune -f >/dev/null 2>&1 || true; fi`]
+      : []),
+    `cat ${stderrTmp} >&2 2>/dev/null`,
+    'exit $ec',
+  ].join('; ');
 }
 
 interface ComposeContext {
@@ -198,15 +228,12 @@ class SelfUpdateService {
 
     // On failure, persist exit code + stderr to UPDATE_ERROR_FILE (host-mounted)
     // so the NEW gateway can read it after restart if we die mid-execution.
+    // Opt-out (default ON): after a clean recreate, prune the dangling image
+    // layers the pull orphaned. Read fresh so this node honors its own setting.
     const stderrTmp = '/tmp/_sencho_err';
-    const composeCmd = [
-      'sleep 3',
-      ['docker compose', ...fFlags, 'up -d --force-recreate', serviceName, `2>${stderrTmp}`].join(' '),
-      'ec=$?',
-      `if [ $ec -ne 0 ]; then { echo "exit=$ec"; cat ${stderrTmp}; } > ${UPDATE_ERROR_FILE} 2>/dev/null; fi`,
-      `cat ${stderrTmp} >&2 2>/dev/null`,
-      'exit $ec',
-    ].join('; ');
+    const pruneOnUpdate =
+      DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
+    const composeCmd = buildSelfUpdateComposeCmd(fFlags, serviceName, stderrTmp, UPDATE_ERROR_FILE, pruneOnUpdate);
 
     const mountArgs: string[] = [
       '-v', '/var/run/docker.sock:/var/run/docker.sock',

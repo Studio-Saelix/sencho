@@ -16,6 +16,7 @@ const {
   mockGetRegistries, mockResolveDockerConfig,
   mockBackupStackFiles, mockRestoreStackFiles,
   mockMkdtempSync, mockWriteFileSync, mockUnlinkSync, mockRmdirSync,
+  mockGetGlobalSettings, mockPruneDanglingImages,
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
@@ -31,6 +32,8 @@ const {
   mockWriteFileSync: vi.fn(),
   mockUnlinkSync: vi.fn(),
   mockRmdirSync: vi.fn(),
+  mockGetGlobalSettings: vi.fn().mockReturnValue({}),
+  mockPruneDanglingImages: vi.fn().mockResolvedValue({ reclaimedBytes: 0 }),
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -62,6 +65,7 @@ vi.mock('../services/DockerController', () => ({
     getInstance: () => ({
       getContainersByStack: mockGetContainersByStack,
       removeContainers: mockRemoveContainers,
+      pruneDanglingImages: mockPruneDanglingImages,
       getDocker: () => ({
         listContainers: mockListContainers,
         getContainer: () => ({
@@ -77,6 +81,7 @@ vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getRegistries: mockGetRegistries,
+      getGlobalSettings: mockGetGlobalSettings,
     }),
   },
 }));
@@ -460,6 +465,82 @@ describe('ComposeService - deployStack', () => {
     expect(error).not.toBeNull();
     expect(error!.message).toContain('CONTAINER_CRASHED');
     expect(mockRestoreStackFiles).not.toHaveBeenCalled();
+  });
+});
+
+// ── updateStack: prune-on-update ───────────────────────────────────────
+
+describe('ComposeService - updateStack prune-on-update', () => {
+  it('prunes dangling images after a successful update when prune_on_update=1', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({ prune_on_update: '1' });
+    mockPruneDanglingImages.mockResolvedValue({ reclaimedBytes: 2_097_152 });
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockPruneDanglingImages).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not prune when prune_on_update=0', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({ prune_on_update: '0' });
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockPruneDanglingImages).not.toHaveBeenCalled();
+  });
+
+  it('does not prune when the setting key is absent (fail-safe for un-backfilled DBs)', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockPruneDanglingImages).not.toHaveBeenCalled();
+  });
+
+  it('does not prune when the update itself fails (prune is success-only)', async () => {
+    setupAutoCloseSpawn();
+    // A container that exited non-zero makes the post-update health probe throw,
+    // so control never reaches the prune block that follows it.
+    mockListContainers.mockResolvedValue([{ Id: 'c1', State: 'exited' }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockGetGlobalSettings.mockReturnValue({ prune_on_update: '1' });
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    // Attach the rejection expectation before advancing timers so the throw
+    // (which fires mid-advance) is never momentarily unhandled.
+    const rejection = expect(promise).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(3100);
+    await rejection;
+
+    expect(mockPruneDanglingImages).not.toHaveBeenCalled();
+  });
+
+  it('does not fail the update when the prune throws', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({ prune_on_update: '1' });
+    mockPruneDanglingImages.mockRejectedValueOnce(new Error('docker busy'));
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+
+    await expect(promise).resolves.toBeUndefined();
   });
 });
 

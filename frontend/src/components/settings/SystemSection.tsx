@@ -133,7 +133,7 @@ function SettingsSkeleton() {
     );
 }
 
-type SystemFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'docker_janitor_gb' | 'global_crash' | 'mesh_auto_recreate'>;
+type SystemFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'docker_janitor_gb' | 'global_crash' | 'prune_on_update' | 'mesh_auto_recreate'>;
 
 const DEFAULT_SYSTEM: SystemFields = {
     host_cpu_limit: DEFAULT_SETTINGS.host_cpu_limit,
@@ -142,6 +142,7 @@ const DEFAULT_SYSTEM: SystemFields = {
     host_alert_suppression_mins: DEFAULT_SETTINGS.host_alert_suppression_mins,
     docker_janitor_gb: DEFAULT_SETTINGS.docker_janitor_gb,
     global_crash: DEFAULT_SETTINGS.global_crash,
+    prune_on_update: DEFAULT_SETTINGS.prune_on_update,
     mesh_auto_recreate: DEFAULT_SETTINGS.mesh_auto_recreate,
 };
 
@@ -163,6 +164,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
         if (settings.host_alert_suppression_mins !== baseline.host_alert_suppression_mins) n++;
         if (settings.docker_janitor_gb !== baseline.docker_janitor_gb) n++;
         if (settings.global_crash !== baseline.global_crash) n++;
+        if (settings.prune_on_update !== baseline.prune_on_update) n++;
         if (settings.mesh_auto_recreate !== baseline.mesh_auto_recreate) n++;
         return n;
     }, [settings]);
@@ -198,6 +200,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                     host_alert_suppression_mins: nodeData.host_alert_suppression_mins ?? DEFAULT_SETTINGS.host_alert_suppression_mins,
                     docker_janitor_gb: nodeData.docker_janitor_gb ?? DEFAULT_SETTINGS.docker_janitor_gb,
                     global_crash: (nodeData.global_crash as '0' | '1') ?? DEFAULT_SETTINGS.global_crash,
+                    prune_on_update: (nodeData.prune_on_update as '0' | '1') ?? DEFAULT_SETTINGS.prune_on_update,
                     mesh_auto_recreate: (nodeData.mesh_auto_recreate as '0' | '1') ?? DEFAULT_SETTINGS.mesh_auto_recreate,
                 };
                 setSettings(safe);
@@ -316,6 +319,15 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                     <TogglePill
                         checked={settings.global_crash === '1'}
                         onChange={(next) => onSettingChange('global_crash', next ? '1' : '0')}
+                    />
+                </SettingsField>
+                <SettingsField
+                    label="Prune dangling images after updates"
+                    helper="When an update finishes, remove the dangling image layers it leaves behind. On by default; turn it off to keep every old layer. Applies to stack updates and Sencho self-updates on this node."
+                >
+                    <TogglePill
+                        checked={settings.prune_on_update === '1'}
+                        onChange={(next) => onSettingChange('prune_on_update', next ? '1' : '0')}
                     />
                 </SettingsField>
             </SettingsSection>

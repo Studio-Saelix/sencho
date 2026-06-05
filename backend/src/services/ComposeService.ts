@@ -527,6 +527,22 @@ export class ComposeService {
       }
 
       sendOutput('=== Stack updated successfully ===\n');
+
+      // Opt-out (default ON): reclaim the dangling image layers the pull/recreate
+      // left behind. Read fresh each run so a remote node honors its own setting.
+      // Wrapped so a prune failure can never reach the atomic-rollback catch below.
+      try {
+        const pruneOnUpdate =
+          DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
+        if (pruneOnUpdate) {
+          const result = await DockerController.getInstance(this.nodeId).pruneDanglingImages();
+          const mb = (result.reclaimedBytes / (1024 * 1024)).toFixed(1);
+          sendOutput(`=== Pruned dangling images · reclaimed ${mb} MB ===\n`);
+        }
+      } catch (pruneError) {
+        console.warn('Failed to prune dangling images after update for %s:', sanitizeForLog(stackName), pruneError);
+      }
+
       if (debug) console.debug(`[ComposeService:debug] updateStack completed in ${Date.now() - t0}ms`, { stackName });
     } catch (updateError) {
       if (atomic) {

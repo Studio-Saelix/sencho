@@ -6,7 +6,7 @@
  * recovery will be unavailable" at boot.
  */
 import { describe, expect, it } from 'vitest';
-import { findDataDirHost } from '../services/SelfUpdateService';
+import { buildSelfUpdateComposeCmd, findDataDirHost } from '../services/SelfUpdateService';
 
 describe('findDataDirHost', () => {
   it('returns the host path for a bind mount at /app/data', () => {
@@ -52,5 +52,34 @@ describe('findDataDirHost', () => {
       { Type: 'tmpfs', Source: '', Destination: '/app/data' },
     ]);
     expect(source).toBeNull();
+  });
+});
+
+describe('buildSelfUpdateComposeCmd', () => {
+  const fFlags = ['-f', '/app/docker-compose.yml'];
+  const stderrTmp = '/tmp/_sencho_err';
+  const errorFile = '/app/data/.sencho-update-error';
+
+  it('appends a success-guarded dangling-image prune when pruneOnUpdate is true', () => {
+    const cmd = buildSelfUpdateComposeCmd(fFlags, 'sencho', stderrTmp, errorFile, true);
+    expect(cmd).toContain('if [ $ec -eq 0 ]; then docker image prune -f');
+    // Prune must never change the helper exit code, so the command still ends on exit $ec.
+    expect(cmd.trim().endsWith('exit $ec')).toBe(true);
+    // Order matters: the prune must run after $ec is captured and after the
+    // error-file write, or it could shadow the recreate's exit code / clobber
+    // the error file. Lock the ordering, not just the presence of the line.
+    expect(cmd.indexOf('ec=$?')).toBeLessThan(cmd.indexOf('docker image prune'));
+    expect(cmd.indexOf(errorFile)).toBeLessThan(cmd.indexOf('docker image prune'));
+  });
+
+  it('omits the prune entirely when pruneOnUpdate is false', () => {
+    const cmd = buildSelfUpdateComposeCmd(fFlags, 'sencho', stderrTmp, errorFile, false);
+    expect(cmd).not.toContain('docker image prune');
+  });
+
+  it('always recreates the service and persists the error file on failure', () => {
+    const cmd = buildSelfUpdateComposeCmd(fFlags, 'sencho', stderrTmp, errorFile, true);
+    expect(cmd).toContain('up -d --force-recreate sencho');
+    expect(cmd).toContain(`> ${errorFile}`);
   });
 });
