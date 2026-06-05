@@ -60,6 +60,14 @@ export interface SystemSheetProps {
    * body padding (`noScroll` skips the default `px-6 py-5` wrapper).
    */
   noScroll?: boolean;
+  /**
+   * Constrain the scrolling body to the sheet width and let any wider child scroll
+   * horizontally instead of overflowing the sheet. Use when the body contains a
+   * fixed-layout widget that forces its own min-width (e.g. the Monaco editor),
+   * which otherwise pushes the body past the sheet edge and gets clipped. Ignored
+   * when `noScroll` is set.
+   */
+  constrainBodyWidth?: boolean;
   children?: React.ReactNode;
 }
 
@@ -78,6 +86,7 @@ export function SystemSheet({
   footerContext,
   size = 'md',
   noScroll = false,
+  constrainBodyWidth = false,
   children,
 }: SystemSheetProps) {
   const hasToolbar = !!(primaryAction || (secondaryActions && secondaryActions.length > 0) || destructiveAction);
@@ -122,7 +131,7 @@ export function SystemSheet({
         {noScroll ? (
           <div className="flex-1 min-h-0 flex flex-col">{children}</div>
         ) : (
-          <ScrollArea className="flex-1">
+          <ScrollArea className="flex-1" block={constrainBodyWidth}>
             <div className="px-6 py-5">{children}</div>
           </ScrollArea>
         )}
