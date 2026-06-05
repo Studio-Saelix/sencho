@@ -535,8 +535,12 @@ export class ComposeService {
         const pruneOnUpdate = DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
         if (pruneOnUpdate) {
           const result = await DockerController.getInstance(this.nodeId).pruneDanglingImages();
-          const mb = (result.reclaimedBytes / (1024 * 1024)).toFixed(1);
-          sendOutput(`=== Pruned dangling images · reclaimed ${mb} MB ===\n`);
+          // The Docker prune API does not report SpaceReclaimed on the containerd
+          // image store, so only show the figure when the daemon actually returns one.
+          const reclaimed = result.reclaimedBytes > 0
+            ? ` · reclaimed ${(result.reclaimedBytes / (1024 * 1024)).toFixed(1)} MB`
+            : '';
+          sendOutput(`=== Pruned dangling images${reclaimed} ===\n`);
         }
       } catch (pruneError) {
         console.warn('Failed to prune dangling images after update for %s:', sanitizeForLog(stackName), pruneError);

@@ -485,6 +485,29 @@ describe('ComposeService - updateStack prune-on-update', () => {
     expect(mockPruneDanglingImages).toHaveBeenCalledTimes(1);
   });
 
+  it('streams a reclaim figure only when the daemon reports bytes', async () => {
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({ prune_on_update: '1' });
+    const ws = createMockWs();
+
+    // The containerd image store reports SpaceReclaimed=0 even when it removes
+    // images, so a zero figure must be omitted rather than shown as "0.0 MB".
+    setupAutoCloseSpawn();
+    mockPruneDanglingImages.mockResolvedValueOnce({ reclaimedBytes: 0 });
+    let p = ComposeService.getInstance(1).updateStack('my-stack', ws);
+    await vi.advanceTimersByTimeAsync(3100);
+    await p;
+    expect(ws.send).toHaveBeenCalledWith('=== Pruned dangling images ===\n');
+
+    ws.send.mockClear();
+    setupAutoCloseSpawn();
+    mockPruneDanglingImages.mockResolvedValueOnce({ reclaimedBytes: 5 * 1024 * 1024 });
+    p = ComposeService.getInstance(1).updateStack('my-stack', ws);
+    await vi.advanceTimersByTimeAsync(3100);
+    await p;
+    expect(ws.send).toHaveBeenCalledWith('=== Pruned dangling images · reclaimed 5.0 MB ===\n');
+  });
+
   it('does not prune when prune_on_update=0', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);
