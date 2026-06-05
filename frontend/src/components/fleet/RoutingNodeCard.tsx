@@ -67,10 +67,16 @@ export function RoutingNodeCard({
     const [lastTestedByHost, setLastTestedByHost] = useState<Map<string, { at: number; ok: boolean }>>(() => new Map());
     const lastSeenRef = useRef<number>(Date.now());
     const lastStatusSignatureRef = useRef<string>('');
+    const mountedRef = useRef(true);
     // Short re-poll timers fired after an enable so the card converges to
     // `meshed` once the proxy bridge finishes dialing (see toggleEnabled).
     const convergeTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+    const clearConvergeTimers = () => {
+        convergeTimersRef.current.forEach(clearTimeout);
+        convergeTimersRef.current = [];
+    };
     useEffect(() => () => {
+        mountedRef.current = false;
         convergeTimersRef.current.forEach(clearTimeout);
         convergeTimersRef.current = [];
     }, []);
@@ -126,6 +132,9 @@ export function RoutingNodeCard({
 
     const toggleEnabled = async (next: boolean) => {
         if (toggling) return;
+        // Cancel any in-flight converge batch up front, so a slow disable (or a
+        // re-toggle) can never let a prior enable's re-polls fire mid-request.
+        clearConvergeTimers();
         setToggling(true);
         try {
             const action = next ? 'enable' : 'disable';
@@ -133,20 +142,23 @@ export function RoutingNodeCard({
                 method: 'POST', localOnly: true,
             });
             if (!res.ok) throw new Error(`status ${res.status}`);
+            // The request can resolve after the card unmounts; bail before any
+            // toast, refresh, or timer scheduling so nothing fires post-unmount.
+            if (!mountedRef.current) return;
             toast.success(next ? 'Mesh enabled on node' : 'Mesh disabled on node');
             onChanged();
-            // The proxy bridge dials asynchronously on enable, so the first status
-            // poll usually still reports `connecting`. Re-poll a few times so the
-            // card settles to meshed on its own rather than stranding the user on a
-            // manual refresh. Clear any prior batch first; a disable cancels them.
-            convergeTimersRef.current.forEach(clearTimeout);
-            convergeTimersRef.current = next
-                ? [1500, 3500, 6000].map((ms) => setTimeout(onChanged, ms))
-                : [];
+            if (next) {
+                // The proxy bridge dials asynchronously on enable, so the first
+                // status poll usually still reports `connecting`. Re-poll a few
+                // times so the card settles to meshed on its own rather than
+                // stranding the user on a manual refresh.
+                convergeTimersRef.current = [1500, 3500, 6000].map((ms) => setTimeout(onChanged, ms));
+            }
         } catch (err) {
+            if (!mountedRef.current) return;
             toast.error(`Failed to ${next ? 'enable' : 'disable'} mesh: ${(err as Error).message}`);
         } finally {
-            setToggling(false);
+            if (mountedRef.current) setToggling(false);
         }
     };
 

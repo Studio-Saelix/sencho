@@ -49,12 +49,15 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
                     apiFetch(`/mesh/aliases/${encodeURIComponent(alias)}/diagnostic`, { localOnly: true }),
                     apiFetch(`/mesh/activity?alias=${encodeURIComponent(alias)}&limit=20`, { localOnly: true }),
                 ]);
+                // Parse both bodies before any state write, then re-check
+                // `cancelled` after every await. Reading the body is itself async,
+                // so a check before `json()` would still let a superseded alias's
+                // diagnostic call setDiag and expose Remove for the wrong stack.
+                const diagBody = diagRes.ok ? await diagRes.json() as MeshRouteDiagnostic : null;
+                const evBody = evRes.ok ? await evRes.json() as { events: MeshActivityEvent[] } : null;
                 if (cancelled) return;
-                if (diagRes.ok) setDiag(await diagRes.json());
-                if (evRes.ok) {
-                    const body = await evRes.json() as { events: MeshActivityEvent[] };
-                    setEvents(body.events);
-                }
+                if (diagBody) setDiag(diagBody);
+                if (evBody) setEvents(evBody.events);
             } finally {
                 if (!cancelled) setLoading(false);
             }

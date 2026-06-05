@@ -9,7 +9,7 @@
  * "Pilot tunnel".
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { MeshNodeStatus, MeshRouteDiagnostic } from '@/types/mesh';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -104,5 +104,41 @@ describe('MeshRouteDetailSheet remove gate', () => {
             );
         });
         await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    });
+
+    it('ignores a superseded alias diagnostic whose body resolves after switching aliases', async () => {
+        let resolveAJson: (value: unknown) => void = () => {};
+        const diagA: MeshRouteDiagnostic = {
+            ...DIAG,
+            alias: 'aliasA',
+            target: { nodeId: 9, stack: 'old-stack', service: 'web', port: 1, alias: 'aliasA' },
+        };
+        vi.mocked(apiFetch).mockImplementation((url: string) => {
+            if (url.includes('aliasA') && url.includes('/diagnostic')) {
+                return Promise.resolve({ ok: true, json: () => new Promise((r) => { resolveAJson = r; }) } as unknown as Response);
+            }
+            if (url.includes('aliasB') && url.includes('/diagnostic')) {
+                return Promise.resolve({ ok: true, json: async () => DIAG } as unknown as Response);
+            }
+            return Promise.resolve({ ok: true, json: async () => ({ events: [] }) } as unknown as Response);
+        });
+
+        const { rerender } = render(
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasA" canManage status={STATUS} aliases={[]} onChanged={() => {}} />,
+        );
+        // Let alias A's fetches resolve so its effect parks on the deferred body read.
+        await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+        rerender(
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasB" canManage status={STATUS} aliases={[]} onChanged={() => {}} />,
+        );
+        expect(await screen.findByText('API proxy bridge')).toBeInTheDocument();
+
+        // Resolve the superseded alias A body; it must not overwrite alias B.
+        await act(async () => { resolveAJson(diagA); await new Promise((r) => setTimeout(r, 0)); });
+        expect(screen.queryByText(/old-stack/)).not.toBeInTheDocument();
+        // Alias B's proxy transport label survives; alias A (node 9, not in status)
+        // would have flipped it to an unknown transport had it overwritten.
+        expect(screen.getByText('API proxy bridge')).toBeInTheDocument();
     });
 });

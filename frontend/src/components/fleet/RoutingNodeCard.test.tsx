@@ -110,4 +110,20 @@ describe('RoutingNodeCard enable auto-converge', () => {
         await act(async () => { vi.advanceTimersByTime(6000); });
         expect(onChanged).toHaveBeenCalledTimes(1);
     });
+
+    it('does not fire after the card unmounts before the enable request resolves', async () => {
+        let resolveEnable: (value: unknown) => void = () => {};
+        vi.mocked(apiFetch).mockReturnValueOnce(
+            new Promise((resolve) => { resolveEnable = resolve; }) as unknown as Promise<Response>,
+        );
+        const { onChanged, view } = renderCard(node({ enabled: false, reverseCallbackStatus: 'not_applicable' }));
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        view.unmount();
+        await act(async () => {
+            resolveEnable({ ok: true, status: 200, json: async () => ({}) });
+            await Promise.resolve();
+            vi.advanceTimersByTime(6000);
+        });
+        expect(onChanged).not.toHaveBeenCalled();
+    });
 });
