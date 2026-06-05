@@ -203,6 +203,39 @@ describe('POST /api/settings (single-key write)', () => {
   });
 });
 
+describe('prune_on_update (auto-prune after updates)', () => {
+  it('defaults to ON in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_on_update).toBe('1');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.prune_on_update).toBeDefined();
+  });
+
+  it('accepts a well-formed prune_on_update write and persists it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'prune_on_update', value: '0' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_on_update).toBe('0');
+    // Restore the seeded default so later suites observe the shipped behavior.
+    DatabaseService.getInstance().updateGlobalSetting('prune_on_update', '1');
+  });
+
+  it('rejects a non-enum prune_on_update value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'prune_on_update', value: 'banana' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_on_update).not.toBe('banana');
+  });
+});
+
 describe('PATCH /api/settings (bulk update)', () => {
   it('rejects unauthenticated requests with 401', async () => {
     const res = await request(app).patch('/api/settings').send({ host_cpu_limit: 50 });

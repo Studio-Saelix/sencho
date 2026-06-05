@@ -407,6 +407,24 @@ describe('DockerController - pruneSystem', () => {
   });
 });
 
+// ── pruneDanglingImages ────────────────────────────────────────────────
+
+describe('DockerController - pruneDanglingImages', () => {
+  it('prunes only dangling images and returns reclaimed bytes', async () => {
+    mockDocker.pruneImages.mockResolvedValue({ SpaceReclaimed: 5000 });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneDanglingImages();
+
+    // dangling:true keeps the prune to untagged layers, unlike pruneSystem('images')
+    // which uses dangling:false to remove every unused image.
+    expect(mockDocker.pruneImages).toHaveBeenCalledWith({
+      filters: { dangling: { 'true': true } },
+    });
+    expect(result).toEqual({ success: true, reclaimedBytes: 5000 });
+  });
+});
+
 // ── getClassifiedResources ─────────────────────────────────────────────
 
 describe('DockerController - getClassifiedResources', () => {
