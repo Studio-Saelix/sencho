@@ -2,6 +2,7 @@
  * Edge-case coverage for the Blueprints feature that the existing suites leave open:
  *   - PUT /:id refusing to disable a blueprint that still has active deployments (409).
  *   - POST / rejecting a selector that exceeds the 200-entry cap (400).
+ *   - DELETE /:id blocking only on live stateful deployments, not never-deployed reviews.
  *   - checkForDrift flagging revision drift when the on-node marker is stale.
  *   - withdrawFromNode refusing to act when the marker belongs to a different blueprint.
  */
@@ -28,7 +29,7 @@ function seedNode(): { id: number; name: string } {
     return { id: result.lastInsertRowid as number, name };
 }
 
-function seedBlueprint(nodeIds: number[]) {
+function seedBlueprint(nodeIds: number[], classification: 'stateless' | 'stateful' = 'stateless') {
     counter += 1;
     return DatabaseService.getInstance().createBlueprint({
         name: `bp-edge-${counter}`,
@@ -36,7 +37,7 @@ function seedBlueprint(nodeIds: number[]) {
         compose_content: 'services:\n  app:\n    image: nginx\n',
         selector: { type: 'nodes', ids: nodeIds },
         drift_mode: 'suggest',
-        classification: 'stateless',
+        classification,
         classification_reasons: [],
         enabled: true,
         created_by: 'admin',
@@ -105,6 +106,105 @@ describe('Blueprint route edge cases', () => {
         expect(res.status).toBe(400);
         expect(res.body.error).toContain('200');
         expect(DatabaseService.getInstance().listBlueprints()).toHaveLength(0);
+    });
+});
+
+describe('Blueprint delete guard', () => {
+    it('deletes a stateful blueprint whose only deployment is a never-deployed pending review', async () => {
+        const node = seedNode();
+        const bp = seedBlueprint([node.id], 'stateful');
+        // A reconciler-recreated review has nothing on the node: last_deployed_at stays null.
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'pending_state_review',
+        });
+        // The route's best-effort withdraw-all loop must not touch Docker in the test.
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+
+        const res = await request(app)
+            .delete(`/api/blueprints/${bp.id}`)
+            .set('Cookie', adminCookie);
+
+        expect(res.status).toBe(204);
+        // The allow-delete path withdraws every deployment, then deletes the blueprint; the
+        // deployment row must be gone afterwards (loop deleteDeployment + FK cascade backstop).
+        expect(withdrawSpy).toHaveBeenCalledTimes(1);
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeUndefined();
+        expect(DatabaseService.getInstance().listDeployments(bp.id)).toHaveLength(0);
+    });
+
+    // Every status that means a live stack is on a node must block delete.
+    it.each(['active', 'drifted', 'correcting', 'evict_blocked'] as const)(
+        'refuses to delete a stateful blueprint with a %s deployment',
+        async (status) => {
+            const node = seedNode();
+            const bp = seedBlueprint([node.id], 'stateful');
+            DatabaseService.getInstance().upsertDeployment({
+                blueprint_id: bp.id,
+                node_id: node.id,
+                status,
+                applied_revision: bp.revision,
+                last_deployed_at: Date.now(),
+            });
+
+            const res = await request(app)
+                .delete(`/api/blueprints/${bp.id}`)
+                .set('Cookie', adminCookie);
+
+            expect(res.status).toBe(409);
+            expect(res.body.code).toBe('stateful_deployments_blocking');
+            expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeDefined();
+        },
+    );
+
+    it('refuses to delete when a pending review still has a deployed stack (revision drift)', async () => {
+        const node = seedNode();
+        const bp = seedBlueprint([node.id], 'stateful');
+        // pending_state_review carried over from a prior deploy keeps last_deployed_at set,
+        // so the old stack is still on the node and delete must refuse.
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'pending_state_review',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+        });
+
+        const res = await request(app)
+            .delete(`/api/blueprints/${bp.id}`)
+            .set('Cookie', adminCookie);
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('stateful_deployments_blocking');
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeDefined();
+    });
+
+    it('counts only the live deployment, not the never-deployed review, in a mixed set', async () => {
+        const liveNode = seedNode();
+        const reviewNode = seedNode();
+        const bp = seedBlueprint([liveNode.id, reviewNode.id], 'stateful');
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: liveNode.id,
+            status: 'active',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+        });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: reviewNode.id,
+            status: 'pending_state_review',
+        });
+
+        const res = await request(app)
+            .delete(`/api/blueprints/${bp.id}`)
+            .set('Cookie', adminCookie);
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('stateful_deployments_blocking');
+        // Only the live deployment blocks; the never-deployed review is excluded from the count.
+        expect(res.body.error).toContain('1 live deployment');
     });
 });
 

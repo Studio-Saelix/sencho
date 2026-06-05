@@ -264,13 +264,24 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        // Refuse delete on stateful blueprints with active deployments. Operator must withdraw explicitly first
+        // Refuse delete on stateful blueprints that still have a live stack on a node; the
+        // operator must withdraw those explicitly so the snapshot-vs-destroy choice is made.
+        // A reconciler-recreated pending_state_review that was never deployed (last_deployed_at
+        // is null) has nothing on any node, so it must not block delete: the best-effort
+        // withdraw-all loop below removes each row via withdrawFromNode, and deleteBlueprint's
+        // foreign-key cascade reaps anything the loop skips (a missing node or a failed withdraw).
         if (blueprint.classification === 'stateful' || blueprint.classification === 'unknown') {
             const deployments = DatabaseService.getInstance().listDeployments(id);
-            const blocking = deployments.filter(d => d.status === 'active' || d.status === 'evict_blocked' || d.status === 'pending_state_review');
+            const blocking = deployments.filter(d =>
+                d.status === 'active' ||
+                d.status === 'drifted' ||
+                d.status === 'correcting' ||
+                d.status === 'evict_blocked' ||
+                (d.status === 'pending_state_review' && d.last_deployed_at != null),
+            );
             if (blocking.length > 0) {
                 res.status(409).json({
-                    error: `Cannot delete a stateful blueprint with ${blocking.length} active or pending deployment(s). Withdraw each deployment explicitly first.`,
+                    error: `Cannot delete a stateful blueprint with ${blocking.length} live deployment(s). Withdraw each from the deployment table first.`,
                     code: 'stateful_deployments_blocking',
                 });
                 return;

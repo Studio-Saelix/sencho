@@ -341,11 +341,11 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                         <ModalDestructiveHeader
                             kicker="BLUEPRINT · DELETE · IRREVERSIBLE"
                             title={`Delete ${blueprint.name}`}
-                            description="Stateless deployments will be withdrawn first. Stateful deployments must be withdrawn explicitly through the deployment table before delete; the API will refuse otherwise."
+                            description="Stateless and not-yet-deployed deployments are withdrawn automatically. Live stateful deployments must be withdrawn from the deployment table first, or delete is refused."
                         />
                         <ModalBody>
                             <p className="text-sm text-stat-subtitle">
-                                Stateless deployments will be withdrawn first. Stateful deployments must be withdrawn explicitly through the deployment table before delete.
+                                Stateless and not-yet-deployed deployments are withdrawn for you. A stateful deployment that is live on a node must be withdrawn from the deployment table first, so you choose whether to snapshot or destroy its data.
                             </p>
                             <div className="space-y-2">
                                 <p className="text-xs text-stat-subtitle leading-relaxed">
