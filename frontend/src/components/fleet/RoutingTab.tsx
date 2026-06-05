@@ -12,6 +12,7 @@ import { MeshDiagnosticsSheet } from './MeshDiagnosticsSheet';
 import { MeshActivitySheet } from './MeshActivitySheet';
 import { MeshTopologyGraph, type MeshGraphEdgeMode } from './MeshTopologyGraph';
 import { SegmentedControl } from '@/components/ui/segmented-control';
+import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from './FleetEmptyState';
 import type { MeshAlias, MeshDataPlaneStatus, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
 
 type RoutingViewMode = 'table' | 'graph';
@@ -137,12 +138,18 @@ export function RoutingTab({ canManage }: { canManage: boolean }) {
 
     if (status.length === 0) {
         return (
-            <div className="flex flex-col items-center justify-center py-16">
-                <ArrowLeftRight className="w-12 h-12 text-stat-subtitle mb-4" />
-                <div className="text-lg font-display italic mb-2">No nodes available</div>
-                <div className="text-sm text-stat-subtitle text-center max-w-md">
-                    Add a node to the fleet to start routing traffic between containers across nodes.
-                </div>
+            <div className="space-y-4">
+                <FleetTabHeading
+                    title="Routing"
+                    subtitle="Reach containers across nodes by hostname, no VPN required."
+                />
+                <FleetEmptyState>
+                    <FleetEmptyCard
+                        icon={ArrowLeftRight}
+                        title="No nodes available"
+                        description="Add a node to the fleet to start routing traffic between containers across nodes."
+                    />
+                </FleetEmptyState>
             </div>
         );
     }
