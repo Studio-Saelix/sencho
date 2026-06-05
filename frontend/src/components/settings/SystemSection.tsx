@@ -323,7 +323,7 @@ export function SystemSection({ onDirtyChange }: SystemSectionProps) {
                 </SettingsField>
                 <SettingsField
                     label="Prune dangling images after updates"
-                    helper="When an update finishes, remove the dangling image layers it leaves behind. On by default; turn it off to keep every old layer. Applies to stack updates and Sencho self-updates on this node."
+                    helper="When an update finishes, remove the node's dangling (untagged) image layers, including the one the update just orphaned. On by default; turn it off to keep every old layer. Applies to stack updates and Sencho self-updates on this node."
                 >
                     <TogglePill
                         checked={settings.prune_on_update === '1'}

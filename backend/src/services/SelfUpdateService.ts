@@ -40,14 +40,23 @@ export function findDataDirHost(mounts: ReadonlyArray<DockerMount>): string | nu
   return match?.Source ?? null;
 }
 
+// POSIX single-quote escaping. serviceName and the compose config paths in
+// fFlags come from Docker Compose labels on Sencho's own container, so a label
+// carrying shell metacharacters must not be able to break out of the command
+// sequence (the exit-code capture, error-file write, and prune guard).
+export function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * Build the shell command the helper container runs to recreate Sencho. Kept as
  * a pure, exported function so the prune-on-update branch is unit-testable.
  *
- * The recreate writes the error file only on failure; the optional dangling
- * prune runs only on success, so the two branches never overlap. The prune
- * suppresses its own output and `|| true`, so it can never alter $ec or be
- * mistaken for an update error.
+ * Label-derived inputs (serviceName, the fFlags config paths) are shell-quoted
+ * so they cannot alter the command structure. The recreate writes the error
+ * file only on failure; the optional dangling prune runs only on success, so
+ * the two branches never overlap. The prune suppresses its own output and
+ * `|| true`, so it can never alter $ec or be mistaken for an update error.
  */
 export function buildSelfUpdateComposeCmd(
   fFlags: string[],
@@ -56,9 +65,10 @@ export function buildSelfUpdateComposeCmd(
   errorFile: string,
   pruneOnUpdate: boolean,
 ): string {
+  const recreate = ['docker compose', ...fFlags.map(shQuote), 'up -d --force-recreate', shQuote(serviceName), `2>${stderrTmp}`].join(' ');
   return [
     'sleep 3',
-    ['docker compose', ...fFlags, 'up -d --force-recreate', serviceName, `2>${stderrTmp}`].join(' '),
+    recreate,
     'ec=$?',
     `if [ $ec -ne 0 ]; then { echo "exit=$ec"; cat ${stderrTmp}; } > ${errorFile} 2>/dev/null; fi`,
     ...(pruneOnUpdate

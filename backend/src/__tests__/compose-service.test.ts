@@ -530,6 +530,22 @@ describe('ComposeService - updateStack prune-on-update', () => {
     expect(mockPruneDanglingImages).not.toHaveBeenCalled();
   });
 
+  it('does not roll back an atomic update when the post-update prune throws', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({ prune_on_update: '1' });
+    mockPruneDanglingImages.mockRejectedValueOnce(new Error('docker busy'));
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack', undefined, true); // atomic
+    await vi.advanceTimersByTimeAsync(3100);
+
+    // The update already succeeded before the prune ran, so a prune failure
+    // must neither reject nor trigger the atomic restore.
+    await expect(promise).resolves.toBeUndefined();
+    expect(mockRestoreStackFiles).not.toHaveBeenCalled();
+  });
+
   it('does not fail the update when the prune throws', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);
