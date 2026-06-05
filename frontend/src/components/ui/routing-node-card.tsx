@@ -570,7 +570,7 @@ function emptyStateCopy(state: RoutingNodeState, name: string, offlineReason?: s
             return {
                 headline: 'No services routed yet.',
                 sub: 'Mesh is on. Opt a stack in to start publishing aliases.',
-                cta: '+ Add stack to mesh',
+                cta: 'Add stack to mesh',
             };
         case 'connecting':
             return {
