@@ -29,7 +29,7 @@ The user-facing effect is `psql -h db.api.opsix.sencho` from a container on any 
 
 **Bidirectional traffic over a single channel.** Mesh traffic is multiplexed onto the same channel Sencho already uses for fleet operations, so a node behind NAT can both receive and originate connections without exposing any new inbound port. The only inbound port that ever matters is the one Sencho itself is already listening on for fleet operations.
 
-**Live fleet-wide diagnostics.** Every alias has a one-click probe that runs across the real code path. Each node exposes a diagnostics panel showing forwarder liveness, pilot tunnel state, active TCP streams, and the resolver cache. A fleet-wide activity log records routing decisions and tunnel state changes as they happen.
+**Live fleet-wide diagnostics.** Every alias has a one-click probe that runs across the real code path. Each node exposes a diagnostics panel showing forwarder liveness, the node's transport state, active TCP streams, and the resolver cache. A fleet-wide activity log records routing decisions and tunnel state changes as they happen.
 
 ## Prerequisites
 
@@ -52,7 +52,7 @@ Mesh lives under **Fleet → Routing**. Managing it (the per-node mesh toggle an
 2. Flip the mesh toggle (`ON` / `OFF`) on each node that should participate.
 3. Click **Add stack to mesh** on a node and confirm one or more stacks.
 
-<Frame caption="The opt-in sheet. Already-meshed stacks show an `in mesh` pill plus a Topology shortcut; the rest get an Add to mesh button.">
+<Frame caption="The opt-in sheet. Already-meshed stacks show an `in mesh` pill; the rest get an Add to mesh button. The action stays reachable from each node card even after the first stack is added.">
   <img src="/images/sencho-mesh/opt-in-sheet.png" alt="Mesh opt-in sheet listing stacks on a node" />
 </Frame>
 
@@ -83,7 +83,7 @@ Every node card has a **Diagnostics** button that opens a live view.
 The sheet shows:
 
 - **Forwarder** state and number of listening ports. The forwarder is the in-process TCP listener Sencho binds for each opted-in service port.
-- **Pilot tunnel** state (`connected` / `disconnected`) and last-seen timestamp. For local diagnostics this reports the local Sencho's own forwarder; for a remote it reports central's view of the tunnel to that remote.
+- **Transport** state, labelled by how the node actually connects: `local (in-process)` for the central node, `API proxy bridge` (`connected` / `connecting` / `unavailable`) for a Distributed API Proxy peer, or `Pilot tunnel` (`connected` / `disconnected`) for a Pilot Agent node. The buffered-bytes and last-seen rows appear only for Pilot Agent nodes, where they apply.
 - **Active streams** with byte counters in and out, and how long each stream has been open.
 - **Resolver cache** showing the aliases currently registered on this node and the backend `host:port` they resolve to.
 
@@ -128,7 +128,7 @@ Edge labels:
 
 Click any node card in graph mode to open its opt-in sheet.
 
-**Per-stack topology.** Inside the opt-in sheet, each opted-in stack row has a **Topology** button that opens a focused diagram for that stack.
+**Per-stack topology.** Click an alias on a node card to open its route detail sheet, then switch to the **Topology** tab for a focused diagram of the stack that publishes that alias.
 
 <Frame caption="Per-stack topology. Stack at the centre, every alias it publishes to the right, and a column of meshed consumer nodes with their tunnel state.">
   <img src="/images/sencho-mesh/stack-topology-sheet.png" alt="Per-stack mesh topology sheet" />
@@ -153,6 +153,8 @@ Every alias row has a one-click test that runs a real probe along the same code 
   - `target_port`: the remote dialed the target container but no service answered on the declared port.
 
 Use Test before assuming the issue is your application. It tells you whether the mesh path itself is working.
+
+Clicking the alias itself (rather than its Test button) opens the route detail sheet: the probe, an Events tab, a **Topology** tab for the publishing stack, and a **Remove from mesh** action that opts the alias's owning stack back out of the mesh. When a stack publishes more than one alias, the confirmation says how many go together, since opt-out is per stack.
 
 ## Customising the mesh subnet
 
@@ -232,8 +234,8 @@ These are the explicit boundaries of the v1 mesh.
     The mesh enforces one alias per TCP port across the fleet. Another stack on the fleet already publishes a service on the same port. Move one of the services to a different port and redeploy, or leave the second stack out of the mesh.
   </Accordion>
 
-  <Accordion title="A node card shows `pilot offline`">
-    The Pilot Agent tunnel to that node is not connected. Open **Fleet → Overview** for the node's status and follow the [Pilot Agent troubleshooting](/features/pilot-agent#troubleshooting) entries. Mesh recovers automatically when the tunnel reconnects; no opt-out is needed.
+  <Accordion title="A node card shows `Degraded`">
+    The transport to that node is not currently up: a Pilot Agent tunnel that dropped, or a Distributed API Proxy bridge that is unavailable. For a Pilot Agent node, open **Fleet → Overview** for the node's status and follow the [Pilot Agent troubleshooting](/features/pilot-agent#troubleshooting) entries. Mesh recovers automatically when the transport reconnects; no opt-out is needed. A node that is actively dialing its bridge shows `Connecting` instead and clears on its own within a few seconds.
   </Accordion>
 
   <Accordion title="A node card shows `unreachable`">

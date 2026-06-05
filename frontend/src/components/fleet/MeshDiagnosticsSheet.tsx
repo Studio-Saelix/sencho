@@ -3,13 +3,16 @@ import { apiFetch } from '@/lib/api';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { RefreshCw } from 'lucide-react';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import type { MeshNodeDiagnostic } from '@/types/mesh';
+import type { MeshNodeDiagnostic, MeshNodeStatus } from '@/types/mesh';
+import { describeTransport } from './meshTransport';
 
 interface Props {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     nodeId: number | null;
     nodeName: string | null;
+    /** Routing status for this node; drives the transport-aware diagnostics line. */
+    nodeStatus: MeshNodeStatus | null;
 }
 
 function bytesFmt(n: number): string {
@@ -24,7 +27,7 @@ function ageFmt(ms: number): string {
     return `${Math.floor(ms / 60_000)}m`;
 }
 
-export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: Props) {
+export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName, nodeStatus }: Props) {
     const [diag, setDiag] = useState<MeshNodeDiagnostic | null>(null);
     const [loading, setLoading] = useState(false);
     const [updatedAt, setUpdatedAt] = useState<number | null>(null);
@@ -48,13 +51,15 @@ export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: P
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open, nodeId]);
 
+    const transport = describeTransport(nodeStatus ?? undefined, diag?.pilot.connected ?? false);
+    const isPilotNode = nodeStatus?.reachableMode === 'pilot';
     const forwarderLabel = diag
         ? (diag.forwarder.listening ? `forwarder listening (${diag.forwarder.listenerCount})` : 'forwarder idle')
         : 'forwarder ?';
-    const pilotLabel = diag ? (diag.pilot.connected ? 'pilot connected' : 'pilot disconnected') : 'pilot ?';
+    const transportLabel = `${transport.label.toLowerCase()} ${transport.value}`;
     const streamsLabel = `${diag?.activeStreams.length ?? 0} streams`;
     const aliasesLabel = `${diag?.aliasCache.length ?? 0} aliases`;
-    const meta = `${forwarderLabel} · ${pilotLabel} · ${streamsLabel} · ${aliasesLabel}`;
+    const meta = `${forwarderLabel} · ${transportLabel} · ${streamsLabel} · ${aliasesLabel}`;
 
     const footerContext = updatedAt ? `Updated ${formatTimeAgo(updatedAt)}` : (loading ? 'Loading…' : 'Never updated');
 
@@ -74,18 +79,22 @@ export function MeshDiagnosticsSheet({ open, onOpenChange, nodeId, nodeName }: P
             footerContext={footerContext}
             size="md"
         >
-            <SheetSection title="Forwarder · pilot · transport">
+            <SheetSection title="Forwarder · transport">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
                     <div className="text-stat-subtitle">Forwarder</div>
                     <div className="font-mono text-stat-value">
                         {diag?.forwarder.listening ? `listening on ${diag.forwarder.listenerCount} port${diag.forwarder.listenerCount === 1 ? '' : 's'}` : 'idle'}
                     </div>
-                    <div className="text-stat-subtitle">Pilot tunnel</div>
-                    <div className="font-mono text-stat-value">{diag?.pilot.connected ? 'connected' : 'disconnected'}</div>
-                    <div className="text-stat-subtitle">Buffered</div>
-                    <div className="font-mono text-stat-value">{diag ? bytesFmt(diag.pilot.bufferedAmount) : '-'}</div>
-                    <div className="text-stat-subtitle">Last seen</div>
-                    <div className="font-mono text-stat-value">{diag?.pilot.lastSeen ? new Date(diag.pilot.lastSeen).toLocaleTimeString() : '-'}</div>
+                    <div className="text-stat-subtitle">{transport.label}</div>
+                    <div className="font-mono text-stat-value">{transport.value}</div>
+                    {isPilotNode && (
+                        <>
+                            <div className="text-stat-subtitle">Buffered</div>
+                            <div className="font-mono text-stat-value">{diag ? bytesFmt(diag.pilot.bufferedAmount) : '-'}</div>
+                            <div className="text-stat-subtitle">Last seen</div>
+                            <div className="font-mono text-stat-value">{diag?.pilot.lastSeen ? new Date(diag.pilot.lastSeen).toLocaleTimeString() : '-'}</div>
+                        </>
+                    )}
                 </div>
                 <p className="text-[11px] text-stat-subtitle leading-snug mt-2">
                     Mesh runs in-process on each node; no separate container.

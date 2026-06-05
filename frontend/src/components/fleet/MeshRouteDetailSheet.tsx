@@ -1,30 +1,46 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
+import { toast } from '@/components/ui/toast-store';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, Activity, Hash } from 'lucide-react';
-import type { MeshRouteDiagnostic, MeshActivityEvent, MeshProbeResult } from '@/types/mesh';
+import { ConfirmModal } from '@/components/ui/modal';
+import { Loader2, Activity, Hash, Trash2 } from 'lucide-react';
+import type { MeshAlias, MeshNodeStatus, MeshRouteDiagnostic, MeshActivityEvent, MeshProbeResult } from '@/types/mesh';
 import { meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
+import { describeTransport } from './meshTransport';
+import { MeshStackTopologyView } from './MeshStackTopologyView';
 
 interface Props {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     alias: string | null;
+    /** Removing a route opts its owning stack out of the mesh; admin-only, mirrors the backend gate. */
+    canManage: boolean;
+    status: MeshNodeStatus[];
+    aliases: MeshAlias[];
+    onChanged: () => void;
 }
 
-type RouteTab = 'overview' | 'events' | 'raw';
+type RouteTab = 'overview' | 'events' | 'topology' | 'raw';
 
-export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
+export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, status, aliases, onChanged }: Props) {
     const [diag, setDiag] = useState<MeshRouteDiagnostic | null>(null);
     const [events, setEvents] = useState<MeshActivityEvent[]>([]);
     const [probe, setProbe] = useState<MeshProbeResult | null>(null);
     const [probing, setProbing] = useState(false);
     const [loading, setLoading] = useState(false);
     const [activeTab, setActiveTab] = useState<RouteTab>('overview');
+    const [confirmRemove, setConfirmRemove] = useState(false);
+    const [removing, setRemoving] = useState(false);
 
     useEffect(() => {
         if (!open || !alias) return;
+        // Reset per-alias state so a stale target can never drive the destructive
+        // remove action (or a misleading transport row) during the refetch window.
+        setDiag(null);
+        setProbe(null);
+        setEvents([]);
         let cancelled = false;
         const refresh = async () => {
             setLoading(true);
@@ -33,12 +49,15 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
                     apiFetch(`/mesh/aliases/${encodeURIComponent(alias)}/diagnostic`, { localOnly: true }),
                     apiFetch(`/mesh/activity?alias=${encodeURIComponent(alias)}&limit=20`, { localOnly: true }),
                 ]);
+                // Parse both bodies before any state write, then re-check
+                // `cancelled` after every await. Reading the body is itself async,
+                // so a check before `json()` would still let a superseded alias's
+                // diagnostic call setDiag and expose Remove for the wrong stack.
+                const diagBody = diagRes.ok ? await diagRes.json() as MeshRouteDiagnostic : null;
+                const evBody = evRes.ok ? await evRes.json() as { events: MeshActivityEvent[] } : null;
                 if (cancelled) return;
-                if (diagRes.ok) setDiag(await diagRes.json());
-                if (evRes.ok) {
-                    const body = await evRes.json() as { events: MeshActivityEvent[] };
-                    setEvents(body.events);
-                }
+                if (diagBody) setDiag(diagBody);
+                if (evBody) setEvents(evBody.events);
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -62,6 +81,26 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
         }
     };
 
+    const removeFromMesh = async () => {
+        const tgt = diag?.target;
+        if (!tgt) return;
+        setRemoving(true);
+        try {
+            const res = await apiFetch(
+                `/mesh/nodes/${tgt.nodeId}/stacks/${encodeURIComponent(tgt.stack)}/opt-out`,
+                { method: 'POST', localOnly: true },
+            );
+            if (!res.ok) throw new Error(`status ${res.status}`);
+            toast.success(`${tgt.stack} removed from mesh, redeploying`);
+            onChanged();
+            onOpenChange(false);
+        } catch (err) {
+            toast.error(`Failed to remove from mesh: ${(err as Error).message}`);
+        } finally {
+            setRemoving(false);
+        }
+    };
+
     if (!alias) return null;
     const pillState = diag ? meshRouteStateFromBackend(diag.state) : 'not-authorized';
     const pill = meshRouteStateTokens(pillState);
@@ -78,7 +117,15 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
                 : `Last probe ${diag.lastProbeMs}ms`)
             : 'No probe run yet';
 
+    const target = diag?.target ?? null;
+    const targetNode = target ? status.find((s) => s.nodeId === target.nodeId) : undefined;
+    const stackAliasCount = target
+        ? aliases.filter((a) => a.nodeId === target.nodeId && a.stackName === target.stack).length
+        : 0;
+    const transport = describeTransport(targetNode, diag?.pilot.connected ?? false);
+
     return (
+        <>
         <SystemSheet
             open={open}
             onOpenChange={onOpenChange}
@@ -91,9 +138,16 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
                 onClick: () => { void runProbe(); },
                 disabled: probing,
             }}
+            destructiveAction={canManage && target ? {
+                label: removing ? 'Removing…' : 'Remove from mesh',
+                icon: Trash2,
+                onClick: () => setConfirmRemove(true),
+                disabled: removing,
+            } : undefined}
             tabs={[
                 { id: 'overview', label: 'Overview' },
                 { id: 'events', label: 'Events', count: events.length },
+                { id: 'topology', label: 'Topology' },
                 { id: 'raw', label: 'Raw' },
             ]}
             activeTab={activeTab}
@@ -125,8 +179,8 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
                                 <div className="font-mono text-stat-value">{diag.target.stack}/{diag.target.service}</div>
                                 <div className="text-stat-subtitle">Port</div>
                                 <div className="font-mono text-stat-value">{diag.target.port}</div>
-                                <div className="text-stat-subtitle">Pilot tunnel</div>
-                                <div className="font-mono text-stat-value">{diag.pilot.connected ? 'connected' : 'disconnected'}</div>
+                                <div className="text-stat-subtitle">{transport.label}</div>
+                                <div className="font-mono text-stat-value">{transport.value}</div>
                             </div>
                         </SheetSection>
                     )}
@@ -162,6 +216,21 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
                 </SheetSection>
             )}
 
+            {activeTab === 'topology' && (
+                <SheetSection title="Stack topology" hideHeader>
+                    {diag?.target ? (
+                        <MeshStackTopologyView
+                            nodeId={diag.target.nodeId}
+                            stackName={diag.target.stack}
+                            status={status}
+                            aliases={aliases}
+                        />
+                    ) : (
+                        <div className="text-xs text-stat-subtitle">No target resolved for this alias.</div>
+                    )}
+                </SheetSection>
+            )}
+
             {activeTab === 'raw' && (
                 <SheetSection title="Diagnostic JSON" hideHeader>
                     <pre className="text-[11px] font-mono text-stat-value bg-card border border-card-border rounded p-3 overflow-x-auto whitespace-pre-wrap break-all">
@@ -170,5 +239,21 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias }: Props) {
                 </SheetSection>
             )}
         </SystemSheet>
+        <ConfirmModal
+            open={confirmRemove}
+            onOpenChange={(o) => { if (!o) setConfirmRemove(false); }}
+            variant="destructive"
+            kicker={`Mesh / ${target?.stack ?? ''}`}
+            title={`Remove ${target?.stack ?? 'stack'} from the mesh?`}
+            description={
+                target
+                    ? `${target.stack} will be redeployed on node #${target.nodeId} so its containers drop the mesh routing entries. This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'alias' : 'aliases'} published by this stack.`
+                    : undefined
+            }
+            confirmLabel="Remove and redeploy"
+            onConfirm={() => { setConfirmRemove(false); void removeFromMesh(); }}
+            onCancel={() => setConfirmRemove(false)}
+        />
+        </>
     );
 }

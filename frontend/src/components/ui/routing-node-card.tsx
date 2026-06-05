@@ -7,7 +7,7 @@ import { useDensity } from '@/hooks/use-density';
 import { formatAgeShort } from '@/lib/relativeTime';
 import { cn } from '@/lib/utils';
 
-export type RoutingNodeState = 'meshed' | 'idle' | 'degraded' | 'offline';
+export type RoutingNodeState = 'meshed' | 'idle' | 'connecting' | 'degraded' | 'offline';
 
 export interface RoutingAliasRow {
     host: string;
@@ -18,7 +18,6 @@ export interface RoutingAliasRow {
 }
 
 export interface RoutingNodeCardMeta {
-    pilotConnected: boolean;
     reverseBridge: 'up' | 'unavailable' | 'na';
     stacks: number;
     aliases: number;
@@ -56,6 +55,7 @@ const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
 const RAIL_CLASS: Record<RoutingNodeState, string> = {
     meshed: 'bg-brand',
     idle: '',
+    connecting: 'bg-brand animate-pulse',
     degraded: 'bg-warning',
     offline: 'bg-destructive',
 };
@@ -63,6 +63,7 @@ const RAIL_CLASS: Record<RoutingNodeState, string> = {
 const RAIL_INLINE_STYLE: Record<RoutingNodeState, React.CSSProperties | undefined> = {
     meshed: undefined,
     idle: { background: 'oklch(0.28 0 0)' },
+    connecting: undefined,
     degraded: undefined,
     offline: undefined,
 };
@@ -70,6 +71,7 @@ const RAIL_INLINE_STYLE: Record<RoutingNodeState, React.CSSProperties | undefine
 const STATE_CHIP: Record<RoutingNodeState, { label: string; tone: string }> = {
     meshed: { label: 'Meshed', tone: 'border-brand/40 bg-brand/10 text-brand' },
     idle: { label: 'Idle', tone: 'border-card-border bg-card text-stat-subtitle' },
+    connecting: { label: 'Connecting', tone: 'border-brand/40 bg-brand/10 text-brand' },
     degraded: { label: 'Degraded', tone: 'border-warning/40 bg-warning/10 text-warning' },
     offline: { label: 'Offline', tone: 'border-destructive/40 bg-destructive/10 text-destructive' },
 };
@@ -92,7 +94,7 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
 
     const toggleDisabled = nodeState === 'offline';
     const diagnosticsDisabled = nodeState === 'offline';
-    const isEnabled = nodeState === 'meshed' || nodeState === 'degraded';
+    const isEnabled = nodeState === 'meshed' || nodeState === 'degraded' || nodeState === 'connecting';
     const chip = STATE_CHIP[nodeState];
 
     const railClass = RAIL_CLASS[nodeState];
@@ -119,7 +121,6 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
                     onShowDiagnostics={onShowDiagnostics}
                     canManage={canManage}
                     footerContext={footerContext}
-                    aliasesEmpty={aliases.length === 0}
                     onAddStack={onAddStack}
                     onRetry={onRetry}
                 />
@@ -165,10 +166,6 @@ interface BodyChrome {
     onRetry?: () => void;
 }
 
-interface CompactProps extends BodyChrome {
-    aliasesEmpty: boolean;
-}
-
 interface ComfortableProps extends BodyChrome {
     crumb: string[];
     aliases: RoutingAliasRow[];
@@ -207,8 +204,7 @@ function ComfortableBody(props: ComfortableProps) {
                     )}
                 </div>
                 <div className={cn(KICKER, 'mt-1.5 text-stat-subtitle leading-none tracking-[0.14em]')}>
-                    pilot {meta.pilotConnected ? 'connected' : 'offline'}
-                    {' · '}reverse {REVERSE_LABEL[meta.reverseBridge]}
+                    reverse {REVERSE_LABEL[meta.reverseBridge]}
                     {' · '}{meta.stacks} stacks
                     {' · '}{meta.aliases} aliases
                 </div>
@@ -231,6 +227,8 @@ function ComfortableBody(props: ComfortableProps) {
                         aliases={aliases}
                         onShowAlias={onShowAlias}
                         onTestAlias={onTestAlias}
+                        onAddStack={onAddStack}
+                        canManage={canManage}
                     />
                     : <EmptyState
                         nodeState={nodeState}
@@ -248,11 +246,11 @@ function ComfortableBody(props: ComfortableProps) {
     );
 }
 
-function CompactBody(props: CompactProps) {
+function CompactBody(props: BodyChrome) {
     const {
         name, isLocal, chip, meta, nodeState, isEnabled,
         toggleDisabled, diagnosticsDisabled, onToggleEnabled, onShowDiagnostics,
-        footerContext, aliasesEmpty, onAddStack, onRetry, canManage,
+        footerContext, onAddStack, onRetry, canManage,
     } = props;
 
     return (
@@ -290,7 +288,7 @@ function CompactBody(props: CompactProps) {
                 </div>
             </header>
 
-            <div className="grid grid-cols-4 divide-x divide-card-border/40 border-y border-card-border/40 bg-card/60 pl-[3px]">
+            <div className="grid grid-cols-3 divide-x divide-card-border/40 border-y border-card-border/40 bg-card/60 pl-[3px]">
                 <CompactCell
                     dot={meta.stacks > 0 ? 'success' : 'muted'}
                     value={String(meta.stacks)}
@@ -300,11 +298,6 @@ function CompactBody(props: CompactProps) {
                     dot={meta.aliases > 0 ? 'success' : 'muted'}
                     value={String(meta.aliases)}
                     sub="published"
-                />
-                <CompactCell
-                    dot={meta.pilotConnected ? 'success' : 'warning'}
-                    value={meta.pilotConnected ? 'on' : 'off'}
-                    sub="agent"
                 />
                 <CompactCell
                     dot={reverseDot(meta.reverseBridge)}
@@ -317,7 +310,6 @@ function CompactBody(props: CompactProps) {
                 context={footerContext}
                 nodeState={nodeState}
                 name={name}
-                aliasesEmpty={aliasesEmpty}
                 onAddStack={onAddStack}
                 onRetry={onRetry}
                 onToggleEnabled={onToggleEnabled}
@@ -388,14 +380,28 @@ interface AliasListProps {
     aliases: RoutingAliasRow[];
     onShowAlias?: (alias: string) => void;
     onTestAlias?: (alias: string) => void;
+    onAddStack?: () => void;
+    canManage: boolean;
 }
 
-function AliasList({ title, aliases, onShowAlias, onTestAlias }: AliasListProps) {
+function AliasList({ title, aliases, onShowAlias, onTestAlias, onAddStack, canManage }: AliasListProps) {
     return (
         <section>
-            <h4 className={cn(KICKER, 'text-stat-subtitle leading-none mb-2 tracking-[0.22em]')}>
-                {title}
-            </h4>
+            <div className="mb-2 flex items-center justify-between gap-2">
+                <h4 className={cn(KICKER, 'text-stat-subtitle leading-none tracking-[0.22em]')}>
+                    {title}
+                </h4>
+                {canManage && onAddStack && (
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={onAddStack}
+                        className="h-6 -my-1 px-1.5 text-stat-subtitle hover:text-brand"
+                    >
+                        <Plus className="w-3 h-3 mr-1" /> Add stack
+                    </Button>
+                )}
+            </div>
             <div className="space-y-1">
                 {aliases.map((row) => (
                     <AliasRow
@@ -480,12 +486,34 @@ function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onTog
     // the backend gates on the admin role, so a non-admin viewer sees a hint
     // instead. The degraded/offline retry is a read-only refresh and stays.
     const isManagementState = nodeState === 'idle' || nodeState === 'meshed';
+    // `connecting` is transient while the mesh bridge dials; show the headline
+    // only, with no retry button (it clears on its own once the bridge is up).
+    const isConnecting = nodeState === 'connecting';
 
     const handleClick = () => {
         if (nodeState === 'idle') onToggleEnabled(true);
         else if (nodeState === 'meshed') onAddStack?.();
         else onRetry?.();
     };
+
+    let action: React.ReactNode = (
+        <Button
+            variant="outline"
+            size="sm"
+            onClick={handleClick}
+            className={cn('mt-1', ctaToneFor(nodeState))}
+        >
+            {ctaIconFor(nodeState)}{cta}
+        </Button>
+    );
+    if (isConnecting) action = null;
+    else if (!canManage && isManagementState) {
+        action = (
+            <div className="font-mono text-[11px] leading-snug text-stat-subtitle">
+                Managing the mesh requires an administrator.
+            </div>
+        );
+    }
 
     return (
         <div className="flex flex-col items-start gap-2 py-3">
@@ -495,20 +523,7 @@ function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onTog
             <div className="font-mono text-[11px] leading-snug text-stat-subtitle">
                 {sub}
             </div>
-            {!canManage && isManagementState ? (
-                <div className="font-mono text-[11px] leading-snug text-stat-subtitle">
-                    Managing the mesh requires an administrator.
-                </div>
-            ) : (
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleClick}
-                    className={cn('mt-1', ctaToneFor(nodeState))}
-                >
-                    {ctaIconFor(nodeState)}{cta}
-                </Button>
-            )}
+            {action}
         </div>
     );
 }
@@ -522,12 +537,23 @@ function ctaIconFor(state: RoutingNodeState): React.ReactNode {
 const CTA_TONE: Record<RoutingNodeState, string> = {
     meshed: '',
     idle: '',
+    connecting: '',
     degraded: 'border-warning/40 text-warning hover:bg-warning/10',
     offline: 'border-destructive/40 text-destructive hover:bg-destructive/10',
 };
 
 function ctaToneFor(state: RoutingNodeState): string {
     return CTA_TONE[state];
+}
+
+// Management CTAs (enable mesh / add stack) need admin; the read-only retry on a
+// degraded/offline node stays available to everyone. `meshed` always offers "add
+// stack" to admins so a node with aliases is never a dead end, and the transient
+// `connecting` state shows no CTA.
+function shouldShowCta(state: RoutingNodeState, canManage: boolean): boolean {
+    if (state === 'connecting') return false;
+    if (state === 'idle' || state === 'meshed') return canManage;
+    return true;
 }
 
 function emptyStateCopy(state: RoutingNodeState, name: string, offlineReason?: string | null): {
@@ -546,10 +572,16 @@ function emptyStateCopy(state: RoutingNodeState, name: string, offlineReason?: s
                 sub: 'Mesh is on. Opt a stack in to start publishing aliases.',
                 cta: 'Add stack to mesh',
             };
+        case 'connecting':
+            return {
+                headline: 'Connecting to the mesh…',
+                sub: 'Bringing up the bridge to this node.',
+                cta: '',
+            };
         case 'degraded':
             return {
-                headline: 'Pilot tunnel disconnected.',
-                sub: 'Mesh traffic resumes when the agent reconnects.',
+                headline: 'Mesh bridge unavailable.',
+                sub: 'Central retries the connection automatically.',
                 cta: 'Retry now',
             };
         case 'offline':
@@ -558,6 +590,10 @@ function emptyStateCopy(state: RoutingNodeState, name: string, offlineReason?: s
                 sub: offlineReason || 'Connection refused.',
                 cta: 'Retry now',
             };
+        default: {
+            const _exhaustive: never = state;
+            throw new Error(`Unhandled routing node state: ${String(_exhaustive)}`);
+        }
     }
 }
 
@@ -575,18 +611,14 @@ interface CompactFooterProps {
     context: string;
     nodeState: RoutingNodeState;
     name: string;
-    aliasesEmpty: boolean;
     onAddStack?: () => void;
     onRetry?: () => void;
     onToggleEnabled: (next: boolean) => void;
     canManage: boolean;
 }
 
-function CompactFooter({ context, nodeState, name, aliasesEmpty, onAddStack, onRetry, onToggleEnabled, canManage }: CompactFooterProps) {
-    // Hide the management CTAs (enable mesh / add stack) for non-admins; the
-    // read-only retry on a degraded/offline node stays available.
-    const isManagementState = nodeState === 'idle' || nodeState === 'meshed';
-    const showCta = (nodeState !== 'meshed' || aliasesEmpty) && (canManage || !isManagementState);
+function CompactFooter({ context, nodeState, name, onAddStack, onRetry, onToggleEnabled, canManage }: CompactFooterProps) {
+    const showCta = shouldShowCta(nodeState, canManage);
     const { cta } = emptyStateCopy(nodeState, name);
     const handleClick = () => {
         if (nodeState === 'idle') onToggleEnabled(true);
