@@ -250,6 +250,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 } : undefined}
                 footerContext={footerContext}
                 size="lg"
+                constrainBodyWidth
             >
                 {!blueprint || !summary ? (
                     <div className="space-y-3">
