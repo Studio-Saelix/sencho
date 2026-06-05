@@ -334,4 +334,30 @@ describe('ResourcesView', () => {
     await waitFor(() => expect(dfCalls()).toBeGreaterThan(before));
     expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
   });
+
+  it('shows the banner on a node switch when /settings fails, instead of inheriting the previous node opt-out', async () => {
+    let settingsOk = true;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/settings') {
+        return settingsOk
+          ? Promise.resolve(jsonResponse({ reclaim_hero: '0' }))
+          : Promise.resolve(jsonResponse({}, { ok: false, status: 500 }));
+      }
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('node-a-img:latest')], volumes: [], networks: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    // Node A has the banner turned off; once loaded it stays hidden.
+    const { rerender } = render(<ResourcesView />);
+    await screen.findByText('node-a-img:latest');
+    expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
+
+    // Switch to node B with a failing /settings: the banner must show (fail
+    // open), not carry over node A's disabled state.
+    settingsOk = false;
+    nodesState.activeNode = { id: 2 };
+    rerender(<ResourcesView />);
+    await screen.findByTestId('reclaim-hero');
+  });
 });

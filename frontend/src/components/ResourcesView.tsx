@@ -449,7 +449,11 @@ export default function ResourcesView() {
 
             if (fetchGenerationRef.current !== generation) return;
 
-            if (settingsData) setReclaimHeroEnabled(settingsData.reclaim_hero !== '0');
+            // Set unconditionally: a failed /settings (settingsData null) must
+            // reset to the default-on state for this node, not inherit the
+            // previously active node's value. undefined !== '0' is true, so a
+            // missing key or failed fetch fails open toward showing the banner.
+            setReclaimHeroEnabled(settingsData?.reclaim_hero !== '0');
             if (usageData) setUsage(usageData);
             if (resourcesData) {
                 setImages(resourcesData.images ?? []);
