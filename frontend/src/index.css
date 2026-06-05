@@ -38,6 +38,16 @@
   --band:       oklch(var(--band-l) 0 0);
   --well:       oklch(var(--well-l) 0 0);
 
+  /* ---- Computed popover / floating-panel fill. Mirrors --background's clamp +
+     --ink-dir + contrast spread off a per-theme raw lightness + alpha, so every
+     floating surface (sheets, dialogs, dropdowns, menus) tones with the active
+     theme (incl. OLED true-black) and deepens with --contrast, instead of being
+     a flat per-theme literal that stranded OLED at the Dim value. ---- */
+  --popover:    oklch(clamp(0, var(--pop-l) - var(--ink-dir) * var(--contrast) * 0.03, 1) 0 0 / var(--pop-a));
+
+  /* Overlay scrim behind modals & sheets (theme-aware; softened in Light). */
+  --scrim: oklch(0 0 0 / 0.45);
+
   /* ---- Computed borders (opaque grey, directionally lit). --border-boost and
      --contrast both lift every hairline through one expression; clamp keeps
      them in gamut and below pure white so the lit edge never merges into a
@@ -88,11 +98,11 @@
   --val: 0.970; --title: 0.800; --sub: 0.605; --icon: 0.480;  --ink-dir: 1;
   --accent-l: 0.745; --brand-fg: oklch(0.15 0 0);
   --glow-l: 0.55; --glow-c: 0.085;
+  --pop-l: 0.14; --pop-a: 0.82;
 
   /* Dark non-derivable tokens (shared by Dim & OLED) */
   --foreground: oklch(0.94 0 0);
   --card-foreground: oklch(0.94 0 0);
-  --popover: oklch(0.14 0 0 / 0.82);
   --popover-foreground: oklch(0.94 0 0);
   --primary: oklch(0.98 0 0);
   --primary-foreground: oklch(0.10 0 0);
@@ -264,6 +274,7 @@
   --val: 0.950; --title: 0.780; --sub: 0.575; --icon: 0.445;  --ink-dir: 1;
   --accent-l: 0.745; --brand-fg: oklch(0.11 0 0);
   --glow-l: 0.46; --glow-c: 0.085;
+  --pop-l: 0.06; --pop-a: 0.86;
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -280,11 +291,12 @@
   --val: 0.190; --title: 0.400; --sub: 0.500; --icon: 0.620;  --ink-dir: -1;
   --accent-l: 0.525; --brand-fg: oklch(0.99 0 0);
   --glow-l: 0.90; --glow-c: 0.040;
+  --pop-l: 1.0; --pop-a: 0.92;
+  --scrim: oklch(0.22 0 0 / 0.32);
 
   /* Light non-derivable tokens */
   --foreground: oklch(0.15 0 0);
   --card-foreground: oklch(0.15 0 0);
-  --popover: oklch(1 0 0 / 0.92);
   --popover-foreground: oklch(0.15 0 0);
   --primary: oklch(0.15 0 0);
   --primary-foreground: oklch(1 0 0);
@@ -505,6 +517,20 @@
     ),
     var(--background);
   background-attachment: fixed;
+}
+
+/* Accent wash for floating panels (sheets & large dialogs). Layers the ambient
+   accent glow as a background image over the panel's own --popover fill, so a
+   portaled surface carries the same accent personality .app-canvas gives the
+   page. Image-only (the popover color stays the base) to keep the glass
+   translucency and backdrop blur; anchored to the panel top so the translucent
+   header bands let it bleed through. */
+.panel-glow {
+  background-image: radial-gradient(
+    ellipse 130% 42% at 50% 0%,
+    var(--glow-color),
+    transparent 64%
+  );
 }
 
 /* Density: compact mode compresses row/cell padding by ~50%. */
