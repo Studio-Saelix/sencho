@@ -5,6 +5,7 @@ import { toast } from '@/components/ui/toast-store';
 import { listSecrets, deleteSecret, type SecretSummary } from '@/lib/secretsApi';
 import { SecretBundleSheet } from './SecretBundleSheet';
 import { SecretPushSheet } from './SecretPushSheet';
+import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from '../FleetEmptyState';
 
 export function SecretsTab() {
     const [items, setItems] = useState<SecretSummary[]>([]);
@@ -69,18 +70,29 @@ export function SecretsTab() {
 
     return (
         <div className="space-y-4">
-            <div className="flex items-center justify-between gap-3">
-                <div>
-                    <h2 className="font-display italic text-[1.5rem] leading-tight text-stat-value">Secret bundles</h2>
-                    <p className="text-sm text-stat-subtitle">Centralized env-var bundles, encrypted at rest, versioned, pushed to labeled nodes.</p>
-                </div>
-                <Button type="button" onClick={() => setCreating(true)} className="gap-1.5">
-                    <Plus className="w-4 h-4" /> New bundle
-                </Button>
-            </div>
+            <FleetTabHeading
+                title="Secret bundles"
+                subtitle="Centralized env-var bundles, encrypted at rest, versioned, pushed to labeled nodes."
+                action={
+                    <Button type="button" onClick={() => setCreating(true)} className="gap-1.5">
+                        <Plus className="w-4 h-4" /> New bundle
+                    </Button>
+                }
+            />
 
             {items.length === 0 ? (
-                <EmptyState onCreate={() => setCreating(true)} />
+                <FleetEmptyState>
+                    <FleetEmptyCard
+                        icon={KeyRound}
+                        title="One source of truth for env"
+                        description="Build a bundle of key=value pairs, push it to nodes by label, see exactly what changed before you write."
+                        action={
+                            <Button type="button" onClick={() => setCreating(true)} className="gap-1.5">
+                                <Plus className="w-4 h-4" /> Create your first bundle
+                            </Button>
+                        }
+                    />
+                </FleetEmptyState>
             ) : (
                 <div className="rounded-xl border border-card-border/60 overflow-hidden">
                     <table className="w-full text-sm">
@@ -146,23 +158,6 @@ export function SecretsTab() {
                 onOpenChange={(o) => { if (!o) setPushing(null); }}
                 secret={pushing}
             />
-        </div>
-    );
-}
-
-function EmptyState({ onCreate }: { onCreate: () => void }) {
-    return (
-        <div className="mx-auto max-w-xl rounded-xl border border-card-border/60 bg-popover/30 p-8 text-center space-y-4">
-            <KeyRound className="mx-auto w-8 h-8 text-stat-subtitle" />
-            <div>
-                <h3 className="font-display italic text-[1.25rem] text-stat-value">One source of truth for env</h3>
-                <p className="text-sm text-stat-subtitle leading-relaxed mt-1">
-                    Build a bundle of key=value pairs, push it to nodes by label, see exactly what changed before you write.
-                </p>
-            </div>
-            <Button type="button" onClick={onCreate} className="gap-1.5">
-                <Plus className="w-4 h-4" /> Create your first bundle
-            </Button>
         </div>
     );
 }

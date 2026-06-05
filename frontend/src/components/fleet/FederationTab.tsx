@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Ban, Loader2, Network, Pin, Server } from 'lucide-react';
+import { Ban, Loader2, Pin, Server } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
+import { FleetTabHeading } from './FleetEmptyState';
 import {
     Select,
     SelectContent,
@@ -93,18 +94,10 @@ export function FederationTab({ canManage }: FederationTabProps) {
 
     return (
         <div className="space-y-6">
-            <header className="flex items-start gap-3">
-                <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-glass-highlight border border-card-border">
-                    <Network className="w-5 h-5 text-foreground" />
-                </div>
-                <div>
-                    <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">Federation</div>
-                    <h2 className="text-lg font-display italic">Placement control</h2>
-                    <p className="text-sm text-muted-foreground max-w-2xl mt-0.5">
-                        Mark nodes unschedulable and pin blueprints to specific nodes. Sencho proposes placements; you approve them. Existing deployments are never moved without an explicit operator action.
-                    </p>
-                </div>
-            </header>
+            <FleetTabHeading
+                title="Placement control"
+                subtitle="Mark nodes unschedulable and pin blueprints to specific nodes."
+            />
 
             <section className="rounded-xl border border-card-border bg-card">
                 <div className="px-4 py-3 border-b border-card-border flex items-center justify-between">

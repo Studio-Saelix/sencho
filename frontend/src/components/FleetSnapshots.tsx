@@ -18,6 +18,7 @@ import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { toast } from '@/components/ui/toast-store';
+import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from './fleet/FleetEmptyState';
 
 // --- Types ---
 
@@ -595,34 +596,33 @@ export default function FleetSnapshots() {
 
     return (
         <div className="space-y-4">
-            {/* Header */}
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                    <Camera className="w-5 h-5 text-muted-foreground" strokeWidth={1.5} />
-                    <h2 className="text-lg font-semibold">Fleet Snapshots</h2>
-                </div>
-                <div className="flex items-center gap-2">
-                    {needsPagination && (
-                        <div className="flex items-center gap-1.5">
-                            <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
-                                <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
+            <FleetTabHeading
+                title="Fleet Snapshots"
+                subtitle="Point-in-time compose backups across every node."
+                action={
+                    <div className="flex items-center gap-2">
+                        {needsPagination && (
+                            <div className="flex items-center gap-1.5">
+                                <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
+                                    <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                </Button>
+                                <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
+                                    {safePage + 1} / {totalPages}
+                                </span>
+                                <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)}>
+                                    <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                </Button>
+                            </div>
+                        )}
+                        {isAdmin && !showCreateForm && (
+                            <Button size="sm" className="gap-1.5" onClick={() => setShowCreateForm(true)}>
+                                <Plus className="w-4 h-4" strokeWidth={1.5} />
+                                Create Snapshot
                             </Button>
-                            <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
-                                {safePage + 1} / {totalPages}
-                            </span>
-                            <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)}>
-                                <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
-                            </Button>
-                        </div>
-                    )}
-                    {isAdmin && !showCreateForm && (
-                        <Button size="sm" className="gap-1.5" onClick={() => setShowCreateForm(true)}>
-                            <Plus className="w-4 h-4" strokeWidth={1.5} />
-                            Create Snapshot
-                        </Button>
-                    )}
-                </div>
-            </div>
+                        )}
+                    </div>
+                }
+            />
 
             {/* Create form */}
             {showCreateForm && (
@@ -666,14 +666,19 @@ export default function FleetSnapshots() {
                     </div>
                 </div>
             ) : snapshots.length === 0 ? (
-                /* Empty state */
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                    <Camera className="w-12 h-12 text-muted-foreground/50 mb-4" />
-                    <h3 className="text-sm font-medium mb-1">No snapshots yet</h3>
-                    <p className="text-xs text-muted-foreground max-w-sm">
-                        Create your first fleet snapshot to back up compose files across all nodes.
-                    </p>
-                </div>
+                <FleetEmptyState>
+                    <FleetEmptyCard
+                        icon={Camera}
+                        title="No snapshots yet"
+                        description="Create your first fleet snapshot to back up compose files across all nodes."
+                        action={isAdmin && !showCreateForm ? (
+                            <Button size="sm" className="gap-1.5" onClick={() => setShowCreateForm(true)}>
+                                <Plus className="w-4 h-4" strokeWidth={1.5} />
+                                Create Snapshot
+                            </Button>
+                        ) : undefined}
+                    />
+                </FleetEmptyState>
             ) : (
                 /* Snapshots table */
                 <div className="rounded-lg border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel overflow-hidden">
