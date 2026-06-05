@@ -6,7 +6,7 @@
  * recovery will be unavailable" at boot.
  */
 import { describe, expect, it } from 'vitest';
-import { findDataDirHost } from '../services/SelfUpdateService';
+import { buildSelfUpdateComposeCmd, findDataDirHost, shQuote } from '../services/SelfUpdateService';
 
 describe('findDataDirHost', () => {
   it('returns the host path for a bind mount at /app/data', () => {
@@ -52,5 +52,50 @@ describe('findDataDirHost', () => {
       { Type: 'tmpfs', Source: '', Destination: '/app/data' },
     ]);
     expect(source).toBeNull();
+  });
+});
+
+describe('buildSelfUpdateComposeCmd', () => {
+  const fFlags = ['-f', '/app/docker-compose.yml'];
+  const stderrTmp = '/tmp/_sencho_err';
+  const errorFile = '/app/data/.sencho-update-error';
+
+  it('appends a success-guarded dangling-image prune when pruneOnUpdate is true', () => {
+    const cmd = buildSelfUpdateComposeCmd(fFlags, 'sencho', stderrTmp, errorFile, true);
+    expect(cmd).toContain('if [ $ec -eq 0 ]; then docker image prune -f');
+    // The prune suppresses its own output and `|| true` so it can never alter
+    // the helper exit code; the command still ends on exit $ec.
+    expect(cmd).toContain('docker image prune -f >/dev/null 2>&1 || true');
+    expect(cmd.trim().endsWith('exit $ec')).toBe(true);
+    // Order matters: the prune must run after $ec is captured and after the
+    // error-file write, or it could shadow the recreate's exit code / clobber
+    // the error file. Lock the ordering, not just the presence of the line.
+    expect(cmd.indexOf('ec=$?')).toBeLessThan(cmd.indexOf('docker image prune'));
+    expect(cmd.indexOf(errorFile)).toBeLessThan(cmd.indexOf('docker image prune'));
+  });
+
+  it('omits the prune entirely when pruneOnUpdate is false', () => {
+    const cmd = buildSelfUpdateComposeCmd(fFlags, 'sencho', stderrTmp, errorFile, false);
+    expect(cmd).not.toContain('docker image prune');
+  });
+
+  it('always recreates the service and persists the error file on failure', () => {
+    const cmd = buildSelfUpdateComposeCmd(fFlags, 'sencho', stderrTmp, errorFile, true);
+    expect(cmd).toContain(`up -d --force-recreate ${shQuote('sencho')}`);
+    expect(cmd).toContain(`> ${errorFile}`);
+  });
+
+  it('shell-quotes label-derived values so metacharacters cannot break the command', () => {
+    // serviceName and config paths come from Docker Compose labels; a hostile
+    // label must stay inert data, not run as a second command.
+    const evilFlags = ['-f', '/tmp/compose.yml; ec=0; #'];
+    const cmd = buildSelfUpdateComposeCmd(evilFlags, 'svc; rm -rf /', stderrTmp, errorFile, true);
+    // The dangerous text survives only inside single quotes, never as bare shell.
+    expect(cmd).toContain(shQuote('/tmp/compose.yml; ec=0; #'));
+    expect(cmd).toContain(shQuote('svc; rm -rf /'));
+    expect(cmd).not.toContain('up -d --force-recreate svc; rm -rf /');
+    // The recreate line stays intact: its redirection and the real exit-code
+    // capture follow the quoted args, so the injected `ec=0` never runs as shell.
+    expect(cmd).toContain(`2>${stderrTmp}; ec=$?;`);
   });
 });
