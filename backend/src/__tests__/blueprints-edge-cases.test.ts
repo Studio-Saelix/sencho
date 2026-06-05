@@ -110,16 +110,18 @@ describe('Blueprint route edge cases', () => {
 });
 
 describe('Blueprint delete guard', () => {
-    it('deletes a stateful blueprint whose only deployment is a never-deployed pending review', async () => {
+    // Rows with no stack of ours on the node must not block delete, AND the route must not run the
+    // withdraw primitive for them: withdrawFromNode proceeds on a missing marker and would
+    // down/delete a same-name stack Sencho never owned. A name_conflict is exactly that unmanaged
+    // stack, so it is excluded even though it carries a last_deployed_at timestamp.
+    it.each([
+        { label: 'never-deployed pending review', status: 'pending_state_review' as const, last_deployed_at: null },
+        { label: 'first-deploy failure', status: 'failed' as const, last_deployed_at: null },
+        { label: 'unmanaged same-name stack', status: 'name_conflict' as const, last_deployed_at: Date.now() },
+    ])('deletes a stateful blueprint with a $label without touching the node', async ({ status, last_deployed_at }) => {
         const node = seedNode();
         const bp = seedBlueprint([node.id], 'stateful');
-        // A reconciler-recreated review has nothing on the node: last_deployed_at stays null.
-        DatabaseService.getInstance().upsertDeployment({
-            blueprint_id: bp.id,
-            node_id: node.id,
-            status: 'pending_state_review',
-        });
-        // The route's best-effort withdraw-all loop must not touch Docker in the test.
+        DatabaseService.getInstance().upsertDeployment({ blueprint_id: bp.id, node_id: node.id, status, last_deployed_at });
         const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
 
         const res = await request(app)
@@ -127,16 +129,18 @@ describe('Blueprint delete guard', () => {
             .set('Cookie', adminCookie);
 
         expect(res.status).toBe(204);
-        // The allow-delete path withdraws every deployment, then deletes the blueprint; the
-        // deployment row must be gone afterwards (loop deleteDeployment + FK cascade backstop).
-        expect(withdrawSpy).toHaveBeenCalledTimes(1);
+        // Critical: never withdraw a row we did not deploy; it could destroy an unmanaged stack.
+        expect(withdrawSpy).not.toHaveBeenCalled();
         expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeUndefined();
+        // The blueprint-delete cascade removes the leftover row.
         expect(DatabaseService.getInstance().listDeployments(bp.id)).toHaveLength(0);
     });
 
-    // Every status that means a live stack is on a node must block delete.
-    it.each(['active', 'drifted', 'correcting', 'evict_blocked'] as const)(
-        'refuses to delete a stateful blueprint with a %s deployment',
+    // A stack Sencho deployed and still owns (last_deployed_at set) blocks delete regardless of its
+    // current status, so the operator makes the snapshot-vs-destroy choice. failed and deploying
+    // carry over last_deployed_at from the prior deploy, so they block too.
+    it.each(['active', 'drifted', 'correcting', 'evict_blocked', 'failed', 'deploying'] as const)(
+        'refuses to delete a stateful blueprint with a deployed %s deployment',
         async (status) => {
             const node = seedNode();
             const bp = seedBlueprint([node.id], 'stateful');
@@ -157,6 +161,28 @@ describe('Blueprint delete guard', () => {
             expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeDefined();
         },
     );
+
+    it('withdraws an owned deployment before deleting a stateless blueprint', async () => {
+        const node = seedNode();
+        const bp = seedBlueprint([node.id]); // stateless: the guard is skipped, so the loop runs
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+        });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+
+        const res = await request(app)
+            .delete(`/api/blueprints/${bp.id}`)
+            .set('Cookie', adminCookie);
+
+        expect(res.status).toBe(204);
+        // A deployed, owned stack must still be withdrawn from the node before the blueprint goes.
+        expect(withdrawSpy).toHaveBeenCalledTimes(1);
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeUndefined();
+    });
 
     it('refuses to delete when a pending review still has a deployed stack (revision drift)', async () => {
         const node = seedNode();
