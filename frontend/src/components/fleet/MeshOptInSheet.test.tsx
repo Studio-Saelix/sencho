@@ -4,9 +4,8 @@
  * Opting a stack in or out is admin-only on the backend
  * (POST /api/mesh/nodes/:id/stacks/:stack/opt-in|opt-out require admin). This
  * test locks the matching UI gate: a manager sees Add/Remove buttons, a
- * non-manager sees the membership read-only with a hint and still gets the
- * read-only topology affordance. The read-only branch must never issue the
- * admin-only mutation.
+ * non-manager sees the membership read-only with a hint. The read-only branch
+ * must never issue the admin-only mutation.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -41,7 +40,6 @@ function renderSheet(canManage: boolean) {
             nodeId={1}
             nodeName="node-alpha"
             onChanged={() => {}}
-            onViewTopology={() => {}}
             canManage={canManage}
         />,
     );
@@ -62,8 +60,6 @@ describe('MeshOptInSheet canManage gate', () => {
         expect(screen.queryByRole('button', { name: /Remove from mesh/i })).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /Add to mesh/i })).not.toBeInTheDocument();
         expect(screen.getByText(/Changing mesh membership requires an administrator/i)).toBeInTheDocument();
-        // Topology is read-only and stays available for opted-in stacks.
-        expect(screen.getByRole('button', { name: /View topology for web/i })).toBeInTheDocument();
         // The read-only branch must never issue an opt-in/opt-out request.
         expect(vi.mocked(apiFetch)).not.toHaveBeenCalledWith(
             expect.stringContaining('/opt-'),

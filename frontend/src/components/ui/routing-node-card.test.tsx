@@ -16,7 +16,7 @@ function renderCard(overrides: Partial<RoutingNodeCardProps> = {}) {
         crumb: ['Routing', 'Node', 'node-alpha'],
         name: 'node-alpha',
         nodeState: 'idle',
-        meta: { pilotConnected: true, reverseBridge: 'na', stacks: 0, aliases: 0 },
+        meta: { reverseBridge: 'na', stacks: 0, aliases: 0 },
         aliases: [],
         onToggleEnabled: vi.fn(),
         onShowDiagnostics: vi.fn(),
@@ -49,7 +49,7 @@ describe('routing-node-card canManage gate', () => {
     it('hides the add-stack CTA for a non-manager on a meshed node', () => {
         renderCard({
             nodeState: 'meshed',
-            meta: { pilotConnected: true, reverseBridge: 'up', stacks: 0, aliases: 0 },
+            meta: { reverseBridge: 'up', stacks: 0, aliases: 0 },
             canManage: false,
         });
         expect(screen.queryByRole('switch')).not.toBeInTheDocument();
@@ -72,6 +72,36 @@ describe('routing-node-card canManage gate', () => {
     });
 });
 
+describe('routing-node-card add-stack reachability and connecting state', () => {
+    const oneAlias = [{ host: 'web.api.node', port: 8080, kind: 'alias' as const }];
+
+    it('keeps an add-stack control for a manager on a meshed node that already has aliases', () => {
+        renderCard({
+            nodeState: 'meshed',
+            meta: { reverseBridge: 'up', stacks: 1, aliases: 1 },
+            aliases: oneAlias,
+            canManage: true,
+        });
+        expect(screen.getByRole('button', { name: /Add stack/i })).toBeInTheDocument();
+    });
+
+    it('hides the add-stack control for a non-manager on a meshed node with aliases', () => {
+        renderCard({
+            nodeState: 'meshed',
+            meta: { reverseBridge: 'up', stacks: 1, aliases: 1 },
+            aliases: oneAlias,
+            canManage: false,
+        });
+        expect(screen.queryByRole('button', { name: /Add stack/i })).not.toBeInTheDocument();
+    });
+
+    it('renders the connecting state as passive with no retry button', () => {
+        renderCard({ nodeState: 'connecting', canManage: true });
+        expect(screen.getByText(/Connecting to the mesh/i)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Retry now/i })).not.toBeInTheDocument();
+    });
+});
+
 describe('routing-node-card canManage gate (compact density)', () => {
     beforeEach(() => {
         window.localStorage.setItem('sencho.appearance.density', 'compact');
@@ -83,7 +113,7 @@ describe('routing-node-card canManage gate (compact density)', () => {
     it('hides the toggle for a non-manager on a meshed node', () => {
         renderCard({
             nodeState: 'meshed',
-            meta: { pilotConnected: true, reverseBridge: 'up', stacks: 0, aliases: 0 },
+            meta: { reverseBridge: 'up', stacks: 0, aliases: 0 },
             canManage: false,
         });
         expect(screen.queryByRole('switch')).not.toBeInTheDocument();
@@ -92,7 +122,7 @@ describe('routing-node-card canManage gate (compact density)', () => {
     it('shows the toggle for a manager on a meshed node', () => {
         renderCard({
             nodeState: 'meshed',
-            meta: { pilotConnected: true, reverseBridge: 'up', stacks: 0, aliases: 0 },
+            meta: { reverseBridge: 'up', stacks: 0, aliases: 0 },
             canManage: true,
         });
         expect(screen.getByRole('switch')).toBeInTheDocument();
