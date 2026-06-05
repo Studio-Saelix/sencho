@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatAgeShort } from '@/lib/relativeTime';
@@ -9,6 +9,7 @@ import {
     type RoutingNodeCardMeta,
     type RoutingNodeState,
 } from '@/components/ui/routing-node-card';
+import { deriveNodeState } from './routingNodeState';
 
 interface Props {
     status: MeshNodeStatus;
@@ -28,14 +29,6 @@ const REVERSE_BRIDGE: Record<MeshNodeStatus['reverseCallbackStatus'], RoutingNod
     not_applicable: 'na',
 };
 
-function deriveNodeState(status: MeshNodeStatus): RoutingNodeState {
-    if (status.reachableMode === 'unreachable') return 'offline';
-    if (!status.enabled) return 'idle';
-    if (status.reachableMode === 'pilot' && !status.pilotConnected) return 'degraded';
-    if (status.reverseCallbackStatus === 'unavailable' || status.reverseCallbackStatus === 'connecting') return 'degraded';
-    return 'meshed';
-}
-
 function buildFooterContext(
     nodeState: RoutingNodeState,
     status: MeshNodeStatus,
@@ -53,12 +46,16 @@ function buildFooterContext(
         }
         case 'idle':
             return `Mesh off · seen ${seen}`;
+        case 'connecting':
+            return `Bringing up bridge · ${seen}`;
         case 'degraded':
-            return status.reverseCallbackStatus === 'connecting'
-                ? `Redialing · last update ${seen}`
-                : `Last seen ${seen}`;
+            return `Last seen ${seen}`;
         case 'offline':
             return `Last seen ${seen}`;
+        default: {
+            const _exhaustive: never = nodeState;
+            throw new Error(`Unhandled routing node state: ${String(_exhaustive)}`);
+        }
     }
 }
 
@@ -70,6 +67,19 @@ export function RoutingNodeCard({
     const [lastTestedByHost, setLastTestedByHost] = useState<Map<string, { at: number; ok: boolean }>>(() => new Map());
     const lastSeenRef = useRef<number>(Date.now());
     const lastStatusSignatureRef = useRef<string>('');
+    const mountedRef = useRef(true);
+    // Short re-poll timers fired after an enable so the card converges to
+    // `meshed` once the proxy bridge finishes dialing (see toggleEnabled).
+    const convergeTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+    const clearConvergeTimers = () => {
+        convergeTimersRef.current.forEach(clearTimeout);
+        convergeTimersRef.current = [];
+    };
+    useEffect(() => () => {
+        mountedRef.current = false;
+        convergeTimersRef.current.forEach(clearTimeout);
+        convergeTimersRef.current = [];
+    }, []);
 
     // Track only health-bearing fields; `activeStreamCount` and stack-count
     // churn would otherwise reset the "seen" clock on every reconcile tick.
@@ -113,7 +123,6 @@ export function RoutingNodeCard({
 
     const nodeState = deriveNodeState(status);
     const meta: RoutingNodeCardMeta = {
-        pilotConnected: status.pilotConnected,
         reverseBridge: REVERSE_BRIDGE[status.reverseCallbackStatus],
         stacks: status.optedInStacks.length,
         aliases: nodeAliases.length,
@@ -123,6 +132,9 @@ export function RoutingNodeCard({
 
     const toggleEnabled = async (next: boolean) => {
         if (toggling) return;
+        // Cancel any in-flight converge batch up front, so a slow disable (or a
+        // re-toggle) can never let a prior enable's re-polls fire mid-request.
+        clearConvergeTimers();
         setToggling(true);
         try {
             const action = next ? 'enable' : 'disable';
@@ -130,12 +142,23 @@ export function RoutingNodeCard({
                 method: 'POST', localOnly: true,
             });
             if (!res.ok) throw new Error(`status ${res.status}`);
+            // The request can resolve after the card unmounts; bail before any
+            // toast, refresh, or timer scheduling so nothing fires post-unmount.
+            if (!mountedRef.current) return;
             toast.success(next ? 'Mesh enabled on node' : 'Mesh disabled on node');
             onChanged();
+            if (next) {
+                // The proxy bridge dials asynchronously on enable, so the first
+                // status poll usually still reports `connecting`. Re-poll a few
+                // times so the card settles to meshed on its own rather than
+                // stranding the user on a manual refresh.
+                convergeTimersRef.current = [1500, 3500, 6000].map((ms) => setTimeout(onChanged, ms));
+            }
         } catch (err) {
+            if (!mountedRef.current) return;
             toast.error(`Failed to ${next ? 'enable' : 'disable'} mesh: ${(err as Error).message}`);
         } finally {
-            setToggling(false);
+            if (mountedRef.current) setToggling(false);
         }
     };
 

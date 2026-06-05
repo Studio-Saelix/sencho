@@ -264,22 +264,36 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        // Refuse delete on stateful blueprints with active deployments. Operator must withdraw explicitly first
+        // Refuse delete on stateful blueprints that still have a stack Sencho deployed and
+        // owns on a node; the operator must withdraw those explicitly so the snapshot-vs-destroy
+        // choice is made. "Deployed by us" is last_deployed_at != null, which holds regardless of
+        // the current status (a previously deployed stack that later failed still carries it). A
+        // never-deployed row (e.g. a reconciler-created pending_state_review awaiting first deploy)
+        // has nothing of ours on the node, so it must not block delete. name_conflict is a
+        // same-name stack we do not own, and withdrawn is already gone, so neither blocks.
         if (blueprint.classification === 'stateful' || blueprint.classification === 'unknown') {
             const deployments = DatabaseService.getInstance().listDeployments(id);
-            const blocking = deployments.filter(d => d.status === 'active' || d.status === 'evict_blocked' || d.status === 'pending_state_review');
+            const blocking = deployments.filter(d =>
+                d.last_deployed_at != null && d.status !== 'name_conflict' && d.status !== 'withdrawn',
+            );
             if (blocking.length > 0) {
                 res.status(409).json({
-                    error: `Cannot delete a stateful blueprint with ${blocking.length} active or pending deployment(s). Withdraw each deployment explicitly first.`,
+                    error: `Cannot delete a stateful blueprint with ${blocking.length} live deployment(s). Withdraw each from the deployment table first.`,
                     code: 'stateful_deployments_blocking',
                 });
                 return;
             }
         }
-        // For stateless: best-effort withdraw before delete
+        // Best-effort cleanup before delete: withdraw exactly the rows a stateful delete would
+        // block, i.e. stacks Sencho deployed and still owns (last_deployed_at set, and neither a
+        // name_conflict nor an already-withdrawn row). Never run the withdraw primitive for a
+        // never-deployed or unmanaged row: withdrawFromNode proceeds on a missing marker and would
+        // down/delete a same-name stack Sencho does not own. The blueprint-delete cascade removes
+        // the rows the loop skips.
         const nodes = DatabaseService.getInstance().getNodes();
         const deployments = DatabaseService.getInstance().listDeployments(id);
         for (const dep of deployments) {
+            if (dep.last_deployed_at == null || dep.status === 'name_conflict' || dep.status === 'withdrawn') continue;
             const node = nodes.find(n => n.id === dep.node_id);
             if (!node) continue;
             try {
