@@ -1,10 +1,13 @@
 /**
  * Coverage for ResourcesView hardening.
  *
- * Locks two correctness fixes that manual smoke testing cannot reliably catch:
+ * Locks correctness fixes that manual smoke testing cannot reliably catch:
  *  - M-1: a slow resource fetch for a previously-active node must not overwrite
  *    the newly-selected node's data (node-switch generation guard).
  *  - M-2: a failed prune must surface the server error, never a false success.
+ *  - Reclaim banner: "Review & prune" reclaims every advertised category and a
+ *    partial failure reports a warning, never a false success; dismiss snoozes
+ *    the banner until the reclaimable total grows past the dismissed snapshot.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -42,7 +45,18 @@ vi.mock('@/hooks/useTrivyStatus', () => ({
 // Heavy or portal-bound children are not under test; stub them to keep the
 // render tree light and deterministic.
 vi.mock('../VulnerabilityScanSheet', () => ({ VulnerabilityScanSheet: () => null }));
-vi.mock('../resources/ReclaimHero', () => ({ ReclaimHero: () => null }));
+// Testable stub: surfaces visibility (testid) and the two callbacks so the
+// snooze and reclaim-all flows can be driven without the real banner styling.
+// Mirrors the real component's bytes<=0 guard.
+vi.mock('../resources/ReclaimHero', () => ({
+  ReclaimHero: ({ bytes, onReview, onDismiss }: { bytes: number; onReview: () => void; onDismiss: () => void }) =>
+    bytes <= 0 ? null : (
+      <div data-testid="reclaim-hero">
+        <button onClick={onReview}>Review &amp; prune</button>
+        <button onClick={onDismiss}>Dismiss hero</button>
+      </div>
+    ),
+}));
 vi.mock('../resources/FootprintTreemap', () => ({ FootprintTreemap: () => null }));
 vi.mock('../resources/ImageDetailsSheet', () => ({ ImageDetailsSheet: () => null }));
 vi.mock('../resources/VolumeBrowserSheet', () => ({ VolumeBrowserSheet: () => null }));
@@ -82,7 +96,24 @@ beforeEach(() => {
   mockedFetch.mockReset();
   licenseState.isPaid = true;
   nodesState.activeNode = { id: 1 };
+  localStorage.clear();
 });
+
+// Reclaimable usage shape with a non-zero total so the banner is shown.
+function reclaimableUsage(images: number, volumes: number) {
+  return {
+    reclaimableImages: images,
+    reclaimableContainers: 0,
+    reclaimableVolumes: volumes,
+    reclaimableImageCount: images > 0 ? 1 : 0,
+    reclaimableContainerCount: 0,
+    reclaimableVolumeCount: volumes > 0 ? 1 : 0,
+    managedImageBytes: 0,
+    unmanagedImageBytes: 0,
+    managedVolumeBytes: 0,
+    unmanagedVolumeBytes: 0,
+  };
+}
 
 afterEach(() => vi.clearAllMocks());
 
@@ -159,5 +190,148 @@ describe('ResourcesView', () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Prune blew up'));
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('reports partial failure from "Review & prune" without a false success', async () => {
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        const target = (JSON.parse(String(opts.body)) as { target: string }).target;
+        if (target === 'volumes') {
+          return Promise.resolve(jsonResponse({ error: 'volume prune failed' }, { ok: false, status: 500 }));
+        }
+        return Promise.resolve(jsonResponse({ reclaimedBytes: 100 }));
+      }
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
+
+    await waitFor(() => expect(toast.warning).toHaveBeenCalled());
+    const warningMsg = (toast.warning as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(warningMsg).toMatch(/volumes/);
+    expect(toast.success).not.toHaveBeenCalled();
+    // Volumes are pruned first (while stopped containers still protect their
+    // named volumes), then containers, then images.
+    const pruned = mockedFetch.mock.calls
+      .filter(([u, o]) => u === '/system/prune/system' && (o as RequestInit)?.method === 'POST')
+      .map(([, o]) => (JSON.parse(String((o as RequestInit).body)) as { target: string }).target);
+    expect(pruned).toEqual(['volumes', 'containers', 'images']);
+  });
+
+  it('reports an error when every prune fails, with no success or warning', async () => {
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ error: 'daemon down' }, { ok: false, status: 500 }));
+      }
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to reclaim disk space.'));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it('omits the reclaimed figure on full success when the daemon reports zero bytes', async () => {
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ reclaimedBytes: 0 }));
+      }
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    const msg = (toast.success as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(msg).not.toMatch(/Freed/);
+    expect(toast.warning).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('shows the reclaimed figure on full success when the daemon reports bytes', async () => {
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ reclaimedBytes: 1048576 }));
+      }
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    const msg = (toast.success as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(msg).toMatch(/Freed/);
+  });
+
+  it('snoozes the banner on dismiss and brings it back when more space is reclaimable', async () => {
+    let usage = reclaimableUsage(1000, 500); // 1500 B total
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(usage));
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<ResourcesView />);
+    await screen.findByTestId('reclaim-hero');
+
+    // Dismiss snapshots the current total; the banner hides.
+    await user.click(screen.getByRole('button', { name: /Dismiss hero/ }));
+    await waitFor(() => expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument());
+
+    // A larger reclaimable total on the same node pushes past the snapshot, so
+    // the banner returns. Same node id keeps the snapshot; the new activeNode
+    // object reference triggers a refetch.
+    usage = reclaimableUsage(8000, 2000); // 10000 B total
+    nodesState.activeNode = { id: 1 };
+    rerender(<ResourcesView />);
+    await screen.findByTestId('reclaim-hero');
+  });
+
+  it('keeps the banner hidden after dismiss when the reclaimable total does not grow', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<ResourcesView />);
+    await screen.findByTestId('reclaim-hero');
+
+    await user.click(screen.getByRole('button', { name: /Dismiss hero/ }));
+    await waitFor(() => expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument());
+
+    // A stable residue (the same total on the same node) must stay dismissed
+    // across a refetch, not re-nag. Force a refetch via a new activeNode ref.
+    const dfCalls = () => mockedFetch.mock.calls.filter(([u]) => u === '/system/docker-df').length;
+    const before = dfCalls();
+    nodesState.activeNode = { id: 1 };
+    rerender(<ResourcesView />);
+    await waitFor(() => expect(dfCalls()).toBeGreaterThan(before));
+    expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
   });
 });

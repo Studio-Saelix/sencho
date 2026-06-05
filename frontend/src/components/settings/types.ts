@@ -12,6 +12,7 @@ export interface PatchableSettings {
     audit_retention_days?: string;
     mesh_auto_recreate?: '0' | '1';
     scan_history_per_image_limit?: string;
+    reclaim_hero?: '0' | '1';
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     audit_retention_days: '90',
     mesh_auto_recreate: '0',
     scan_history_per_image_limit: '50',
+    reclaim_hero: '1',
 };
 
 export type SectionId =

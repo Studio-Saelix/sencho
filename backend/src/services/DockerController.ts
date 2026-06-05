@@ -140,12 +140,18 @@ class DockerController {
 
     const reclaimableContainers = (items: any[]) => {
       if (!items || !Array.isArray(items)) return { bytes: 0, count: 0 };
-      const reclaimable = items.filter(i => i.State !== 'running');
+      // Count only the containers `docker container prune` will actually
+      // remove: created, exited, and dead. A paused or restarting container
+      // survives the prune, so counting it leaves a residue the banner can
+      // never clear no matter which prune the operator runs.
+      const prunableStates = new Set(['created', 'exited', 'dead']);
+      const reclaimable = items.filter(i => prunableStates.has(String(i.State).toLowerCase()));
+      // Size by the writable layer only. `docker system df` reports a stopped
+      // container's reclaimable as its SizeRw; SizeRootFs additionally includes
+      // the read-only image layers, which removing the container never frees,
+      // so using it over-reports what a prune actually reclaims.
       const bytes = reclaimable.reduce((acc, item) => {
-        let size = item.SizeRw || item.SizeRootFs || 0;
-        if (item.UsageData && typeof item.UsageData.Size === 'number') {
-          size = item.UsageData.Size;
-        }
+        const size = typeof item.SizeRw === 'number' && item.SizeRw > 0 ? item.SizeRw : 0;
         return acc + size;
       }, 0);
       return { bytes, count: reclaimable.length };

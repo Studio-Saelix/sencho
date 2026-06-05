@@ -339,3 +339,31 @@ describe('Paid-only setting keys (audit_retention_days)', () => {
     }
   });
 });
+
+describe('reclaim_hero setting', () => {
+  it('is allowlisted and seeds to "1" (banner on by default)', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.reclaim_hero).toBe('1');
+  });
+
+  it('accepts a well-formed write and rejects a non-enum value', async () => {
+    const ok = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ reclaim_hero: '0' });
+    expect(ok.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().reclaim_hero).toBe('0');
+
+    const bad = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ reclaim_hero: 'banana' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().reclaim_hero).toBe('0');
+
+    // Reset for any later reads of the shared test DB.
+    DatabaseService.getInstance().updateGlobalSetting('reclaim_hero', '1');
+  });
+});
