@@ -11,17 +11,11 @@ import { MeshRouteDetailSheet } from './MeshRouteDetailSheet';
 import { MeshDiagnosticsSheet } from './MeshDiagnosticsSheet';
 import { MeshActivitySheet } from './MeshActivitySheet';
 import { MeshTopologyGraph, type MeshGraphEdgeMode } from './MeshTopologyGraph';
-import { MeshStackTopologySheet } from './MeshStackTopologySheet';
 import { SegmentedControl } from '@/components/ui/segmented-control';
+import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from './FleetEmptyState';
 import type { MeshAlias, MeshDataPlaneStatus, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
 
 type RoutingViewMode = 'table' | 'graph';
-
-interface TopologyStackTarget {
-    nodeId: number;
-    nodeName: string;
-    stack: string;
-}
 
 const MESH_REFRESH_INTERVAL_MS = 30000;
 const VIEW_MODE_KEY = 'sencho-routing-view-mode';
@@ -56,7 +50,6 @@ export function RoutingTab({ canManage }: { canManage: boolean }) {
     const [activityOpen, setActivityOpen] = useState(false);
     const [viewMode, setViewMode] = useState<RoutingViewMode>(readStoredViewMode);
     const [edgeMode, setEdgeMode] = useState<MeshGraphEdgeMode>(readStoredEdgeMode);
-    const [topologyStack, setTopologyStack] = useState<TopologyStackTarget | null>(null);
 
     const refresh = useCallback(async (opts: { silent?: boolean } = {}) => {
         try {
@@ -145,12 +138,18 @@ export function RoutingTab({ canManage }: { canManage: boolean }) {
 
     if (status.length === 0) {
         return (
-            <div className="flex flex-col items-center justify-center py-16">
-                <ArrowLeftRight className="w-12 h-12 text-stat-subtitle mb-4" />
-                <div className="text-lg font-display italic mb-2">No nodes available</div>
-                <div className="text-sm text-stat-subtitle text-center max-w-md">
-                    Add a node to the fleet to start routing traffic between containers across nodes.
-                </div>
+            <div className="space-y-4">
+                <FleetTabHeading
+                    title="Routing"
+                    subtitle="Reach containers across nodes by hostname, no VPN required."
+                />
+                <FleetEmptyState>
+                    <FleetEmptyCard
+                        icon={ArrowLeftRight}
+                        title="No nodes available"
+                        description="Add a node to the fleet to start routing traffic between containers across nodes."
+                    />
+                </FleetEmptyState>
             </div>
         );
     }
@@ -189,8 +188,6 @@ export function RoutingTab({ canManage }: { canManage: boolean }) {
                     diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                     routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
                     activityOpen={activityOpen} setActivityOpen={setActivityOpen}
-                    topologyStack={topologyStack}
-                    setTopologyStack={setTopologyStack}
                     status={status}
                     aliases={aliases}
                     onChanged={() => { void refresh(); }}
@@ -255,8 +252,6 @@ export function RoutingTab({ canManage }: { canManage: boolean }) {
                 diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                 routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
                 activityOpen={activityOpen} setActivityOpen={setActivityOpen}
-                topologyStack={topologyStack}
-                setTopologyStack={setTopologyStack}
                 status={status}
                 aliases={aliases}
                 onChanged={() => { void refresh(); }}
@@ -301,13 +296,15 @@ function SheetsRoot(props: {
     setRouteDetailAlias: (v: string | null) => void;
     activityOpen: boolean;
     setActivityOpen: (v: boolean) => void;
-    topologyStack: TopologyStackTarget | null;
-    setTopologyStack: (v: TopologyStackTarget | null) => void;
     status: MeshNodeStatus[];
     aliases: MeshAlias[];
     onChanged: () => void;
 }) {
     const optInNode = props.optInNode;
+    const diagNode = props.diagnosticsNode;
+    const diagNodeStatus = diagNode
+        ? (props.status.find((s) => s.nodeId === diagNode.id) ?? null)
+        : null;
     return (
         <>
             {optInNode && (
@@ -318,10 +315,6 @@ function SheetsRoot(props: {
                     nodeName={optInNode.name}
                     canManage={props.canManage}
                     onChanged={props.onChanged}
-                    onViewTopology={(stack) => {
-                        props.setTopologyStack({ nodeId: optInNode.id, nodeName: optInNode.name, stack });
-                        props.setOptInNode(null);
-                    }}
                 />
             )}
             <MeshDiagnosticsSheet
@@ -329,24 +322,20 @@ function SheetsRoot(props: {
                 onOpenChange={(open) => { if (!open) props.setDiagnosticsNode(null); }}
                 nodeId={props.diagnosticsNode?.id ?? null}
                 nodeName={props.diagnosticsNode?.name ?? null}
+                nodeStatus={diagNodeStatus}
             />
             <MeshRouteDetailSheet
                 open={!!props.routeDetailAlias}
                 onOpenChange={(open) => { if (!open) props.setRouteDetailAlias(null); }}
                 alias={props.routeDetailAlias}
+                canManage={props.canManage}
+                status={props.status}
+                aliases={props.aliases}
+                onChanged={props.onChanged}
             />
             <MeshActivitySheet
                 open={props.activityOpen}
                 onOpenChange={props.setActivityOpen}
-            />
-            <MeshStackTopologySheet
-                open={!!props.topologyStack}
-                onOpenChange={(open) => { if (!open) props.setTopologyStack(null); }}
-                nodeId={props.topologyStack?.nodeId ?? null}
-                nodeName={props.topologyStack?.nodeName ?? null}
-                stackName={props.topologyStack?.stack ?? null}
-                status={props.status}
-                aliases={props.aliases}
             />
         </>
     );

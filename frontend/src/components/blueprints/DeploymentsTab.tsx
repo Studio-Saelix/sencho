@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Plus } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody } from '@/components/ui/modal';
+import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
 import {
     type BlueprintListItem,
@@ -11,6 +13,7 @@ import {
 } from '@/lib/blueprintsApi';
 import { BlueprintCatalog } from './BlueprintCatalog';
 import { BlueprintEmptyState } from './BlueprintEmptyState';
+import { FleetTabHeading, FleetEmptyState } from '../fleet/FleetEmptyState';
 import { BlueprintDetail } from './BlueprintDetail';
 import { BlueprintEditor } from './BlueprintEditor';
 import { useLicense } from '@/context/LicenseContext';
@@ -95,7 +98,21 @@ export function DeploymentsTab() {
     return (
         <div className="space-y-5">
             {blueprints.length === 0 ? (
-                <BlueprintEmptyState onCreate={() => setCreateOpen(true)} canCreate={canEdit} />
+                <>
+                    <FleetTabHeading
+                        title="Blueprints"
+                        subtitle="Declare compose templates once and keep matching nodes in sync."
+                        action={canEdit ? (
+                            <Button size="sm" className="gap-1.5" onClick={() => setCreateOpen(true)}>
+                                <Plus className="w-4 h-4" strokeWidth={1.5} />
+                                New Blueprint
+                            </Button>
+                        ) : undefined}
+                    />
+                    <FleetEmptyState>
+                        <BlueprintEmptyState onCreate={() => setCreateOpen(true)} canCreate={canEdit} />
+                    </FleetEmptyState>
+                </>
             ) : (
                 <BlueprintCatalog
                     blueprints={blueprints}
