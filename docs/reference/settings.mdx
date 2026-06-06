@@ -3,22 +3,28 @@ title: Settings Reference
 description: Complete reference for every option in the Sencho Settings Hub.
 ---
 
-Open the Settings Hub by clicking the **Profile** icon in the top bar and selecting **Settings**. The sidebar groups every section into four themes so related settings live together.
+Open the Settings Hub by clicking the **Profile** icon in the top bar and selecting **Settings**. The sidebar groups every section into themed groups so related settings live together.
 
 <Frame>
-  <img src="/images/settings/settings-hub-grouped.png" alt="Settings Hub with the grouped sidebar: Identity, System, Alerts, Advanced" />
+  <img src="/images/settings/settings-hub-grouped.png" alt="Settings Hub with the grouped sidebar" />
 </Frame>
 
 ### Sidebar groups
 
 | Group | What it covers |
 |-------|----------------|
-| **Identity** | Account, Appearance, License, Users, SSO, API Tokens |
-| **System** | System Limits, Registries, Cloud Backup, Nodes (System Limits is per-node; the rest are global) |
-| **Alerts** | Notifications, Routing, Webhooks |
-| **Advanced** | Labels, Security, Developer, App Store, Support, About |
+| **Personal** | Account, Appearance |
+| **Access** | License, Users, SSO, API Tokens |
+| **Infrastructure** | Nodes, Fleet Mesh, Registries, Cloud Backup, App Store |
+| **Monitoring** | Host Alerts, Docker & Storage |
+| **Notifications** | Channels, Notification Routing |
+| **Automation** | Webhooks |
+| **Organization** | Labels |
+| **Security** | Vulnerability Scanning |
+| **Operations** | Data Retention, Developer Diagnostics, Recovery |
+| **Help** | Support, About |
 
-Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Registries, Cloud Backup, Routing, Security) stay hidden for non-admin operators.
+Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Fleet Mesh, Registries, Cloud Backup, Notification Routing, Vulnerability Scanning) stay hidden for non-admin operators.
 
 ### Page chrome
 
@@ -26,10 +32,10 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 
 | Pill | Meaning |
 |------|---------|
-| **SCOPE** `operator` / `global` | Setting applies to your account (Identity sections) or to the whole instance (System and Advanced) |
+| **SCOPE** `operator` / `global` | Setting applies to your account or this browser (Personal sections) or to the whole instance (every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
-| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Notifications); `ROUTES` (Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `TRIVY managed`/`host`/`missing` and `POLICIES` (Security); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer) |
+| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `TRIVY managed`/`host`/`missing` and `POLICIES` (Vulnerability Scanning); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer Diagnostics) |
 
 ### Quick search
 
@@ -44,7 +50,7 @@ Click **Filter** at the top of the sidebar, or press `Ctrl+K` / `⌘K` while the
 For node-scoped sections the masthead replaces the **SCOPE** pill with a **NODE** pill showing the active node name. Switch the active node from the top bar's **Switch node** button to edit a different node's per-node settings.
 
 <Frame>
-  <img src="/images/settings/settings-node-scope.png" alt="System Limits section showing the NODE pill in the masthead" />
+  <img src="/images/settings/settings-node-scope.png" alt="Host Alerts section showing the NODE pill in the masthead" />
 </Frame>
 
 ---
@@ -211,32 +217,73 @@ See [API Tokens](/features/api-tokens) for the full walkthrough.
 
 ---
 
-## System Limits
+## Host Alerts
 
 **Scope:** Per-node (applies to the currently selected node)
 
-Configure resource thresholds that trigger visual warnings on the dashboard stat cards. These are display thresholds only; Sencho does not throttle or kill containers when limits are reached. The masthead **NODE** pill names which node you are configuring; the **EDITED** pill counts unsaved changes.
+Configure the host resource thresholds that trigger warnings, the suppression cadence for repeated alerts, and whether unexpected container exits raise a crash alert. These are alerting thresholds, not enforcement: Sencho warns when a metric crosses a line, it never throttles or kills containers. The masthead **NODE** pill names which node you are configuring; the **EDITED** pill counts unsaved changes.
 
 <Frame>
-  <img src="/images/settings/settings-system-limits.png" alt="System Limits section showing Host thresholds and Docker hygiene subsections" />
+  <img src="/images/settings/settings-host-alerts.png" alt="Host Alerts section showing the Host thresholds and Crash capture subsections" />
 </Frame>
 
 ### Host thresholds
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **CPU limit** | 90% | Alerts fire when the 5-minute average CPU exceeds this percentage. The input warns at values above 95%. |
+| **CPU limit** | 90% | Alerts fire when host CPU utilization exceeds this percentage. The input warns at values above 95%. |
 | **RAM limit** | 90% | Set this below the point at which the host starts paging to swap. |
 | **Disk limit** | 90% | Low free space slows image pulls and backups. |
+| **Alert suppression** | 60 min | How long to wait before resending a host alert while the metric stays over threshold. The follow-up message includes a count of suppressed cycles. Range 1 to 1,440 minutes. |
 
-### Docker hygiene
+### Crash capture
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Global crash capture** | On | Watch every managed container for unexpected exits. When on, Sencho sends a notification whenever a container exits with a non-zero status outside a planned stop. |
+
+Click **Save alerts** to apply.
+
+---
+
+## Docker & Storage
+
+**Scope:** Per-node (applies to the currently selected node)
+
+Configure the reclaimable-space alert, the reclaimable-space banner, and automatic image cleanup after updates.
+
+### Storage alerts
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Janitor threshold** | 5 GiB | Alert when reclaimable Docker data (images, volumes, build cache that `docker prune` could free) exceeds this size. Set to `0` to disable the alert. |
-| **Global crash capture** | On | Watch every managed container for unexpected exits. When on, Sencho sends a notification whenever a container exits with a non-zero status outside a planned stop. |
+| **Show reclaimable-space banner** | On | Show the reclaimable-space banner at the top of the Resource Hub when this node has unused images, stopped containers, or dangling volumes to clear. |
 
-Click **Save limits** to apply.
+### Image cleanup
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Prune dangling images after updates** | On | When a stack update or a Sencho self-update finishes, remove the node's dangling (untagged) image layers, including the one the update just orphaned. Only untagged layers are touched: tagged images, your volumes, and your data are never removed. Turn it off to keep every old layer. |
+
+Click **Save settings** to apply.
+
+---
+
+## Fleet Mesh
+
+<Note>
+  Fleet Mesh is admin-only.
+</Note>
+
+**Scope:** Per-node (applies to the currently selected node)
+
+Control the cross-node service mesh data plane for the selected node.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Auto-recreate mesh network** | Off | If `sencho_mesh` is removed at runtime, rebuild it at the same subnet on the next 10-second tick. Off by default; leave it off and restart Sencho manually for the safest path. See [Sencho Mesh](/features/sencho-mesh) for the reconciler behavior. |
+
+Click **Save settings** to apply.
 
 ---
 
@@ -300,7 +347,7 @@ Quick reference:
 
 ---
 
-## Notifications
+## Channels
 
 **Scope:** Per-node (each node has its own notification agents; remote nodes dispatch alerts through their own channels)
 
@@ -319,7 +366,7 @@ At least one agent must be enabled for stack alerts to deliver notifications. Se
 
 ---
 
-## Routing
+## Notification Routing
 
 <Note>
   Creating, editing, and deleting routes is admin-only.
@@ -385,10 +432,10 @@ See [Stack Labels](/features/stack-labels) for the full walkthrough.
 
 ---
 
-## Security
+## Vulnerability Scanning
 
 <Note>
-  Security is admin-only. The Trivy installer and CVE/misconfig suppressions are available on all tiers; scan policies and the **Auto-update Trivy** toggle require an Admiral license (the toggle also requires a managed Trivy binary).
+  Vulnerability Scanning is admin-only. The Trivy installer and CVE/misconfig suppressions are available on all tiers; scan policies and the **Auto-update Trivy** toggle require an Admiral license (the toggle also requires a managed Trivy binary).
 </Note>
 
 **Scope:** Per-node
@@ -423,31 +470,34 @@ Sencho instances on the Admiral tier can act as a security control plane for the
 
 ---
 
-## Developer
+## Data Retention
 
-**Scope:** Per-node (developer mode), Global (data retention)
+**Scope:** Per-node
 
-<Frame>
-  <img src="/images/settings/settings-developer-section.png" alt="Developer settings panel with the Developer Mode toggle and Data Retention fields" />
-</Frame>
-
-Advanced settings for debug diagnostics and data retention. Most operators can leave these at their defaults. The masthead publishes a **DEV MODE** pill (`on` / `off`).
-
-### Diagnostics
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| **Developer mode** | Off | Enables real-time metrics streams and verbose debug diagnostics in the UI. Does not affect [Global Observability](/features/global-observability) streaming, which is always on. |
-
-### Data retention
+How long Sencho keeps historical data on this node before pruning it.
 
 | Setting | Default | Max | Description |
 |---------|---------|-----|-------------|
 | **Container metrics** | 24 hrs | 8,760 (1 year) | How long to keep per-container CPU, RAM, and network history for dashboard charts. |
 | **Notification log** | 30 days | 365 | How long to keep alert and notification history. |
+| **Scan history per image** | 50 scans | 1,000 | How many vulnerability scans to keep per image. Older scans beyond the cap are pruned. |
 | **Audit log** | 90 days | 365 | How long to keep audit trail entries. Requires Admiral. |
 
-Click **Save settings** to apply. Retention rows are global; the **Developer mode** toggle is per-node.
+Click **Save settings** to apply.
+
+---
+
+## Developer Diagnostics
+
+**Scope:** Per-node
+
+Debug diagnostics for this node. Most operators can leave this off. The masthead publishes a **DEV MODE** pill (`on` / `off`).
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Developer mode** | Off | Enables real-time metrics streams and verbose debug diagnostics in the UI. Does not affect [Global Observability](/features/global-observability) streaming, which is always on. |
+
+Click **Save settings** to apply.
 
 ---
 

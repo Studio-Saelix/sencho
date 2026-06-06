@@ -207,7 +207,7 @@ For user management and scoped permissions, see [RBAC & User Management](/featur
 
 Every POST, PUT, DELETE, and PATCH request to the API is recorded in the audit log with the acting username, IP address, HTTP method, response status, and an auto-generated summary. GET requests are excluded to keep the log focused on mutations.
 
-The audit log is searchable by keyword (actions, paths, usernames) and filterable by HTTP method and date range. Results can be exported as CSV or JSON (up to 10,000 entries per export). Retention defaults to 90 days and is configurable from 1 to 365 days in **Settings · Developer · Data retention**.
+The audit log is searchable by keyword (actions, paths, usernames) and filterable by HTTP method and date range. Results can be exported as CSV or JSON (up to 10,000 entries per export). Retention defaults to 90 days and is configurable from 1 to 365 days in **Settings · Operations · Data Retention**.
 
 The **Auditor** role provides read-only access to the audit log without any other administrative privileges, making it suitable for compliance reviewers who should not have access to system settings.
 

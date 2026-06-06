@@ -52,7 +52,7 @@ Conceptually, the agent reverses the usual client/server direction.
 Inside the control instance, the tunnel terminates at a **loopback bridge**: a tiny HTTP server on `127.0.0.1:<random-port>` per active tunnel. Every other Sencho feature (the existing HTTP proxy, WebSocket forwarder, mesh dialer, license-tier propagation) treats the bridge as just another remote URL. Once enrolled, the pilot node shows up in the same Nodes table, the same node switcher, and the same dashboard as a proxy-mode node, with the same shipped capabilities except where pilot mode intentionally narrows the surface (see below).
 
 <Frame>
-  <img src="/images/pilot-agent/03-nodes-table-tunnel.png" alt="Settings · System · Nodes table showing a Local row and a Pilot Agent row. The pilot row has Mode badge 'Pilot Agent', Endpoint 'tunnel (seen 45m ago)', and Status badge 'Online'." />
+  <img src="/images/pilot-agent/03-nodes-table-tunnel.png" alt="Settings · Infrastructure · Nodes table showing a Local row and a Pilot Agent row. The pilot row has Mode badge 'Pilot Agent', Endpoint 'tunnel (seen 45m ago)', and Status badge 'Online'." />
 </Frame>
 
 What rides through the tunnel:
@@ -302,7 +302,7 @@ The generic node-connectivity issues (a node showing Offline, a pilot agent stuc
   </Accordion>
 
   <Accordion title="Tunnel closes with WebSocket close code 1002 (protocol error)">
-    The agent sent a frame larger than the 8 MB ceiling, or the wire decoder rejected a malformed frame. Run the control instance with developer mode enabled (Settings → Developer) to surface the diagnostic decode log, then check the logs for `[PilotBridge:diag] Malformed frame from agent`. The agent reconnects automatically; persistent failures usually mean a version mismatch between the control instance and the agent image.
+    The agent sent a frame larger than the 8 MB ceiling, or the wire decoder rejected a malformed frame. Run the control instance with developer mode enabled (Settings → Operations → Developer Diagnostics) to surface the diagnostic decode log, then check the logs for `[PilotBridge:diag] Malformed frame from agent`. The agent reconnects automatically; persistent failures usually mean a version mismatch between the control instance and the agent image.
   </Accordion>
 
   <Accordion title="I ran the enrollment command on the wrong host">

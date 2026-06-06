@@ -301,7 +301,7 @@ If not set, Sencho auto-detects the URL from the request's `Host` header and pro
   </Accordion>
 
   <Accordion title="Users land with the wrong username or no email">
-    Enable **Developer Mode** (Settings → Developer) to log the raw claims Sencho receives from the provider in the server logs. Check your provider's documentation for which claims it includes in the ID token and `userinfo` response, and verify that the configured **Scopes** include everything your provider needs to emit `email` and group claims. For Custom OIDC, override **User ID Claim**, **Username Claim**, or **Email Claim** to match the names your provider actually emits.
+    Enable **Developer Mode** (Settings → Operations → Developer Diagnostics) to log the raw claims Sencho receives from the provider in the server logs. Check your provider's documentation for which claims it includes in the ID token and `userinfo` response, and verify that the configured **Scopes** include everything your provider needs to emit `email` and group claims. For Custom OIDC, override **User ID Claim**, **Username Claim**, or **Email Claim** to match the names your provider actually emits.
   </Accordion>
 
   <Accordion title="The provider returns 'invalid redirect URI' during sign-in">

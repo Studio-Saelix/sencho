@@ -3,9 +3,12 @@
 export { AccountSection } from './AccountSection';
 export { AppearanceSection } from './AppearanceSection';
 export { LicenseSection } from './LicenseSection';
-export { SystemSection } from './SystemSection';
+export { HostAlertsSection } from './HostAlertsSection';
+export { DockerStorageSection } from './DockerStorageSection';
+export { FleetMeshSection } from './FleetMeshSection';
 export { NotificationsSection } from './NotificationsSection';
 export { DeveloperSection } from './DeveloperSection';
+export { DataRetentionSection } from './DataRetentionSection';
 export { AppStoreSection } from './AppStoreSection';
 export { SupportSection } from './SupportSection';
 export { AboutSection } from './AboutSection';

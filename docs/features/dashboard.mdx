@@ -169,7 +169,7 @@ A **Clear All Notifications** button is anchored at the bottom right of the card
 
 The list paginates at eight rows; chevrons and an `N / M` indicator appear in the header when there is more than one page.
 
-Alert rules and severity routing are configured per stack in **Settings · Notifications**. See [Alerts and notifications](/features/alerts-notifications) for channel setup, per-stack rules, and the routing engine.
+Alert rules and severity routing are configured per stack in **Settings · Notifications · Channels**. See [Alerts and notifications](/features/alerts-notifications) for channel setup, per-stack rules, and the routing engine.
 
 ## How health is derived
 
@@ -226,6 +226,6 @@ When you switch the active node from the node switcher, the dashboard resets eve
     Critical can fire on RAM, disk, or the combination of any exited container with an unread error alert, not only on CPU. Read the reasons line right under the meta line; it lists every signal pushing the state up. Common cases: RAM at or above 90% from an oversized service, disk at or above 90% from runaway log retention, or a crashed container that no one has acknowledged in the alerts panel.
   </Accordion>
   <Accordion title="The dashboard feels sluggish on a large deployment">
-    Toggle **Developer mode** under **Settings · System**. Both dashboard endpoints then emit a `[Dashboard:debug]` line in the Sencho container logs for every request, reporting elapsed milliseconds and the contextual fields (`nodeId`, row count, `days` window). Use the timings to identify whether the Configuration Status payload or the stack-restarts query is the bottleneck. Disable developer mode when you are done to keep the log volume manageable.
+    Toggle **Developer mode** under **Settings · Operations · Developer Diagnostics**. Both dashboard endpoints then emit a `[Dashboard:debug]` line in the Sencho container logs for every request, reporting elapsed milliseconds and the contextual fields (`nodeId`, row count, `days` window). Use the timings to identify whether the Configuration Status payload or the stack-restarts query is the bottleneck. Disable developer mode when you are done to keep the log volume manageable.
   </Accordion>
 </AccordionGroup>

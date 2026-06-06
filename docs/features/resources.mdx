@@ -17,7 +17,7 @@ The hero stays hidden when there is nothing to reclaim, keeping the view focused
 
 To set the banner aside without pruning, use the **×** in its top-right corner. It stays hidden on that browser until the reclaimable total grows past the amount it held when you dismissed it, so a small, stubborn remainder will not keep reappearing while a genuine new build-up still surfaces.
 
-To keep the banner off for a node entirely, open **Settings → System → Docker hygiene** and switch off **Show reclaimable-space banner**. It is on by default and applies per node.
+To keep the banner off for a node entirely, open **Settings → Monitoring → Docker & Storage** and switch off **Show reclaimable-space banner**. It is on by default and applies per node.
 
 <Note>
   The banner and the **Review & prune** action are admin-only. Read-only roles still see the rest of the page but cannot trigger destructive operations.
@@ -224,6 +224,6 @@ When no unmanaged containers are detected, the tab shows a success state with th
     The Unmanaged tab filters the running Sencho container out by design so it cannot be selected and purged. Other containers started outside Sencho (with `docker run` or by a Compose project outside `COMPOSE_DIR`) still appear normally. To inspect the Sencho container itself, use **Host Console** or `docker ps` on the host.
   </Accordion>
   <Accordion title="The reclaim banner will not go away, or shows a small amount that will not prune">
-    The banner mirrors what Docker reports as reclaimable on the node, and it counts only the resources a standard prune can actually remove. After a prune, some storage drivers still report a few megabytes as reclaimable that the prune does not free. To stop the banner drawing attention to a stubborn remainder, dismiss it with the **×** in its top-right corner; it stays hidden until the reclaimable total grows past that point. To turn it off for the node entirely, switch off **Show reclaimable-space banner** in **Settings → System → Docker hygiene**.
+    The banner mirrors what Docker reports as reclaimable on the node, and it counts only the resources a standard prune can actually remove. After a prune, some storage drivers still report a few megabytes as reclaimable that the prune does not free. To stop the banner drawing attention to a stubborn remainder, dismiss it with the **×** in its top-right corner; it stays hidden until the reclaimable total grows past that point. To turn it off for the node entirely, switch off **Show reclaimable-space banner** in **Settings → Monitoring → Docker & Storage**.
   </Accordion>
 </AccordionGroup>

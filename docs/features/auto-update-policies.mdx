@@ -65,7 +65,7 @@ Auto-update is opt-in per stack. A stack participates in unattended updates only
 
 Every update pulls a fresh image and recreates the affected containers. Once the new image is in place, the image it replaced becomes a dangling (untagged) layer that otherwise lingers on disk until you prune it by hand.
 
-Sencho clears this for you. Under **Settings > System > Docker hygiene**, the **Prune dangling images after updates** toggle is on by default. When a stack update or a Sencho self-update finishes successfully, Sencho removes the node's dangling (untagged) image layers, including the one the update just orphaned. This is a standard dangling-image prune, so any other untagged layers already on the node are reclaimed in the same pass. Only untagged layers are touched: tagged images (including those for stopped stacks), your volumes, and your data are never removed. Changing the setting requires an admin account.
+Sencho clears this for you. Under **Settings > Monitoring > Docker & Storage**, the **Prune dangling images after updates** toggle is on by default. When a stack update or a Sencho self-update finishes successfully, Sencho removes the node's dangling (untagged) image layers, including the one the update just orphaned. This is a standard dangling-image prune, so any other untagged layers already on the node are reclaimed in the same pass. Only untagged layers are touched: tagged images (including those for stopped stacks), your volumes, and your data are never removed. Changing the setting requires an admin account.
 
 The toggle is per node. Each Sencho instance honors its own setting, so you can leave cleanup on for your hub and off for a particular remote, or the reverse. Switch the active node and open its settings to set the value for that node.
 
@@ -121,7 +121,7 @@ The preview is recomputed each time the readiness board loads, so it reflects th
     One or more nodes that are marked online in your fleet did not respond within the request timeout. Pending updates from those nodes are not shown until they come back. Check the node's status from the Fleet view and the network path between this Sencho instance and the unreachable node.
   </Accordion>
   <Accordion title='An old image I wanted to keep disappeared after an update'>
-    Automatic cleanup removes only dangling (untagged) image layers, the leftovers a pull orphans. Any image that still carries a tag, including images for stopped stacks, is left in place. If you keep a previous build to roll back to, give it a distinct tag so it is never dangling, or turn off **Prune dangling images after updates** under **Settings > System > Docker hygiene** on that node.
+    Automatic cleanup removes only dangling (untagged) image layers, the leftovers a pull orphans. Any image that still carries a tag, including images for stopped stacks, is left in place. If you keep a previous build to roll back to, give it a distinct tag so it is never dangling, or turn off **Prune dangling images after updates** under **Settings > Monitoring > Docker & Storage** on that node.
   </Accordion>
   <Accordion title='Disk usage barely changed after an update'>
     Automatic cleanup reclaims dangling (untagged) image layers only. A long-running host accumulates other reclaimable data (stopped containers, unused volumes and networks, build cache) that this toggle does not touch. Run a full prune from the [Resources](/features/resources) view, or schedule a prune task, to reclaim the rest.
