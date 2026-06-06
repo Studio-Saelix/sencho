@@ -39,6 +39,8 @@ html-report/
 .coverage/
 coverage/
 .playwright-mcp/
+# Visual-regression baselines are environment-specific; regenerate per env.
+e2e/**/*-snapshots/
 
 # Logs
 *.log
