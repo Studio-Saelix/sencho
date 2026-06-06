@@ -1,11 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Bell } from 'lucide-react';
-import {
-  CursorProvider,
-  Cursor,
-  CursorContainer,
-  CursorFollow,
-} from '@/components/animate-ui/primitives/animate/cursor';
 import type { Stats, SystemStats, NotificationItem, HealthLevel } from './types';
 
 interface HealthStatusBarProps {
@@ -153,43 +147,7 @@ export function HealthStatusBar({
 
         {/* Stats column */}
         <div className="hidden items-stretch justify-end gap-0 md:flex">
-          <CursorProvider>
-            <CursorContainer>
-              <StatTile label="RUNNING" value={running} tone="value" />
-            </CursorContainer>
-            <Cursor>
-              <span className="h-2 w-2 rounded-full bg-brand" />
-            </Cursor>
-            <CursorFollow
-              side="bottom"
-              sideOffset={8}
-              align="center"
-              transition={{ stiffness: 400, damping: 40, bounce: 0 }}
-            >
-              <div className="rounded-md border border-card-border bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] px-3 py-2 shadow-md">
-                <div className="flex items-center gap-3 font-mono text-xs tabular-nums">
-                  <span className="text-stat-value">
-                    {stats.managed}
-                    <span className="ml-1 font-sans text-stat-subtitle">managed</span>
-                  </span>
-                  <span className="text-stat-icon">·</span>
-                  <span className="text-stat-value">
-                    {stats.unmanaged}
-                    <span className="ml-1 font-sans text-stat-subtitle">external</span>
-                  </span>
-                  {stats.exited > 0 ? (
-                    <>
-                      <span className="text-stat-icon">·</span>
-                      <span className="text-destructive">
-                        {stats.exited}
-                        <span className="ml-1 font-sans text-stat-subtitle">exited</span>
-                      </span>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            </CursorFollow>
-          </CursorProvider>
+          <StatTile label="RUNNING" value={running} tone="value" />
           <StatTile label="CPU" value={cpuLabel} tone={parseFloat(systemStats?.cpu.usage || '0') >= 80 ? 'warn' : 'value'} divider />
           <StatTile label="MEM" value={memLabel} tone="value" divider />
         </div>

@@ -1,12 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Bell } from 'lucide-react';
-import {
-  CursorProvider,
-  Cursor,
-  CursorContainer,
-  CursorFollow,
-} from '@/components/animate-ui/primitives/animate/cursor';
-
 type FleetHealth = 'healthy' | 'degraded' | 'critical';
 
 interface FleetMastheadProps {
@@ -145,40 +138,13 @@ export function FleetMasthead({
             tone="value"
             divider
           />
-          <CursorProvider>
-            <CursorContainer>
-              <StatTile
-                label="CONTAINERS"
-                value={`${activeContainers}`}
-                sub={`of ${totalContainers} total`}
-                tone="value"
-                divider
-              />
-            </CursorContainer>
-            <Cursor>
-              <span className="h-2 w-2 rounded-full bg-brand" />
-            </Cursor>
-            <CursorFollow
-              side="bottom"
-              sideOffset={8}
-              align="center"
-              transition={{ stiffness: 400, damping: 40, bounce: 0 }}
-            >
-              <div className="rounded-md border border-card-border bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] px-3 py-2 shadow-md">
-                <div className="flex items-center gap-3 font-mono text-xs tabular-nums">
-                  <span className="text-stat-value">
-                    {activeContainers}
-                    <span className="ml-1 font-sans text-stat-subtitle">running</span>
-                  </span>
-                  <span className="text-stat-icon">·</span>
-                  <span className="text-stat-value">
-                    {totalContainers}
-                    <span className="ml-1 font-sans text-stat-subtitle">total</span>
-                  </span>
-                </div>
-              </div>
-            </CursorFollow>
-          </CursorProvider>
+          <StatTile
+            label="CONTAINERS"
+            value={`${activeContainers}`}
+            sub={`of ${totalContainers} total`}
+            tone="value"
+            divider
+          />
         </div>
 
         <div className="flex items-center gap-2 pl-4">
