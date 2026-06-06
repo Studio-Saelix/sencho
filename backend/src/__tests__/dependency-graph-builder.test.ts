@@ -135,6 +135,43 @@ describe('assembleGraph - declared services and depends_on', () => {
     expect(g.flags.some((f) => f.kind === 'missing-dependency')).toBe(true);
     expect(g.nodes.find((n) => n.id === 'svc:web:web')?.flags).toContain('missing-dependency');
   });
+
+  it('flags a depends_on target whose container is exited (not just absent)', () => {
+    const snapshot = snap({
+      containers: [
+        container({ id: 'c1', service: 'web', stack: 'web', state: 'running' }),
+        container({ id: 'c2', service: 'db', stack: 'web', state: 'exited' }),
+      ],
+    });
+    const declared: DeclaredCompose = {
+      services: [
+        { name: 'web', dependsOn: ['db'], networks: [], volumes: [], ports: [] },
+        { name: 'db', dependsOn: [], networks: [], volumes: [], ports: [] },
+      ],
+      networks: {}, volumes: {},
+    };
+    const g = assembleGraph({ nodeId: 1, nodeName: 'hub', stacks: ['web'], snapshot, declaredByStack: declMap([['web', declared]]), parseErrors: [] });
+    expect(g.flags.some((f) => f.kind === 'missing-dependency')).toBe(true);
+    expect(g.nodes.find((n) => n.id === 'svc:web:web')?.flags).toContain('missing-dependency');
+  });
+
+  it('does not flag internal dependencies of a fully stopped stack', () => {
+    const snapshot = snap({
+      containers: [
+        container({ id: 'c1', service: 'web', stack: 'web', state: 'exited' }),
+        container({ id: 'c2', service: 'db', stack: 'web', state: 'exited' }),
+      ],
+    });
+    const declared: DeclaredCompose = {
+      services: [
+        { name: 'web', dependsOn: ['db'], networks: [], volumes: [], ports: [] },
+        { name: 'db', dependsOn: [], networks: [], volumes: [], ports: [] },
+      ],
+      networks: {}, volumes: {},
+    };
+    const g = assembleGraph({ nodeId: 1, nodeName: 'hub', stacks: ['web'], snapshot, declaredByStack: declMap([['web', declared]]), parseErrors: [] });
+    expect(g.flags.some((f) => f.kind === 'missing-dependency')).toBe(false);
+  });
 });
 
 // ── assembleGraph: flags ─────────────────────────────────────────────────
@@ -225,7 +262,28 @@ describe('detectPortConflicts', () => {
   it('flags two stacks claiming the same host port', () => {
     const conflicts = detectPortConflicts([claim({ stack: 'a', publishedPort: 8080 }), claim({ stack: 'b', publishedPort: 8080 })]);
     expect(conflicts).toHaveLength(1);
-    expect(conflicts[0].portKey).toBe('8080/tcp');
+    expect(conflicts[0].port).toBe(8080);
+    expect(conflicts[0].protocol).toBe('tcp');
+  });
+
+  it('flags only the clashing specific-IP claimants, not an unrelated bind on the same port', () => {
+    const conflicts = detectPortConflicts([
+      claim({ stack: 'a', service: 'x', hostIp: '10.0.0.1', publishedPort: 443 }),
+      claim({ stack: 'b', service: 'y', hostIp: '10.0.0.1', publishedPort: 443 }),
+      claim({ stack: 'c', service: 'z', hostIp: '10.0.0.2', publishedPort: 443 }),
+    ]);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].scopes).toEqual(['10.0.0.1']);
+    const stacks = conflicts[0].claimants.map((c) => c.stack).sort();
+    expect(stacks).toEqual(['a', 'b']);
+  });
+
+  it('does not flag IPv4 + IPv6 bindings of one service publish', () => {
+    const conflicts = detectPortConflicts([
+      claim({ stack: 'a', service: 'x', hostIp: '0.0.0.0', publishedPort: 8080 }),
+      claim({ stack: 'a', service: 'x', hostIp: '::', publishedPort: 8080 }),
+    ]);
+    expect(conflicts).toHaveLength(0);
   });
 
   it('flags two services in the same stack claiming the same port', () => {
@@ -262,7 +320,7 @@ describe('detectPortConflicts', () => {
 
 describe('detectMissingDependencies', () => {
   const base = (declared: DeclaredCompose, over: Partial<Parameters<typeof detectMissingDependencies>[0]> = {}) => ({
-    stack: 'web', declared, runtimeServices: new Set<string>(['web']), hasContainers: true,
+    stack: 'web', declared, runningServices: new Set<string>(['web']), hasContainers: true,
     stackNetworkNames: ['web_frontend'], stackVolumeNames: ['web_data'],
     allNetworkNames: new Set(['web_frontend']), allVolumeNames: new Set(['web_data']), ...over,
   });
@@ -280,9 +338,16 @@ describe('detectMissingDependencies', () => {
     expect(out[0].target).toBe('db');
   });
 
-  it('does not flag an external network', () => {
+  it('does not flag an external network that exists on the host', () => {
     const declared: DeclaredCompose = { services: [{ name: 'web', dependsOn: [], networks: ['proxy'], volumes: [], ports: [] }], networks: { proxy: { external: true } }, volumes: {} };
-    expect(detectMissingDependencies(base(declared))).toHaveLength(0);
+    expect(detectMissingDependencies(base(declared, { allNetworkNames: new Set(['proxy']) }))).toHaveLength(0);
+  });
+
+  it('flags an external network that does not exist on the host', () => {
+    const declared: DeclaredCompose = { services: [{ name: 'web', dependsOn: [], networks: ['proxy'], volumes: [], ports: [] }], networks: { proxy: { external: true } }, volumes: {} };
+    const out = detectMissingDependencies(base(declared, { allNetworkNames: new Set() }));
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('network');
   });
 
   it('does not flag a network present via the project-prefix suffix match', () => {

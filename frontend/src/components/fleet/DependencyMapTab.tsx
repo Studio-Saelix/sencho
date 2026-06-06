@@ -121,6 +121,8 @@ interface Adjacency {
   byId: Map<string, DepNode>;
   stackChildren: Map<string, string[]>;
   serviceResources: Map<string, string[]>;
+  /** Reverse of serviceResources: resource id -> services that reference it. */
+  resourceServices: Map<string, string[]>;
   hostByNodeId: Map<number, string>;
   serviceStack: Map<string, string>;
 }
@@ -129,6 +131,7 @@ function buildAdjacency(map: FleetDependencyMap): Adjacency {
   const byId = new Map(map.nodes.map((n) => [n.id, n]));
   const stackChildren = new Map<string, string[]>();
   const serviceResources = new Map<string, string[]>();
+  const resourceServices = new Map<string, string[]>();
   const serviceStack = new Map<string, string>();
   const hostByNodeId = new Map<number, string>();
 
@@ -141,12 +144,15 @@ function buildAdjacency(map: FleetDependencyMap): Adjacency {
       stackChildren.set(e.source, arr);
       serviceStack.set(e.target, e.source);
     } else if (e.kind === 'service-network' || e.kind === 'service-volume' || e.kind === 'service-port') {
-      const arr = serviceResources.get(e.source) ?? [];
-      arr.push(e.target);
-      serviceResources.set(e.source, arr);
+      const fwd = serviceResources.get(e.source) ?? [];
+      fwd.push(e.target);
+      serviceResources.set(e.source, fwd);
+      const rev = resourceServices.get(e.target) ?? [];
+      rev.push(e.source);
+      resourceServices.set(e.target, rev);
     }
   }
-  return { byId, stackChildren, serviceResources, hostByNodeId, serviceStack };
+  return { byId, stackChildren, serviceResources, resourceServices, hostByNodeId, serviceStack };
 }
 
 // ── Tab ─────────────────────────────────────────────────────────────────────
@@ -228,15 +234,29 @@ export function DependencyMapTab() {
     };
 
     if (filterActive) {
+      const revealService = (svcId: string) => {
+        const svcNode = adjacency.byId.get(svcId);
+        if (!svcNode || !passNode(svcNode)) return;
+        addWithHost(svcNode);
+        const parentStack = adjacency.serviceStack.get(svcId);
+        if (parentStack) { visibleIds.add(parentStack); expanded.add(parentStack); }
+      };
       for (const n of data.nodes) {
         if (!passNode(n) || n.kind === 'host' || n.kind === 'stack') continue;
         if (!matchesFilters(n)) continue;
         addWithHost(n);
-        const parentStack = adjacency.serviceStack.get(n.id);
-        if (parentStack) { visibleIds.add(parentStack); expanded.add(parentStack); }
-        for (const r of adjacency.serviceResources.get(n.id) ?? []) visibleIds.add(r);
+        if (n.kind === 'service') {
+          const parentStack = adjacency.serviceStack.get(n.id);
+          if (parentStack) { visibleIds.add(parentStack); expanded.add(parentStack); }
+          for (const r of adjacency.serviceResources.get(n.id) ?? []) visibleIds.add(r);
+        } else {
+          // A matching resource reveals the services that claim it (and their
+          // stacks) so "what claims port 8080?" and "which stacks share this
+          // network?" show the connected services, not an isolated node.
+          for (const svc of adjacency.resourceServices.get(n.id) ?? []) revealService(svc);
+        }
       }
-      // Orphan stacks that match directly.
+      // Stacks that match directly (e.g. orphan synthetic stacks).
       for (const n of data.nodes) {
         if (n.kind === 'stack' && passNode(n) && matchesFilters(n)) addWithHost(n);
       }

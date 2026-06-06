@@ -24,7 +24,6 @@ export interface DepNode {
   managedStatus?: 'managed' | 'unmanaged' | 'system';
   state?: string;
   flags: DepFlagKind[];
-  meta?: Record<string, string | number>;
 }
 
 export interface DepEdge {

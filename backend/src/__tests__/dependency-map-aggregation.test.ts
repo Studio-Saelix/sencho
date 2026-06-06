@@ -3,7 +3,7 @@
  * authoritative node attribution, and graceful partial-failure handling.
  */
 import { describe, it, expect } from 'vitest';
-import { mergeFleetGraph, type FleetNodeGraphResult, type LocalDependencyGraph } from '../services/DependencyGraphService';
+import { mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult, type LocalDependencyGraph } from '../services/DependencyGraphService';
 
 function localGraph(nodeId: number, nodeName: string, stack: string): LocalDependencyGraph {
   return {
@@ -61,5 +61,31 @@ describe('mergeFleetGraph', () => {
     expect(merged.nodes).toHaveLength(0);
     expect(merged.edges).toHaveLength(0);
     expect(merged.nodeErrors).toHaveLength(2);
+  });
+});
+
+describe('isLocalDependencyGraph', () => {
+  it('accepts a well-formed graph and one with parseErrors absent', () => {
+    expect(isLocalDependencyGraph({ nodes: [{ id: 'host', flags: [] }], edges: [{ id: 'e', source: 'a', target: 'b' }], flags: [{ subjects: ['a'] }], parseErrors: [{ stack: 's', error: 'x' }] })).toBe(true);
+    expect(isLocalDependencyGraph({ nodes: [], edges: [], flags: [] })).toBe(true);
+  });
+
+  it('rejects null and non-array core fields', () => {
+    expect(isLocalDependencyGraph(null)).toBe(false);
+    expect(isLocalDependencyGraph({ nodes: {}, edges: [], flags: [] })).toBe(false);
+  });
+
+  it('rejects a node missing its flags array', () => {
+    expect(isLocalDependencyGraph({ nodes: [{ id: 'x' }], edges: [], flags: [] })).toBe(false);
+  });
+
+  it('rejects flags whose subjects are missing or non-string (would corrupt merge)', () => {
+    expect(isLocalDependencyGraph({ nodes: [], edges: [], flags: [{}] })).toBe(false);
+    expect(isLocalDependencyGraph({ nodes: [], edges: [], flags: [{ subjects: [1] }] })).toBe(false);
+  });
+
+  it('rejects malformed parseErrors elements (would throw in merge)', () => {
+    expect(isLocalDependencyGraph({ nodes: [], edges: [], flags: [], parseErrors: [null] })).toBe(false);
+    expect(isLocalDependencyGraph({ nodes: [], edges: [], flags: [], parseErrors: ['oops'] })).toBe(false);
   });
 });

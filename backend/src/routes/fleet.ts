@@ -37,7 +37,7 @@ import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cach
 import { activeBulkActions } from './labels';
 import { runLocalLabelStop, type LabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
-import { buildLocalGraph, mergeFleetGraph, type FleetNodeGraphResult, type LocalDependencyGraph } from '../services/DependencyGraphService';
+import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 
@@ -677,11 +677,12 @@ fleetRouter.get('/dependency-map', authMiddleware, async (_req: Request, res: Re
           const errBody = await resp.json().catch(() => null) as { error?: string } | null;
           return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
         }
-        const graph = await resp.json().catch(() => null) as LocalDependencyGraph | null;
+        const graph = await resp.json().catch(() => null);
         // Shape-guard a reachable-but-malformed payload (proxy HTML, version
         // drift) so one bad node degrades to a nodeError instead of crashing
         // mergeFleetGraph and 500-ing the whole fleet map.
-        if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges) || !Array.isArray(graph.flags)) {
+        if (!isLocalDependencyGraph(graph)) {
+          console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} returned a payload that failed shape validation (status ${resp.status})`);
           return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: 'Remote returned an unexpected dependency-graph payload' };
         }
         return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
