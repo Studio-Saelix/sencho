@@ -23,12 +23,8 @@ It carries:
 - A **pulsing dot** that mirrors the state color: green when nominal, amber when degraded, rose when critical. The dot is solid (no pulse) when Healthy.
 - A **meta line** in uppercase mono tracking with the active node's name, the number of nodes registered to this Sencho instance, and the time since the last successful poll, for example `LOCAL · 4 NODES · LAST SYNC 1S`.
 - A **reasons line** that names exactly which signals moved the state away from Healthy, for example `RAM 95% · 18 unread errors`. When the state is Healthy the reasons line reads `All systems nominal`.
-- Three quick stat tiles on the right edge of the bar: **RUNNING** (`active/total`), **CPU**, and **MEM**. Hover the **RUNNING** tile to expand a managed / external (and exited, when present) breakdown in a cursor-following tooltip.
+- Three quick stat tiles on the right edge of the bar: **RUNNING** (`active/total`), **CPU**, and **MEM**.
 - An alerts counter pinned to the far right, showing the number of unread notifications next to a bell icon. The icon and count tint amber while at least one alert is unread.
-
-<Frame>
-  <img src="/images/dashboard/running-tile-hover.png" alt="Status masthead with the RUNNING tile hovered, the cursor-following tooltip showing '15 managed · 1 external' under the masthead values." />
-</Frame>
 
 The masthead's CPU stat tile tints amber once host CPU crosses 80% and stays amber even at 90% or higher. The MEM and RUNNING values stay neutral; the reasons line and the gauge strip below are where you read severity.
 
