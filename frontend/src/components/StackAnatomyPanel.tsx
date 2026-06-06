@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { parse as parseYaml } from 'yaml';
-import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
+import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen, Copy } from 'lucide-react';
 import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { copyToClipboard } from '@/lib/clipboard';
+import { toast } from '@/components/ui/toast-store';
+import { buildStackAnatomyMarkdown, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import type { NotificationItem } from '@/components/dashboard/types';
 
@@ -44,17 +47,6 @@ interface GitSourceInfo {
   repo_url: string;
   branch: string;
   compose_path?: string;
-}
-
-interface PortRow {
-  host: string;
-  container: string;
-  proto: string;
-}
-
-interface VolumeRow {
-  host: string;
-  container: string;
 }
 
 interface Anatomy {
@@ -249,7 +241,7 @@ export default function StackAnatomyPanel({
 
   const envVarCount = envKeys.size;
 
-  const [gitSource, setGitSource] = useState<GitSourceInfo | null>(null);
+  const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo } | null>(null);
   const [updatePreview, setUpdatePreview] = useState<UpdatePreview | null>(null);
   const [scanStatus, setScanStatus] = useState<{
     status: 'ok' | 'partial' | 'failed' | 'skipped' | null;
@@ -270,7 +262,10 @@ export default function StackAnatomyPanel({
           if (data && data.linked === false) {
             setGitSource(null);
           } else {
-            setGitSource({ repo_url: data.repo_url, branch: data.branch, compose_path: data.compose_path });
+            setGitSource({
+              stack: stackName,
+              info: { repo_url: data.repo_url, branch: data.branch, compose_path: data.compose_path },
+            });
           }
         } else {
           setGitSource(null);
@@ -358,6 +353,9 @@ export default function StackAnatomyPanel({
     ? anatomy.networks[0]
     : `${stackName}_default`;
   const firstEnvFile = anatomy?.envFiles[0] ?? selectedEnvFile ?? null;
+  // Only treat the fetched source as current when it belongs to the selected stack, so a
+  // slow /git-source response for a previously selected stack cannot render or be exported here.
+  const activeGitSource = gitSource?.stack === stackName ? gitSource.info : null;
   const primaryHostPort = useMemo(() => {
     if (!anatomy) return null;
     for (const svc of anatomy.services) {
@@ -366,6 +364,28 @@ export default function StackAnatomyPanel({
     }
     return null;
   }, [anatomy]);
+
+  const handleCopyMarkdown = async () => {
+    if (!anatomy) return;
+    const markdown = buildStackAnatomyMarkdown({
+      stackName,
+      services: anatomy.services,
+      ports: anatomy.ports,
+      volumes: anatomy.volumes,
+      restart: anatomy.restart,
+      envFile: firstEnvFile,
+      envVarCount,
+      missingVars,
+      networkName,
+      gitSource: activeGitSource ? formatGitSource(activeGitSource) : null,
+    });
+    try {
+      await copyToClipboard(markdown);
+      toast.success('Stack anatomy copied as Markdown.');
+    } catch {
+      toast.error('Failed to copy to clipboard.');
+    }
+  };
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
@@ -403,6 +423,17 @@ export default function StackAnatomyPanel({
           <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
         </TabsList>
         <div className="flex items-center gap-3">
+          {anatomy && (
+            <button
+              type="button"
+              data-testid="anatomy-copy-md-btn"
+              onClick={() => { void handleCopyMarkdown(); }}
+              className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
+            >
+              <Copy className="h-3 w-3" strokeWidth={1.5} />
+              copy md
+            </button>
+          )}
           {onOpenFiles && (
             <button
               type="button"
@@ -521,8 +552,8 @@ export default function StackAnatomyPanel({
                 className="inline-flex items-center gap-1.5 font-mono text-[11px] text-left hover:text-brand transition-colors"
               >
                 <GitBranch className="h-3 w-3 shrink-0" strokeWidth={1.5} />
-                {gitSource ? (
-                  <span className="truncate">git <span className="text-stat-subtitle">·</span> {formatGitSource(gitSource)}</span>
+                {activeGitSource ? (
+                  <span className="truncate">git <span className="text-stat-subtitle">·</span> {formatGitSource(activeGitSource)}</span>
                 ) : (
                   <span>local</span>
                 )}

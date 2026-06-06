@@ -67,7 +67,7 @@ When the container has a compose service name attached, an extra `⋮` button ap
 
 The right column shows the **Anatomy panel** by default: a read-only summary of the compose file with a tab for the stack's activity timeline.
 
-The header strip carries two tabs (**Anatomy** and **Activity**) plus shortcuts to open the **files** tab and enter **edit** mode. The shortcuts belong to the strip itself and remain available regardless of which tab is active.
+The header strip carries two tabs (**Anatomy** and **Activity**) plus shortcuts to **copy md** (export the summary as Markdown), open the **files** tab, and enter **edit** mode. The shortcuts belong to the strip itself and remain available regardless of which tab is active.
 
 The Anatomy tab lists:
 
@@ -80,6 +80,12 @@ The Anatomy tab lists:
 - **source** with `git · <host>/<repo>#<branch>` when the stack is linked to a Git repository, or `local` when it is not. Clicking the row opens the Git source dialog. A pulsing brand-color dot means an upstream change is queued.
 
 When an image update is available, an inline banner appears at the top of the panel. Its tone follows the version-bump severity: `safe to apply` (patch), `review recommended` (minor), `breaking changes possible` (major), or `review required` when the bump cannot be classified. The banner has an inline **apply** button that runs the same operation as the action bar's **Update**; it is hidden for roles that lack the `stack:edit` permission and when the bump is flagged as blocked.
+
+### Copy as Markdown
+
+The **copy md** shortcut copies the current anatomy to your clipboard as a Markdown document: the stack name, services, a ports table, a volumes table, the restart policy, the env file with its variable count, any missing variables, the network, and the source. Paste it straight into a README, a Git repository, Obsidian, BookStack, or a support thread to keep a written record of how a stack is wired.
+
+Empty sections render cleanly as `none`, and the export carries only variable **names** and **counts**, never the values stored in your `.env` file.
 
 The **Activity** tab streams every operational event scoped to this stack. See [Stack Activity](/features/stack-activity) for the full event catalog and attribution rules.
 
