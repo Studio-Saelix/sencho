@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.90.0](https://github.com/Studio-Saelix/sencho/compare/v0.89.0...v0.90.0) (2026-06-06)
+
+
+### Added
+
+* **resources:** reclaim banner controls and accurate reclaim math ([#1318](https://github.com/Studio-Saelix/sencho/issues/1318)) ([3089492](https://github.com/Studio-Saelix/sencho/commit/308949282c93c5046bec83a85b59a8cc020d1fc2))
+* **settings:** reorganize the settings hub into domain groups ([#1321](https://github.com/Studio-Saelix/sencho/issues/1321)) ([ce08a59](https://github.com/Studio-Saelix/sencho/commit/ce08a593d7df95333a9d8b2762501b3d6d525c33))
+* **stacks:** one-click import for stray compose files ([#1320](https://github.com/Studio-Saelix/sencho/issues/1320)) ([f7f3afe](https://github.com/Studio-Saelix/sencho/commit/f7f3afe05a80a172028c099b419106d075b33fe8))
+* **updates:** auto-prune dangling images after updates ([#1316](https://github.com/Studio-Saelix/sencho/issues/1316)) ([716daf7](https://github.com/Studio-Saelix/sencho/commit/716daf77d083fc2270366d7ef1be0a59424a83d2))
+
+
+### Fixed
+
+* **blueprints:** allow deleting blueprints stuck on awaiting-confirmation deployments ([#1313](https://github.com/Studio-Saelix/sencho/issues/1313)) ([b4cca9b](https://github.com/Studio-Saelix/sencho/commit/b4cca9b9958bdc17a3d232b5b535ed8ddcbb4124))
+* **blueprints:** keep the edit sheet body within the sheet width ([#1314](https://github.com/Studio-Saelix/sencho/issues/1314)) ([5d508b9](https://github.com/Studio-Saelix/sencho/commit/5d508b941683cdc4b3a9065e02653ccde0a53726))
+* **security:** resolve open CodeQL path-injection and temp-file alerts ([#1322](https://github.com/Studio-Saelix/sencho/issues/1322)) ([86bfc10](https://github.com/Studio-Saelix/sencho/commit/86bfc108aea5b3799ea1897d9c141d6cbab3a776))
+* **theme:** make sheets and dialogs track the active theme ([#1315](https://github.com/Studio-Saelix/sencho/issues/1315)) ([622af7e](https://github.com/Studio-Saelix/sencho/commit/622af7e0b388e1e7951b672fb6a73ef0f934f27e))
+
 ## [0.89.0](https://github.com/Studio-Saelix/sencho/compare/v0.88.2...v0.89.0) (2026-06-05)
 
 
