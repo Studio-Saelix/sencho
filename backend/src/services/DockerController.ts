@@ -91,6 +91,61 @@ export interface TopologyNetwork {
   containers: TopologyContainer[];
 }
 
+/** A host-published port binding on a container. */
+export interface DependencyPort {
+  /** Host interface the port binds to ('' or '0.0.0.0'/'::' means all interfaces). */
+  ip: string;
+  publishedPort: number;
+  privatePort: number | null;
+  protocol: string;
+}
+
+/** A container as seen by the dependency map: compose identity plus its real
+ *  runtime network/volume names and published ports. */
+export interface DependencyContainer {
+  id: string;
+  name: string;
+  /** com.docker.compose.service label, or null for non-compose containers. */
+  service: string | null;
+  /** Raw com.docker.compose.project label (may not map to a known stack). */
+  composeProject: string | null;
+  /** Resolved Sencho stack, or null when the container is not Sencho-managed. */
+  stack: string | null;
+  state: string;
+  image: string;
+  networks: { name: string; id: string; ip: string }[];
+  /** Named-volume sources mounted by the container (bind mounts excluded). */
+  volumes: string[];
+  ports: DependencyPort[];
+}
+
+export interface DependencyNetwork {
+  id: string;
+  name: string;
+  driver: string;
+  scope: string;
+  isSystem: boolean;
+  /** Raw com.docker.compose.project label (may not map to a known stack). */
+  composeProject: string | null;
+  /** Resolved Sencho stack this network belongs to, or null. */
+  stack: string | null;
+}
+
+export interface DependencyVolume {
+  name: string;
+  driver: string;
+  composeProject: string | null;
+  /** Resolved Sencho stack this volume belongs to, or null. */
+  stack: string | null;
+}
+
+/** One node-scoped snapshot of everything the dependency map needs. */
+export interface DependencySnapshot {
+  containers: DependencyContainer[];
+  networks: DependencyNetwork[];
+  volumes: DependencyVolume[];
+}
+
 export type NetworkDriver = 'bridge' | 'overlay' | 'macvlan' | 'host' | 'none';
 
 export interface CreateNetworkOptions {
@@ -844,6 +899,95 @@ class DockerController {
     }
 
     return result;
+  }
+
+  /**
+   * One-shot, node-scoped snapshot for the dependency map: every container's
+   * compose service identity, real network/volume names, and protocol/IP-typed
+   * published ports, plus the full network and volume inventory. Three Docker
+   * list calls and no per-container inspect keep it cheap at fleet scale.
+   */
+  public async getDependencySnapshot(knownStackNames: string[]): Promise<DependencySnapshot> {
+    const knownSet = new Set(knownStackNames);
+
+    const [rawContainers, rawNetworks, rawVolumeData, projectToStack] = await Promise.all([
+      this.docker.listContainers({ all: true }),
+      this.docker.listNetworks(),
+      this.docker.listVolumes(),
+      DockerController.resolveProjectNameMap(knownStackNames),
+    ]);
+
+    const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
+    const resolvedBase = path.resolve(COMPOSE_DIR);
+
+    const containersRaw = this.validateApiData<any[]>(rawContainers);
+    const networksRaw = this.validateApiData<any[]>(rawNetworks);
+    const volumesRaw: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
+
+    const containers: DependencyContainer[] = containersRaw.map((c: any) => {
+      const netSettings: Record<string, { NetworkID?: string; IPAddress?: string }> =
+        c.NetworkSettings?.Networks ?? {};
+      const networks = Object.entries(netSettings).map(([name, info]) => ({
+        name,
+        id: info.NetworkID ?? '',
+        ip: info.IPAddress ?? '',
+      }));
+
+      const volumes: string[] = Array.isArray(c.Mounts)
+        ? c.Mounts
+            .filter((m: any) => m?.Type === 'volume' && typeof m.Name === 'string' && m.Name)
+            .map((m: any) => m.Name as string)
+        : [];
+
+      const ports: DependencyPort[] = Array.isArray(c.Ports)
+        ? c.Ports
+            .filter((p: any) => typeof p.PublicPort === 'number' && p.PublicPort > 0)
+            .map((p: any) => ({
+              ip: typeof p.IP === 'string' ? p.IP : '',
+              publishedPort: p.PublicPort as number,
+              privatePort: typeof p.PrivatePort === 'number' ? p.PrivatePort : null,
+              protocol: typeof p.Type === 'string' ? p.Type : 'tcp',
+            }))
+        : [];
+
+      return {
+        id: c.Id,
+        name: (c.Names?.[0] ?? '').replace(/^\//, '') || (c.Id ?? '').substring(0, 12),
+        service: c.Labels?.['com.docker.compose.service'] ?? null,
+        composeProject: c.Labels?.['com.docker.compose.project'] ?? null,
+        stack: DockerController.resolveContainerStack(c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase),
+        state: c.State ?? 'unknown',
+        image: c.Image ?? '',
+        networks,
+        volumes,
+        ports,
+      };
+    });
+
+    const networks: DependencyNetwork[] = networksRaw.map((net: any) => {
+      const project = net.Labels?.['com.docker.compose.project'] ?? null;
+      return {
+        id: net.Id,
+        name: net.Name,
+        driver: net.Driver ?? 'bridge',
+        scope: net.Scope ?? 'local',
+        isSystem: DockerController.SYSTEM_NETWORKS.has(net.Name),
+        composeProject: project,
+        stack: DockerController.resolveProjectLabel(project ?? undefined, knownSet, projectToStack),
+      };
+    });
+
+    const volumes: DependencyVolume[] = volumesRaw.map((vol: any) => {
+      const project = vol.Labels?.['com.docker.compose.project'] ?? null;
+      return {
+        name: vol.Name,
+        driver: vol.Driver ?? 'local',
+        composeProject: project,
+        stack: DockerController.resolveProjectLabel(project ?? undefined, knownSet, projectToStack),
+      };
+    });
+
+    return { containers, networks, volumes };
   }
 
   /** Resolves a Docker Compose project label to a known Sencho stack name, or null. */

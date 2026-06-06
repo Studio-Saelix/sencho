@@ -1,7 +1,7 @@
 import {
     RefreshCw, Search, Camera, Plus,
     Network, SlidersHorizontal,
-    Send, KeyRound, ArrowLeftRight, Wrench,
+    Send, KeyRound, ArrowLeftRight, Wrench, Workflow,
 } from 'lucide-react';
 import { FleetMasthead } from './fleet/FleetMasthead';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
@@ -26,6 +26,7 @@ import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
 import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 import { SecretsTab } from './fleet/secrets/SecretsTab';
+import { DependencyMapTab } from './fleet/DependencyMapTab';
 import { useNodeActions } from './nodes/useNodeActions';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
 
@@ -87,6 +88,11 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             <TabsHighlightItem value="configuration">
                                 <TabsTrigger value="configuration">
                                     <SlidersHorizontal className="w-4 h-4 mr-1.5" />Status
+                                </TabsTrigger>
+                            </TabsHighlightItem>
+                            <TabsHighlightItem value="dependencies">
+                                <TabsTrigger value="dependencies">
+                                    <Workflow className="w-4 h-4 mr-1.5" />Dependencies
                                 </TabsTrigger>
                             </TabsHighlightItem>
                             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
@@ -200,6 +206,9 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 )}
                 <TabsContent value="configuration">
                     <FleetConfiguration />
+                </TabsContent>
+                <TabsContent value="dependencies">
+                    <DependencyMapTab />
                 </TabsContent>
                 {isPaid && (
                     <TabsContent value="deployments">

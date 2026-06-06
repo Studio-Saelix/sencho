@@ -44,6 +44,7 @@ vi.mock('util', () => ({
 }));
 
 import DockerController from '../services/DockerController';
+import { CacheService } from '../services/CacheService';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -1109,5 +1110,72 @@ describe('DockerController - disconnectContainerFromNetwork', () => {
     await expect(dc.disconnectContainerFromNetwork('sencho_mesh', 'sencho-host-1234')).rejects.toMatchObject({
       statusCode: 500,
     });
+  });
+});
+
+// ── getDependencySnapshot ──────────────────────────────────────────────
+
+describe('DockerController - getDependencySnapshot', () => {
+  beforeEach(() => {
+    // resolveProjectNameMap caches under a constant key; clear it so each test
+    // resolves stack ownership from its own mocked compose set.
+    CacheService.getInstance().invalidate('project-name-map');
+  });
+
+  it('maps service identity, networks, volume mounts, and published ports', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'abc123def456',
+        Names: ['/web-1'],
+        Image: 'nginx:alpine',
+        State: 'running',
+        Labels: { 'com.docker.compose.project': 'web', 'com.docker.compose.service': 'api' },
+        NetworkSettings: { Networks: { web_frontend: { NetworkID: 'net1', IPAddress: '172.18.0.2' } } },
+        Mounts: [
+          { Type: 'volume', Name: 'web_data', Destination: '/data' },
+          { Type: 'bind', Source: '/host/path', Destination: '/app' },
+        ],
+        Ports: [
+          { IP: '0.0.0.0', PrivatePort: 80, PublicPort: 8080, Type: 'tcp' },
+          { PrivatePort: 9090, Type: 'tcp' },
+        ],
+      },
+    ]);
+    mockDocker.listNetworks.mockResolvedValue([
+      { Id: 'b', Name: 'bridge' },
+      { Id: 'net1', Name: 'web_frontend', Driver: 'bridge', Scope: 'local', Labels: { 'com.docker.compose.project': 'web' } },
+    ]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [{ Name: 'web_data', Driver: 'local', Labels: { 'com.docker.compose.project': 'web' } }] });
+
+    const dc = DockerController.getInstance(1);
+    const snap = await dc.getDependencySnapshot(['web']);
+
+    const c = snap.containers[0];
+    expect(c.service).toBe('api');
+    expect(c.stack).toBe('web');
+    expect(c.networks).toEqual([{ name: 'web_frontend', id: 'net1', ip: '172.18.0.2' }]);
+    expect(c.volumes).toEqual(['web_data']); // bind mount dropped
+    expect(c.ports).toEqual([{ ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' }]); // unpublished 9090 dropped
+
+    expect(snap.networks.find((n) => n.name === 'bridge')?.isSystem).toBe(true);
+    const frontend = snap.networks.find((n) => n.name === 'web_frontend');
+    expect(frontend?.isSystem).toBe(false);
+    expect(frontend?.stack).toBe('web');
+
+    expect(snap.volumes[0]).toMatchObject({ name: 'web_data', stack: 'web', composeProject: 'web' });
+  });
+
+  it('classifies a non-compose container as having no service or stack', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      { Id: 'x', Names: ['/manual'], Image: 'redis', State: 'running', Labels: {}, NetworkSettings: { Networks: {} }, Mounts: [], Ports: [] },
+    ]);
+    mockDocker.listNetworks.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+
+    const dc = DockerController.getInstance(1);
+    const snap = await dc.getDependencySnapshot([]);
+    expect(snap.containers[0].service).toBeNull();
+    expect(snap.containers[0].stack).toBeNull();
+    expect(snap.containers[0].composeProject).toBeNull();
   });
 });
