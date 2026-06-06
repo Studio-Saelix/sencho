@@ -232,4 +232,39 @@ describe('FileSystemService.importCandidateIntoStack', () => {
       fs.rmSync(outsideDir, { recursive: true, force: true });
     }
   });
+
+  it('refuses to promote a nested directory whose compose file resolves outside the base', async () => {
+    // The directory is real and within the base, but the compose file inside it is a
+    // symlink to an out-of-base file. Without validating the file (only the dir), the
+    // move would relocate the directory and leave a stack whose compose.yaml still
+    // points outside the compose directory, which the editor read path would follow.
+    // Symlink creation is unprivileged on some platforms, so the escaping symlink is
+    // simulated by resolving the compose file's realpath to an out-of-base target;
+    // the directory still resolves to itself.
+    const childDir = path.join(tmpRoot, 'realparent', 'realchild');
+    fs.mkdirSync(childDir, { recursive: true });
+    fs.writeFileSync(path.join(childDir, 'compose.yaml'), COMPOSE);
+    const composePath = path.join(childDir, 'compose.yaml');
+    const outsideTarget = path.join(path.dirname(tmpRoot), 'sencho-outside-target.yaml');
+    const realpathSpy = vi
+      .spyOn(fsPromises, 'realpath')
+      .mockImplementation(async (p) => {
+        const s = typeof p === 'string' ? p : p.toString();
+        return s === composePath ? outsideTarget : s;
+      });
+    try {
+      await expect(
+        FileSystemService.getInstance().importCandidateIntoStack(
+          { location: 'realparent/realchild/compose.yaml', composeFile: 'compose.yaml', status: 'nested' },
+          'escaped-nested',
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_PATH' });
+      // No destination stack was created and the source directory is left in place.
+      expect(fs.existsSync(path.join(tmpRoot, 'escaped-nested'))).toBe(false);
+      expect(fs.existsSync(childDir)).toBe(true);
+    } finally {
+      realpathSpy.mockRestore();
+      fs.rmSync(path.join(tmpRoot, 'realparent'), { recursive: true, force: true });
+    }
+  });
 });

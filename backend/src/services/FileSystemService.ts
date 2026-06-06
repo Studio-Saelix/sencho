@@ -636,6 +636,14 @@ export class FileSystemService {
       const sourceDir = path.dirname(source);
       this.assertWithinBase(sourceDir);
       const realSourceDir = await this.realPathWithinBase(sourceDir);
+      // The directory can be real and within the base while the compose file inside
+      // it symlinks out of the base. Confirm the compose file resolves within the
+      // (real) source directory, otherwise the symlink rides the directory move into
+      // a stack folder and the editor would later follow it to the out-of-base file.
+      const realCompose = await this.realPathWithinBase(source);
+      if (!isPathWithinBase(realCompose, realSourceDir)) {
+        throw Object.assign(new Error('Compose file escapes the import directory'), { code: 'INVALID_PATH' });
+      }
       await fsPromises.rename(realSourceDir, destDir);
       return;
     }
