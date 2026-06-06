@@ -89,7 +89,7 @@ The sheet shows:
 
 Mesh runs in-process on each node; there is no separate mesh container to inspect with `docker ps`.
 
-Enable **Developer Mode** under **Settings → Developer** to surface `[Mesh:diag]` lines in the container logs covering the forwarder's routing decisions (same-node versus cross-node, and which node-identity resolution won) and the timing of opt-in, opt-out, and alias-refresh operations (`docker logs sencho 2>&1 | grep '\[Mesh:diag\]'`). They are off by default and meant for one-off debugging; turn developer mode back off when you are done to keep log volume manageable.
+Enable **Developer Mode** under **Settings → Operations → Developer Diagnostics** to surface `[Mesh:diag]` lines in the container logs covering the forwarder's routing decisions (same-node versus cross-node, and which node-identity resolution won) and the timing of opt-in, opt-out, and alias-refresh operations (`docker logs sencho 2>&1 | grep '\[Mesh:diag\]'`). They are off by default and meant for one-off debugging; turn developer mode back off when you are done to keep log volume manageable.
 
 ## Mesh activity log
 

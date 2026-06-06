@@ -5,7 +5,7 @@ description: Install and mount the Trivy CLI so Sencho can scan container images
 
 Sencho's [Vulnerability Scanning](/features/vulnerability-scanning) feature uses the [Trivy](https://trivy.dev) CLI. Trivy is not bundled with the Sencho Docker image. You have three ways to provide it, in order of convenience:
 
-1. **One-click install from Settings → Security** (recommended).
+1. **One-click install from Settings → Security → Vulnerability Scanning** (recommended).
 2. Bind mount a host Trivy binary into the container.
 3. Build a custom Sencho image with Trivy baked in.
 
@@ -23,7 +23,7 @@ Trivy's vulnerability database updates multiple times per day and is around 100 
 
 Sencho can install and manage Trivy for you without any extra bind mounts or environment variables.
 
-1. Go to **Settings → Security**.
+1. Go to **Settings → Security → Vulnerability Scanning**.
 2. Under **Vulnerability Scanner**, click **Install Trivy**.
 3. Wait for the status to flip to **Installed (managed)**. The version appears next to the badge.
 
@@ -40,7 +40,7 @@ Behind the scenes:
 
 ### Updating the managed install
 
-When a newer Trivy release is available, Settings → Security shows an **Update available** badge next to the version. Click **Update** to pull the latest release.
+When a newer Trivy release is available, Settings → Security → Vulnerability Scanning shows an **Update available** badge next to the version. Click **Update** to pull the latest release.
 
 To update automatically instead, toggle **Auto-update Trivy** on. Sencho checks for new releases once a day and installs them in the background. You'll get an in-app notification each time a new version is installed, or when an update is available and auto-update is off.
 
@@ -181,7 +181,7 @@ Plan to refresh the bundle on a schedule (weekly is typical) so CVE data stays c
 
 ## Verifying Sencho detects Trivy
 
-1. Open **Settings → Security**. The **Vulnerability Scanner** card shows the current status and version.
+1. Open **Settings → Security → Vulnerability Scanning**. The **Vulnerability Scanner** card shows the current status and version.
 2. Open the **Resources** tab. If Trivy is detected, a shield icon appears in the Actions column of the **Images** panel next to the delete icon on every row.
 
 If the scanner shows as not installed after using Option 2 or 3, see the troubleshooting section below.

@@ -174,6 +174,6 @@ Snapshots are stored in Sencho's SQLite database. Captured file contents, includ
     Transient errors surface as a notification and leave the local snapshot in place. Retry by clicking the cloud-upload action on the snapshot row, or wait for the next scheduled snapshot which retries on its own. Persistent failures usually indicate an endpoint outage; verify the storage provider is reachable from your Sencho host (custom S3 endpoints often sit behind a different DNS or firewall path than the rest of your traffic).
   </Accordion>
   <Accordion title="I need more detail about a snapshot or restore operation">
-    Enable **Developer Mode** under **Settings → Developer** to activate diagnostic logging for snapshot creation (per-node capture timing and file counts), restore operations, and scheduled snapshot execution. Diagnostic logs appear in the server's standard output with a `:debug` suffix.
+    Enable **Developer Mode** under **Settings → Operations → Developer Diagnostics** to activate diagnostic logging for snapshot creation (per-node capture timing and file counts), restore operations, and scheduled snapshot execution. Diagnostic logs appear in the server's standard output with a `:debug` suffix.
   </Accordion>
 </AccordionGroup>

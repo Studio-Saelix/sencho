@@ -131,7 +131,7 @@ By default Sencho uses LinuxServer.io's hosted catalogue. To point at your own:
   <img src="/images/app-store/app-store-settings-registry.png" alt="Settings · Infrastructure · App Store with two panels: Default registry showing LinuxServer.io and the api.linuxserver.io/api/v1/images URL, and Custom registry with a Registry URL input, a 'using default' hint, and Reset to default and Save & refresh buttons" />
 </Frame>
 
-1. Open **Settings › Advanced › App Store**.
+1. Open **Settings › Infrastructure › App Store**.
 2. Type your catalogue URL into **Registry URL**. The URL must start with `http://` or `https://` and serve a JSON array of template objects in the [Portainer v2 template format](https://documentation.portainer.io/v2.0-be/api/templates/).
 3. Click **Save & refresh**. Sencho persists the new URL and immediately invalidates the template cache so the App Store reloads from the new source.
 
@@ -143,7 +143,7 @@ The default registry display at the top of the page is informational only; you c
 
 <AccordionGroup>
   <Accordion title="No tiles appear">
-    Sencho fetches templates from the configured registry on demand. If the grid stays empty and the loading spinner is gone, the registry returned an empty list or the request failed before parsing. Open **Settings › Advanced › App Store** and confirm the **Registry URL** is reachable from the node (try the URL in a browser tab); a custom catalogue served from a private host will not load if the Sencho container cannot resolve or reach it. Click **Save & refresh** to invalidate the cache and try again. If you switched to a custom registry by mistake, click **Reset to default**. Sencho also bounds the registry response size: a catalogue that returns an excessively large payload is rejected with a size-limit error instead of being loaded, so a misconfigured or runaway endpoint cannot stall the node.
+    Sencho fetches templates from the configured registry on demand. If the grid stays empty and the loading spinner is gone, the registry returned an empty list or the request failed before parsing. Open **Settings › Infrastructure › App Store** and confirm the **Registry URL** is reachable from the node (try the URL in a browser tab); a custom catalogue served from a private host will not load if the Sencho container cannot resolve or reach it. Click **Save & refresh** to invalidate the cache and try again. If you switched to a custom registry by mistake, click **Reset to default**. Sencho also bounds the registry response size: a catalogue that returns an excessively large payload is rejected with a size-limit error instead of being loaded, so a misconfigured or runaway endpoint cannot stall the node.
   </Accordion>
   <Accordion title="The port-conflict warning will not clear">
     The conflict indicator is computed against a snapshot of the node's bound ports taken when you opened the deployment sheet. If you freed the port from another stack while the sheet was open, the warning does not refresh on its own. Close the sheet and reopen it to recompute, or pick a different host port. The message `in use by an external app` means a process outside Sencho holds the binding (often the host's reverse proxy or a system service); changing the host port is usually faster than tracking down the offender.

@@ -195,7 +195,7 @@ When a task that previously failed succeeds again, Sencho dispatches an `info`-l
 
 Vulnerability Scan tasks are an exception: they always dispatch a completion notification, even on a clean run, because the message body carries severity counts you may want to react to. The severity is `info` on a clean run and `warning` when findings are present; the category is `scan_finding`, not `system`. The full message format and routing behavior is documented in [Alerts & Notifications · Vulnerability scanning](/features/alerts-notifications#vulnerability-scanning).
 
-Configure delivery channels in **Settings · Notifications**.
+Configure delivery channels in **Settings · Notifications · Channels**.
 
 ## Execution history
 
@@ -245,7 +245,7 @@ If Sencho restarts while a task is mid-execution, the orphaned run record is mar
     Sencho was restarted (or the process crashed) while this run was in flight, so the scheduler marked it failed on startup to avoid a stuck `Running` row. The task itself is still enabled and will fire again at its next cron tick. If you want to re-execute immediately, click **Run now** on the row.
   </Accordion>
   <Accordion title="A scheduled scan completed but no notification arrived">
-    Scan notifications share the same delivery path as every other Sencho notification. Check, in order: 1) at least one channel is enabled in **Settings · Notifications** and its **Test** button succeeds; 2) if the stack the scan is associated with has notification routes defined, at least one matching route is enabled (the routing layer takes priority over the global channels); 3) open the notification bell, where every notification is recorded regardless of channel configuration, and look for a delivery-error entry; 4) on a remote node, channels must be configured on that node itself because channel settings are per-node.
+    Scan notifications share the same delivery path as every other Sencho notification. Check, in order: 1) at least one channel is enabled in **Settings · Notifications · Channels** and its **Test** button succeeds; 2) if the stack the scan is associated with has notification routes defined, at least one matching route is enabled (the routing layer takes priority over the global channels); 3) open the notification bell, where every notification is recorded regardless of channel configuration, and look for a delivery-error entry; 4) on a remote node, channels must be configured on that node itself because channel settings are per-node.
   </Accordion>
   <Accordion title="A Vulnerability Scan fails with 'Trivy binary is not available'">
     Trivy must be installed on the node that runs the scan, not just on the gateway. Follow [Installing Trivy](/operations/trivy-setup) on the target node, then click **Run now** on the schedule to confirm the scan succeeds before waiting for the next cron tick.

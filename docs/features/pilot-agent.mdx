@@ -302,7 +302,7 @@ The generic node-connectivity issues (a node showing Offline, a pilot agent stuc
   </Accordion>
 
   <Accordion title="Tunnel closes with WebSocket close code 1002 (protocol error)">
-    The agent sent a frame larger than the 8 MB ceiling, or the wire decoder rejected a malformed frame. Run the control instance with developer mode enabled (Settings → Developer) to surface the diagnostic decode log, then check the logs for `[PilotBridge:diag] Malformed frame from agent`. The agent reconnects automatically; persistent failures usually mean a version mismatch between the control instance and the agent image.
+    The agent sent a frame larger than the 8 MB ceiling, or the wire decoder rejected a malformed frame. Run the control instance with developer mode enabled (Settings → Operations → Developer Diagnostics) to surface the diagnostic decode log, then check the logs for `[PilotBridge:diag] Malformed frame from agent`. The agent reconnects automatically; persistent failures usually mean a version mismatch between the control instance and the agent image.
   </Accordion>
 
   <Accordion title="I ran the enrollment command on the wrong host">

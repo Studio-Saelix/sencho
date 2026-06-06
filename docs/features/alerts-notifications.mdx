@@ -6,12 +6,12 @@ description: Threshold and event alerts for your fleet, dispatched to Discord, S
 Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and one of three external channels you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
 
 <Frame>
-  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications panel showing the Discord, Slack, and Webhook tabs with the masthead breadcrumb, the CHANNELS 3/3 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
+  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel showing the Discord, Slack, and Webhook tabs with the masthead breadcrumb, the CHANNELS 3/3 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
 </Frame>
 
 ## Notification channels
 
-Open **Settings · Notifications** to configure the three channel types. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the three slots are enabled.
+Open **Settings · Notifications · Channels** to configure the three channel types. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the three slots are enabled.
 
 Each tab carries the same controls: an **Enabled** toggle (helper: `Send Sencho events to this <name> channel.`), a **Webhook URL** input (placeholder `https://...`, helper: `Sencho posts JSON payloads here. Use a private channel.`), and the **Test** and **Save** buttons. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
 
@@ -57,7 +57,7 @@ Each dispatch is a single-shot HTTP POST with a 10-second `AbortSignal.timeout`.
 Routing lets you direct alerts that match specific criteria to dedicated channels. Production crashes can land in `#prod-incidents` on Slack while staging notifications go to a less urgent Discord channel, all without juggling per-channel webhook URLs across teams.
 
 <Frame>
-  <img src="/images/alerts-notifications/routing-list.png" alt="Settings · Routing card list showing two rules ('Critical to Slack' and 'Production alerts'), each with a Discord badge, an ON pill, the 'Matches all alerts' summary line, a truncated channel URL, a Priority chip, and lightning-test, edit, and delete icon actions on the right." />
+  <img src="/images/alerts-notifications/routing-list.png" alt="Settings · Notifications · Notification Routing card list showing two rules ('Critical to Slack' and 'Production alerts'), each with a Discord badge, an ON pill, the 'Matches all alerts' summary line, a truncated channel URL, a Priority chip, and lightning-test, edit, and delete icon actions on the right." />
 </Frame>
 
 ### How routing fits into dispatch
@@ -70,7 +70,7 @@ A route with all four matchers left empty matches every alert and intercepts glo
 
 ### Creating a routing rule
 
-Open **Settings · Routing** and click **+ Add Route**.
+Open **Settings · Notifications · Notification Routing** and click **+ Add Route**.
 
 <Frame>
   <img src="/images/alerts-notifications/routing-modal.png" alt="The 'New routing rule' modal with the 'ROUTING · NEW RULE' kicker, a Name input filled with 'Production alerts', a Node scope select reading 'Any node', empty Stacks, Labels, and Categories combobox pickers, the helper line 'Leave blank to match all categories. All non-empty filters must match (AND).', a Channel tab strip with Discord selected and a webhook URL filled in, and Priority and Enabled fields with Cancel and CREATE actions in the footer." />
@@ -164,7 +164,7 @@ The **NOTIFICATION CHANNELS** banner above the rules list reflects what dispatch
 
 - **Loading** is a spinner with `Checking notification channels...` while Sencho asks the target node for its agent state.
 - **Remote node** is a blue banner reading `Remote node: <name>`, with the body `Alert rules are stored and evaluated on this remote instance. Notifications are dispatched using that node's configured channels.` A sub-line reports whether the remote has any channels configured.
-- **No channels** is an amber banner reading `No notification channels configured`, body `Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, or a webhook in Settings → Notifications.`
+- **No channels** is an amber banner reading `No notification channels configured`, body `Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, or a webhook in Settings → Notifications → Channels.`
 - **Active** is a green banner reading `Notifications active via Discord, Slack, …` with the configured channels listed.
 
 <Frame>
@@ -347,10 +347,10 @@ See [Blueprints](/features/blueprint-model).
 
 ## Retention and limits
 
-Three retention controls live under **Settings · Developer · Data retention**.
+Three retention controls live under **Settings · Operations · Data Retention**.
 
 <Frame>
-  <img src="/images/alerts-notifications/developer-retention.png" alt="Settings · Developer · Data retention card showing three rows: Container metrics with a 24 HRS field, Notification log with a 30 DAYS field, and Audit log (Admiral) with a 90 DAYS field, plus a SAVE SETTINGS button." />
+  <img src="/images/alerts-notifications/developer-retention.png" alt="Settings · Operations · Data Retention card showing three rows: Container metrics with a 24 HRS field, Notification log with a 30 DAYS field, and Audit log (Admiral) with a 90 DAYS field, plus a SAVE SETTINGS button." />
 </Frame>
 
 | Control | Range | Default | What it prunes |
