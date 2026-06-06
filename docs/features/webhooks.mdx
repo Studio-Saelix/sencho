@@ -11,14 +11,14 @@ Sencho webhooks let external systems trigger stack actions over HTTP. The typica
 
 ## How it works
 
-1. You create a webhook in **Settings → Alerts → Webhooks**, targeting a specific stack and action.
+1. You create a webhook in **Settings → Automation → Webhooks**, targeting a specific stack and action.
 2. Sencho generates a unique secret for HMAC-SHA256 signature validation.
 3. Your CI/CD system sends a `POST` request to the trigger URL with the correct signature.
 4. Sencho validates the signature and executes the action asynchronously.
 
 ## Creating a webhook
 
-Open **Settings → Alerts → Webhooks** and click **Create webhook**. The page is part of the global settings and is reachable while the **Local** node is active in the node switcher; webhooks created from this page execute against the local Sencho instance.
+Open **Settings → Automation → Webhooks** and click **Create webhook**. The page is part of the global settings and is reachable while the **Local** node is active in the node switcher; webhooks created from this page execute against the local Sencho instance.
 
 <Frame>
   <img src="/images/webhooks/webhooks-create-form.png" alt="New webhook form with Name, Stack, Node, and Action fields. The Action dropdown is open showing Deploy (down + up), Restart, Stop, Start, Pull and Update, and Git source sync." />
@@ -169,7 +169,7 @@ Sencho retains the last 100 executions per webhook and surfaces the 20 most rece
   <Accordion title="My trigger returns 404 'Webhook not found or signature invalid'.">
     The trigger endpoint returns the same 404 for every unauthenticated case, so the response alone will not tell you which check failed. Work through this checklist:
 
-    - The id in the URL is wrong. Copy the trigger URL straight from the webhook card in **Settings → Alerts → Webhooks**.
+    - The id in the URL is wrong. Copy the trigger URL straight from the webhook card in **Settings → Automation → Webhooks**.
     - The webhook's enable toggle is off. Check the **On / Off** switch on the card.
     - The request omitted the `X-Webhook-Signature` header. Confirm the full value, including the `sha256=` prefix; the header value is `sha256={hex}`.
     - The request had no body. Send at least `{}` and sign that exact byte sequence.

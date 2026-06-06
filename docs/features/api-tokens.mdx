@@ -52,12 +52,12 @@ Finally, scope-enforced API tokens compose with the fleet. When a request carrie
 
 ## Creating a token
 
-<Frame caption="Settings → Identity → API Tokens. Empty state, with the Create token affordance.">
+<Frame caption="Settings → Access → API Tokens. Empty state, with the Create token affordance.">
   <img src="/images/api-tokens/api-tokens-empty-state.png" alt="API Tokens settings tab, empty state" />
 </Frame>
 
 <Steps>
-  <Step title="Open Settings → Identity → API Tokens">
+  <Step title="Open Settings → Access → API Tokens">
     Click your avatar, then **Settings**. The tab lives in the **Identity** group of the Settings sidebar.
   </Step>
   <Step title="Click Create token">
@@ -212,7 +212,7 @@ Net behaviour: one API token on the hub is a fleet-wide credential whose authori
 
 The Settings → API Tokens tab lists every active token you own as a card.
 
-<Frame caption="Settings → Identity → API Tokens. Each card carries the token name, a scope badge (Read Only · Deploy Only · Full Admin), the created date, last-used relative time, and the expiration date when one is set.">
+<Frame caption="Settings → Access → API Tokens. Each card carries the token name, a scope badge (Read Only · Deploy Only · Full Admin), the created date, last-used relative time, and the expiration date when one is set.">
   <img src="/images/api-tokens/api-tokens-populated.png" alt="API Tokens settings tab listing three tokens, one of each scope" />
 </Frame>
 
@@ -358,7 +358,7 @@ Read Only is sufficient for the notification stream.
   </Accordion>
 
   <Accordion title="The API Tokens tab is missing from Settings">
-    The tab is admin-only. Sign in as an admin user to see it. Tokens are also issued from the hub; if you have selected a remote node in the node switcher, switch back to the local hub and the tab will appear under **Settings → Identity**.
+    The tab is admin-only. Sign in as an admin user to see it. Tokens are also issued from the hub; if you have selected a remote node in the node switcher, switch back to the local hub and the tab will appear under **Settings → Access**.
   </Accordion>
 
   <Accordion title="The token list shows `Couldn't load API tokens`">

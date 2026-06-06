@@ -11,7 +11,7 @@ Deploy enforcement is the pre-flight half of Sencho's vulnerability workflow. Wh
 
 ## Configuring a block policy
 
-Policies are managed under **Settings → Advanced → Security → Scan Policies**. The **Add policy** button opens the editor; existing policies appear as a list of cards with `max: <SEVERITY>` and `block` badges, the configured stack-pattern scope, and pencil and trash buttons.
+Policies are managed under **Settings → Security → Vulnerability Scanning → Scan Policies**. The **Add policy** button opens the editor; existing policies appear as a list of cards with `max: <SEVERITY>` and `block` badges, the configured stack-pattern scope, and pencil and trash buttons.
 
 <Frame>
   <img src="/images/deploy-enforcement/policy-list.png" alt="Scan Policies card showing a configured policy with the name 'Production block on critical', a max: CRITICAL badge, a block badge, and the Scope demo-blocked-* set as the stack pattern" />
@@ -112,7 +112,7 @@ Neither drift mechanism blocks, stops, or quarantines a running stack automatica
   <Accordion title="The gate let a deploy through even though I have a block policy">
     Check the following in order:
 
-    1. Open **Settings → Advanced → Security** on the target node and confirm Trivy is installed. Sencho fails open when Trivy is missing, dispatching a warning alert instead of blocking. [Install Trivy](/operations/trivy-setup) to enforce the policy.
+    1. Open **Settings → Security → Vulnerability Scanning** on the target node and confirm Trivy is installed. Sencho fails open when Trivy is missing, dispatching a warning alert instead of blocking. [Install Trivy](/operations/trivy-setup) to enforce the policy.
     2. Confirm the policy is enabled and the stack pattern matches the stack name. `prod-*` matches `prod-api` but not `production-api`. An empty pattern matches every stack on the node.
     3. Check the highest severity in the latest scan for each image. If no image reached the threshold, the gate correctly allowed the deploy.
   </Accordion>

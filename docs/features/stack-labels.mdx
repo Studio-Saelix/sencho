@@ -48,10 +48,10 @@ The Tags filter aggregates label rows across nodes by name, so a label called `p
 
 ### Manage labels from Settings
 
-**Settings · Advanced · Labels** is the canonical place to create, rename, recolor, and delete labels. The masthead shows a `LABELS N/50` counter so you can see how close the active node is to the cap, and a per-row stack count tells you how many stacks currently carry each label.
+**Settings · Organization · Labels** is the canonical place to create, rename, recolor, and delete labels. The masthead shows a `LABELS N/50` counter so you can see how close the active node is to the cap, and a per-row stack count tells you how many stacks currently carry each label.
 
 <Frame>
-  <img src="/images/stack-labels/settings-labels.png" alt="Settings page open on the Advanced · Labels section. The right pane shows a 'Per-node labels for stacks and containers.' description, a 'New label' primary button, and three label rows: Media (purple dot, 6 stacks), Network (orange dot, 3 stacks), Utilities (slate dot, 5 stacks). The masthead shows the LABELS 3/50 stat." />
+  <img src="/images/stack-labels/settings-labels.png" alt="Settings page open on the Organization · Labels section. The right pane shows a 'Per-node labels for stacks and containers.' description, a 'New label' primary button, and three label rows: Media (purple dot, 6 stacks), Network (orange dot, 3 stacks), Utilities (slate dot, 5 stacks). The masthead shows the LABELS 3/50 stat." />
 </Frame>
 
 Hover any row to reveal a **Pencil** edit icon and a destructive **Trash** icon on the trailing edge. The edit dialog shares its chrome with the create dialog: the kicker reads `LABELS · NEW` for a new label or `LABELS · EDIT` when you opened it from the pencil, the body has a single `Label name` input plus the ten color swatches, and the footer has **Cancel** and **Create** (or **Save**) buttons.
@@ -67,7 +67,7 @@ Deleting a label opens a destructive confirmation with the kicker `LABELS · DEL
 Right-clicking a stack in the sidebar (or using the three-dot kebab menu on its row) opens the same context menu under the **organize** group. Click **Labels** to open a submenu listing every label that exists on the active node, with a checkmark next to each one currently assigned to this stack. Clicking a label toggles the assignment immediately. The two trailing items handle creation and full management:
 
 - **New label** drops an inline form into the same submenu (text input with placeholder `Label name`, the ten color swatches, **Create** / **Cancel** buttons). Submitting creates the label on this node and assigns it to the stack in a single round trip. The entry hides itself once the node hits 50 labels.
-- **Manage labels...** sends you to **Settings · Advanced · Labels** for bulk renames, recolors, and deletions.
+- **Manage labels...** sends you to **Settings · Organization · Labels** for bulk renames, recolors, and deletions.
 
 <Frame>
   <img src="/images/stack-labels/context-menu-labels.png" alt="Right-click context menu on a sidebar stack row. The Labels submenu is open and shows three label rows (Media with a checkmark on the right, Network, Utilities), a separator, a + New label entry, and a Manage labels... entry." />
@@ -111,19 +111,19 @@ The **Bulk label assign** card is per-node only by design. To re-tag stacks on a
 - **Names are unique per node**, case-sensitive. The same name on two nodes is two separate label rows. Cross-node fleet stop matches on name; bulk assign always operates on one node's labels at a time.
 - **Allowed name characters**: letters, digits, spaces, and hyphens. Empty names and names beyond 30 characters are rejected at the API.
 - **Bulk-action concurrency**: only one label-driven bulk action can run on a single node at a time. A second concurrent attempt against the same node returns HTTP 429 and the operator sees an error toast; the in-flight action keeps running.
-- **Role visibility**: label authoring is open to every signed-in role. Sidebar grouping, trailing dots on stack rows, the **Settings · Advanced · Labels** panel, the inline create form in the stack menu, and the Fleet View **Tags** filter all work for every user.
+- **Role visibility**: label authoring is open to every signed-in role. Sidebar grouping, trailing dots on stack rows, the **Settings · Organization · Labels** panel, the inline create form in the stack menu, and the Fleet View **Tags** filter all work for every user.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="Stacks are not grouped under labels in the sidebar">
-    Grouping requires at least one stack to carry at least one label. With zero labels assigned the sidebar collapses into a single `UNLABELED` group, which is rendered as a flat list. Create a label from **Settings · Advanced · Labels** or right-click any stack and use **Labels · New label**, assign it to a stack, and the grouped layout takes over.
+    Grouping requires at least one stack to carry at least one label. With zero labels assigned the sidebar collapses into a single `UNLABELED` group, which is rendered as a flat list. Create a label from **Settings · Organization · Labels** or right-click any stack and use **Labels · New label**, assign it to a stack, and the grouped layout takes over.
   </Accordion>
   <Accordion title="The trailing colored dots are missing on stack rows">
     A stack row only renders trailing dots when at least one label is assigned to that stack. Right-click the row, open the **Labels** submenu, and tick at least one label; the dots appear on the next sidebar refresh. If a stack already has labels assigned but the dots still do not appear, check that the active node is the one that owns the assignments. Labels are per-node, so switching the node switcher to a different instance shows that instance's assignments only.
   </Accordion>
   <Accordion title="`+ New label` is missing from the stack context menu">
-    The active node already has 50 labels (the per-node cap). Both the inline `New label` entry in the stack submenu and the **New label** button in **Settings · Advanced · Labels** hide themselves at the cap. Delete an unused label or rename an existing one to free a slot.
+    The active node already has 50 labels (the per-node cap). Both the inline `New label` entry in the stack submenu and the **New label** button in **Settings · Organization · Labels** hide themselves at the cap. Delete an unused label or rename an existing one to free a slot.
   </Accordion>
   <Accordion title="The Tags filter does not list a label I just created">
     The Tags filter aggregates labels across every node in the fleet by name. If the new label only exists on one node and that node was offline at the moment the page loaded, the dropdown may not include it. Refresh **Fleet · Overview** with the **Refresh** button in the toolbar to repull node state.
