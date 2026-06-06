@@ -1,21 +1,19 @@
-import { useState, useRef, useEffect } from 'react';
-import { TogglePill } from '@/components/ui/toggle-pill';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useAuth } from '@/context/AuthContext';
 import { RefreshCw } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
-import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
-import type { SenchoSettingsChangedDetail } from '@/lib/events';
+import { useAuth } from '@/context/AuthContext';
 import { DEFAULT_SETTINGS } from './types';
 import type { PatchableSettings } from './types';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { TogglePill } from '@/components/ui/toggle-pill';
 
-interface DeveloperSectionProps {
+interface FleetMeshSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
 }
 
@@ -27,22 +25,29 @@ function SectionSkeleton() {
     );
 }
 
-type DeveloperFields = Pick<PatchableSettings, 'developer_mode'>;
+type FleetMeshFields = Pick<PatchableSettings, 'mesh_auto_recreate'>;
 
-const DEFAULT_DEVELOPER: DeveloperFields = {
-    developer_mode: DEFAULT_SETTINGS.developer_mode,
+const DEFAULT_FLEET_MESH: FleetMeshFields = {
+    mesh_auto_recreate: DEFAULT_SETTINGS.mesh_auto_recreate,
 };
 
-export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
-    const { isAdmin } = useAuth();
+export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
     const { activeNode } = useNodes();
+    const { isAdmin } = useAuth();
     const readOnly = !isAdmin;
-    const [settings, setSettings] = useState<DeveloperFields>({ ...DEFAULT_DEVELOPER });
-    const serverSettingsRef = useRef<DeveloperFields>({ ...DEFAULT_DEVELOPER });
+    const [settings, setSettings] = useState<FleetMeshFields>({ ...DEFAULT_FLEET_MESH });
+    const serverSettingsRef = useRef<FleetMeshFields>({ ...DEFAULT_FLEET_MESH });
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
 
-    const hasChanges = settings.developer_mode !== serverSettingsRef.current.developer_mode;
+    const dirtyCount = useMemo(() => {
+        const baseline = serverSettingsRef.current;
+        let n = 0;
+        if (settings.mesh_auto_recreate !== baseline.mesh_auto_recreate) n++;
+        return n;
+    }, [settings]);
+
+    const hasChanges = dirtyCount > 0;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -53,9 +58,9 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
             ? null
             : [
                 {
-                    label: 'DEV MODE',
-                    value: settings.developer_mode === '1' ? 'on' : 'off',
-                    tone: settings.developer_mode === '1' ? 'warn' : 'subtitle',
+                    label: 'EDITED',
+                    value: hasChanges ? `${dirtyCount} pending` : 'saved',
+                    tone: hasChanges ? 'warn' : 'value',
                 },
             ],
     );
@@ -66,13 +71,13 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
             try {
                 const nodeRes = await apiFetch('/settings');
                 const nodeData: Record<string, string> = nodeRes.ok ? await nodeRes.json() : {};
-                const safe: DeveloperFields = {
-                    developer_mode: (nodeData.developer_mode as '0' | '1') ?? DEFAULT_SETTINGS.developer_mode,
+                const safe: FleetMeshFields = {
+                    mesh_auto_recreate: (nodeData.mesh_auto_recreate as '0' | '1') ?? DEFAULT_SETTINGS.mesh_auto_recreate,
                 };
                 setSettings(safe);
                 serverSettingsRef.current = { ...safe };
             } catch (e) {
-                console.error('Failed to fetch developer settings', e);
+                console.error('Failed to fetch fleet mesh settings', e);
             } finally {
                 setIsLoading(false);
             }
@@ -81,19 +86,16 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeNode?.id]);
 
-    const onSettingChange = <K extends keyof DeveloperFields>(key: K, value: DeveloperFields[K]) => {
+    const onSettingChange = <K extends keyof FleetMeshFields>(key: K, value: FleetMeshFields[K]) => {
         setSettings(prev => ({ ...prev, [key]: value }));
     };
 
     const saveSettings = async () => {
-        const payload = {
-            developer_mode: settings.developer_mode,
-        };
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
-                body: JSON.stringify(payload),
+                body: JSON.stringify(settings),
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
@@ -101,10 +103,7 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
                 return;
             }
             serverSettingsRef.current = { ...settings };
-            toast.success('Developer settings saved.');
-            window.dispatchEvent(new CustomEvent<SenchoSettingsChangedDetail>(SENCHO_SETTINGS_CHANGED, {
-                detail: { changedKeys: Object.keys(payload) },
-            }));
+            toast.success('Mesh settings saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
         } finally {
@@ -116,20 +115,19 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
 
     return (
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
-            <SettingsSection title="Diagnostics">
+            <SettingsSection title="Mesh data plane">
                 <SettingsField
-                    label="Developer mode"
-                    helper="Enable real-time metrics streams and verbose debug diagnostics in the UI."
+                    label="Auto-recreate mesh network"
+                    helper="If sencho_mesh is removed at runtime, rebuild it at the same subnet on the next 10s tick. Off by default; leave off and restart Sencho manually for the safest path."
                 >
                     <TogglePill
-                        id="developer_mode"
-                        checked={settings.developer_mode === '1'}
-                        onChange={(c) => onSettingChange('developer_mode', c ? '1' : '0')}
+                        checked={settings.mesh_auto_recreate === '1'}
+                        onChange={(next) => onSettingChange('mesh_auto_recreate', next ? '1' : '0')}
                     />
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? 'unsaved changes' : undefined)}>
+            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                 {!readOnly && (
                     <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges}>
                         {isSaving ? (

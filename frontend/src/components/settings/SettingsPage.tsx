@@ -19,9 +19,12 @@ import {
     AccountSection,
     AppearanceSection,
     LicenseSection,
-    SystemSection,
+    HostAlertsSection,
+    DockerStorageSection,
+    FleetMeshSection,
     NotificationsSection,
     DeveloperSection,
+    DataRetentionSection,
     AppStoreSection,
     SupportSection,
     AboutSection,
@@ -191,13 +194,16 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
             case 'api-tokens': return <ApiTokensSection />;
             case 'registries': return <RegistriesSection />;
             case 'labels': return <LabelsSection />;
-            case 'system': return <SystemSection onDirtyChange={(d) => handleDirtyChange('system', d)} />;
+            case 'host-alerts': return <HostAlertsSection onDirtyChange={(d) => handleDirtyChange('host-alerts', d)} />;
+            case 'docker-storage': return <DockerStorageSection onDirtyChange={(d) => handleDirtyChange('docker-storage', d)} />;
+            case 'fleet-mesh': return <FleetMeshSection onDirtyChange={(d) => handleDirtyChange('fleet-mesh', d)} />;
             case 'notifications': return <NotificationsSection />;
             case 'notification-routing': return <NotificationRoutingSection />;
             case 'webhooks': return <WebhooksSection />;
             case 'security': return <SecuritySection isPaid={isPaid} />;
             case 'cloud-backup': return <CloudBackupSection />;
             case 'developer': return <DeveloperSection onDirtyChange={(d) => handleDirtyChange('developer', d)} />;
+            case 'data-retention': return <DataRetentionSection onDirtyChange={(d) => handleDirtyChange('data-retention', d)} />;
             case 'nodes': return <NodeManager />;
             case 'app-store': return <AppStoreSection />;
             case 'recovery': return <RecoverySection />;
@@ -302,7 +308,7 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
 }
 
 function scopeLabel(item: SettingsItemMeta): string {
-    if (item.group === 'identity') return 'operator';
+    if (item.group === 'personal' || item.group === 'access') return 'operator';
     return 'global';
 }
 
