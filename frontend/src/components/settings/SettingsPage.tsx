@@ -1,5 +1,7 @@
 import { useLayoutEffect, useRef, useState, useCallback, useMemo, useEffect, lazy, Suspense } from 'react';
+import { ChevronLeft } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useIsMobile } from '@/hooks/use-is-mobile';
 import {
     CommandDialog,
     CommandEmpty,
@@ -107,6 +109,19 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
     const { isPaid } = useLicense();
     const { activeNode } = useNodes();
     const isRemote = activeNode?.type === 'remote';
+
+    // Mobile master/detail: below md the nav rail and the section content cannot
+    // sit side by side, so the rail is a full-screen list and choosing a section
+    // pushes it full-screen with a back affordance. Desktop shows both as before.
+    const isMobile = useIsMobile();
+    const [mobileSectionOpen, setMobileSectionOpen] = useState(false);
+    const handleSectionChange = useCallback((section: SectionId) => {
+        onSectionChange(section);
+        if (isMobile) setMobileSectionOpen(true);
+    }, [onSectionChange, isMobile]);
+    // Desktop shows both panes; mobile shows exactly one (the rail or the section).
+    const showSidebar = !isMobile || !mobileSectionOpen;
+    const showSection = !isMobile || mobileSectionOpen;
     const visibility: VisibilityContext = useMemo(
         () => ({ isRemote, isAdmin, isPaid }),
         [isRemote, isAdmin, isPaid],
@@ -245,14 +260,27 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
             />
 
             <div className="flex flex-1 min-h-0 gap-4">
-                <SettingsSidebar
-                    dirtyFlags={dirtyFlags}
-                    currentSection={safeSection}
-                    onSectionChange={onSectionChange}
-                    onOpenPalette={() => setCommandOpen(true)}
-                />
+                {showSidebar && (
+                    <SettingsSidebar
+                        dirtyFlags={dirtyFlags}
+                        currentSection={safeSection}
+                        onSectionChange={handleSectionChange}
+                        onOpenPalette={() => setCommandOpen(true)}
+                    />
+                )}
 
+                {showSection && (
                 <div className="flex-1 min-h-0 min-w-0 rounded-lg border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors overflow-hidden flex flex-col">
+                    {isMobile && mobileSectionOpen && (
+                        <button
+                            type="button"
+                            onClick={() => setMobileSectionOpen(false)}
+                            className="md:hidden flex shrink-0 items-center gap-1 border-b border-hairline px-4 py-3 font-mono text-xs text-brand"
+                        >
+                            <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
+                            Settings
+                        </button>
+                    )}
                     <ScrollArea
                         block
                         viewportRef={contentViewportRef}
@@ -281,6 +309,7 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
                         </div>
                     </ScrollArea>
                 </div>
+                )}
             </div>
 
             <CommandDialog open={commandOpen} onOpenChange={setCommandOpen}>
@@ -296,7 +325,7 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
                                     glyph={group.glyph}
                                     onSelect={() => {
                                         setCommandOpen(false);
-                                        onSectionChange(item.id);
+                                        handleSectionChange(item.id);
                                     }}
                                 />
                             ))}

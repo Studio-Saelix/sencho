@@ -73,7 +73,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
 
             <Tabs defaultValue="overview">
                 <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
-                    <TabsList>
+                    <TabsList className="max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
                         <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
                             <TabsHighlightItem value="overview">
                                 <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -131,7 +131,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             )}
                         </TabsHighlight>
                     </TabsList>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 max-md:w-full max-md:flex-wrap">
                         <Button
                             variant="outline"
                             size="sm"
