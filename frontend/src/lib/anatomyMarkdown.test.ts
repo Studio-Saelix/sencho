@@ -132,6 +132,16 @@ describe('buildStackAnatomyMarkdown', () => {
     expect(md).toContain('| svc | 127.0.0.1\\|x | 80 | tcp |');
   });
 
+  it('escapes backslashes before pipes so the escaping cannot be defeated', () => {
+    const md = buildStackAnatomyMarkdown({
+      ...emptyInput,
+      services: ['svc'],
+      // host `C:\data` -> `C:\\data`; container `a\|b` -> backslash doubled then pipe escaped -> `a\\\|b`
+      volumes: { svc: [{ host: 'C:\\data', container: 'a\\|b' }] },
+    });
+    expect(md).toContain('| svc | C:\\\\data | a\\\\\\|b |');
+  });
+
   it('collapses newlines in a table cell to a single space', () => {
     const md = buildStackAnatomyMarkdown({
       ...emptyInput,

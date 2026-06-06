@@ -39,9 +39,13 @@ export interface AnatomyMarkdownInput {
 
 const code = (s: string): string => `\`${s}\``;
 
-// Pipes break Markdown table rows; newlines break the row onto a fresh line.
+// Escape the backslash first (so it cannot defeat the pipe escaping), then pipes
+// that would break a table row, then collapse newlines onto the same line.
 function escapeCell(value: string): string {
-  return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, ' ');
 }
 
 function servicesSection(services: string[]): string {
