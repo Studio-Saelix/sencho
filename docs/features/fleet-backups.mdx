@@ -93,14 +93,14 @@ Admins can delete snapshots from the list view by clicking the trash icon on the
 ## Cloud Backup
 
 <Note>
-  Custom S3-compatible storage is available on every tier. Sencho Cloud Backup is an Admiral feature. Configure either in **Settings → System → Cloud Backup**.
+  Custom S3-compatible storage is available on every tier. Sencho Cloud Backup is an Admiral feature. Configure either in **Settings → Infrastructure → Cloud Backup**.
 </Note>
 
-Cloud Backup mirrors every fleet snapshot to off-site storage so your snapshots survive local disk failure. The Cloud Backup settings page (reached via **Settings → System → Cloud Backup**) shows a header with your current scope, provider, storage used, and total snapshot count in the cloud. Two storage modes are supported.
+Cloud Backup mirrors every fleet snapshot to off-site storage so your snapshots survive local disk failure. The Cloud Backup settings page (reached via **Settings → Infrastructure → Cloud Backup**) shows a header with your current scope, provider, storage used, and total snapshot count in the cloud. Two storage modes are supported.
 
 ### Sencho Cloud Backup (included)
 
-A managed 500 MB allowance backed by Cloudflare R2, included with every Admiral license. Open **Settings → System → Cloud Backup**, choose **Sencho Cloud Backup (Included)**, and click **Activate**. Sencho exchanges your license key for scoped storage credentials and starts replicating new snapshots automatically.
+A managed 500 MB allowance backed by Cloudflare R2, included with every Admiral license. Open **Settings → Infrastructure → Cloud Backup**, choose **Sencho Cloud Backup (Included)**, and click **Activate**. Sencho exchanges your license key for scoped storage credentials and starts replicating new snapshots automatically.
 
 Once active, the settings page shows a storage gauge (used / 500 MB and object count), a status message confirming auto-upload is on, and a **Reprovision** button to refresh credentials if needed. You can verify connectivity at any time with the **Test** button.
 
@@ -133,7 +133,7 @@ To upload a single snapshot on demand, open the **Snapshots** tab in Fleet View.
 
 ### Browsing and downloading cloud snapshots
 
-The **Cloud Snapshots** panel in **Settings → System → Cloud Backup** lists every archive currently in your bucket, with size and last-modified timestamp. Click the download icon to save a `.tar.gz` archive locally for off-host disaster recovery. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack.
+The **Cloud Snapshots** panel in **Settings → Infrastructure → Cloud Backup** lists every archive currently in your bucket, with size and last-modified timestamp. Click the download icon to save a `.tar.gz` archive locally for off-host disaster recovery. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack.
 
 ### Restoring from a cloud snapshot
 
@@ -153,7 +153,7 @@ Snapshots are stored in Sencho's SQLite database. Captured file contents, includ
 
 <AccordionGroup>
   <Accordion title="A snapshot shows skipped nodes">
-    If a remote node is offline, unreachable, or its API token has expired, the node is skipped during snapshot creation. The list shows a warning icon with a count of skipped nodes, and the snapshot's detail view names each one along with the reason. Common causes are the remote Sencho instance being stopped or restarting, the node's API URL or token having been changed after it was added, or a firewall or network issue blocking the connection. Verify the remote is running and reachable, update the node's API URL and token in **Settings → System → Nodes** if needed, then create a new snapshot.
+    If a remote node is offline, unreachable, or its API token has expired, the node is skipped during snapshot creation. The list shows a warning icon with a count of skipped nodes, and the snapshot's detail view names each one along with the reason. Common causes are the remote Sencho instance being stopped or restarting, the node's API URL or token having been changed after it was added, or a firewall or network issue blocking the connection. Verify the remote is running and reachable, update the node's API URL and token in **Settings → Infrastructure → Nodes** if needed, then create a new snapshot.
   </Accordion>
   <Accordion title="Restore fails with 'Target node no longer exists'">
     The node recorded in the snapshot has been removed from the fleet since the snapshot was taken. Snapshots reference nodes by registry ID, so a node that was deleted and re-added is treated as a different target. Re-add the node first, then retry the restore against the freshly registered row.
@@ -168,12 +168,12 @@ Snapshots are stored in Sencho's SQLite database. Captured file contents, includ
     Double-check the Access Key ID, Secret Access Key, and bucket name; one wrong character is the most common cause. Some providers require S3-compatible API access to be enabled on the bucket separately from the credentials. For MinIO, confirm the user has read/write permission on the target bucket. After correcting the values, click **Test** again before saving.
   </Accordion>
   <Accordion title="Cloud uploads fail after hitting the 500 MB quota">
-    Sencho Cloud Backup carries a 500 MB allowance per license. Once you hit the cap, new uploads fail with a quota error and the storage gauge in the settings page reads at or near 500 MB. Free space by deleting older archives from the **Cloud Snapshots** panel in **Settings → System → Cloud Backup**. Local snapshots are unaffected by cloud deletions, so the in-place restore path stays intact. To raise the ceiling, switch the storage mode to **Custom S3 (BYOB)** and point at a bucket you control.
+    Sencho Cloud Backup carries a 500 MB allowance per license. Once you hit the cap, new uploads fail with a quota error and the storage gauge in the settings page reads at or near 500 MB. Free space by deleting older archives from the **Cloud Snapshots** panel in **Settings → Infrastructure → Cloud Backup**. Local snapshots are unaffected by cloud deletions, so the in-place restore path stays intact. To raise the ceiling, switch the storage mode to **Custom S3 (BYOB)** and point at a bucket you control.
   </Accordion>
   <Accordion title="Cloud upload returns a network timeout or 5xx error">
     Transient errors surface as a notification and leave the local snapshot in place. Retry by clicking the cloud-upload action on the snapshot row, or wait for the next scheduled snapshot which retries on its own. Persistent failures usually indicate an endpoint outage; verify the storage provider is reachable from your Sencho host (custom S3 endpoints often sit behind a different DNS or firewall path than the rest of your traffic).
   </Accordion>
   <Accordion title="I need more detail about a snapshot or restore operation">
-    Enable **Developer Mode** under **Settings → Developer** to activate diagnostic logging for snapshot creation (per-node capture timing and file counts), restore operations, and scheduled snapshot execution. Diagnostic logs appear in the server's standard output with a `:debug` suffix.
+    Enable **Developer Mode** under **Settings → Operations → Developer Diagnostics** to activate diagnostic logging for snapshot creation (per-node capture timing and file counts), restore operations, and scheduled snapshot execution. Diagnostic logs appear in the server's standard output with a `:debug` suffix.
   </Accordion>
 </AccordionGroup>

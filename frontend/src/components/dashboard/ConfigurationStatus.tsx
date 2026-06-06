@@ -158,12 +158,12 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
           <Row
             label="Auto-heal policies"
             value={automation.autoHeal.total === 0 ? 'None' : `${automation.autoHeal.enabled} / ${automation.autoHeal.total} active`}
-            onClick={open('system')}
+            onClick={open('host-alerts')}
           />
           <Row
             label="Auto-update schedules"
             value={automation.autoUpdate.total === 0 ? 'None' : `${automation.autoUpdate.enabled} / ${automation.autoUpdate.total} active`}
-            onClick={open('system')}
+            onClick={open('host-alerts')}
           />
           {!automation.webhooks.locked && (
             <Row
@@ -176,7 +176,7 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
             <Row
               label="Scheduled tasks"
               value={formatCount(automation.scheduledTasks.enabled, 'active')}
-              onClick={open('system')}
+              onClick={open('host-alerts')}
             />
           )}
 
@@ -206,12 +206,12 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
           <Row
             label="Alert thresholds"
             value={`CPU ${thresholds.cpuLimit}% · RAM ${thresholds.ramLimit}% · Disk ${thresholds.diskLimit}%`}
-            onClick={open('system')}
+            onClick={open('host-alerts')}
           />
           <Row
             label="Crash detection"
             value={thresholds.globalCrash ? 'On' : 'Off'}
-            onClick={open('system')}
+            onClick={open('host-alerts')}
           />
         </div>
       </CardContent>

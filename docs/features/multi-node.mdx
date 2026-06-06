@@ -6,7 +6,7 @@ description: Connect multiple Sencho instances and manage every server from one 
 Sencho's multi-node feature lets you operate Docker Compose stacks on every server you run from a single browser tab. Each server runs its own Sencho instance and the control instance acts as a transparent proxy to the others.
 
 <Frame>
-  <img src="/images/multi-node/node-manager.png" alt="Settings · System · Nodes panel showing the masthead breadcrumb, SCOPE/NODES/REMOTE stat strip, Add node button, Generate Node Token card, and a populated table of one Local row plus seven remote rows with mixed Proxy and Pilot Agent modes." />
+  <img src="/images/multi-node/node-manager.png" alt="Settings · Infrastructure · Nodes panel showing the masthead breadcrumb, SCOPE/NODES/REMOTE stat strip, Add node button, Generate Node Token card, and a populated table of one Local row plus seven remote rows with mixed Proxy and Pilot Agent modes." />
 </Frame>
 
 ## How it works
@@ -45,7 +45,7 @@ For a deep look at how the pilot tunnel works under the hood (credential lifecyc
 
 ### Step 1. Open the Add node form
 
-On the control instance, click your avatar in the top-right and choose **Settings**. In the sidebar pick **System → Nodes**, then click **Add node**.
+On the control instance, click your avatar in the top-right and choose **Settings**. In the sidebar pick **Infrastructure → Nodes**, then click **Add node**.
 
 <Frame>
   <img src="/images/multi-node/add-node-pilot.png" alt="Add remote node modal with Type set to Remote and Mode set to Pilot Agent. The form shows Name, Type, Mode, Mode helper text, and Compose Directory fields. URL and token fields are hidden because Pilot Agent does not need them." />
@@ -90,7 +90,7 @@ Click the button to mint a fresh enrollment command. The previous tunnel is disc
 
 ### Step 1. Generate a long-lived token on the remote
 
-On the **remote** Sencho instance (the server you want to add), open **Settings → System → Nodes**. Click **Generate Token** in the **Generate Node Token** card and copy the token that appears.
+On the **remote** Sencho instance (the server you want to add), open **Settings → Infrastructure → Nodes**. Click **Generate Token** in the **Generate Node Token** card and copy the token that appears.
 
 <Frame>
   <img src="/images/multi-node/generate-token.png" alt="Generate Node Token card showing the explanation text and a freshly issued JWT-style token displayed in a monospace block with a copy button." />
@@ -102,7 +102,7 @@ On the **remote** Sencho instance (the server you want to add), open **Settings 
 
 ### Step 2. Add the node on your control instance
 
-Open **Settings → System → Nodes** on the control instance and click **Add node**. Set Type to **Remote** and Mode to **Distributed API Proxy** to reveal the URL and token fields.
+Open **Settings → Infrastructure → Nodes** on the control instance and click **Add node**. Set Type to **Remote** and Mode to **Distributed API Proxy** to reveal the URL and token fields.
 
 <Frame>
   <img src="/images/multi-node/add-node-proxy.png" alt="Add remote node modal in Distributed API Proxy mode. The form shows Name, Type, Mode, Sencho API URL with a plain-HTTP warning banner underneath, API Token (masked), and Compose Directory. The HTTP warning recommends HTTPS or a VPN when the node is reachable over the public internet." />
@@ -185,10 +185,10 @@ When you select a remote node in the switcher, the Settings hub filters to the p
 | Panel | Scope | Notes |
 |-------|:-----:|-------|
 | Appearance | Per browser | Theme and density preferences are stored in your browser, not on the node. |
-| System Limits | Per node | Host CPU, RAM, disk, and crash-loop thresholds for the selected node. |
-| Notifications | Per node | Discord, Slack, and Webhook channels fire from the node that detects the event. |
+| Host Alerts | Per node | Host CPU, RAM, disk, and crash thresholds for the selected node. |
+| Channels | Per node | Discord, Slack, and Webhook channels fire from the node that detects the event. |
 | Labels | Per node | Stack and container label palettes. |
-| Security | Per node | Trivy install state and scanner readiness for the selected node. |
+| Vulnerability Scanning | Per node | Trivy install state and scanner readiness for the selected node. |
 | Developer | Per node | Retention windows for metrics and logs, plus Developer Mode. |
 | App Store | Per node | Template registry URL and featured-catalog source for the selected node's catalog. |
 | Support | Per browser | Diagnostics bundle, docs links, contact channels. |
@@ -226,7 +226,7 @@ Click the trash icon to remove a remote node. The local row hides this icon beca
 
 Bearer tokens grant full control over the remote Sencho instance. Treat them like passwords:
 
-- **Rotate immediately** if a token is compromised: open the remote instance's **Settings → System → Nodes** and click **Generate Token** to mint a new one. The previous token is invalidated instantly.
+- **Rotate immediately** if a token is compromised: open the remote instance's **Settings → Infrastructure → Nodes** and click **Generate Token** to mint a new one. The previous token is invalidated instantly.
 - Tokens are **encrypted at rest** in the local SQLite database.
 - Tokens cannot be used to open interactive terminals (Host Console or container exec). Interactive shell access always requires a real browser session on that specific instance.
 

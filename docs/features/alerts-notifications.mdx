@@ -6,12 +6,12 @@ description: Threshold and event alerts for your fleet, dispatched to Discord, S
 Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and one of three external channels you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
 
 <Frame>
-  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications panel showing the Discord, Slack, and Webhook tabs with the masthead breadcrumb, the CHANNELS 3/3 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
+  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel showing the Discord, Slack, and Webhook tabs with the masthead breadcrumb, the CHANNELS 3/3 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
 </Frame>
 
 ## Notification channels
 
-Open **Settings · Notifications** to configure the three channel types. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the three slots are enabled.
+Open **Settings · Notifications · Channels** to configure the three channel types. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the three slots are enabled.
 
 Each tab carries the same controls: an **Enabled** toggle (helper: `Send Sencho events to this <name> channel.`), a **Webhook URL** input (placeholder `https://...`, helper: `Sencho posts JSON payloads here. Use a private channel.`), and the **Test** and **Save** buttons. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
 
@@ -57,7 +57,7 @@ Each dispatch is a single-shot HTTP POST with a 10-second `AbortSignal.timeout`.
 Routing lets you direct alerts that match specific criteria to dedicated channels. Production crashes can land in `#prod-incidents` on Slack while staging notifications go to a less urgent Discord channel, all without juggling per-channel webhook URLs across teams.
 
 <Frame>
-  <img src="/images/alerts-notifications/routing-list.png" alt="Settings · Routing card list showing two rules ('Critical to Slack' and 'Production alerts'), each with a Discord badge, an ON pill, the 'Matches all alerts' summary line, a truncated channel URL, a Priority chip, and lightning-test, edit, and delete icon actions on the right." />
+  <img src="/images/alerts-notifications/routing-list.png" alt="Settings · Notifications · Notification Routing card list showing two rules ('Critical to Slack' and 'Production alerts'), each with a Discord badge, an ON pill, the 'Matches all alerts' summary line, a truncated channel URL, a Priority chip, and lightning-test, edit, and delete icon actions on the right." />
 </Frame>
 
 ### How routing fits into dispatch
@@ -70,7 +70,7 @@ A route with all four matchers left empty matches every alert and intercepts glo
 
 ### Creating a routing rule
 
-Open **Settings · Routing** and click **+ Add Route**.
+Open **Settings · Notifications · Notification Routing** and click **+ Add Route**.
 
 <Frame>
   <img src="/images/alerts-notifications/routing-modal.png" alt="The 'New routing rule' modal with the 'ROUTING · NEW RULE' kicker, a Name input filled with 'Production alerts', a Node scope select reading 'Any node', empty Stacks, Labels, and Categories combobox pickers, the helper line 'Leave blank to match all categories. All non-empty filters must match (AND).', a Channel tab strip with Discord selected and a webhook URL filled in, and Priority and Enabled fields with Cancel and CREATE actions in the footer." />
@@ -164,7 +164,7 @@ The **NOTIFICATION CHANNELS** banner above the rules list reflects what dispatch
 
 - **Loading** is a spinner with `Checking notification channels...` while Sencho asks the target node for its agent state.
 - **Remote node** is a blue banner reading `Remote node: <name>`, with the body `Alert rules are stored and evaluated on this remote instance. Notifications are dispatched using that node's configured channels.` A sub-line reports whether the remote has any channels configured.
-- **No channels** is an amber banner reading `No notification channels configured`, body `Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, or a webhook in Settings → Notifications.`
+- **No channels** is an amber banner reading `No notification channels configured`, body `Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, or a webhook in Settings → Notifications → Channels.`
 - **Active** is a green banner reading `Notifications active via Discord, Slack, …` with the configured channels listed.
 
 <Frame>
@@ -286,7 +286,7 @@ Real-time on the Docker event stream:
 
 Each metric (CPU, RAM, disk) carries its own suppression window. The first time a metric crosses its threshold, one notification fires immediately. While the metric stays over threshold within the window, additional cycles are silently counted but not dispatched. The next dispatch after the window elapses carries a summary suffix: `Suppressed 119 alerts in the last 60m; first over threshold at 14:23 UTC.` When the metric drops below threshold, the counter resets so the next breach fires fresh.
 
-The suppression window defaults to 60 minutes and is configured per node in **Settings → System → Host thresholds → Alert suppression**.
+The suppression window defaults to 60 minutes and is configured per node in **Settings → Monitoring → Host Alerts → Alert suppression**.
 
 ### Docker janitor
 
@@ -347,10 +347,10 @@ See [Blueprints](/features/blueprint-model).
 
 ## Retention and limits
 
-Three retention controls live under **Settings · Developer · Data retention**.
+Three retention controls live under **Settings · Operations · Data Retention**.
 
 <Frame>
-  <img src="/images/alerts-notifications/developer-retention.png" alt="Settings · Developer · Data retention card showing three rows: Container metrics with a 24 HRS field, Notification log with a 30 DAYS field, and Audit log (Admiral) with a 90 DAYS field, plus a SAVE SETTINGS button." />
+  <img src="/images/alerts-notifications/developer-retention.png" alt="Settings · Operations · Data Retention card showing three rows: Container metrics with a 24 HRS field, Notification log with a 30 DAYS field, and Audit log (Admiral) with a 90 DAYS field, plus a SAVE SETTINGS button." />
 </Frame>
 
 | Control | Range | Default | What it prunes |
@@ -365,15 +365,15 @@ A separate rate limit applies to crash and health alerts only: 20 emits per 60-s
 
 ## Crash detection toggle
 
-The global crash-capture switch lives under **Settings · System · Docker hygiene**.
+The global crash-capture switch lives under **Settings · Monitoring · Host Alerts**.
 
 <Frame>
-  <img src="/images/alerts-notifications/system-crash-toggle.png" alt="Settings · System · System Limits panel showing a HOST THRESHOLDS section with CPU limit, RAM limit, and Disk limit at 100%, then a DOCKER HYGIENE section with a Janitor threshold of 5 GiB and a Global crash capture toggle in the ON state with the helper line 'Watch every managed container for unexpected exits.'" />
+  <img src="/images/alerts-notifications/system-crash-toggle.png" alt="Settings · Monitoring · Host Alerts panel showing a HOST THRESHOLDS section with CPU limit, RAM limit, and Disk limit, then a CRASH CAPTURE section with a Global crash capture toggle in the ON state with the helper line 'Watch every managed container for unexpected exits.'" />
 </Frame>
 
 The **Global crash capture** toggle controls whether `DockerEventService` raises crash, OOM, and healthcheck alerts on the active node. Helper text: `Watch every managed container for unexpected exits.` Defaults to on; if the database read fails, Sencho falls back to default-deny so the system never leaks alerts you cannot turn off.
 
-The same panel carries the **Host thresholds** rows (CPU limit, RAM limit, Disk limit, all expressed as percent) that drive the host-level monitor warnings, and the **Janitor threshold** (in GiB) that drives the unused-Docker-data alert.
+The **Host Alerts** panel also carries the **Host thresholds** rows (CPU limit, RAM limit, Disk limit, all expressed as percent) that drive the host-level monitor warnings. The **Janitor threshold** (in GiB) that drives the unused-Docker-data alert lives in the **Docker & Storage** panel.
 
 ## Refresh cadence
 
@@ -396,7 +396,7 @@ Switching the active node tears down per-stack rule editors and reloads channel 
 
 <AccordionGroup>
   <Accordion title="Notifications never arrive in Discord, Slack, or my webhook">
-    Check three things in order. First, the channel toggle in **Settings · Notifications** must be on; the kicker on each tab reads `enabled` or `off`. Second, the URL must use HTTPS; the form rejects plain `http://` outright. Third, a routing rule with empty `Stacks`, `Labels`, and `Categories` matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
+    Check three things in order. First, the channel toggle in **Settings · Notifications · Channels** must be on; the kicker on each tab reads `enabled` or `off`. Second, the URL must use HTTPS; the form rejects plain `http://` outright. Third, a routing rule with empty `Stacks`, `Labels`, and `Categories` matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
   </Accordion>
   <Accordion title="An alert rule never fires even when the threshold is breached">
     Three causes account for almost every case. First, the rule's **Duration** has not elapsed yet: the breach must persist for the full duration before the rule fires. Second, the rule is still in cooldown after a previous fire. Third, the panel's banner is not green: a remote-node banner means the rule was saved on a remote whose channels you may not have configured, and an amber `No notification channels configured` banner means the rule evaluates fine but Sencho has nowhere to send the alert. The evaluator runs on a 30-second tick, so expect up to 30 seconds of latency between the breach starting and the timer engaging.
@@ -408,7 +408,7 @@ Switching the active node tears down per-stack rule editors and reloads channel 
     When the daemon disconnects and reconnects, Sencho snapshots every container at the moment of reconnect. If at least 20% exited during the gap, the service emits a single `info`/`system` summary `Docker daemon interruption detected: N containers exited during connection gap.` instead of one crash alert per container. Below the threshold, every gap exit is classified individually.
   </Accordion>
   <Accordion title="Crash alerts stopped arriving and nothing else looks wrong">
-    Check **Settings · System · Docker hygiene · Global crash capture**. The toggle is the master switch for the Docker event service. The panel cache reads the database every 500 ms; if the database read errors, Sencho defaults the toggle to off so the failure mode is silent rather than spammy. Repair the toggle, save, and the next Docker event reaches the dispatcher.
+    Check **Settings · Monitoring · Host Alerts · Global crash capture**. The toggle is the master switch for the Docker event service. The panel cache reads the database every 500 ms; if the database read errors, Sencho defaults the toggle to off so the failure mode is silent rather than spammy. Repair the toggle, save, and the next Docker event reaches the dispatcher.
   </Accordion>
   <Accordion title="A burst of crashes happened but I only see about twenty alerts">
     Sencho rate-limits crash and health dispatches to 20 emits per rolling 60-second window per node, then emits a single `warning`/`monitor_alert` roll-up `N additional containers crashed in the last minute.` once the window closes. Every alert is still persisted to `notification_history` and visible in the bell up to the 100-row per-node cap; only the channel fanout is throttled.

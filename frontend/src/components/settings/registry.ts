@@ -1,6 +1,16 @@
 import type { SectionId } from './types';
 
-export type SettingsGroupId = 'identity' | 'system' | 'alerts' | 'advanced';
+export type SettingsGroupId =
+    | 'personal'
+    | 'access'
+    | 'infrastructure'
+    | 'monitoring'
+    | 'notifications'
+    | 'automation'
+    | 'organization'
+    | 'security'
+    | 'operations'
+    | 'help';
 
 export interface SettingsGroupMeta {
     id: SettingsGroupId;
@@ -10,10 +20,16 @@ export interface SettingsGroupMeta {
 }
 
 export const SETTINGS_GROUPS: readonly SettingsGroupMeta[] = [
-    { id: 'identity', label: 'Identity', glyph: '\u25C8' },
-    { id: 'system', label: 'System', kicker: 'node-scoped', glyph: '\u25C6' },
-    { id: 'alerts', label: 'Alerts', glyph: '\u25C7' },
-    { id: 'advanced', label: 'Advanced', glyph: '\u25C7' },
+    { id: 'personal', label: 'Personal', glyph: '\u25C8' },
+    { id: 'access', label: 'Access', glyph: '\u25C8' },
+    { id: 'infrastructure', label: 'Infrastructure', glyph: '\u25C6' },
+    { id: 'monitoring', label: 'Monitoring', kicker: 'node-scoped', glyph: '\u25C6' },
+    { id: 'notifications', label: 'Notifications', glyph: '\u25C7' },
+    { id: 'automation', label: 'Automation', glyph: '\u25C7' },
+    { id: 'organization', label: 'Organization', glyph: '\u25C7' },
+    { id: 'security', label: 'Security', glyph: '\u25C6' },
+    { id: 'operations', label: 'Operations', glyph: '\u25C7' },
+    { id: 'help', label: 'Help', glyph: '\u25C7' },
 ];
 
 export type TierGate = 'paid' | null;
@@ -32,9 +48,10 @@ export interface SettingsItemMeta {
 }
 
 export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
+    // Personal
     {
         id: 'account',
-        group: 'identity',
+        group: 'personal',
         label: 'Account',
         description: 'Password, MFA, and session controls for the signed-in operator.',
         keywords: ['password', 'mfa', 'two-factor', 'session', 'profile'],
@@ -44,16 +61,17 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     },
     {
         id: 'appearance',
-        group: 'identity',
+        group: 'personal',
         label: 'Appearance',
         description: 'Theme, accent, density, and display preferences saved to this browser.',
         keywords: ['theme', 'dim', 'oled', 'light', 'dark', 'accent', 'color', 'glow', 'border', 'contrast', 'density', 'comfortable', 'compact', 'spacing', 'display'],
         tier: null,
         scope: 'global',
     },
+    // Access
     {
         id: 'license',
-        group: 'identity',
+        group: 'access',
         label: 'License',
         description: 'Activation key, plan tier, and seat allocation.',
         keywords: ['key', 'activation', 'tier', 'plan', 'seats', 'billing'],
@@ -63,7 +81,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     },
     {
         id: 'users',
-        group: 'identity',
+        group: 'access',
         label: 'Users',
         description: 'Operators, role assignments, and access scopes.',
         keywords: ['operators', 'team', 'rbac', 'roles', 'permissions'],
@@ -74,7 +92,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     },
     {
         id: 'sso',
-        group: 'identity',
+        group: 'access',
         label: 'SSO',
         description: 'Single sign-on via SAML or OIDC identity providers.',
         keywords: ['saml', 'oidc', 'okta', 'entra', 'azure', 'login'],
@@ -85,7 +103,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     },
     {
         id: 'api-tokens',
-        group: 'identity',
+        group: 'access',
         label: 'API Tokens',
         description: 'Long-lived bearer tokens for CI and scripts.',
         keywords: ['bearer', 'automation', 'ci', 'scripts', 'scopes'],
@@ -94,18 +112,30 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         adminOnly: true,
         hiddenOnRemote: true,
     },
+    // Infrastructure
     {
-        id: 'system',
-        group: 'system',
-        label: 'System Limits',
-        description: 'Threshold percentages for host CPU, RAM, disk, and crash-loop alerts.',
-        keywords: ['cpu', 'ram', 'disk', 'limits', 'thresholds', 'alerts'],
+        id: 'nodes',
+        group: 'infrastructure',
+        label: 'Nodes',
+        description: 'Remote Sencho instances proxied through this control plane.',
+        keywords: ['fleet', 'remote', 'proxy', 'node', 'cluster'],
+        tier: null,
+        scope: 'global',
+        hiddenOnRemote: true,
+    },
+    {
+        id: 'fleet-mesh',
+        group: 'infrastructure',
+        label: 'Fleet Mesh',
+        description: 'Data-plane network behavior for the cross-node service mesh.',
+        keywords: ['mesh', 'network', 'recreate', 'fleet', 'routing', 'data plane', 'sencho_mesh'],
         tier: null,
         scope: 'node',
+        adminOnly: true,
     },
     {
         id: 'registries',
-        group: 'system',
+        group: 'infrastructure',
         label: 'Registries',
         description: 'Private Docker registries and pull credentials.',
         keywords: ['docker', 'ghcr', 'ecr', 'private', 'pull', 'auth'],
@@ -116,7 +146,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     },
     {
         id: 'cloud-backup',
-        group: 'system',
+        group: 'infrastructure',
         label: 'Cloud Backup',
         description: 'Mirror fleet snapshots to Sencho Cloud Backup or any S3-compatible storage.',
         keywords: ['cloud', 'backup', 'snapshot', 's3', 'r2', 'minio', 'storage', 'offsite'],
@@ -126,28 +156,47 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         hiddenOnRemote: true,
     },
     {
-        id: 'nodes',
-        group: 'system',
-        label: 'Nodes',
-        description: 'Remote Sencho instances proxied through this control plane.',
-        keywords: ['fleet', 'remote', 'proxy', 'node', 'cluster'],
+        id: 'app-store',
+        group: 'infrastructure',
+        label: 'App Store',
+        description: 'Template registry URL and featured-catalog source.',
+        keywords: ['templates', 'registry', 'catalog', 'featured'],
         tier: null,
-        scope: 'global',
-        hiddenOnRemote: true,
+        scope: 'node',
+    },
+    // Monitoring
+    {
+        id: 'host-alerts',
+        group: 'monitoring',
+        label: 'Host Alerts',
+        description: 'Alert thresholds for host CPU, RAM, and disk, plus suppression cadence and container crash capture.',
+        keywords: ['cpu', 'ram', 'disk', 'thresholds', 'alerts', 'suppression', 'crash', 'host', 'limits'],
+        tier: null,
+        scope: 'node',
     },
     {
+        id: 'docker-storage',
+        group: 'monitoring',
+        label: 'Docker & Storage',
+        description: 'Reclaimable-space alerts and Docker image cleanup after updates.',
+        keywords: ['docker', 'janitor', 'prune', 'reclaim', 'storage', 'images', 'cleanup', 'dangling'],
+        tier: null,
+        scope: 'node',
+    },
+    // Notifications
+    {
         id: 'notifications',
-        group: 'alerts',
-        label: 'Notifications',
-        description: 'In-app toasts and browser push for stack, container, and system events.',
-        keywords: ['toasts', 'push', 'events', 'alerts', 'inbox'],
+        group: 'notifications',
+        label: 'Channels',
+        description: 'Discord, Slack, and custom webhook destinations for Sencho alerts.',
+        keywords: ['discord', 'slack', 'webhook', 'channels', 'destinations', 'alerts'],
         tier: null,
         scope: 'node',
     },
     {
         id: 'notification-routing',
-        group: 'alerts',
-        label: 'Routing',
+        group: 'notifications',
+        label: 'Notification Routing',
         description: 'Rules that steer alerts to the right channel based on severity or label.',
         keywords: ['rules', 'routing', 'channels', 'severity', 'labels'],
         tier: null,
@@ -155,9 +204,10 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         adminOnly: true,
         hiddenOnRemote: true,
     },
+    // Automation
     {
         id: 'webhooks',
-        group: 'alerts',
+        group: 'automation',
         label: 'Webhooks',
         description: 'Incoming HMAC-signed HTTP triggers that run stack actions from CI/CD pipelines.',
         keywords: ['webhook', 'incoming', 'trigger', 'ci', 'cd', 'pipeline', 'deploy', 'hmac', 'signature', 'action'],
@@ -165,46 +215,49 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         scope: 'global',
         hiddenOnRemote: true,
     },
+    // Organization
     {
         id: 'labels',
-        group: 'advanced',
+        group: 'organization',
         label: 'Labels',
         description: 'Per-node labels for stacks and containers.',
         keywords: ['labels', 'tags', 'palette', 'organisation'],
         tier: null,
         scope: 'node',
     },
+    // Security
     {
         id: 'security',
-        group: 'advanced',
-        label: 'Security',
+        group: 'security',
+        label: 'Vulnerability Scanning',
         description: 'Image scanning, suppressions, and posture defaults.',
-        keywords: ['scan', 'cve', 'trivy', 'suppressions', 'hardening'],
+        keywords: ['scan', 'cve', 'trivy', 'suppressions', 'hardening', 'vulnerability', 'misconfig'],
         tier: null,
         scope: 'node',
         adminOnly: true,
     },
+    // Operations
     {
-        id: 'developer',
-        group: 'advanced',
-        label: 'Developer',
-        description: 'Retention windows and debug modes.',
-        keywords: ['retention', 'logs', 'metrics', 'debug', 'developer'],
+        id: 'data-retention',
+        group: 'operations',
+        label: 'Data Retention',
+        description: 'How long to keep container metrics, notification logs, scan history, and audit entries.',
+        keywords: ['retention', 'metrics', 'logs', 'scans', 'audit', 'history', 'prune', 'window'],
         tier: null,
         scope: 'node',
     },
     {
-        id: 'app-store',
-        group: 'advanced',
-        label: 'App Store',
-        description: 'Template registry URL and featured-catalog source.',
-        keywords: ['templates', 'registry', 'catalog', 'featured'],
+        id: 'developer',
+        group: 'operations',
+        label: 'Developer Diagnostics',
+        description: 'Developer mode for real-time metrics streams and verbose debug diagnostics.',
+        keywords: ['developer', 'debug', 'diagnostics', 'metrics', 'verbose'],
         tier: null,
         scope: 'node',
     },
     {
         id: 'recovery',
-        group: 'advanced',
+        group: 'operations',
         label: 'Recovery',
         description: 'System health snapshot, safe recovery actions, and emergency command-line reference.',
         keywords: ['recovery', 'safe mode', 'diagnostics', 'health', 'emergency', 'cli', 'reset', 'backup', 'restore'],
@@ -213,9 +266,10 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         adminOnly: true,
         hiddenOnRemote: true,
     },
+    // Help
     {
         id: 'support',
-        group: 'advanced',
+        group: 'help',
         label: 'Support',
         description: 'Diagnostics bundle, docs links, and contact channels.',
         keywords: ['help', 'diagnostics', 'bundle', 'docs', 'contact'],
@@ -224,7 +278,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     },
     {
         id: 'about',
-        group: 'advanced',
+        group: 'help',
         label: 'About',
         description: 'Build metadata, release notes, and licence attributions.',
         keywords: ['version', 'build', 'release', 'attributions'],

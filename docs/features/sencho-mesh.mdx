@@ -89,7 +89,7 @@ The sheet shows:
 
 Mesh runs in-process on each node; there is no separate mesh container to inspect with `docker ps`.
 
-Enable **Developer Mode** under **Settings → Developer** to surface `[Mesh:diag]` lines in the container logs covering the forwarder's routing decisions (same-node versus cross-node, and which node-identity resolution won) and the timing of opt-in, opt-out, and alias-refresh operations (`docker logs sencho 2>&1 | grep '\[Mesh:diag\]'`). They are off by default and meant for one-off debugging; turn developer mode back off when you are done to keep log volume manageable.
+Enable **Developer Mode** under **Settings → Operations → Developer Diagnostics** to surface `[Mesh:diag]` lines in the container logs covering the forwarder's routing decisions (same-node versus cross-node, and which node-identity resolution won) and the timing of opt-in, opt-out, and alias-refresh operations (`docker logs sencho 2>&1 | grep '\[Mesh:diag\]'`). They are off by default and meant for one-off debugging; turn developer mode back off when you are done to keep log volume manageable.
 
 ## Mesh activity log
 
@@ -169,7 +169,7 @@ services:
 
 Sencho pins itself to `<network address> + 2` (so `10.42.0.2` for the example above; the bridge's `+1` gateway sits between). The `sencho_mesh` network is created with an IPRange covering the upper half of the subnet, so Docker's auto-allocation hands meshed workloads `<network> + 128` and up by default and never grabs Sencho's static IP while Sencho is offline. Each node is configured independently; the alias registry pushes the correct local IP to each node's override file.
 
-Sencho re-checks the mesh data plane every 10 seconds and updates `/api/health` and the dashboard banner with the current state, so removing or recreating `sencho_mesh` while Sencho is running is reflected within one tick instead of waiting for a restart. The reconciler is report-only by default: if the network disappears, Sencho surfaces `not_found` and waits for the operator to restart. To have Sencho rebuild the network at the same subnet on the next tick, flip **Settings → System → Mesh data plane → Auto-recreate mesh network** on. Auto-recreate never iterates the subnet candidate list (it would invalidate every existing `extra_hosts` override on disk); if the original subnet is no longer free, Sencho reports `subnet_overlap` and stops. Repeat failures are throttled to one attempt per minute.
+Sencho re-checks the mesh data plane every 10 seconds and updates `/api/health` and the dashboard banner with the current state, so removing or recreating `sencho_mesh` while Sencho is running is reflected within one tick instead of waiting for a restart. The reconciler is report-only by default: if the network disappears, Sencho surfaces `not_found` and waits for the operator to restart. To have Sencho rebuild the network at the same subnet on the next tick, flip **Settings → Infrastructure → Fleet Mesh → Auto-recreate mesh network** on. Auto-recreate never iterates the subnet candidate list (it would invalidate every existing `extra_hosts` override on disk); if the original subnet is no longer free, Sencho reports `subnet_overlap` and stops. Repeat failures are throttled to one attempt per minute.
 
 ## Security and trust boundaries
 
