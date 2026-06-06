@@ -36,6 +36,11 @@ export function useOverlayState() {
 
   const [pendingUnsavedLoad, setPendingUnsavedLoad] = useState<string | null>(null);
   const [pendingUnsavedNode, setPendingUnsavedNode] = useState<Node | null>(null);
+  // A deferred "leave the dirty editor" navigation (back to the list, Home, a
+  // bottom-tab / hamburger destination). Wrapped in an object so the state
+  // setter is not mistaken for a functional update. Runs after the user
+  // confirms the unsaved-changes dialog. See useStackActions.attemptLeaveEditor.
+  const [pendingLeaveAction, setPendingLeaveAction] = useState<{ run: () => void } | null>(null);
 
   const [bashModalOpen, setBashModalOpen] = useState(false);
   const [selectedContainer, setSelectedContainer] = useState<Container | null>(null);
@@ -93,6 +98,7 @@ export function useOverlayState() {
     deleteDialogOpen, stackToDelete, openDeleteDialog, closeDeleteDialog,
     pendingUnsavedLoad, setPendingUnsavedLoad,
     pendingUnsavedNode, setPendingUnsavedNode,
+    pendingLeaveAction, setPendingLeaveAction,
     bashModalOpen, selectedContainer, openBashModal, closeBashModal,
     logViewerOpen, logContainer, openLogViewer, closeLogViewer,
     stackMonitor, openAlertSheet, openAutoHeal, closeStackMonitor,

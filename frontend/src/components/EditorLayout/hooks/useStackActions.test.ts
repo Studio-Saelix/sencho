@@ -70,8 +70,10 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
   return {
     setPendingUnsavedLoad: vi.fn(),
     setPendingUnsavedNode: vi.fn(),
+    setPendingLeaveAction: vi.fn(),
     pendingUnsavedLoad: null,
     pendingUnsavedNode: null,
+    pendingLeaveAction: null,
     policyBlock: null,
     setPolicyBlock: vi.fn(),
     setPolicyBypassing: vi.fn(),
@@ -298,5 +300,54 @@ describe('useStackActions.bypassPolicyAndRetry', () => {
     const { result } = setup({ overlay: { policyBlock: null as never } });
     await result.current.bypassPolicyAndRetry();
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('stashes the navigation when the editor is dirty instead of running it', () => {
+    const perform = vi.fn();
+    // Default fixture: content !== originalContent and a stack is selected → dirty.
+    const { result, overlayState } = setup();
+    result.current.attemptLeaveEditor(perform);
+    expect(perform).not.toHaveBeenCalled();
+    expect(overlayState.setPendingLeaveAction).toHaveBeenCalledWith({ run: perform });
+  });
+
+  it('runs the navigation immediately when the editor is clean', () => {
+    const perform = vi.fn();
+    const { result, overlayState } = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+    });
+    result.current.attemptLeaveEditor(perform);
+    expect(perform).toHaveBeenCalledTimes(1);
+    expect(overlayState.setPendingLeaveAction).not.toHaveBeenCalled();
+  });
+
+  it('runs the stashed leave action and clears it on discardAndLoadPending', () => {
+    const run = vi.fn();
+    const { result, overlayState, editorState } = setup({ overlay: { pendingLeaveAction: { run } } });
+    result.current.discardAndLoadPending();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(overlayState.setPendingLeaveAction).toHaveBeenCalledWith(null);
+    expect(editorState.setContent).toHaveBeenCalledWith(editorState.originalContent);
+  });
+
+  it('gives a stashed leave action precedence over a coexisting pending load', () => {
+    const run = vi.fn();
+    const { result } = setup({ overlay: { pendingLeaveAction: { run }, pendingUnsavedLoad: 'other.yml' } });
+    result.current.discardAndLoadPending();
+    expect(run).toHaveBeenCalledTimes(1);
+    // The leave branch returns before the load branch, so no stack fetch fires.
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('clears a stashed leave action on cancel', () => {
+    const { result, overlayState } = setup({ overlay: { pendingLeaveAction: { run: vi.fn() } } });
+    result.current.cancelPendingUnsavedLoad();
+    expect(overlayState.setPendingLeaveAction).toHaveBeenCalledWith(null);
   });
 });
