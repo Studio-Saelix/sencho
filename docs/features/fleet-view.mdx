@@ -59,7 +59,7 @@ Three buttons sit next to the tab strip in the top-right corner. They are visibl
 |--------|--------------|
 | **Check Updates** | Opens the [Node Updates sheet](#node-updates) where you can manage Sencho version updates across the fleet. |
 | **Refresh** | Forces an immediate re-fetch of fleet data. The icon spins while the refresh is in flight; the button is disabled until it completes. |
-| **Add node** | Opens the same Add Node dialog as **Settings · System · Nodes** so you can register a new node without leaving the Fleet page. Admin-only. After saving a remote proxy node, a connection test runs automatically and the result toasts in (success or saved-but-unreachable). |
+| **Add node** | Opens the same Add Node dialog as **Settings · Infrastructure · Nodes** so you can register a new node without leaving the Fleet page. Admin-only. After saving a remote proxy node, a connection test runs automatically and the result toasts in (success or saved-but-unreachable). |
 
 ## The Overview tab
 
@@ -100,7 +100,7 @@ Offline nodes render dimmed, with no stats grid, no usage bars, and no update af
 
 ### Node actions menu (admin)
 
-Every card carries a three-dot **Node actions** kebab in the top-right corner. The menu surfaces the same lifecycle actions you would find in **Settings · System · Nodes**:
+Every card carries a three-dot **Node actions** kebab in the top-right corner. The menu surfaces the same lifecycle actions you would find in **Settings · Infrastructure · Nodes**:
 
 | Action | Notes |
 |--------|-------|
@@ -143,7 +143,7 @@ A toolbar at the top of the topology canvas offers three layouts. Pick the one t
 | **Grouped** | Remotes cluster by their primary node label (alphabetically first when a node has multiple). The local node sits in its own cluster. Use this to read environment, region, or role groupings at a glance. Nodes without any label fall into an Unlabeled cluster. |
 | **Free** | Drag any node anywhere on the canvas. Positions persist in this browser, so the arrangement is there when you come back. |
 
-Assign labels in **Settings · System · Nodes** to drive Grouped mode. Each node accepts multiple labels; the alphabetically first one is its cluster.
+Assign labels in **Settings · Infrastructure · Nodes** to drive Grouped mode. Each node accepts multiple labels; the alphabetically first one is its cluster.
 
 ### Stack drill-down
 
@@ -264,7 +264,7 @@ Fleet View queries every registered node in parallel. Each node responds indepen
 
 <AccordionGroup>
   <Accordion title="A remote node's Current version reads 'unknown'">
-    The control instance could not resolve the remote's `/api/meta` endpoint. Open **Settings → System → Nodes**, click **Test connection** on the row, and read the toast. The most common causes are a wrong API URL or scheme, a token that has been rotated on the remote (issue a new one and update the saved row), or a firewall or reverse proxy that is not forwarding to the remote's Sencho port. Once the remote is reachable, its version surfaces on the next fleet refresh and the **Update** button becomes available again.
+    The control instance could not resolve the remote's `/api/meta` endpoint. Open **Settings → Infrastructure → Nodes**, click **Test connection** on the row, and read the toast. The most common causes are a wrong API URL or scheme, a token that has been rotated on the remote (issue a new one and update the saved row), or a firewall or reverse proxy that is not forwarding to the remote's Sencho port. Once the remote is reachable, its version surfaces on the next fleet refresh and the **Update** button becomes available again.
   </Accordion>
   <Accordion title="'Update all' says no updates available">
     The bulk action only triggers updates on remotes that report a valid current version *and* a valid latest version. If a remote's Current reads `unknown`, it is excluded from **Update all** because the gateway cannot perform a safe version comparison. The per-row **Update** button is still available and will run a one-shot update with the latest version it could resolve.
@@ -282,6 +282,6 @@ Fleet View queries every registered node in parallel. Each node responds indepen
     Free mode stores node positions in your browser's local storage. The arrangement is per-browser; it does not sync across devices or users. If positions reset on reload, the most common causes are a browser session that has local storage disabled (private or incognito windows, strict tracking-prevention modes, which fall back to in-memory state for the session only), storage cleared by browser cleanup tools or a profile reset, or simply a different browser or profile. To verify storage is writable, open DevTools → Application → Local Storage on the Sencho origin and confirm the `sencho-topology-preferences` key exists after switching modes or dragging a node.
   </Accordion>
   <Accordion title="Grouped topology shows everything in one Unlabeled cluster">
-    Grouped mode clusters remote nodes by their primary node label. When no remotes carry any labels, every remote falls into the **Unlabeled** cluster and the canvas looks similar to Hub mode. A hint banner above the canvas points to **Settings · System · Nodes** where labels are managed. Add at least one label to two or more remotes and reopen the topology to see the clusters split.
+    Grouped mode clusters remote nodes by their primary node label. When no remotes carry any labels, every remote falls into the **Unlabeled** cluster and the canvas looks similar to Hub mode. A hint banner above the canvas points to **Settings · Infrastructure · Nodes** where labels are managed. Add at least one label to two or more remotes and reopen the topology to see the clusters split.
   </Accordion>
 </AccordionGroup>
