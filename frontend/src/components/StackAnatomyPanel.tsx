@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { parse as parseYaml } from 'yaml';
-import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen, Copy } from 'lucide-react';
+import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
 import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { copyToClipboard } from '@/lib/clipboard';
-import { toast } from '@/components/ui/toast-store';
-import { buildStackAnatomyMarkdown, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
+import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
+import StackDossierPanel from './stack/StackDossierPanel';
 import type { NotificationItem } from '@/components/dashboard/types';
 
 interface StackAnatomyPanelProps {
@@ -365,9 +364,11 @@ export default function StackAnatomyPanel({
     return null;
   }, [anatomy]);
 
-  const handleCopyMarkdown = async () => {
-    if (!anatomy) return;
-    const markdown = buildStackAnatomyMarkdown({
+  // Assembled facts for this stack, passed to the Dossier tab for its read-only
+  // summary and Markdown export. Null until compose parses.
+  const anatomyInput = useMemo<AnatomyMarkdownInput | null>(() => {
+    if (!anatomy) return null;
+    return {
       stackName,
       services: anatomy.services,
       ports: anatomy.ports,
@@ -378,14 +379,8 @@ export default function StackAnatomyPanel({
       missingVars,
       networkName,
       gitSource: activeGitSource ? formatGitSource(activeGitSource) : null,
-    });
-    try {
-      await copyToClipboard(markdown);
-      toast.success('Stack anatomy copied as Markdown.');
-    } catch {
-      toast.error('Failed to copy to clipboard.');
-    }
-  };
+    };
+  }, [anatomy, stackName, firstEnvFile, envVarCount, missingVars, networkName, activeGitSource]);
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
@@ -421,19 +416,9 @@ export default function StackAnatomyPanel({
         <TabsList className="h-7 gap-0.5 bg-transparent border-none p-0">
           <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
           <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
+          <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
         </TabsList>
         <div className="flex items-center gap-3">
-          {anatomy && (
-            <button
-              type="button"
-              data-testid="anatomy-copy-md-btn"
-              onClick={() => { void handleCopyMarkdown(); }}
-              className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
-            >
-              <Copy className="h-3 w-3" strokeWidth={1.5} />
-              copy md
-            </button>
-          )}
           {onOpenFiles && (
             <button
               type="button"
@@ -635,6 +620,9 @@ export default function StackAnatomyPanel({
           )}
         </div>
       )}
+      </TabsContent>
+      <TabsContent value="dossier" className="flex flex-col flex-1 min-h-0 mt-0">
+        <StackDossierPanel stackName={stackName} anatomy={anatomyInput} canEdit={canEdit} />
       </TabsContent>
       </Tabs>
     </div>
