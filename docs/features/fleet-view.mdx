@@ -38,13 +38,14 @@ A single rail summarises the state of every registered node so you can read the 
 
 ### Tabs
 
-The Fleet view is a tab strip. Four tab triggers are visible to every tier; the Deployments, Routing, Federation, and Secrets triggers only render when the active license unlocks them. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Five tab triggers are visible to every tier; the Deployments, Routing, Federation, and Secrets triggers only render when the active license unlocks them. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
 | **Overview** | Community | The grid or topology view of every node and its health. Covered in the next section. |
 | **Snapshots** | Community | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
 | **Status** | Community | One card per node summarising which automations and security features are configured. Covered below. |
+| **Dependencies** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
 | **Deployments** | Admiral | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Admiral | Cross-node service routing via Sencho Mesh. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Admiral | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
@@ -201,6 +202,40 @@ Online nodes render a two-column summary grid with up to eight rows:
 Offline nodes show a muted card with the heading and the message `Node is unreachable. Configuration unavailable.` The Online or Offline indicator in the card header confirms reachability at the time of the last fetch.
 
 The tab fetches each node's configuration in parallel; a single dead node does not block the rest from rendering.
+
+## The Dependency Map tab
+
+The **Dependencies** tab draws a read-only map of how everything on the fleet fits together: each node, the stacks on it, and how those stacks' services connect to networks, volumes, and published ports. It is built for troubleshooting ("which stacks share this network?", "what is still claiming port 8080?", "why is this volume sitting unused?") rather than for editing anything. Nothing on this tab changes your stacks.
+
+The map is assembled from what Docker and your compose files already describe, so it reflects the live state every time you open the tab or press **Refresh**.
+
+### What the map shows
+
+The graph reads left to right: each **node** branches into its **stacks**, and a stack expands into its **services**, with each service linked to the **networks** it joins, the **named volumes** it mounts, and the **host ports** it publishes. A dashed link between two services marks a declared `depends_on` relationship.
+
+To stay readable on large fleets, the graph starts collapsed: you see the nodes and their stacks, and the element count stays small no matter how big the fleet is. Click any stack to expand its services and resources; click again to collapse it.
+
+### Anomaly flags
+
+A summary strip above the map counts four kinds of issue, and the affected elements are ringed in the graph (and tagged in the list):
+
+| Flag | What it means |
+|------|---------------|
+| **Missing deps** | A service declares a `depends_on` target, network, or volume that is not present at runtime. The service that points at the missing thing is flagged. |
+| **Port conflicts** | Two services claim the same host interface, port, and protocol on the same node, so they cannot both bind it. |
+| **Orphans** | A network or volume that no container uses, or a stack that is running on the node but is not managed by Sencho. |
+| **Shared** | A network or volume that more than one stack uses. Often intentional, but worth knowing before you change or remove it. |
+
+### Filtering and the list view
+
+- **Search** narrows the map to matching stacks, services, and resources, expanding the stacks that contain a match.
+- **Node** chips limit the map to one or more nodes.
+- Clicking a flag in the summary strip filters to just the elements carrying that flag.
+- The **Graph / List** toggle swaps the diagram for a flat table (Node, Stack, Type, Name, State, Flags). The list has no size limit, so it is the surface to reach for on very large fleets, or when the graph suggests narrowing with a filter first.
+
+### When a node can't be reached
+
+The map is fleet-wide: the control instance gathers each node's view and merges them. If a node is offline or unreachable, a banner names it and the rest of the fleet still draws, so one dark node never blanks the whole map.
 
 ## Node Updates
 

@@ -37,6 +37,7 @@ import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cach
 import { activeBulkActions } from './labels';
 import { runLocalLabelStop, type LabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
+import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 
@@ -639,6 +640,65 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
   } catch (error) {
     console.error('[Fleet] Configuration overview error:', error);
     res.status(500).json({ error: 'Failed to fetch fleet configuration' });
+  }
+});
+
+/**
+ * Fleet-wide dependency map. Auth-only (read-only visibility, Community). Fans
+ * out to every node, building each node's local graph in-process for the hub
+ * and via its auth-only per-node route for remotes, then merges with per-node
+ * attribution. Unreachable nodes degrade to nodeErrors so the rest still draws.
+ */
+fleetRouter.get('/dependency-map', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+
+    const results = await Promise.allSettled(
+      nodes.map(async (node: Node): Promise<FleetNodeGraphResult> => {
+        if (node.type === 'local') {
+          const graph = await buildLocalGraph(node.id, node.name);
+          return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
+        }
+
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) {
+          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: formatNoTargetError(node) };
+        }
+
+        const resp = await fetch(
+          `${target.apiUrl.replace(/\/$/, '')}/api/dependency-map/node-graph`,
+          {
+            headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
+            signal: AbortSignal.timeout(15000),
+          },
+        );
+        if (!resp.ok) {
+          const errBody = await resp.json().catch(() => null) as { error?: string } | null;
+          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
+        }
+        const graph = await resp.json().catch(() => null);
+        // Shape-guard a reachable-but-malformed payload (proxy HTML, version
+        // drift) so one bad node degrades to a nodeError instead of crashing
+        // mergeFleetGraph and 500-ing the whole fleet map.
+        if (!isLocalDependencyGraph(graph)) {
+          console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} returned a payload that failed shape validation (status ${resp.status})`);
+          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: 'Remote returned an unexpected dependency-graph payload' };
+        }
+        return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
+      }),
+    );
+
+    const perNode: FleetNodeGraphResult[] = results.map((result, i) => {
+      if (result.status === 'fulfilled') return result.value;
+      console.error(`[Fleet] Dependency map fetch failed for node ${nodes[i].name}:`, result.reason);
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', graph: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+    });
+
+    res.json(mergeFleetGraph(perNode));
+  } catch (error) {
+    console.error('[Fleet] Dependency map error:', error);
+    res.status(500).json({ error: 'Failed to build fleet dependency map' });
   }
 });
 
