@@ -241,7 +241,7 @@ export default function StackAnatomyPanel({
 
   const envVarCount = envKeys.size;
 
-  const [gitSource, setGitSource] = useState<GitSourceInfo | null>(null);
+  const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo } | null>(null);
   const [updatePreview, setUpdatePreview] = useState<UpdatePreview | null>(null);
   const [scanStatus, setScanStatus] = useState<{
     status: 'ok' | 'partial' | 'failed' | 'skipped' | null;
@@ -262,7 +262,10 @@ export default function StackAnatomyPanel({
           if (data && data.linked === false) {
             setGitSource(null);
           } else {
-            setGitSource({ repo_url: data.repo_url, branch: data.branch, compose_path: data.compose_path });
+            setGitSource({
+              stack: stackName,
+              info: { repo_url: data.repo_url, branch: data.branch, compose_path: data.compose_path },
+            });
           }
         } else {
           setGitSource(null);
@@ -350,6 +353,9 @@ export default function StackAnatomyPanel({
     ? anatomy.networks[0]
     : `${stackName}_default`;
   const firstEnvFile = anatomy?.envFiles[0] ?? selectedEnvFile ?? null;
+  // Only treat the fetched source as current when it belongs to the selected stack, so a
+  // slow /git-source response for a previously selected stack cannot render or be exported here.
+  const activeGitSource = gitSource?.stack === stackName ? gitSource.info : null;
   const primaryHostPort = useMemo(() => {
     if (!anatomy) return null;
     for (const svc of anatomy.services) {
@@ -371,7 +377,7 @@ export default function StackAnatomyPanel({
       envVarCount,
       missingVars,
       networkName,
-      gitSource: gitSource ? formatGitSource(gitSource) : null,
+      gitSource: activeGitSource ? formatGitSource(activeGitSource) : null,
     });
     try {
       await copyToClipboard(markdown);
@@ -546,8 +552,8 @@ export default function StackAnatomyPanel({
                 className="inline-flex items-center gap-1.5 font-mono text-[11px] text-left hover:text-brand transition-colors"
               >
                 <GitBranch className="h-3 w-3 shrink-0" strokeWidth={1.5} />
-                {gitSource ? (
-                  <span className="truncate">git <span className="text-stat-subtitle">·</span> {formatGitSource(gitSource)}</span>
+                {activeGitSource ? (
+                  <span className="truncate">git <span className="text-stat-subtitle">·</span> {formatGitSource(activeGitSource)}</span>
                 ) : (
                   <span>local</span>
                 )}

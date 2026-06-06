@@ -151,6 +151,15 @@ describe('buildStackAnatomyMarkdown', () => {
     expect(md).toContain('| svc | a b | /mnt |');
   });
 
+  it('collapses CRLF and lone carriage returns in a table cell', () => {
+    const md = buildStackAnatomyMarkdown({
+      ...emptyInput,
+      services: ['svc'],
+      volumes: { svc: [{ host: 'a\r\nb', container: 'c\rd' }] },
+    });
+    expect(md).toContain('| svc | a b | c d |');
+  });
+
   it('flattens rows from multiple services into one table', () => {
     const md = buildStackAnatomyMarkdown({
       ...emptyInput,
