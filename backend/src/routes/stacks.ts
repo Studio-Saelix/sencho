@@ -256,8 +256,8 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
 });
 
 // Read-only scan of the compose directory for the guided first-import flow.
-// Surfaces compose files found on disk (loose at the root, already a stack, or
-// one directory too deep) with a dry preview so a new user can land their first
+// Surfaces compose files that are not yet stacks (loose at the root, or one
+// directory too deep) with a dry preview so a new user can land their first
 // stack without reading the docs first. Performs no writes.
 stacksRouter.get('/import/scan', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:read')) return;
@@ -311,13 +311,7 @@ stacksRouter.post('/import/move', async (req: Request, res: Response) => {
     if (!match) {
       return res.status(404).json({ error: 'That compose file was not found. Rescan and try again.' });
     }
-    if (match.status === 'listed') {
-      return res.status(400).json({ error: 'That stack is already in place.' });
-    }
-    await fsSvc.importCandidateIntoStack(
-      { location: match.location, composeFile: match.composeFile, status: match.status },
-      destName,
-    );
+    await fsSvc.importCandidateIntoStack(match, destName);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Imported compose file into stack: ${sanitizeForLog(destName)}`);
     res.json({ name: destName });

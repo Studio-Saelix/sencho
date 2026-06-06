@@ -5,9 +5,7 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronRight,
-  ArrowUpRight,
   AlertTriangle,
-  CheckCircle2,
   FolderInput,
 } from 'lucide-react';
 import { ModalBody, ModalFooter } from '../ui/modal';
@@ -34,7 +32,7 @@ interface ImportCandidate {
   name: string;
   composeFile: string;
   location: string;
-  status: 'listed' | 'loose-root' | 'nested';
+  status: 'loose-root' | 'nested';
   services: ServicePreview[];
   warnings: string[];
   parseError?: string;
@@ -47,8 +45,9 @@ interface ImportScanResponse {
 
 export interface ImportStackPanelProps {
   onClose: () => void;
-  // Navigate to an already-listed stack (it is already in the sidebar).
-  onOpenStack: (name: string) => void;
+  // Refresh the sidebar stack list after a file is moved into place, so the
+  // newly imported stack shows up without closing the modal.
+  onImported: () => void;
 }
 
 // Join a host compose-dir path with extra segments for display only. The dir is
@@ -58,7 +57,7 @@ function joinPath(base: string, ...segments: string[]): string {
   return [trimmed, ...segments].join('/');
 }
 
-export function ImportStackPanel({ onClose, onOpenStack }: ImportStackPanelProps) {
+export function ImportStackPanel({ onClose, onImported }: ImportStackPanelProps) {
   const { can } = useAuth();
   const canCreate = can('stack:create');
   const [loading, setLoading] = useState(true);
@@ -80,7 +79,7 @@ export function ImportStackPanel({ onClose, onOpenStack }: ImportStackPanelProps
       const parsed = (await response.json()) as ImportScanResponse;
       setData(parsed);
       if (opts?.announce && parsed.candidates.length === 0) {
-        toast.info('No compose files found.');
+        toast.info('No compose files to import.');
       }
     } catch (error) {
       console.error('Failed to scan compose directory:', error);
@@ -105,6 +104,9 @@ export function ImportStackPanel({ onClose, onOpenStack }: ImportStackPanelProps
       const result = (await response.json().catch(() => ({}))) as { name?: unknown };
       const importedName = typeof result.name === 'string' ? result.name : name;
       toast.success(`Imported "${importedName}".`);
+      // Refresh both surfaces: the import list drops the now-placed file, and the
+      // sidebar picks up the new stack.
+      onImported();
       await scan();
     } catch (error) {
       console.error('Failed to move compose file into place:', error);
@@ -112,7 +114,7 @@ export function ImportStackPanel({ onClose, onOpenStack }: ImportStackPanelProps
     } finally {
       setMovingLocation(null);
     }
-  }, [scan]);
+  }, [scan, onImported]);
 
   useEffect(() => {
     void scan();
@@ -161,10 +163,10 @@ export function ImportStackPanel({ onClose, onOpenStack }: ImportStackPanelProps
           ) : candidates.length === 0 ? (
             <div className="py-10 text-center">
               <FolderSearch className="mx-auto h-6 w-6 text-stat-icon" strokeWidth={1.5} />
-              <p className="mt-3 text-sm text-stat-title">No compose files found.</p>
+              <p className="mt-3 text-sm text-stat-title">No compose files to import.</p>
               <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-stat-subtitle">
-                Put each stack in its own subfolder inside the compose directory, then rescan. Or
-                pick another source above to create one from scratch.
+                Stacks already in their own subfolder show up in the sidebar. Drop a loose compose
+                file in the compose directory and rescan, or pick another source above to create one.
               </p>
             </div>
           ) : (
@@ -186,10 +188,6 @@ export function ImportStackPanel({ onClose, onOpenStack }: ImportStackPanelProps
                   moving={movingLocation === c.location}
                   onToggle={() => toggle(c.location)}
                   onMove={(name) => void move(c.location, name)}
-                  onOpenStack={(name) => {
-                    onClose();
-                    onOpenStack(name);
-                  }}
                 />
               ))}
             </div>
@@ -225,7 +223,6 @@ function CandidateCard({
   moving,
   onToggle,
   onMove,
-  onOpenStack,
 }: {
   candidate: ImportCandidate;
   composeDir: string;
@@ -234,7 +231,6 @@ function CandidateCard({
   moving: boolean;
   onToggle: () => void;
   onMove: (name: string) => void;
-  onOpenStack: (name: string) => void;
 }) {
   const { name, composeFile, location, status, services, warnings, parseError } = candidate;
   // Prefill the destination name: a nested stack already has a folder name worth
@@ -263,81 +259,68 @@ function CandidateCard({
           <span className="block truncate font-mono text-sm text-stat-value">{displayName}</span>
           <span className="block truncate font-mono text-[10px] text-stat-subtitle">{location}</span>
         </span>
-        <StatusBadge status={status} />
+        <StatusBadge />
       </button>
 
       {expanded && (
         <div className="border-t border-card-border/60 px-3 py-2.5 space-y-2.5">
-          {status === 'listed' ? (
-            <button
-              type="button"
-              onClick={() => onOpenStack(name)}
-              className="inline-flex items-center gap-1.5 text-xs text-brand hover:underline"
-            >
-              Open in sidebar
-              <ArrowUpRight className="h-3 w-3" strokeWidth={1.5} />
-            </button>
-          ) : (
-            <div className="space-y-2.5">
-              <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/5 px-2.5 py-2">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" strokeWidth={1.5} />
-                <div className="text-xs leading-relaxed text-stat-subtitle">
-                  Not in its own subfolder, so it will not show as a stack.{' '}
-                  {canCreate ? (
-                    'Move it into place below, or arrange it by hand and rescan.'
-                  ) : (
-                    <>
-                      Move it to <span className="break-all font-mono text-stat-value">{target}</span>, then
-                      rescan.
-                    </>
-                  )}
-                </div>
-              </div>
+          <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/5 px-2.5 py-2">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" strokeWidth={1.5} />
+            <div className="text-xs leading-relaxed text-stat-subtitle">
+              Not in its own subfolder, so it will not show as a stack.{' '}
+              {canCreate ? (
+                'Move it into place below, or arrange it by hand and rescan.'
+              ) : (
+                <>
+                  Move it to <span className="break-all font-mono text-stat-value">{target}</span>, then
+                  rescan.
+                </>
+              )}
+            </div>
+          </div>
 
-              {canCreate && (
-                <div className="space-y-2 rounded-md border border-card-border bg-card/60 px-2.5 py-2.5">
-                  <Input
-                    value={destName}
-                    onChange={(e) => {
-                      setDestName(e.target.value);
-                      setConfirming(false);
-                    }}
-                    placeholder={status === 'nested' ? name : 'Stack name (e.g., myapp)'}
-                    disabled={moving}
-                    aria-label="Destination stack name"
-                    className="font-mono text-xs"
-                  />
-                  <div className="break-all font-mono text-[10px] text-stat-subtitle">→ {target}</div>
-                  {status === 'loose-root' && (
-                    <p className="text-[10px] leading-relaxed text-stat-subtitle">
-                      Only this file moves. Files it references by a relative path (like a root .env) stay
-                      put.
-                    </p>
-                  )}
-                  {confirming ? (
-                    <div className="flex items-center gap-2">
-                      <span className="flex-1 text-[11px] text-stat-subtitle">Move it on disk?</span>
-                      <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={moving}>
-                        Cancel
-                      </Button>
-                      <Button size="sm" onClick={() => onMove(trimmedName)} disabled={moving || !nameValid}>
-                        {moving ? (
-                          <>
-                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" strokeWidth={1.5} />
-                            Moving
-                          </>
-                        ) : (
-                          'Confirm move'
-                        )}
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button size="sm" onClick={() => setConfirming(true)} disabled={moving || !nameValid}>
-                      <FolderInput className="mr-1.5 h-3.5 w-3.5" strokeWidth={1.5} />
-                      Move into place
-                    </Button>
-                  )}
+          {canCreate && (
+            <div className="space-y-2 rounded-md border border-card-border bg-card/60 px-2.5 py-2.5">
+              <Input
+                value={destName}
+                onChange={(e) => {
+                  setDestName(e.target.value);
+                  setConfirming(false);
+                }}
+                placeholder={status === 'nested' ? name : 'Stack name (e.g., myapp)'}
+                disabled={moving}
+                aria-label="Destination stack name"
+                className="font-mono text-xs"
+              />
+              <div className="break-all font-mono text-[10px] text-stat-subtitle">→ {target}</div>
+              {status === 'loose-root' && (
+                <p className="text-[10px] leading-relaxed text-stat-subtitle">
+                  Only this file moves. Files it references by a relative path (like a root .env) stay
+                  put.
+                </p>
+              )}
+              {confirming ? (
+                <div className="flex items-center gap-2">
+                  <span className="flex-1 text-[11px] text-stat-subtitle">Move it on disk?</span>
+                  <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={moving}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={() => onMove(trimmedName)} disabled={moving || !nameValid}>
+                    {moving ? (
+                      <>
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" strokeWidth={1.5} />
+                        Moving
+                      </>
+                    ) : (
+                      'Confirm move'
+                    )}
+                  </Button>
                 </div>
+              ) : (
+                <Button size="sm" onClick={() => setConfirming(true)} disabled={moving || !nameValid}>
+                  <FolderInput className="mr-1.5 h-3.5 w-3.5" strokeWidth={1.5} />
+                  Move into place
+                </Button>
               )}
             </div>
           )}
@@ -357,15 +340,7 @@ function CandidateCard({
   );
 }
 
-function StatusBadge({ status }: { status: ImportCandidate['status'] }) {
-  if (status === 'listed') {
-    return (
-      <span className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] uppercase tracking-[0.12em] text-success">
-        <CheckCircle2 className="h-3 w-3" strokeWidth={1.5} />
-        In sidebar
-      </span>
-    );
-  }
+function StatusBadge() {
   return (
     <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] text-warning">
       Needs move

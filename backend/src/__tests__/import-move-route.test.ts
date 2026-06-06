@@ -3,8 +3,9 @@
  *
  * The service-level filesystem behavior is covered in import-move.test.ts; this
  * suite exercises the route's own logic against the real app: the stack:create
- * permission gate, body validation, the candidate re-match (404 / already-listed),
- * the error-code-to-status mapping, and the success shape. Fixtures are written
+ * permission gate, body validation, the candidate re-match (404 for a location the
+ * scan does not surface, including one that is already a stack), the
+ * error-code-to-status mapping, and the success shape. Fixtures are written
  * into the per-file COMPOSE_DIR that setupTestDb wires the default node to.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -80,7 +81,9 @@ describe('POST /api/stacks/import/move', () => {
     expect(res.status).toBe(404);
   });
 
-  it('returns 400 when the candidate is already a listed stack', async () => {
+  it('returns 404 when the location is a stack already in the sidebar', async () => {
+    // A top-level subdir with a compose file is already a stack, so the scan does
+    // not surface it as a candidate; the location matches nothing and 404s.
     fs.mkdirSync(path.join(composeDir, 'already'), { recursive: true });
     fs.writeFileSync(path.join(composeDir, 'already', 'compose.yaml'), COMPOSE);
     try {
@@ -88,7 +91,7 @@ describe('POST /api/stacks/import/move', () => {
         .post('/api/stacks/import/move')
         .set('Cookie', adminCookie)
         .send({ location: 'already/compose.yaml', name: 'already2' });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(404);
     } finally {
       fs.rmSync(path.join(composeDir, 'already'), { recursive: true, force: true });
     }

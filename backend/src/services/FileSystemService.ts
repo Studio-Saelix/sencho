@@ -45,30 +45,28 @@ const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(IMPORT_COMPOSE_FILENAMES);
 const IMPORT_MAX_PREVIEW_BYTES = 1_048_576; // 1 MiB
 
 /**
- * A compose file discovered on disk during the guided import scan. `status`
- * records placement: a top-level subdirectory with a compose file is already a
- * stack (`listed`); a compose file loose at the compose-dir root (`loose-root`)
- * or one directory too deep (`nested`) will not auto-register and needs the user
- * to move it. `content` is null when the file was oversized or unreadable.
+ * A compose file discovered on disk during the guided import scan that is not yet
+ * a stack. `status` records why: a compose file loose at the compose-dir root
+ * (`loose-root`) or one directory too deep (`nested`) will not auto-register and
+ * needs the user to move it. A top-level subdirectory with a compose file is
+ * already a stack (it shows in the sidebar), so the scan skips it and it never
+ * appears here. `content` is null when the file was oversized or unreadable.
  */
 export interface ImportCandidateRaw {
   name: string;
   composeFile: string;
   location: string;
-  status: 'listed' | 'loose-root' | 'nested';
+  status: 'loose-root' | 'nested';
   content: string | null;
   oversized: boolean;
 }
 
 /**
- * An import candidate that can be moved into place: a loose-root or nested
- * compose file, never one already listed as a stack. Derived from
- * ImportCandidateRaw so the relationship stays compile-time linked and the
- * 'listed' exclusion survives any future status additions.
+ * The subset of an import candidate the move path needs: where the compose file
+ * sits and whether it is loose at the root or nested. The scan only surfaces
+ * these two placements, so any candidate it returns can be moved into place.
  */
-export type MovableImportCandidate = Pick<ImportCandidateRaw, 'location' | 'composeFile'> & {
-  status: Exclude<ImportCandidateRaw['status'], 'listed'>;
-};
+export type MovableImportCandidate = Pick<ImportCandidateRaw, 'location' | 'composeFile' | 'status'>;
 
 // Strips at most one trailing slash. The upstream validator
 // (isValidRelativeStackPath) rejects any '//' sequence, so a string reaching
@@ -506,10 +504,11 @@ export class FileSystemService {
   }
 
   /**
-   * Scan the compose directory for compose files to surface in the guided import
-   * flow: loose files at the root, top-level stack subdirectories, and compose
-   * files one directory too deep. Read-only. Bounded by `maxCandidates` and by a
-   * single level of nesting so a deep tree cannot make this walk unbounded.
+   * Scan the compose directory for compose files that are not yet stacks: loose
+   * files at the root and compose files one directory too deep. A top-level
+   * subdirectory with a compose file is already a stack, so it is skipped, not
+   * surfaced. Read-only. Bounded by `maxCandidates` and by a single level of
+   * nesting so a deep tree cannot make this walk unbounded.
    */
   async findImportCandidates(maxCandidates = 100): Promise<ImportCandidateRaw[]> {
     const candidates: ImportCandidateRaw[] = [];
@@ -540,8 +539,9 @@ export class FileSystemService {
       const dir = path.join(this.baseDir, entry.name);
       const topCompose = await this.firstComposeFilename(dir);
       if (topCompose) {
-        const loaded = await this.readComposeCandidate(path.join(dir, topCompose));
-        candidates.push({ name: entry.name, composeFile: topCompose, location: `${entry.name}/${topCompose}`, status: 'listed', ...loaded });
+        // A top-level subdirectory with a compose file is already a stack (it
+        // shows in the sidebar), so it is not an import candidate. Skip it and do
+        // not descend: any compose files deeper inside belong to this stack.
         continue;
       }
 
@@ -617,15 +617,34 @@ export class FileSystemService {
       // EEXIST (mapped to a 409 conflict) instead of merging into the existing
       // directory and letting the rename clobber a same-named file.
       await fsPromises.mkdir(destDir);
-      await fsPromises.rename(realSource, path.join(destDir, candidate.composeFile));
+      try {
+        await fsPromises.rename(realSource, path.join(destDir, candidate.composeFile));
+      } catch (error) {
+        // mkdir just created destDir empty; a failed rename would otherwise strand
+        // it, and a retry with the same name would then hit the access() precheck
+        // and 409 for a stack that was never created. Remove the empty dir we made
+        // (best-effort, only ever empty) and rethrow the original failure.
+        await fsPromises.rmdir(destDir).catch(() => undefined);
+        throw error;
+      }
       return;
     }
 
-    // nested: promote the whole child directory (<parent>/<child>) one level up.
-    const sourceDir = path.dirname(source);
-    this.assertWithinBase(sourceDir);
-    const realSourceDir = await this.realPathWithinBase(sourceDir);
-    await fsPromises.rename(realSourceDir, destDir);
+    if (candidate.status === 'nested') {
+      // Promote the whole child directory (<parent>/<child>) one level up so the
+      // stack keeps its .env and any sibling files.
+      const sourceDir = path.dirname(source);
+      this.assertWithinBase(sourceDir);
+      const realSourceDir = await this.realPathWithinBase(sourceDir);
+      await fsPromises.rename(realSourceDir, destDir);
+      return;
+    }
+
+    // Exhaustiveness guard: the union is loose-root | nested. A status added later
+    // fails to compile here until it is handled, rather than silently taking a move
+    // path that does not fit it.
+    const unhandled: never = candidate.status;
+    throw new Error(`Unhandled import candidate status: ${String(unhandled)}`);
   }
 
   /**

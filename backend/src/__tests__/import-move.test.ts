@@ -136,6 +136,32 @@ describe('FileSystemService.importCandidateIntoStack', () => {
     }
   });
 
+  it('rolls back the empty destination directory when the loose-root rename fails', async () => {
+    // mkdir succeeds, then the rename fails. The empty destDir it created must be
+    // removed so a retry with the same name is not blocked by a phantom
+    // "already exists" conflict on the access() precheck.
+    fs.writeFileSync(path.join(tmpRoot, 'docker-compose.yml'), COMPOSE);
+    const renameSpy = vi
+      .spyOn(fsPromises, 'rename')
+      .mockRejectedValueOnce(Object.assign(new Error('disk error'), { code: 'EIO' }));
+    try {
+      await expect(
+        FileSystemService.getInstance().importCandidateIntoStack(
+          { location: 'docker-compose.yml', composeFile: 'docker-compose.yml', status: 'loose-root' },
+          'rollback',
+        ),
+      ).rejects.toMatchObject({ code: 'EIO' });
+      // The empty directory the failed move created was cleaned up...
+      expect(fs.existsSync(path.join(tmpRoot, 'rollback'))).toBe(false);
+      // ...and the source loose file is left in place for a retry.
+      expect(fs.existsSync(path.join(tmpRoot, 'docker-compose.yml'))).toBe(true);
+    } finally {
+      renameSpy.mockRestore();
+      fs.rmSync(path.join(tmpRoot, 'docker-compose.yml'), { force: true });
+      fs.rmSync(path.join(tmpRoot, 'rollback'), { recursive: true, force: true });
+    }
+  });
+
   it('rejects an invalid destination name without touching the filesystem', async () => {
     fs.writeFileSync(path.join(tmpRoot, 'compose.yaml'), COMPOSE);
     try {
