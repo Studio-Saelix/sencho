@@ -331,7 +331,7 @@ stacksRouter.post('/import/move', async (req: Request, res: Response) => {
     if (code === 'ENOENT') {
       return res.status(404).json({ error: 'That compose file was not found. Rescan and try again.' });
     }
-    console.error('Failed to import compose file into stack:', error);
+    console.error('Failed to import compose file into stack:', sanitizeForLog((error as Error)?.message ?? String(error)));
     res.status(500).json({ error: 'Failed to move the compose file into place' });
   }
 });

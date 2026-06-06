@@ -593,7 +593,18 @@ export class FileSystemService {
     candidate: MovableImportCandidate,
     destName: string,
   ): Promise<void> {
-    const destDir = this.resolveStackDir(destName); // validates name + containment
+    // Validate the name, then re-establish containment inline at the sinks below
+    // (path.resolve against the safe base + a single startsWith). resolveStackDir
+    // applies the same check, but only the inline form is credited by static
+    // analysis, matching the read and backup paths in this file.
+    if (!isValidStackName(destName)) {
+      throw Object.assign(new Error('Invalid stack name'), { code: 'INVALID_STACK_NAME' });
+    }
+    const baseResolved = path.resolve(this.baseDir);
+    const destDir = path.resolve(baseResolved, destName);
+    if (!destDir.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Invalid stack name'), { code: 'INVALID_STACK_NAME' });
+    }
 
     // No overwrite: the destination stack must not already exist. ENOENT is the
     // expected happy path; any other access error (e.g. EACCES) should surface.
@@ -612,13 +623,20 @@ export class FileSystemService {
 
     if (candidate.status === 'loose-root') {
       const realSource = await this.realPathWithinBase(source);
+      // Build the relocated file path through the same inline containment barrier so
+      // the rename target is a credited safe path (candidate.composeFile is an
+      // allowlisted compose filename, but it is traced from the request).
+      const destComposePath = path.resolve(baseResolved, destName, candidate.composeFile);
+      if (!destComposePath.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Invalid path'), { code: 'INVALID_PATH' });
+      }
       // Non-recursive mkdir is the atomic no-overwrite guard: if the destination
       // appeared between the access() precheck above and here, this throws
       // EEXIST (mapped to a 409 conflict) instead of merging into the existing
       // directory and letting the rename clobber a same-named file.
       await fsPromises.mkdir(destDir);
       try {
-        await fsPromises.rename(realSource, path.join(destDir, candidate.composeFile));
+        await fsPromises.rename(realSource, destComposePath);
       } catch (error) {
         // mkdir just created destDir empty; a failed rename would otherwise strand
         // it, and a retry with the same name would then hit the access() precheck
