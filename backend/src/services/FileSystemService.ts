@@ -816,7 +816,17 @@ export class FileSystemService {
     const debug = isDebugEnabled();
     const t0 = Date.now();
     const stackDir = this.resolveStackDir(stackName);
-    const backupDir = this.getBackupDir(stackName);
+    // Canonical js/path-injection barrier at the backup read sink: resolve the
+    // backup dir against its root and confirm containment inline, mirroring
+    // backupStackFiles. stackName is already validated by resolveStackDir above;
+    // re-establishing containment at the readdir sink itself lets static
+    // analysis see the barrier, which it does not credit through the
+    // getBackupDir helper.
+    const backupRoot = path.resolve(getBackupBaseDir());
+    const backupDir = path.resolve(backupRoot, String(this.nodeId), stackName);
+    if (!backupDir.startsWith(backupRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes backup directory'), { code: 'INVALID_PATH' });
+    }
 
     const items = await fsPromises.readdir(backupDir);
     const backedUp = new Set(items);
