@@ -6,6 +6,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
+import fs from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -22,6 +24,13 @@ const FIELD_KEYS = [
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
+  // The dossier routes require the stack to exist on disk, so seed a compose
+  // file for every stack name these tests drive through the HTTP API.
+  const composeDir = process.env.COMPOSE_DIR as string;
+  for (const stack of ['web', 'upd', 'clr']) {
+    fs.mkdirSync(path.join(composeDir, stack), { recursive: true });
+    fs.writeFileSync(path.join(composeDir, stack, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+  }
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);
@@ -94,6 +103,19 @@ describe('PUT /api/stacks/:stackName/dossier', () => {
       .set('Cookie', adminCookie)
       .send({ static_ip: 'x'.repeat(300) });
     expect(res.status).toBe(400);
+  });
+});
+
+describe('Dossier requires the stack to exist', () => {
+  it('returns 404 for a GET on a stack that does not exist', async () => {
+    const res = await request(app).get('/api/stacks/ghost/dossier').set('Cookie', adminCookie);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for a PUT on a missing stack and creates no orphan row', async () => {
+    const res = await request(app).put('/api/stacks/ghost/dossier').set('Cookie', adminCookie).send({ purpose: 'orphan' });
+    expect(res.status).toBe(404);
+    expect(DatabaseService.getInstance().getStackDossier(1, 'ghost')).toBeUndefined();
   });
 });
 

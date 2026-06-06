@@ -63,9 +63,16 @@ describe('buildStackDossierMarkdown', () => {
     expect(md).toContain('- **Purpose:** line one line two');
   });
 
-  it('never emits a KEY=value env assignment, so no secret can leak', () => {
+  it('the generated facts never emit a .env assignment, only variable names and counts', () => {
     const md = buildStackDossierMarkdown(anatomy, fields({ custom_notes: 'see runbook' }));
+    expect(md).toContain('- Variables: 4');
+    expect(md).toContain('- Missing: `CLAIM_TOKEN`');
     expect(md).not.toMatch(/CLAIM_TOKEN\s*=/);
+  });
+
+  it('exports operator notes verbatim (user-authored content is not redacted)', () => {
+    const md = buildStackDossierMarkdown(anatomy, fields({ custom_notes: 'DB_PASSWORD=hunter2' }));
+    expect(md).toContain('DB_PASSWORD=hunter2');
   });
 
   it('is deterministic across distinct but equal inputs', () => {

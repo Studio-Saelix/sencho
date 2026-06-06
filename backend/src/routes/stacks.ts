@@ -671,9 +671,10 @@ const StackDossierUpdateSchema = z.object({
 });
 const emptyDossierFields = (): StackDossierFields => StackDossierUpdateSchema.parse({});
 
-stacksRouter.get('/:stackName/dossier', (req: Request, res: Response) => {
+stacksRouter.get('/:stackName/dossier', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
     const row = DatabaseService.getInstance().getStackDossier(req.nodeId, stackName);
     // No dossier yet: answer 200 with a blank document so the editor loads clean
@@ -685,9 +686,10 @@ stacksRouter.get('/:stackName/dossier', (req: Request, res: Response) => {
   }
 });
 
-stacksRouter.put('/:stackName/dossier', (req: Request, res: Response) => {
+stacksRouter.put('/:stackName/dossier', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   const parsed = StackDossierUpdateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' });

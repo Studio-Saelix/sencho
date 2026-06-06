@@ -50,7 +50,7 @@ Two actions in the tab header produce a single Markdown document combining the g
 - **copy md** copies it to the clipboard.
 - **download** saves it as `<stack>-dossier.md`.
 
-The export is clean Markdown that reads well in Git, Obsidian, BookStack, a README, or stored alongside a backup. Because the generated half only ever includes env variable names and counts, no secret value is ever exported.
+The export is clean Markdown that reads well in Git, Obsidian, BookStack, a README, or stored alongside a backup. The generated facts never include `.env` values, only variable names and counts. Your operator notes are exported exactly as you write them, so treat them like any document you might share and avoid pasting secrets you do not want in the export.
 
 ## Accessing the Dossier tab
 
