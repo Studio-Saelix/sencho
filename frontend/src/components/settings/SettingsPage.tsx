@@ -209,7 +209,8 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
             case 'recovery': return <RecoverySection />;
             case 'support': return <SupportSection />;
             case 'about': return <AboutSection />;
-            default: return null;
+            // Exhaustiveness guard: a new SectionId without a case above fails tsc here.
+            default: return assertExhaustiveSection(safeSection);
         }
     // Section components close over isPaid for tier-gated branches; handleDirtyChange is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -307,8 +308,19 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
     );
 }
 
+// Compile-time check that the section switch covers every SectionId. If the
+// switch is ever reached at runtime (it should not be, since safeSection is a
+// validated registry id), log the unhandled id and render nothing rather than crash.
+function assertExhaustiveSection(section: never): null {
+    console.error('Unhandled settings section', section);
+    return null;
+}
+
 function scopeLabel(item: SettingsItemMeta): string {
-    if (item.group === 'personal' || item.group === 'access') return 'operator';
+    // Personal sections (account, appearance) apply to the signed-in operator or
+    // this browser. Access sections (license, users, sso, api-tokens) are
+    // instance-global, so they read as global like every other non-node group.
+    if (item.group === 'personal') return 'operator';
     return 'global';
 }
 
