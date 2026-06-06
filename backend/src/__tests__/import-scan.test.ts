@@ -50,42 +50,48 @@ describe('FileSystemService.findImportCandidates', () => {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  it('classifies listed, loose-root, and nested compose files and ignores the rest', async () => {
+  it('surfaces loose-root and nested files and skips directories already a stack', async () => {
     const candidates = await FileSystemService.getInstance().findImportCandidates();
 
-    const listed = candidates.find((c) => c.status === 'listed');
-    expect(listed).toMatchObject({ name: 'immich', composeFile: 'compose.yaml', location: 'immich/compose.yaml' });
-    expect(listed?.content).toContain('services:');
+    // immich is a top-level subdir with a compose file, so it is already a stack
+    // (it shows in the sidebar) and is not offered as an import candidate.
+    expect(candidates.some((c) => c.name === 'immich')).toBe(false);
 
     const loose = candidates.find((c) => c.status === 'loose-root');
     expect(loose).toMatchObject({ name: '', composeFile: 'docker-compose.yml', location: 'docker-compose.yml' });
+    expect(loose?.content).toContain('services:');
 
     const nested = candidates.find((c) => c.status === 'nested');
     expect(nested).toMatchObject({ name: 'vault', composeFile: 'compose.yaml', location: 'apps/vault/compose.yaml' });
 
     // The directory with only a README produced no candidate.
     expect(candidates.some((c) => c.name === 'notes')).toBe(false);
-    expect(candidates).toHaveLength(3);
+    expect(candidates).toHaveLength(2);
   });
 
   it('flags oversized compose files instead of reading them', async () => {
-    const bigDir = path.join(tmpRoot, 'big');
+    // Nested under a wrapper with no top-level compose, so the scan descends and
+    // surfaces the inner file (a top-level dir with a compose file is a stack and
+    // would be skipped).
+    const bigDir = path.join(tmpRoot, 'oversized-wrap', 'big');
     fs.mkdirSync(bigDir, { recursive: true });
     fs.writeFileSync(path.join(bigDir, 'compose.yaml'), 'x'.repeat(1_048_577));
     try {
       const candidates = await FileSystemService.getInstance().findImportCandidates();
       const big = candidates.find((c) => c.name === 'big');
+      expect(big?.status).toBe('nested');
       expect(big?.oversized).toBe(true);
       expect(big?.content).toBeNull();
     } finally {
-      fs.rmSync(bigDir, { recursive: true, force: true });
+      fs.rmSync(path.join(tmpRoot, 'oversized-wrap'), { recursive: true, force: true });
     }
   });
 
   it('skips a non-regular file (a directory named compose.yaml) without reading it', async () => {
     // A directory named compose.yaml passes the access() probe; the isFile()
     // guard means it is reported as unreadable rather than read as content.
-    const weirdDir = path.join(tmpRoot, 'weird');
+    // Nested under a wrapper so it surfaces as a candidate at all.
+    const weirdDir = path.join(tmpRoot, 'weird-wrap', 'weird');
     fs.mkdirSync(path.join(weirdDir, 'compose.yaml'), { recursive: true });
     try {
       const candidates = await FileSystemService.getInstance().findImportCandidates();
@@ -94,7 +100,7 @@ describe('FileSystemService.findImportCandidates', () => {
       expect(weird?.content).toBeNull();
       expect(weird?.oversized).toBe(false);
     } finally {
-      fs.rmSync(weirdDir, { recursive: true, force: true });
+      fs.rmSync(path.join(tmpRoot, 'weird-wrap'), { recursive: true, force: true });
     }
   });
 
@@ -102,7 +108,8 @@ describe('FileSystemService.findImportCandidates', () => {
     // Sibling of the temp compose root, i.e. outside the base dir.
     const outside = path.join(path.dirname(tmpRoot), `sencho-outside-${Date.now()}.yaml`);
     fs.writeFileSync(outside, COMPOSE);
-    const escDir = path.join(tmpRoot, 'escape');
+    // Nested under a wrapper so the symlinked compose file surfaces as a candidate.
+    const escDir = path.join(tmpRoot, 'escape-wrap', 'escape');
     fs.mkdirSync(escDir, { recursive: true });
     let linked = true;
     try {
@@ -122,14 +129,15 @@ describe('FileSystemService.findImportCandidates', () => {
       expect(warnSpy).toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
-      fs.rmSync(escDir, { recursive: true, force: true });
+      fs.rmSync(path.join(tmpRoot, 'escape-wrap'), { recursive: true, force: true });
       fs.rmSync(outside, { force: true });
     }
   });
 
-  it('keeps the top-level listing and does not also descend into it', async () => {
-    // A directory that is already a stack and also has a compose file one level
-    // deeper yields only the listed entry, never the nested child.
+  it('skips a directory that is already a stack and does not descend into it', async () => {
+    // A directory that is already a stack (top-level compose) and also has a
+    // compose file one level deeper yields no candidates: it is skipped as an
+    // existing stack, and the scan does not descend into it to surface the child.
     const dir = path.join(tmpRoot, 'both');
     fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'compose.yaml'), COMPOSE);
@@ -137,15 +145,21 @@ describe('FileSystemService.findImportCandidates', () => {
     try {
       const candidates = await FileSystemService.getInstance().findImportCandidates();
       const fromBoth = candidates.filter((c) => c.location.startsWith('both/'));
-      expect(fromBoth).toHaveLength(1);
-      expect(fromBoth[0]).toMatchObject({ name: 'both', status: 'listed', location: 'both/compose.yaml' });
+      expect(fromBoth).toHaveLength(0);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it('truncates at maxCandidates', async () => {
-    const candidates = await FileSystemService.getInstance().findImportCandidates(2);
-    expect(candidates).toHaveLength(2);
+    // Base fixtures yield 2 candidates (loose-root + nested); add a third loose
+    // file so a cap of 2 actually truncates rather than coincidentally matching.
+    fs.writeFileSync(path.join(tmpRoot, 'compose.yaml'), COMPOSE);
+    try {
+      const candidates = await FileSystemService.getInstance().findImportCandidates(2);
+      expect(candidates).toHaveLength(2);
+    } finally {
+      fs.rmSync(path.join(tmpRoot, 'compose.yaml'), { force: true });
+    }
   });
 });

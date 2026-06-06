@@ -344,7 +344,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 <div role="tabpanel" id={panelId('import')} aria-labelledby={tabId('import')}>
                     <ImportStackPanel
                         onClose={() => onOpenChange(false)}
-                        onOpenStack={(name) => { void onStackCreated(name, activeNode?.id); }}
+                        onImported={() => { void onStacksChanged(); }}
                     />
                 </div>
             )}
