@@ -51,18 +51,20 @@ const VIEWS: View[] = [
 ];
 
 // Paint over genuinely non-deterministic content so it does not cause false
-// diffs. These elements occupy the same box, so a layout shift around them
-// still moves surrounding unmasked pixels and is caught.
+// diffs. Mask only the elements that actually churn between runs, NOT the
+// surrounding shell: the rest of the sidebar and the top bar stay unmasked so
+// the gate proves they are unchanged. Masked elements keep their box, so a
+// layout shift around them still moves unmasked pixels and is caught.
 function maskDynamic(page: Page) {
     return [
-        // Persistent chrome with live content (the sidebar activity ticker and
-        // live status dots, the top bar). Not touched by the mobile pass, and
-        // its "x ago" ticker churns every run.
-        page.locator('.bg-sidebar'),
+        // The sidebar activity ticker ("x ago" text + live dot) is the only
+        // churning part of the otherwise-static sidebar.
+        page.locator('[data-testid="activity-ticker"]'),
+        // The top-bar notification count changes as alerts arrive.
+        page.locator('[aria-label^="Notifications"]'),
         page.locator('svg'),                              // sparklines / gauges / charts
         page.locator('.xterm'),                           // live terminal (stack detail)
         page.locator('[data-testid="deploy-feedback-pill"]'),
-        page.locator('[data-testid="ticker-dot"]'),
     ];
 }
 
@@ -88,11 +90,14 @@ for (const width of WIDTHS) {
                 await expect(page).toHaveScreenshot(`${view.label}-${width}.png`, {
                     animations: 'disabled',
                     mask: maskDynamic(page),
-                    // Live numeric stats (CPU%, memory, latency) churn between runs.
-                    // This budget absorbs that few-hundred-pixel text churn while
-                    // staying far below any real desktop layout shift, which moves
-                    // tens of thousands of pixels. A base-class regression fails loudly.
-                    maxDiffPixels: 3000,
+                    // The only remaining churn is the in-content live stats that
+                    // can't be masked without hiding layout (dashboard gauge
+                    // values, fleet node CPU/MEM, per-container stats). This small
+                    // budget absorbs that text churn yet stays orders of magnitude
+                    // below any real desktop layout shift, so a base-class
+                    // regression still fails loudly. Run against a seeded /
+                    // frozen-data instance in CI to drop this to 0.
+                    maxDiffPixels: 1200,
                 });
             });
         }
