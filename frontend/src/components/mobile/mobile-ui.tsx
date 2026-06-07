@@ -6,13 +6,25 @@ import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import { Sparkline } from '@/components/ui/sparkline';
 
-type Tone = 'success' | 'warning' | 'destructive' | 'brand';
+export type Tone = 'success' | 'warning' | 'destructive' | 'brand';
 
+const TONE_TEXT: Record<Tone, string> = {
+  success: 'text-success',
+  warning: 'text-warning',
+  destructive: 'text-destructive',
+  brand: 'text-brand',
+};
 const TONE_BG: Record<Tone, string> = {
   success: 'bg-success',
   warning: 'bg-warning',
   destructive: 'bg-destructive',
   brand: 'bg-brand',
+};
+const TONE_MUTED: Record<Tone, string> = {
+  success: 'bg-success/[0.14]',
+  warning: 'bg-warning/[0.14]',
+  destructive: 'bg-destructive/[0.14]',
+  brand: 'bg-brand/[0.09]',
 };
 const TONE_VAR: Record<Tone, string> = {
   success: 'var(--success)',
@@ -78,8 +90,67 @@ export function MSparkline({ values, height = 30, color = 'var(--brand)', peak =
   );
 }
 
-// Status masthead for the bespoke mobile content leads (Home today; Fleet and
-// Schedules as they are re-skinned): 3px cyan left rail, kicker, serif-italic
+// State pill (online, degraded, etc.).
+export function StatePill({ tone = 'success', live = false, children }: { tone?: Tone; live?: boolean; children: ReactNode }) {
+  return (
+    <span
+      className={cn('inline-flex items-center gap-1.5 rounded-[7px] border px-[9px] py-[3px] font-mono text-[11px] tracking-[0.04em]', TONE_TEXT[tone], TONE_MUTED[tone])}
+      style={{ borderColor: `color-mix(in oklch, ${TONE_VAR[tone]} 30%, transparent)` }}
+    >
+      <StateDot tone={tone} size={6} pulse={live} glow={!live} />
+      {children}
+    </span>
+  );
+}
+
+// Mono button: primary (cyan) / outline / ghost. >=44px tall.
+export function MBtn({
+  kind = 'outline',
+  children,
+  full = false,
+  onClick,
+  disabled = false,
+  className,
+}: { kind?: 'primary' | 'outline' | 'ghost'; children: ReactNode; full?: boolean; onClick?: () => void; disabled?: boolean; className?: string }) {
+  const variant =
+    kind === 'primary' ? 'bg-brand text-brand-foreground shadow-btn-glow'
+      : kind === 'outline' ? 'bg-card text-stat-title border border-card-border border-t-card-border-top shadow-btn-glow'
+        : 'bg-transparent text-stat-subtitle';
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-transparent px-[14px] font-mono text-[11px] font-medium uppercase tracking-[0.12em] whitespace-nowrap transition-colors disabled:opacity-50',
+        full && 'w-full',
+        variant,
+        className,
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Back chevron chip for drill-in detail screens.
+export function BackChip({ label, onClick }: { label: string; onClick?: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex min-h-11 items-center gap-1 rounded-[7px] pl-0.5 pr-2 font-mono text-xs text-brand"
+    >
+      <svg width="8" height="13" viewBox="0 0 8 13" aria-hidden="true">
+        <path d="M6.5 1L1 6.5 6.5 12" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      {label}
+    </button>
+  );
+}
+
+// Status masthead for the bespoke mobile content leads (Home and Fleet today;
+// Schedules as it is re-skinned): 3px cyan left rail, kicker, serif-italic
 // state word, meta, optional right slot.
 export function Masthead({
   kicker,

@@ -42,13 +42,14 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
 import { MobileMoreMenu } from './MobileMoreMenu';
 import { MobileDashboard } from './mobile/MobileDashboard';
+import { MobileFleet } from './mobile/MobileFleet';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
 import type { SectionId } from './settings/types';
 
 // Content views that render a bespoke, masthead-led mobile screen instead of the
 // reflowed desktop workspace. For these the global TopBar is dropped on mobile
 // (each screen's masthead leads). The set grows as screens are re-skinned.
-const BESPOKE_MOBILE_VIEWS = new Set<string>(['dashboard']);
+const BESPOKE_MOBILE_VIEWS = new Set<string>(['dashboard', 'fleet']);
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -266,6 +267,31 @@ export default function EditorLayout() {
   const handleSelectStack = (file: string) => {
     if (isMobile) setPendingDetailStack(file);
     void stackActions.loadFile(file);
+  };
+
+  // Open a specific stack on a node (from Fleet): load it directly if that node
+  // is already active, else stash it and switch nodes (the node-switch effect
+  // loads the pending stack once the registry settles). Mobile shows the
+  // optimistic detail surface immediately.
+  const handleFleetNavigateToNode = (nodeId: number, stackName: string) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    if (isMobile) setPendingDetailStack(stackName);
+    if (activeNode?.id === nodeId) {
+      void stackActions.loadFile(stackName);
+    } else {
+      pendingStackLoadRef.current = stackName;
+      setActiveNode(node);
+    }
+  };
+
+  // "Inspect" a node from the mobile Fleet screen: switch to it and land on its
+  // stack list.
+  const handleInspectNode = (nodeId: number) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    if (activeNode?.id !== nodeId) setActiveNode(node);
+    goToMobileList();
   };
 
   // Hamburger / command-palette navigation is mobile-aware so it collapses the
@@ -587,17 +613,7 @@ export default function EditorLayout() {
               void stackActions.loadFile(sName);
             }}
             onHostConsoleClose={() => setActiveView(selectedFile ? 'editor' : 'dashboard')}
-            onFleetNavigateToNode={(nodeId, sName) => {
-              const node = nodes.find(n => n.id === nodeId);
-              if (node) {
-                if (activeNode?.id === nodeId) {
-                  void stackActions.loadFile(sName);
-                } else {
-                  pendingStackLoadRef.current = sName;
-                  setActiveNode(node);
-                }
-              }
-            }}
+            onFleetNavigateToNode={handleFleetNavigateToNode}
             filterNodeId={filterNodeId}
             onClearScheduledOpsFilter={() => setFilterNodeId(null)}
             schedulePrefill={schedulePrefill}
@@ -640,6 +656,14 @@ export default function EditorLayout() {
                 headerActions={mobileMastheadActions}
                 onNavigateToStack={handleSelectStack}
                 onViewAllStacks={goToMobileList}
+              />
+            );
+          case 'fleet':
+            return (
+              <MobileFleet
+                headerActions={mobileMastheadActions}
+                onInspectNode={handleInspectNode}
+                onInspectStack={handleFleetNavigateToNode}
               />
             );
           default:
