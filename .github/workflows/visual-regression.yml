@@ -1,0 +1,109 @@
+name: Visual Regression
+
+# Desktop-unchanged gate for the mobile work: snapshots the touched top-level
+# views at desktop widths and fails if a base layout class changed instead of a
+# mobile-only override being added.
+#
+# Baselines are platform-specific (Linux runner fonts differ from a developer's
+# OS), so they are generated here and committed, not produced locally. Seed or
+# refresh them by running this workflow manually with "update_baselines: true"
+# on the target branch (a feature branch, not a protected one); the compare job
+# then gates every PR into main against those committed baselines.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      update_baselines:
+        description: Regenerate and commit the visual baselines on this branch
+        type: boolean
+        default: false
+
+concurrency:
+  group: visual-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Gate PRs into main against the committed baselines. Until baselines exist
+  # (first adoption), the comparison is skipped with a warning rather than
+  # failing every PR; once they are committed the gate compares for real.
+  compare:
+    name: Compare against baselines
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Check for committed baselines
+        id: baselines
+        run: |
+          if compgen -G "e2e/*-snapshots/*.png" > /dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No visual baselines committed yet. Run this workflow manually with update_baselines=true on this branch to seed them, then this job will gate for real."
+          fi
+
+      - name: Start app & install Playwright
+        if: steps.baselines.outputs.present == 'true'
+        uses: ./.github/actions/start-app
+
+      - name: Compare visual snapshots
+        if: steps.baselines.outputs.present == 'true'
+        run: npx playwright test --project=visual
+
+      - name: Upload diff report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: visual-report
+          path: |
+            e2e/report/
+            test-results/
+            ci-logs/
+          retention-days: 7
+
+  # Manual: regenerate the baselines on the runner platform and commit them to
+  # the branch the workflow was dispatched on. Refuses to run on main: seed on a
+  # feature branch, then merge the baselines in through a PR.
+  seed:
+    name: Seed / refresh baselines
+    if: github.event_name == 'workflow_dispatch' && inputs.update_baselines
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Refuse to seed on main
+        if: github.ref_name == 'main'
+        run: |
+          echo "::error::Do not seed baselines on main. Dispatch this workflow on a feature branch, then merge the baselines in via a PR."
+          exit 1
+
+      - name: Checkout Code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Start app & install Playwright
+        uses: ./.github/actions/start-app
+
+      - name: Regenerate baselines
+        run: npx playwright test --project=visual --update-snapshots
+
+      - name: Commit baselines
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Baselines live under a path that is gitignored for local runs, so
+          # force-add the ones this run produced.
+          git add -f 'e2e/*-snapshots/'
+          if git diff --cached --quiet; then
+            echo "Baselines unchanged."
+          else
+            git commit -m "test(visual): refresh desktop visual-regression baselines"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
