@@ -94,6 +94,8 @@ describe('assembleStackDrift - status', () => {
     expect(report.hasComposeFile).toBe(false);
     expect(report.parseError).toContain('Could not parse');
     expect(report.findings).toEqual([]);
+    // hasContainers still reflects the runtime even when compose is unparseable.
+    expect(report.hasContainers).toBe(true);
   });
 });
 

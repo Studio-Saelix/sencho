@@ -115,11 +115,12 @@ export interface AssembleStackDriftInput {
  */
 export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftReport {
   const { stack, declared, containers, parseError } = input;
+  const hasContainers = containers.some((c) => RUNNING_STATES.has(c.state));
 
   // A parse failure means the declared model is untrustworthy: report drift
-  // rather than risk a false in-sync.
+  // rather than risk a false in-sync. hasContainers still reflects runtime.
   if (parseError) {
-    return { stack, status: 'drifted', hasComposeFile: false, hasContainers: false, findings: [], parseError };
+    return { stack, status: 'drifted', hasComposeFile: false, hasContainers, findings: [], parseError };
   }
 
   const runtimeByService = new Map<string, RuntimeService>();
@@ -134,7 +135,7 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
 
   // Nothing running: the stack is defined on disk but not deployed. One status
   // conveys this; per-service findings would just be noise.
-  if (runtimeByService.size === 0) {
+  if (!hasContainers) {
     return { stack, status: 'missing-runtime', hasComposeFile: true, hasContainers: false, findings: [] };
   }
 
@@ -204,7 +205,7 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
   }
 
   const status: StackDriftStatus = findings.length > 0 ? 'drifted' : 'in-sync';
-  return { stack, status, hasComposeFile: true, hasContainers: true, findings };
+  return { stack, status, hasComposeFile: true, hasContainers, findings };
 }
 
 /**
