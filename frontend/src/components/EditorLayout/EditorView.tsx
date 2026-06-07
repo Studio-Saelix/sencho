@@ -145,6 +145,9 @@ export interface EditorViewProps {
 
     // Mobile-only: back affordance in the detail header returns to the stack list.
     onMobileBack?: () => void;
+    // Mobile-only: notifications + more-menu cluster for the detail header right
+    // slot (the global TopBar is dropped on the full-screen detail surface).
+    headerActions?: React.ReactNode;
 }
 
 export function EditorView(props: EditorViewProps) {

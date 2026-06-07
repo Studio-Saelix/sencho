@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from './ui/button';
 import { Plus, Loader2, ChevronLeft } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
@@ -321,8 +321,9 @@ export default function EditorLayout() {
     }
   }, [stackActions, setActiveView, isMobile, navigateMobileAware]);
 
-  const renderEditor = () => (
+  const renderEditor = (headerActions?: ReactNode) => (
     <EditorView
+      headerActions={headerActions}
       stackName={stackName}
       isDarkMode={isDarkMode}
       containers={containers}
@@ -687,9 +688,9 @@ export default function EditorLayout() {
               {mobileSurface === 'content' && (bespokeContent ? renderMobileBespoke() : workspaceEl)}
               {mobileSurface === 'detail' && (
                 detailReady ? (
-                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderEditor()}</div>
+                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderEditor(mobileMastheadActions)}</div>
                 ) : (
-                  <MobileDetailLoading name={pendingDetailStack ?? ''} onBack={goToMobileList} />
+                  <MobileDetailLoading name={pendingDetailStack ?? ''} onBack={goToMobileList} headerActions={mobileMastheadActions} />
                 )
               )}
             </div>
@@ -730,7 +731,7 @@ export default function EditorLayout() {
 // Optimistic stack-detail placeholder shown on mobile the instant a row is
 // tapped, until loadFile resolves and the real EditorView mounts. Keeps the tap
 // feeling immediate on slow networks.
-function MobileDetailLoading({ name, onBack }: { name: string; onBack: () => void }) {
+function MobileDetailLoading({ name, onBack, headerActions }: { name: string; onBack: () => void; headerActions?: ReactNode }) {
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="flex items-center gap-1 border-b border-hairline px-3 py-2">
@@ -743,9 +744,10 @@ function MobileDetailLoading({ name, onBack }: { name: string; onBack: () => voi
           <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
           Stacks
         </button>
-        <span className="truncate font-display text-2xl italic text-stat-value">
+        <span className="min-w-0 flex-1 truncate font-display text-2xl italic text-stat-value">
           {name.replace(/\.(ya?ml)$/, '')}
         </span>
+        {headerActions ? <div className="shrink-0">{headerActions}</div> : null}
       </div>
       <div className="flex flex-1 items-center justify-center text-stat-subtitle">
         <Loader2 className="h-5 w-5 animate-spin" strokeWidth={1.5} />
