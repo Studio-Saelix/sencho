@@ -78,6 +78,13 @@ describe('computeStackHashes', () => {
     const v2 = computeStackHashes('services:\n  web:\n    image: nginx:1.28\n');
     expect(v2.renderedHash).not.toBe(v1.renderedHash);
   });
+
+  it('returns a null rendered hash when the model cannot be parsed', () => {
+    // No services => the local parser reports a parse error and cannot model it.
+    const h = computeStackHashes('not_a_compose_key: true\n');
+    expect(typeof h.sourceHash).toBe('string');
+    expect(h.renderedHash).toBeNull();
+  });
 });
 
 describe('setStackDossierHashes', () => {

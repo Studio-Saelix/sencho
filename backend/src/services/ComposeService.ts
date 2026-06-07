@@ -10,6 +10,7 @@ import { MeshService } from './MeshService';
 import { LogFormatter } from './LogFormatter';
 import { NodeRegistry } from './NodeRegistry';
 import { RegistryService } from './RegistryService';
+import { DriftLedgerService } from './DriftLedgerService';
 
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -359,6 +360,11 @@ export class ComposeService {
       }
       throw deployError;
     }
+    // Reached only on a successful deploy (the catch above always rethrows). Record
+    // the drift baseline here so every deploy path gets one, not just the manual
+    // route: bulk, Git-source, App Store, scheduler, and webhook deploys all funnel
+    // through this method. Internally guarded; awaited so it cannot race later work.
+    await DriftLedgerService.getInstance().recordBaseline(this.nodeId, stackName);
   }
 
   streamLogs(stackName: string, ws: WebSocket) {
@@ -554,6 +560,9 @@ export class ComposeService {
       }
       throw updateError;
     }
+    // Reached only on a successful update; re-baseline so temporal drift compares
+    // against what is now deployed (see deployStack for why this lives here).
+    await DriftLedgerService.getInstance().recordBaseline(this.nodeId, stackName);
   }
 
   public async downStack(stackName: string): Promise<void> {

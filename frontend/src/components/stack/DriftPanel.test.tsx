@@ -146,6 +146,13 @@ describe('DriftPanel', () => {
     expect(apiFetch).toHaveBeenLastCalledWith('/stacks/web/drift/recheck', { method: 'POST' });
   });
 
+  it('omits the temporal card when the report carries no temporal field (older node)', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'in-sync' }))); // no temporal field
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    expect(screen.queryByTestId('drift-temporal')).not.toBeInTheDocument();
+  });
+
   it('shows "no deploy baseline" when the report has no temporal baseline', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
       status: 'in-sync',

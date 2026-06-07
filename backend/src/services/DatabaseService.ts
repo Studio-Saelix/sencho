@@ -2155,7 +2155,7 @@ export class DatabaseService {
      * with empty operator notes if none exists; on conflict updates only the hash
      * columns so operator-authored notes and their updated_at are left untouched.
      */
-    public setStackDossierHashes(nodeId: number, stackName: string, sourceHash: string, renderedHash: string): void {
+    public setStackDossierHashes(nodeId: number, stackName: string, sourceHash: string, renderedHash: string | null): void {
         const now = Date.now();
         this.db.prepare(
             `INSERT INTO stack_dossiers (node_id, stack_name, source_hash, rendered_hash, created_at, updated_at)

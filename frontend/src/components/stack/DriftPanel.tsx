@@ -87,8 +87,8 @@ const FINDING_LABEL: Record<DriftFindingKind, string> = {
 };
 
 /** The temporal overlay: how the on-disk compose compares to the last deploy baseline. */
-function temporalMeta(temporal: DriftTemporal | undefined): { label: string; icon: LucideIcon; tone: string; line: string; key: string } {
-  if (!temporal || !temporal.hasBaseline) {
+function temporalMeta(temporal: DriftTemporal): { label: string; icon: LucideIcon; tone: string; line: string; key: string } {
+  if (!temporal.hasBaseline) {
     return {
       key: 'no-baseline',
       label: 'no deploy baseline',
@@ -219,7 +219,10 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
 
   const meta = report ? STATUS_META[report.status] : null;
   const StatusIcon = meta?.icon;
-  const temporal = report ? temporalMeta(report.temporal) : null;
+  // Only render the temporal card when the payload actually carries it. A report
+  // proxied from an older node without the ledger layer omits it; showing "no deploy
+  // baseline" there would be misleading, so the card is left out entirely.
+  const temporal = report?.temporal ? temporalMeta(report.temporal) : null;
   const TemporalIcon = temporal?.icon;
   const ledger = report?.ledger ?? [];
   const busy = loading || rechecking;
