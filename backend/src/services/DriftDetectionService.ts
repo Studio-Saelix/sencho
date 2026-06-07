@@ -221,7 +221,7 @@ export async function buildStackDriftReport(nodeId: number, stackName: string): 
   try {
     content = await fs.getStackContent(stackName);
   } catch (error) {
-    console.error('[Drift] Failed to read compose for stack %s:', sanitizeForLog(stackName), error);
+    console.error('[Drift] Failed to read compose for stack %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'read failed')));
     return {
       stack: stackName,
       status: 'drifted',
@@ -246,7 +246,7 @@ export async function buildStackDriftReport(nodeId: number, stackName: string): 
     // Docker is unreachable, so runtime drift cannot be assessed. The headline
     // failure is reachability; a separate parse error (if any) surfaces as
     // drifted once Docker is back, keeping the parseError-implies-drifted invariant.
-    console.error('[Drift] Docker snapshot failed for stack %s:', sanitizeForLog(stackName), error);
+    console.error('[Drift] Docker snapshot failed for stack %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'snapshot failed')));
     return {
       stack: stackName,
       status: 'unreachable',
