@@ -1,0 +1,57 @@
+---
+title: Drift Detection
+description: See at a glance whether a stack's running containers still match the Compose file on disk, with specific, actionable reasons when they have diverged.
+---
+
+The **Drift** tab in the right-hand **Anatomy** panel answers a single day-two question: does what is actually running still match the Compose file on disk? Sencho treats your Compose file as the source of truth, so it compares the file against the live Docker runtime and reports exactly where the two have diverged.
+
+The check is read-only. It tells you what changed and never alters a stack on its own, so you can trust the report before deciding what to do about it. The report is built fresh each time you open the tab, with no separate state to maintain.
+
+## Status
+
+Every stack resolves to one of four states, shown as a badge at the top of the tab:
+
+| Status | Meaning |
+|--------|---------|
+| **In sync** | The running containers match the Compose file: same services, images, and published ports. |
+| **Drifted** | Something running differs from the file. The specific reasons are listed below the badge. |
+| **Not running** | The stack is defined on disk but no containers are running. |
+| **Unreachable** | Docker could not be reached, so drift cannot be assessed right now. |
+
+## Findings
+
+When a stack is drifted, each reason is listed against the service it affects:
+
+| Finding | What it means |
+|---------|---------------|
+| **Service missing** | The Compose file declares a service, but it has no running container. |
+| **Undeclared** | A container is running for the stack, but no matching service exists in the Compose file. |
+| **Image** | A running container uses a different image than the Compose file declares. The expected and running values are shown side by side. |
+| **Ports** | The published ports of a service differ from what the Compose file declares. |
+
+Image references are compared after normalizing the implicit Docker Hub registry and a missing tag to `:latest`, so `nginx` and `docker.io/library/nginx:latest` are treated as the same image. A running container pinned to a digest is compared against the declared tag as written.
+
+## Accessing the Drift tab
+
+1. Click any stack in the left sidebar to open it.
+2. Switch to the **Drift** tab in the Anatomy panel header.
+3. Read the status badge and any findings. Use **re-check** to run the comparison again after you deploy or change something.
+
+On a phone, the same report appears under the **Compose** section of the stack detail.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="A stack I deliberately stopped shows as 'Not running'">
+    That is expected. Drift compares the file on disk against what is actually running, so a stack with no running containers reports **Not running** even when you stopped it on purpose. Deploy it to return it to **In sync**.
+  </Accordion>
+  <Accordion title="The image finding flags a stack I just updated">
+    Open **re-check** after the deploy finishes. During a rolling update, replicas can briefly run different images, and the report is a snapshot of that moment. Once every container is on the declared image, the finding clears.
+  </Accordion>
+  <Accordion title="A stack that uses a published port range shows a ports finding">
+    A Compose port range such as `8000-8002:8000-8002` is compared conservatively and can read as a ports difference even when the deployment is correct. Sencho errs toward surfacing a possible difference rather than hiding one. The status reflects this as drift you can confirm against the file.
+  </Accordion>
+  <Accordion title="The status says 'Unreachable'">
+    Sencho could not reach Docker on the active node, so it cannot compare the runtime. Confirm the Docker engine is running and the node is online, then use **re-check**. Other stacks on the same node will show the same state until Docker responds.
+  </Accordion>
+</AccordionGroup>
