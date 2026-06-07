@@ -46,12 +46,8 @@ import { MobileFleet } from './mobile/MobileFleet';
 import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
 import type { SectionId } from './settings/types';
-
-// Content views that render a bespoke, masthead-led mobile screen instead of the
-// reflowed desktop workspace. For these the global TopBar is dropped on mobile
-// (each screen's masthead leads). The set grows as screens are re-skinned.
-const BESPOKE_MOBILE_VIEWS = new Set<string>(['dashboard', 'fleet', 'scheduled-ops', 'settings']);
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();

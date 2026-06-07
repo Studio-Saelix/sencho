@@ -31,11 +31,24 @@ export default defineConfig({
 
   projects: [
     {
-      // Default project: skips the manual screenshot capture spec so
-      // `npx playwright test` does not regenerate docs images on every run.
+      // Default project (what CI runs via --project=chromium). Skips the manual
+      // screenshot capture spec and the visual-regression gate: the gate needs
+      // committed, platform-matched baselines and runs in its own job, so it
+      // must not fail the functional E2E run on a missing snapshot.
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
-      testIgnore: ['**/screenshots.spec.ts'],
+      testIgnore: ['**/screenshots.spec.ts', '**/desktop-visual-regression.spec.ts'],
+    },
+    {
+      // Desktop-unchanged visual gate. Run explicitly (and in the dedicated
+      // Visual Regression workflow):
+      //   npx playwright test --project=visual
+      // Baselines are platform-specific; regenerate with --update-snapshots in
+      // the same environment you compare in (locally, or the workflow's
+      // Playwright container for the CI baselines).
+      name: 'visual',
+      use: { ...devices['Desktop Chrome'] },
+      testMatch: ['**/desktop-visual-regression.spec.ts'],
     },
     {
       // Manual-only project for capturing docs/images/. Run explicitly:
