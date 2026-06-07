@@ -204,7 +204,7 @@ export function ToastContainer() {
   const visible = toasts.slice(-MAX_VISIBLE);
 
   return createPortal(
-    <div className="pointer-events-none fixed bottom-4 right-4 z-[200] flex w-full max-w-sm flex-col gap-2 p-4">
+    <div className="pointer-events-none fixed bottom-4 right-4 z-[200] flex w-full max-w-sm flex-col gap-2 p-4 max-md:bottom-[calc(var(--sn-mobile-tabbar-h)_+_env(safe-area-inset-bottom)_+_0.75rem)]">
       <AnimatePresence mode="popLayout">
         {visible.map((t) => (
           <ToastItem key={t.id} {...t} />

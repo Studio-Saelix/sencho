@@ -34,11 +34,14 @@ interface ModalProps {
   children: React.ReactNode;
   size?: ModalSize;
   className?: string;
-  /** Pass through to DialogContent — set to false when the modal renders its own close affordance. */
+  /** Pass through to DialogContent. Set to false when the modal renders its own close affordance. */
   showClose?: boolean;
+  /** Fill the viewport below md (for large overlays like logs / shell). Opt-in so
+   *  small confirm dialogs keep their compact centered size on a phone. */
+  mobileFullScreen?: boolean;
 }
 
-export function Modal({ open, onOpenChange, children, size = 'md', className, showClose }: ModalProps) {
+export function Modal({ open, onOpenChange, children, size = 'md', className, showClose, mobileFullScreen }: ModalProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -47,6 +50,7 @@ export function Modal({ open, onOpenChange, children, size = 'md', className, sh
           'p-0 gap-0 overflow-hidden grid-cols-1',
           SIZE_CLASS[size],
           className,
+          mobileFullScreen && 'max-md:h-[100dvh] max-md:w-screen max-md:max-w-none max-md:rounded-none max-md:border-0',
         )}
       >
         {children}

@@ -126,9 +126,10 @@ export function StackRow(props: StackRowProps) {
         ) : null}
       </span>
 
-      {/* Kebab — always rightmost */}
+      {/* Kebab: always rightmost. Hover-revealed on desktop; always visible on
+          touch viewports where there is no hover. */}
       <div
-        className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+        className="opacity-0 group-hover:opacity-100 max-md:opacity-100 transition-opacity flex-shrink-0"
         onClick={(e) => e.stopPropagation()}
       >
         {kebabSlot}

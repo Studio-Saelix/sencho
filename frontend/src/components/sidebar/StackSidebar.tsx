@@ -59,8 +59,12 @@ export function StackSidebar(props: StackSidebarProps) {
   }, []);
 
   return (
-    <div className="w-64 border-r border-glass-border bg-sidebar backdrop-blur-md flex flex-col">
-      <SidebarBrand isDarkMode={isDarkMode} />
+    <div className="w-64 max-md:w-full max-md:flex-1 max-md:min-h-0 max-md:border-r-0 border-r border-glass-border bg-sidebar backdrop-blur-md flex flex-col">
+      {/* The TopBar provides the global chrome on mobile, so the in-sidebar
+          brand row is redundant there and hidden to save vertical space. */}
+      <div className="max-md:hidden">
+        <SidebarBrand isDarkMode={isDarkMode} />
+      </div>
       <div className="px-4 pt-2 pb-0">{nodeSwitcherSlot}</div>
       {canCreate && createStackSlot !== null && (
         <SidebarActions

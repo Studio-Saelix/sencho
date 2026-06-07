@@ -214,7 +214,7 @@ export default function BashExecModal({ isOpen, onClose, containerId, containerN
   };
 
   return (
-    <Modal open={isOpen} onOpenChange={handleClose} className="max-w-4xl h-[600px] flex flex-col">
+    <Modal open={isOpen} onOpenChange={handleClose} mobileFullScreen className="max-w-4xl h-[600px] flex flex-col">
       <ModalHeader
         kicker={`BASH · ${containerName.toUpperCase()}`}
         title={

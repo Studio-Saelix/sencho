@@ -40,7 +40,7 @@ function DeployFeedbackPillBase({ isVisible, onExpand }: DeployFeedbackPillProps
       data-testid="deploy-feedback-pill"
       onClick={onExpand}
       onKeyDown={handleKeyDown}
-      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[280px] bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] border border-glass-border rounded-full px-3 py-1.5 shadow-lg cursor-pointer flex items-center gap-2"
+      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[280px] bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] border border-glass-border rounded-full px-3 py-1.5 shadow-lg cursor-pointer flex items-center gap-2 max-md:bottom-[calc(var(--sn-mobile-tabbar-h)_+_env(safe-area-inset-bottom)_+_0.75rem)]"
     >
       <span className={dotClass} />
       <span className={cn(textClass, 'flex items-center gap-1 min-w-0 flex-1 overflow-hidden')}>
