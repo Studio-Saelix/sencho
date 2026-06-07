@@ -41,6 +41,7 @@ import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import type { SectionId } from './settings/types';
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -201,22 +202,6 @@ export default function EditorLayout() {
     nextAutoUpdateRunAt,
   });
 
-  const handleActivityAction = useCallback((action: SidebarActivityAction) => {
-    switch (action.kind) {
-      case 'open-stack-notification':
-        stackActions.navigateToNotification(action.summary.notif);
-        return;
-      case 'open-auto-updates':
-        setActiveView('auto-updates');
-        return;
-      case 'open-activity':
-        setActiveView('global-observability');
-        return;
-      case 'noop':
-        return;
-    }
-  }, [stackActions, setActiveView]);
-
   const loadingAction = selectedFile ? (stackActionMap[selectedFile] ?? null) : null;
   const stackName = selectedFile || '';
 
@@ -260,7 +245,15 @@ export default function EditorLayout() {
 
   const goToMobileList = () => leaveToMobileSurface('list');
   const navigateMobileAware = (view: string) => leaveToMobileSurface('content', () => handleNavigate(view));
-  const openSettingsMobileAware = () => leaveToMobileSurface('content', () => handleOpenSettings());
+  const openSettingsMobileAware = (section?: SectionId) =>
+    leaveToMobileSurface('content', () => handleOpenSettings(section));
+
+  // Settings navigation from outside the bottom bar (profile menu, node
+  // switcher, dashboard config links). On mobile it flips to the content
+  // surface so the section is actually shown instead of leaving the user on
+  // the stack list; on desktop it is the plain open.
+  const openSettings = (section?: SectionId) =>
+    (isMobile ? openSettingsMobileAware(section) : handleOpenSettings(section));
 
   // Tapping a stack row on mobile flips to the detail surface immediately.
   const handleSelectStack = (file: string) => {
@@ -271,6 +264,27 @@ export default function EditorLayout() {
   // Hamburger / command-palette navigation is mobile-aware so it collapses the
   // current surface and honors the unsaved-changes guard; desktop is untouched.
   const navHandler = isMobile ? navigateMobileAware : handleNavigate;
+
+  // Sidebar activity actions navigate to top-level views. On mobile they must
+  // flip the surface to content (otherwise the user stays on the stack list);
+  // on desktop they set the view directly as before.
+  const handleActivityAction = useCallback((action: SidebarActivityAction) => {
+    switch (action.kind) {
+      case 'open-stack-notification':
+        stackActions.navigateToNotification(action.summary.notif);
+        return;
+      case 'open-auto-updates':
+        if (isMobile) navigateMobileAware('auto-updates');
+        else setActiveView('auto-updates');
+        return;
+      case 'open-activity':
+        if (isMobile) navigateMobileAware('global-observability');
+        else setActiveView('global-observability');
+        return;
+      case 'noop':
+        return;
+    }
+  }, [stackActions, setActiveView, isMobile, navigateMobileAware]);
 
   const renderEditor = () => (
     <EditorView
@@ -462,7 +476,7 @@ export default function EditorLayout() {
           isDarkMode={isDarkMode}
           nodeSwitcherSlot={
             <NodeSwitcher
-              onManageNodes={() => handleOpenSettings('nodes')}
+              onManageNodes={() => openSettings('nodes')}
             />
           }
           createStackSlot={createStackSlot}
@@ -532,7 +546,7 @@ export default function EditorLayout() {
           }
           userMenu={
             <UserProfileDropdown
-              onOpenSettings={() => handleOpenSettings('account')}
+              onOpenSettings={() => openSettings('account')}
             />
           }
         />
@@ -568,7 +582,7 @@ export default function EditorLayout() {
             onPrefillConsumed={handlePrefillConsumed}
             notifications={notifications}
             onNavigateToStack={(stackFile) => { void stackActions.loadFile(stackFile); }}
-            onOpenSettingsSection={(section) => handleOpenSettings(section)}
+            onOpenSettingsSection={(section) => openSettings(section)}
             onClearNotifications={clearAllNotifications}
             renderEditor={renderEditor}
           />
