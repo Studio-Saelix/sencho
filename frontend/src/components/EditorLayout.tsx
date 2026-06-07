@@ -40,8 +40,15 @@ import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-e
 import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
+import { MobileMoreMenu } from './MobileMoreMenu';
+import { MobileDashboard } from './mobile/MobileDashboard';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
 import type { SectionId } from './settings/types';
+
+// Content views that render a bespoke, masthead-led mobile screen instead of the
+// reflowed desktop workspace. For these the global TopBar is dropped on mobile
+// (each screen's masthead leads). The set grows as screens are re-skinned.
+const BESPOKE_MOBILE_VIEWS = new Set<string>(['dashboard']);
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -525,6 +532,19 @@ export default function EditorLayout() {
         />
       );
 
+      const notificationsEl = (
+        <NotificationPanel
+          notifications={notifications}
+          nodes={nodes}
+          onMarkAllRead={markAllRead}
+          onClearAll={clearAllNotifications}
+          onDelete={deleteNotification}
+          onNavigate={stackActions.navigateToNotification}
+        />
+      );
+      const themeSwitchEl = <ThemeQuickSwitch />;
+      const userMenuEl = <UserProfileDropdown onOpenSettings={() => openSettings('account')} />;
+
       const topBarEl = (
         <TopBar
           activeView={activeView}
@@ -533,23 +553,25 @@ export default function EditorLayout() {
           mobileNavOpen={mobileNavOpen}
           onMobileNavOpenChange={setMobileNavOpen}
           search={<GlobalCommandPaletteTrigger />}
-          themeSwitch={<ThemeQuickSwitch />}
-          notifications={
-            <NotificationPanel
-              notifications={notifications}
-              nodes={nodes}
-              onMarkAllRead={markAllRead}
-              onClearAll={clearAllNotifications}
-              onDelete={deleteNotification}
-              onNavigate={stackActions.navigateToNotification}
-            />
-          }
-          userMenu={
-            <UserProfileDropdown
-              onOpenSettings={() => openSettings('account')}
-            />
-          }
+          themeSwitch={themeSwitchEl}
+          notifications={notificationsEl}
+          userMenu={userMenuEl}
         />
+      );
+
+      // On the bespoke mobile screens the TopBar is dropped, so notifications and
+      // the secondary-destinations menu are rehomed into each screen's masthead
+      // right slot.
+      const mobileMastheadActions = (
+        <div className="flex items-center gap-0.5">
+          {notificationsEl}
+          <MobileMoreMenu
+            navItems={navItems}
+            activeView={activeView}
+            onNavigate={navigateMobileAware}
+            footer={<>{themeSwitchEl}{userMenuEl}</>}
+          />
+        </div>
       );
 
       const workspaceEl = (
@@ -605,14 +627,34 @@ export default function EditorLayout() {
         />
       );
 
+      // Bespoke, masthead-led mobile screens. When showing one, the TopBar is
+      // dropped and the screen renders its own masthead (with notifications +
+      // more-menu rehomed into the right slot).
+      const bespokeContent = mobileSurface === 'content' && BESPOKE_MOBILE_VIEWS.has(activeView);
+      const renderMobileBespoke = () => {
+        switch (activeView) {
+          case 'dashboard':
+            return (
+              <MobileDashboard
+                notifications={notifications}
+                headerActions={mobileMastheadActions}
+                onNavigateToStack={handleSelectStack}
+                onViewAllStacks={goToMobileList}
+              />
+            );
+          default:
+            return workspaceEl;
+        }
+      };
+
       if (isMobile) {
         return (
           <div className="flex h-screen w-screen flex-col overflow-hidden app-canvas text-foreground">
             {commandPaletteEl}
-            {mobileSurface !== 'detail' && topBarEl}
+            {mobileSurface !== 'detail' && !bespokeContent && topBarEl}
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
               {mobileSurface === 'list' && sidebarEl}
-              {mobileSurface === 'content' && workspaceEl}
+              {mobileSurface === 'content' && (bespokeContent ? renderMobileBespoke() : workspaceEl)}
               {mobileSurface === 'detail' && (
                 detailReady ? (
                   <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderEditor()}</div>
@@ -626,6 +668,7 @@ export default function EditorLayout() {
               activeView={activeView}
               mobileView={mobileView}
               detailOpen={detailOpen}
+              onHome={() => navigateMobileAware('dashboard')}
               onStacks={goToMobileList}
               onNavigate={navigateMobileAware}
               onSettings={openSettingsMobileAware}
