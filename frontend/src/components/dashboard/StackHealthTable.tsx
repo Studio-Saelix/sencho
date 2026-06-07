@@ -15,7 +15,10 @@ interface StackHealthTableProps {
 const PAGE_SIZE = 8;
 const WARN = 80;
 const CRIT = 90;
-const GRID_TEMPLATE = 'grid-cols-[14px_minmax(0,1fr)_minmax(0,120px)_52px_52px_72px_110px_16px]';
+// Shared by the header and data rows so their columns stay aligned. The
+// `max-md:min-w` keeps both at the same width below md, where the card scrolls
+// horizontally; desktop is unaffected by the `max-md:` prefix.
+const GRID_TEMPLATE = 'grid-cols-[14px_minmax(0,1fr)_minmax(0,120px)_52px_52px_72px_110px_16px] max-md:min-w-[600px]';
 
 const formatMemory = (mb: number): string => {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
@@ -148,7 +151,7 @@ export function StackHealthTable({
   }
 
   return (
-    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel max-md:overflow-x-auto">
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="flex items-baseline gap-3">
           <h2 className="font-display italic text-xl leading-none tracking-tight text-stat-value">
