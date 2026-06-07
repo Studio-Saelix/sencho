@@ -103,6 +103,7 @@
                   "features/editor",
                   "features/stack-file-explorer",
                   "features/stack-activity",
+                  "features/stack-dossier",
                   "features/stack-labels",
                   "features/sidebar"
                 ]

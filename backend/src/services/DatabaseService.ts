@@ -65,6 +65,30 @@ export interface AutoHealHistoryEntry {
     timestamp: number;
 }
 
+/** Operator-authored fields of a stack dossier (everything the user types). */
+export interface StackDossierFields {
+    purpose: string;
+    owner: string;
+    access_urls: string;
+    static_ip: string;
+    vlan: string;
+    firewall_notes: string;
+    reverse_proxy_notes: string;
+    backup_notes: string;
+    upgrade_notes: string;
+    recovery_notes: string;
+    custom_notes: string;
+}
+
+/** A persisted stack dossier row: operator fields plus identity and timestamps. */
+export interface StackDossier extends StackDossierFields {
+    id?: number;
+    node_id: number;
+    stack_name: string;
+    created_at: number;
+    updated_at: number;
+}
+
 export interface Node {
     id: number;
     name: string;
@@ -1131,6 +1155,26 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_auto_heal_history_policy_ts
         ON auto_heal_history(policy_id, timestamp DESC);
 
+      CREATE TABLE IF NOT EXISTS stack_dossiers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        purpose TEXT NOT NULL DEFAULT '',
+        owner TEXT NOT NULL DEFAULT '',
+        access_urls TEXT NOT NULL DEFAULT '',
+        static_ip TEXT NOT NULL DEFAULT '',
+        vlan TEXT NOT NULL DEFAULT '',
+        firewall_notes TEXT NOT NULL DEFAULT '',
+        reverse_proxy_notes TEXT NOT NULL DEFAULT '',
+        backup_notes TEXT NOT NULL DEFAULT '',
+        upgrade_notes TEXT NOT NULL DEFAULT '',
+        recovery_notes TEXT NOT NULL DEFAULT '',
+        custom_notes TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(node_id, stack_name)
+      );
+
       CREATE TABLE IF NOT EXISTS secrets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
@@ -2014,6 +2058,57 @@ export class DatabaseService {
         this.db.prepare('UPDATE auto_heal_policies SET enabled = ?, updated_at = ? WHERE id = ?').run(enabled ? 1 : 0, Date.now(), policyId);
     }
 
+    // --- Stack Dossiers ---
+
+    public getStackDossier(nodeId: number, stackName: string): StackDossier | undefined {
+        return this.db.prepare('SELECT * FROM stack_dossiers WHERE node_id = ? AND stack_name = ?').get(nodeId, stackName) as StackDossier | undefined;
+    }
+
+    public upsertStackDossier(nodeId: number, stackName: string, fields: StackDossierFields): StackDossier {
+        const now = Date.now();
+        this.db.prepare(
+            `INSERT INTO stack_dossiers (
+                node_id, stack_name, purpose, owner, access_urls, static_ip, vlan,
+                firewall_notes, reverse_proxy_notes, backup_notes, upgrade_notes,
+                recovery_notes, custom_notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(node_id, stack_name) DO UPDATE SET
+                purpose = excluded.purpose,
+                owner = excluded.owner,
+                access_urls = excluded.access_urls,
+                static_ip = excluded.static_ip,
+                vlan = excluded.vlan,
+                firewall_notes = excluded.firewall_notes,
+                reverse_proxy_notes = excluded.reverse_proxy_notes,
+                backup_notes = excluded.backup_notes,
+                upgrade_notes = excluded.upgrade_notes,
+                recovery_notes = excluded.recovery_notes,
+                custom_notes = excluded.custom_notes,
+                updated_at = excluded.updated_at`
+        ).run(
+            nodeId,
+            stackName,
+            fields.purpose,
+            fields.owner,
+            fields.access_urls,
+            fields.static_ip,
+            fields.vlan,
+            fields.firewall_notes,
+            fields.reverse_proxy_notes,
+            fields.backup_notes,
+            fields.upgrade_notes,
+            fields.recovery_notes,
+            fields.custom_notes,
+            now,
+            now
+        );
+        return this.getStackDossier(nodeId, stackName) as StackDossier;
+    }
+
+    public deleteStackDossier(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM stack_dossiers WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    }
+
     // --- Notification History ---
 
     private mapNotificationRow(row: any): NotificationHistory {
@@ -2350,6 +2445,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_label_assignments WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM stack_dossiers WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
