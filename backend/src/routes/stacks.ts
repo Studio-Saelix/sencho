@@ -12,6 +12,7 @@ import { CacheService } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { buildStackDriftReport } from '../services/DriftDetectionService';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
@@ -1005,6 +1006,18 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
   } catch (error) {
     console.error('[Stacks] Failed to fetch services:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to fetch services' });
+  }
+});
+
+stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const report = await buildStackDriftReport(req.nodeId, stackName);
+    res.json(report);
+  } catch (error) {
+    console.error('[Stacks] Failed to build drift report for %s:', sanitizeForLog(stackName), error);
+    res.status(500).json({ error: 'Failed to build drift report' });
   }
 });
 

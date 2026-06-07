@@ -104,6 +104,7 @@
                   "features/stack-file-explorer",
                   "features/stack-activity",
                   "features/stack-dossier",
+                  "features/stack-drift",
                   "features/stack-labels",
                   "features/sidebar"
                 ]

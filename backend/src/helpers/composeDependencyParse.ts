@@ -22,6 +22,8 @@ export interface DeclaredService {
   /** Named-volume source keys only (bind mounts and anonymous volumes excluded). */
   volumes: string[];
   ports: DeclaredPort[];
+  /** Service `image:` reference as declared, or undefined for build-only services. */
+  image?: string;
 }
 
 /** A top-level networks:/volumes: entry. */
@@ -188,6 +190,7 @@ export function parseComposeDependencies(content: string): DeclaredCompose {
       networks: collectKeys(svc.networks),
       volumes,
       ports,
+      image: asString(svc.image),
     });
   }
 
