@@ -59,6 +59,7 @@ CLAUDE.md
 # Design system (local-only authoritative reference)
 frontend/DESIGN.md
 .design-bundle/
+docs/design/
 
 # Local-only projects (separate repos)
 demo-video/

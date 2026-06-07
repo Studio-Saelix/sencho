@@ -54,6 +54,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         setCopiedDigest,
         requestDeleteStack,
         onMobileBack,
+        headerActions,
     } = props;
 
     const [segment, setSegment] = useState<Segment>('logs');
@@ -67,15 +68,18 @@ export function MobileStackDetail(props: EditorViewProps) {
             <div className="flex h-full min-h-0 flex-col">
                 {/* Detail header: back to list + identity + action bar */}
                 <div className="shrink-0 border-b border-hairline px-4 pb-3 pt-3">
-                    <button
-                        type="button"
-                        onClick={onMobileBack}
-                        aria-label="Back to stacks"
-                        className="mb-1 inline-flex min-h-11 items-center gap-1 pr-3 font-mono text-xs text-brand"
-                    >
-                        <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
-                        Stacks
-                    </button>
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                        <button
+                            type="button"
+                            onClick={onMobileBack}
+                            aria-label="Back to stacks"
+                            className="inline-flex min-h-11 items-center gap-1 pr-3 font-mono text-xs text-brand"
+                        >
+                            <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
+                            Stacks
+                        </button>
+                        {headerActions ? <div className="shrink-0">{headerActions}</div> : null}
+                    </div>
                     <StackIdentityHeader
                         stackName={stackName}
                         activeNode={activeNode}

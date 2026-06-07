@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from './ui/button';
 import { Plus, Loader2, ChevronLeft } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
@@ -40,8 +40,18 @@ import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-e
 import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
+import { MobileMoreMenu } from './MobileMoreMenu';
+import { MobileDashboard } from './mobile/MobileDashboard';
+import { MobileFleet } from './mobile/MobileFleet';
+import { MobileSchedules } from './mobile/MobileSchedules';
+import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
 import type { SectionId } from './settings/types';
+
+// Content views that render a bespoke, masthead-led mobile screen instead of the
+// reflowed desktop workspace. For these the global TopBar is dropped on mobile
+// (each screen's masthead leads). The set grows as screens are re-skinned.
+const BESPOKE_MOBILE_VIEWS = new Set<string>(['dashboard', 'fleet', 'scheduled-ops', 'settings']);
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -261,6 +271,31 @@ export default function EditorLayout() {
     void stackActions.loadFile(file);
   };
 
+  // Open a specific stack on a node (from Fleet): load it directly if that node
+  // is already active, else stash it and switch nodes (the node-switch effect
+  // loads the pending stack once the registry settles). Mobile shows the
+  // optimistic detail surface immediately.
+  const handleFleetNavigateToNode = (nodeId: number, stackName: string) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    if (isMobile) setPendingDetailStack(stackName);
+    if (activeNode?.id === nodeId) {
+      void stackActions.loadFile(stackName);
+    } else {
+      pendingStackLoadRef.current = stackName;
+      setActiveNode(node);
+    }
+  };
+
+  // "Inspect" a node from the mobile Fleet screen: switch to it and land on its
+  // stack list.
+  const handleInspectNode = (nodeId: number) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    if (activeNode?.id !== nodeId) setActiveNode(node);
+    goToMobileList();
+  };
+
   // Hamburger / command-palette navigation is mobile-aware so it collapses the
   // current surface and honors the unsaved-changes guard; desktop is untouched.
   const navHandler = isMobile ? navigateMobileAware : handleNavigate;
@@ -286,8 +321,9 @@ export default function EditorLayout() {
     }
   }, [stackActions, setActiveView, isMobile, navigateMobileAware]);
 
-  const renderEditor = () => (
+  const renderEditor = (headerActions?: ReactNode) => (
     <EditorView
+      headerActions={headerActions}
       stackName={stackName}
       isDarkMode={isDarkMode}
       containers={containers}
@@ -525,6 +561,19 @@ export default function EditorLayout() {
         />
       );
 
+      const notificationsEl = (
+        <NotificationPanel
+          notifications={notifications}
+          nodes={nodes}
+          onMarkAllRead={markAllRead}
+          onClearAll={clearAllNotifications}
+          onDelete={deleteNotification}
+          onNavigate={stackActions.navigateToNotification}
+        />
+      );
+      const themeSwitchEl = <ThemeQuickSwitch />;
+      const userMenuEl = <UserProfileDropdown onOpenSettings={() => openSettings('account')} />;
+
       const topBarEl = (
         <TopBar
           activeView={activeView}
@@ -533,23 +582,25 @@ export default function EditorLayout() {
           mobileNavOpen={mobileNavOpen}
           onMobileNavOpenChange={setMobileNavOpen}
           search={<GlobalCommandPaletteTrigger />}
-          themeSwitch={<ThemeQuickSwitch />}
-          notifications={
-            <NotificationPanel
-              notifications={notifications}
-              nodes={nodes}
-              onMarkAllRead={markAllRead}
-              onClearAll={clearAllNotifications}
-              onDelete={deleteNotification}
-              onNavigate={stackActions.navigateToNotification}
-            />
-          }
-          userMenu={
-            <UserProfileDropdown
-              onOpenSettings={() => openSettings('account')}
-            />
-          }
+          themeSwitch={themeSwitchEl}
+          notifications={notificationsEl}
+          userMenu={userMenuEl}
         />
+      );
+
+      // On the bespoke mobile screens the TopBar is dropped, so notifications and
+      // the secondary-destinations menu are rehomed into each screen's masthead
+      // right slot.
+      const mobileMastheadActions = (
+        <div className="flex items-center gap-0.5">
+          {notificationsEl}
+          <MobileMoreMenu
+            navItems={navItems}
+            activeView={activeView}
+            onNavigate={navigateMobileAware}
+            footer={<>{themeSwitchEl}{userMenuEl}</>}
+          />
+        </div>
       );
 
       const workspaceEl = (
@@ -565,17 +616,7 @@ export default function EditorLayout() {
               void stackActions.loadFile(sName);
             }}
             onHostConsoleClose={() => setActiveView(selectedFile ? 'editor' : 'dashboard')}
-            onFleetNavigateToNode={(nodeId, sName) => {
-              const node = nodes.find(n => n.id === nodeId);
-              if (node) {
-                if (activeNode?.id === nodeId) {
-                  void stackActions.loadFile(sName);
-                } else {
-                  pendingStackLoadRef.current = sName;
-                  setActiveNode(node);
-                }
-              }
-            }}
+            onFleetNavigateToNode={handleFleetNavigateToNode}
             filterNodeId={filterNodeId}
             onClearScheduledOpsFilter={() => setFilterNodeId(null)}
             schedulePrefill={schedulePrefill}
@@ -605,19 +646,51 @@ export default function EditorLayout() {
         />
       );
 
+      // Bespoke, masthead-led mobile screens. When showing one, the TopBar is
+      // dropped and the screen renders its own masthead (with notifications +
+      // more-menu rehomed into the right slot).
+      const bespokeContent = mobileSurface === 'content' && BESPOKE_MOBILE_VIEWS.has(activeView);
+      const renderMobileBespoke = () => {
+        switch (activeView) {
+          case 'dashboard':
+            return (
+              <MobileDashboard
+                notifications={notifications}
+                headerActions={mobileMastheadActions}
+                onNavigateToStack={handleSelectStack}
+                onViewAllStacks={goToMobileList}
+              />
+            );
+          case 'fleet':
+            return (
+              <MobileFleet
+                headerActions={mobileMastheadActions}
+                onInspectNode={handleInspectNode}
+                onInspectStack={handleFleetNavigateToNode}
+              />
+            );
+          case 'scheduled-ops':
+            return <MobileSchedules headerActions={mobileMastheadActions} />;
+          case 'settings':
+            return <MobileSettings headerActions={mobileMastheadActions} />;
+          default:
+            return workspaceEl;
+        }
+      };
+
       if (isMobile) {
         return (
           <div className="flex h-screen w-screen flex-col overflow-hidden app-canvas text-foreground">
             {commandPaletteEl}
-            {mobileSurface !== 'detail' && topBarEl}
+            {mobileSurface !== 'detail' && !bespokeContent && topBarEl}
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
               {mobileSurface === 'list' && sidebarEl}
-              {mobileSurface === 'content' && workspaceEl}
+              {mobileSurface === 'content' && (bespokeContent ? renderMobileBespoke() : workspaceEl)}
               {mobileSurface === 'detail' && (
                 detailReady ? (
-                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderEditor()}</div>
+                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderEditor(mobileMastheadActions)}</div>
                 ) : (
-                  <MobileDetailLoading name={pendingDetailStack ?? ''} onBack={goToMobileList} />
+                  <MobileDetailLoading name={pendingDetailStack ?? ''} onBack={goToMobileList} headerActions={mobileMastheadActions} />
                 )
               )}
             </div>
@@ -626,6 +699,7 @@ export default function EditorLayout() {
               activeView={activeView}
               mobileView={mobileView}
               detailOpen={detailOpen}
+              onHome={() => navigateMobileAware('dashboard')}
               onStacks={goToMobileList}
               onNavigate={navigateMobileAware}
               onSettings={openSettingsMobileAware}
@@ -657,7 +731,7 @@ export default function EditorLayout() {
 // Optimistic stack-detail placeholder shown on mobile the instant a row is
 // tapped, until loadFile resolves and the real EditorView mounts. Keeps the tap
 // feeling immediate on slow networks.
-function MobileDetailLoading({ name, onBack }: { name: string; onBack: () => void }) {
+function MobileDetailLoading({ name, onBack, headerActions }: { name: string; onBack: () => void; headerActions?: ReactNode }) {
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="flex items-center gap-1 border-b border-hairline px-3 py-2">
@@ -670,9 +744,10 @@ function MobileDetailLoading({ name, onBack }: { name: string; onBack: () => voi
           <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
           Stacks
         </button>
-        <span className="truncate font-display text-2xl italic text-stat-value">
+        <span className="min-w-0 flex-1 truncate font-display text-2xl italic text-stat-value">
           {name.replace(/\.(ya?ml)$/, '')}
         </span>
+        {headerActions ? <div className="shrink-0">{headerActions}</div> : null}
       </div>
       <div className="flex flex-1 items-center justify-center text-stat-subtitle">
         <Loader2 className="h-5 w-5 animate-spin" strokeWidth={1.5} />
