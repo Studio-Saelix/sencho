@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from './ui/button';
-import { Plus } from 'lucide-react';
+import { Plus, Loader2, ChevronLeft } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
 import { NotificationPanel } from './NotificationPanel';
 import { TopBar } from './TopBar';
@@ -38,6 +38,20 @@ import { usePanelSessionStartedAt } from '@/components/sidebar/usePanelSessionSt
 import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivityTicker';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
 import { toast } from '@/components/ui/toast-store';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { MobileTabBar } from './MobileTabBar';
+import { MobileMoreMenu } from './MobileMoreMenu';
+import { MobileDashboard } from './mobile/MobileDashboard';
+import { MobileFleet } from './mobile/MobileFleet';
+import { MobileSchedules } from './mobile/MobileSchedules';
+import { MobileSettings } from './mobile/MobileSettings';
+import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import type { SectionId } from './settings/types';
+
+// Content views that render a bespoke, masthead-led mobile screen instead of the
+// reflowed desktop workspace. For these the global TopBar is dropped on mobile
+// (each screen's masthead leads). The set grows as screens are re-skinned.
+const BESPOKE_MOBILE_VIEWS = new Set<string>(['dashboard', 'fleet', 'scheduled-ops', 'settings']);
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -198,26 +212,169 @@ export default function EditorLayout() {
     nextAutoUpdateRunAt,
   });
 
+  const loadingAction = selectedFile ? (stackActionMap[selectedFile] ?? null) : null;
+  const stackName = selectedFile || '';
+
+  const { isDarkMode } = useTheme();
+
+  // ---- Mobile shell (below md) ---------------------------------------------
+  // Desktop renders the persistent sidebar + workspace untouched. On a phone we
+  // show exactly one surface at a time: the stack list, a top-level view, or a
+  // full-screen stack detail. `mobileView` is explicit state, decoupled from
+  // `activeView`, so 'dashboard' still maps to HomeDashboard everywhere.
+  const isMobile = useIsMobile();
+  const [mobileView, setMobileView] = useState<MobileView>('list');
+  // Optimistically flip to the detail surface the instant a row is tapped,
+  // before loadFile's fetch resolves selectedFile; cleared once it settles.
+  const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!isFileLoading && pendingDetailStack) setPendingDetailStack(null);
+  }, [isFileLoading, pendingDetailStack]);
+
+  const { surface: mobileSurface, detailReady, detailOpen } = deriveMobileSurface({
+    activeView,
+    selectedFile,
+    mobileView,
+    pendingDetailStack,
+  });
+
+  // A phone shows one surface at a time, so every mobile navigation tears down
+  // the current detail and switches surfaces, guarding a dirty editor first.
+  // `then` runs the destination-specific work (navigate to a view, open
+  // settings) after the surface flips.
+  const leaveToMobileSurface = (target: MobileView, then?: () => void) => {
+    stackActions.attemptLeaveEditor(() => {
+      stackActions.resetEditorState();
+      setPendingDetailStack(null);
+      setMobileView(target);
+      then?.();
+    });
+  };
+
+  const goToMobileList = () => leaveToMobileSurface('list');
+  const navigateMobileAware = (view: string) => leaveToMobileSurface('content', () => handleNavigate(view));
+  const openSettingsMobileAware = (section?: SectionId) =>
+    leaveToMobileSurface('content', () => handleOpenSettings(section));
+
+  // Settings navigation from outside the bottom bar (profile menu, node
+  // switcher, dashboard config links). On mobile it flips to the content
+  // surface so the section is actually shown instead of leaving the user on
+  // the stack list; on desktop it is the plain open.
+  const openSettings = (section?: SectionId) =>
+    (isMobile ? openSettingsMobileAware(section) : handleOpenSettings(section));
+
+  // Tapping a stack row on mobile flips to the detail surface immediately.
+  const handleSelectStack = (file: string) => {
+    if (isMobile) setPendingDetailStack(file);
+    void stackActions.loadFile(file);
+  };
+
+  // Open a specific stack on a node (from Fleet): load it directly if that node
+  // is already active, else stash it and switch nodes (the node-switch effect
+  // loads the pending stack once the registry settles). Mobile shows the
+  // optimistic detail surface immediately.
+  const handleFleetNavigateToNode = (nodeId: number, stackName: string) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    if (isMobile) setPendingDetailStack(stackName);
+    if (activeNode?.id === nodeId) {
+      void stackActions.loadFile(stackName);
+    } else {
+      pendingStackLoadRef.current = stackName;
+      setActiveNode(node);
+    }
+  };
+
+  // "Inspect" a node from the mobile Fleet screen: switch to it and land on its
+  // stack list.
+  const handleInspectNode = (nodeId: number) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    if (activeNode?.id !== nodeId) setActiveNode(node);
+    goToMobileList();
+  };
+
+  // Hamburger / command-palette navigation is mobile-aware so it collapses the
+  // current surface and honors the unsaved-changes guard; desktop is untouched.
+  const navHandler = isMobile ? navigateMobileAware : handleNavigate;
+
+  // Sidebar activity actions navigate to top-level views. On mobile they must
+  // flip the surface to content (otherwise the user stays on the stack list);
+  // on desktop they set the view directly as before.
   const handleActivityAction = useCallback((action: SidebarActivityAction) => {
     switch (action.kind) {
       case 'open-stack-notification':
         stackActions.navigateToNotification(action.summary.notif);
         return;
       case 'open-auto-updates':
-        setActiveView('auto-updates');
+        if (isMobile) navigateMobileAware('auto-updates');
+        else setActiveView('auto-updates');
         return;
       case 'open-activity':
-        setActiveView('global-observability');
+        if (isMobile) navigateMobileAware('global-observability');
+        else setActiveView('global-observability');
         return;
       case 'noop':
         return;
     }
-  }, [stackActions, setActiveView]);
+  }, [stackActions, setActiveView, isMobile, navigateMobileAware]);
 
-  const loadingAction = selectedFile ? (stackActionMap[selectedFile] ?? null) : null;
-  const stackName = selectedFile || '';
-
-  const { isDarkMode } = useTheme();
+  const renderEditor = (headerActions?: ReactNode) => (
+    <EditorView
+      headerActions={headerActions}
+      stackName={stackName}
+      isDarkMode={isDarkMode}
+      containers={containers}
+      containerStats={containerStats}
+      containerStatsError={containerStatsError}
+      content={content}
+      envContent={envContent}
+      envExists={envExists}
+      envFiles={envFiles}
+      selectedEnvFile={selectedEnvFile}
+      isFileLoading={isFileLoading}
+      backupInfo={backupInfo}
+      gitSourcePendingMap={gitSourcePendingMap}
+      notifications={notifications}
+      activeTab={activeTab}
+      isEditing={isEditing}
+      editingCompose={editingCompose}
+      logsMode={logsMode}
+      copiedDigest={copiedDigest}
+      loadingAction={loadingAction}
+      stackMisconfigScanning={stackMisconfigScanning}
+      can={can}
+      isAdmin={isAdmin}
+      trivy={trivy}
+      activeNode={activeNode}
+      copiedDigestTimerRef={copiedDigestTimerRef}
+      deployStack={stackActions.deployStack}
+      restartStack={stackActions.restartStack}
+      stopStack={stackActions.stopStack}
+      updateStack={stackActions.updateStack}
+      rollbackStack={stackActions.rollbackStack}
+      scanStackConfig={stackActions.scanStackConfig}
+      enterEditMode={stackActions.enterEditMode}
+      requestSave={stackActions.requestSave}
+      requestSaveAndDeploy={stackActions.requestSaveAndDeploy}
+      discardChanges={stackActions.discardChanges}
+      setContent={setContent}
+      setEnvContent={setEnvContent}
+      changeEnvFile={stackActions.changeEnvFile}
+      openLogViewer={stackActions.openLogViewer}
+      openBashModal={stackActions.openBashModal}
+      serviceAction={stackActions.serviceAction}
+      setActiveTab={setActiveTab}
+      setLogsMode={setLogsMode}
+      setEditingCompose={setEditingCompose}
+      setGitSourceOpen={setGitSourceOpen}
+      setCopiedDigest={setCopiedDigest}
+      requestDeleteStack={stackActions.requestDeleteStack}
+      onMobileBack={goToMobileList}
+    />
+  );
 
   // Track the last "committed" node id so the node-switch dirty guard can
   // detect an actual switch (vs the initial mount or an internal revert).
@@ -341,94 +498,113 @@ export default function EditorLayout() {
 
   return (
     <GlobalCommandPaletteProvider>
-    <div className="flex h-screen w-screen overflow-hidden app-canvas text-foreground">
-      <GlobalCommandPalette
-        navItems={navItems}
-        onNavigate={handleNavigate}
-        onSelectStack={stackActions.loadFileOnNode}
-      />
-      {/* Left Sidebar (Stacks) */}
-      <StackSidebar
-        isDarkMode={isDarkMode}
-        nodeSwitcherSlot={
-          <NodeSwitcher
-            onManageNodes={() => handleOpenSettings('nodes')}
-          />
-        }
-        createStackSlot={createStackSlot}
-        onScan={handleScanStacks}
-        isScanning={isScanning}
-        canCreate={can('stack:create')}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        filterChip={filterChip}
-        filterCounts={filterCounts}
-        onFilterChipChange={setFilterChip}
-        list={{
-          files: chipFilteredFiles,
-          isLoading,
-          selectedFile,
-          searchQuery,
-          stackLabelMap,
-          stackStatuses: stackStatuses as Record<string, StackRowStatus | undefined>,
-          stackUpdates,
-          gitSourcePendingMap,
-          pinnedFiles: pinned,
-          isCollapsed,
-          toggleCollapse,
-          isBusy: isStackBusy,
-          getDisplayName: stackActions.getDisplayName,
-          onSelectFile: stackActions.loadFile,
-          buildMenuCtx,
-          remoteResults,
-          remoteLoading: remoteSearchLoading,
-          remoteFailedNodes: remoteSearchFailedNodes,
-          onSelectRemoteFile: (nodeId, file) => {
-            const node = nodes.find(n => n.id === nodeId);
-            if (node) void stackActions.loadFileOnNode(node, file);
-          },
-          filterChip,
-          onOpenCreate: can('stack:create') ? openCreateDialog : undefined,
-        }}
-        activitySummary={activitySummary}
-        onActivityAction={handleActivityAction}
-        bulkMode={bulkMode}
-        selectedFiles={selectedFiles}
-        onToggleBulkMode={toggleBulkMode}
-        onToggleSelect={toggleSelect}
-        onClearSelection={clearSelection}
-        onBulkAction={handleBulkAction}
-      />
+    {(() => {
+      const commandPaletteEl = (
+        <GlobalCommandPalette
+          navItems={navItems}
+          onNavigate={navHandler}
+          onSelectStack={stackActions.loadFileOnNode}
+        />
+      );
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      const sidebarEl = (
+        <StackSidebar
+          isDarkMode={isDarkMode}
+          nodeSwitcherSlot={
+            <NodeSwitcher
+              onManageNodes={() => openSettings('nodes')}
+            />
+          }
+          createStackSlot={createStackSlot}
+          onScan={handleScanStacks}
+          isScanning={isScanning}
+          canCreate={can('stack:create')}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          filterChip={filterChip}
+          filterCounts={filterCounts}
+          onFilterChipChange={setFilterChip}
+          list={{
+            files: chipFilteredFiles,
+            isLoading,
+            selectedFile,
+            searchQuery,
+            stackLabelMap,
+            stackStatuses: stackStatuses as Record<string, StackRowStatus | undefined>,
+            stackUpdates,
+            gitSourcePendingMap,
+            pinnedFiles: pinned,
+            isCollapsed,
+            toggleCollapse,
+            isBusy: isStackBusy,
+            getDisplayName: stackActions.getDisplayName,
+            onSelectFile: handleSelectStack,
+            buildMenuCtx,
+            remoteResults,
+            remoteLoading: remoteSearchLoading,
+            remoteFailedNodes: remoteSearchFailedNodes,
+            onSelectRemoteFile: (nodeId, file) => {
+              const node = nodes.find(n => n.id === nodeId);
+              if (node) void stackActions.loadFileOnNode(node, file);
+            },
+            filterChip,
+            onOpenCreate: can('stack:create') ? openCreateDialog : undefined,
+          }}
+          activitySummary={activitySummary}
+          onActivityAction={handleActivityAction}
+          bulkMode={bulkMode}
+          selectedFiles={selectedFiles}
+          onToggleBulkMode={toggleBulkMode}
+          onToggleSelect={toggleSelect}
+          onClearSelection={clearSelection}
+          onBulkAction={handleBulkAction}
+        />
+      );
+
+      const notificationsEl = (
+        <NotificationPanel
+          notifications={notifications}
+          nodes={nodes}
+          onMarkAllRead={markAllRead}
+          onClearAll={clearAllNotifications}
+          onDelete={deleteNotification}
+          onNavigate={stackActions.navigateToNotification}
+        />
+      );
+      const themeSwitchEl = <ThemeQuickSwitch />;
+      const userMenuEl = <UserProfileDropdown onOpenSettings={() => openSettings('account')} />;
+
+      const topBarEl = (
         <TopBar
           activeView={activeView}
           navItems={navItems}
-          onNavigate={handleNavigate}
+          onNavigate={navHandler}
           mobileNavOpen={mobileNavOpen}
           onMobileNavOpenChange={setMobileNavOpen}
           search={<GlobalCommandPaletteTrigger />}
-          themeSwitch={<ThemeQuickSwitch />}
-          notifications={
-            <NotificationPanel
-              notifications={notifications}
-              nodes={nodes}
-              onMarkAllRead={markAllRead}
-              onClearAll={clearAllNotifications}
-              onDelete={deleteNotification}
-              onNavigate={stackActions.navigateToNotification}
-            />
-          }
-          userMenu={
-            <UserProfileDropdown
-              onOpenSettings={() => handleOpenSettings('account')}
-            />
-          }
+          themeSwitch={themeSwitchEl}
+          notifications={notificationsEl}
+          userMenu={userMenuEl}
         />
+      );
 
-        {/* Main Workspace */}
-        <div key={activeView} className="flex-1 overflow-y-auto p-6 animate-fade-up">
+      // On the bespoke mobile screens the TopBar is dropped, so notifications and
+      // the secondary-destinations menu are rehomed into each screen's masthead
+      // right slot.
+      const mobileMastheadActions = (
+        <div className="flex items-center gap-0.5">
+          {notificationsEl}
+          <MobileMoreMenu
+            navItems={navItems}
+            activeView={activeView}
+            onNavigate={navigateMobileAware}
+            footer={<>{themeSwitchEl}{userMenuEl}</>}
+          />
+        </div>
+      );
+
+      const workspaceEl = (
+        <div key={activeView} className="flex-1 overflow-y-auto p-6 max-md:p-4 animate-fade-up">
           <ViewRouter
             activeView={activeView}
             selectedFile={selectedFile}
@@ -440,95 +616,142 @@ export default function EditorLayout() {
               void stackActions.loadFile(sName);
             }}
             onHostConsoleClose={() => setActiveView(selectedFile ? 'editor' : 'dashboard')}
-            onFleetNavigateToNode={(nodeId, sName) => {
-              const node = nodes.find(n => n.id === nodeId);
-              if (node) {
-                if (activeNode?.id === nodeId) {
-                  void stackActions.loadFile(sName);
-                } else {
-                  pendingStackLoadRef.current = sName;
-                  setActiveNode(node);
-                }
-              }
-            }}
+            onFleetNavigateToNode={handleFleetNavigateToNode}
             filterNodeId={filterNodeId}
             onClearScheduledOpsFilter={() => setFilterNodeId(null)}
             schedulePrefill={schedulePrefill}
             onPrefillConsumed={handlePrefillConsumed}
             notifications={notifications}
             onNavigateToStack={(stackFile) => { void stackActions.loadFile(stackFile); }}
-            onOpenSettingsSection={(section) => handleOpenSettings(section)}
+            onOpenSettingsSection={(section) => openSettings(section)}
             onClearNotifications={clearAllNotifications}
-            renderEditor={() => (
-              <EditorView
-                stackName={stackName}
-                isDarkMode={isDarkMode}
-                containers={containers}
-                containerStats={containerStats}
-                containerStatsError={containerStatsError}
-                content={content}
-                envContent={envContent}
-                envExists={envExists}
-                envFiles={envFiles}
-                selectedEnvFile={selectedEnvFile}
-                isFileLoading={isFileLoading}
-                backupInfo={backupInfo}
-                gitSourcePendingMap={gitSourcePendingMap}
-                notifications={notifications}
-                activeTab={activeTab}
-                isEditing={isEditing}
-                editingCompose={editingCompose}
-                logsMode={logsMode}
-                copiedDigest={copiedDigest}
-                loadingAction={loadingAction}
-                stackMisconfigScanning={stackMisconfigScanning}
-                can={can}
-                isAdmin={isAdmin}
-                trivy={trivy}
-                activeNode={activeNode}
-                copiedDigestTimerRef={copiedDigestTimerRef}
-                deployStack={stackActions.deployStack}
-                restartStack={stackActions.restartStack}
-                stopStack={stackActions.stopStack}
-                updateStack={stackActions.updateStack}
-                rollbackStack={stackActions.rollbackStack}
-                scanStackConfig={stackActions.scanStackConfig}
-                enterEditMode={stackActions.enterEditMode}
-                requestSave={stackActions.requestSave}
-                requestSaveAndDeploy={stackActions.requestSaveAndDeploy}
-                discardChanges={stackActions.discardChanges}
-                setContent={setContent}
-                setEnvContent={setEnvContent}
-                changeEnvFile={stackActions.changeEnvFile}
-                openLogViewer={stackActions.openLogViewer}
-                openBashModal={stackActions.openBashModal}
-                serviceAction={stackActions.serviceAction}
-                setActiveTab={setActiveTab}
-                setLogsMode={setLogsMode}
-                setEditingCompose={setEditingCompose}
-                setGitSourceOpen={setGitSourceOpen}
-                setCopiedDigest={setCopiedDigest}
-                requestDeleteStack={stackActions.requestDeleteStack}
-              />
-            )}
+            renderEditor={renderEditor}
           />
         </div>
-      </div>
+      );
 
-      <ShellOverlays
-        overlayState={overlayState}
-        stackActions={stackActions}
-        isDarkMode={isDarkMode}
-        isAdmin={isAdmin}
-        can={can}
-        selectedFile={selectedFile}
-        stackName={stackName}
-        gitSourceOpen={gitSourceOpen}
-        setGitSourceOpen={setGitSourceOpen}
-        securityHistoryOpen={securityHistoryOpen}
-        setSecurityHistoryOpen={setSecurityHistoryOpen}
-      />
-    </div>
+      const shellOverlaysEl = (
+        <ShellOverlays
+          overlayState={overlayState}
+          stackActions={stackActions}
+          isDarkMode={isDarkMode}
+          isAdmin={isAdmin}
+          can={can}
+          selectedFile={selectedFile}
+          stackName={stackName}
+          gitSourceOpen={gitSourceOpen}
+          setGitSourceOpen={setGitSourceOpen}
+          securityHistoryOpen={securityHistoryOpen}
+          setSecurityHistoryOpen={setSecurityHistoryOpen}
+        />
+      );
+
+      // Bespoke, masthead-led mobile screens. When showing one, the TopBar is
+      // dropped and the screen renders its own masthead (with notifications +
+      // more-menu rehomed into the right slot).
+      const bespokeContent = mobileSurface === 'content' && BESPOKE_MOBILE_VIEWS.has(activeView);
+      const renderMobileBespoke = () => {
+        switch (activeView) {
+          case 'dashboard':
+            return (
+              <MobileDashboard
+                notifications={notifications}
+                headerActions={mobileMastheadActions}
+                onNavigateToStack={handleSelectStack}
+                onViewAllStacks={goToMobileList}
+              />
+            );
+          case 'fleet':
+            return (
+              <MobileFleet
+                headerActions={mobileMastheadActions}
+                onInspectNode={handleInspectNode}
+                onInspectStack={handleFleetNavigateToNode}
+              />
+            );
+          case 'scheduled-ops':
+            return <MobileSchedules headerActions={mobileMastheadActions} />;
+          case 'settings':
+            return <MobileSettings headerActions={mobileMastheadActions} />;
+          default:
+            return workspaceEl;
+        }
+      };
+
+      if (isMobile) {
+        return (
+          <div className="flex h-screen w-screen flex-col overflow-hidden app-canvas text-foreground">
+            {commandPaletteEl}
+            {mobileSurface !== 'detail' && !bespokeContent && topBarEl}
+            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+              {mobileSurface === 'list' && sidebarEl}
+              {mobileSurface === 'content' && (bespokeContent ? renderMobileBespoke() : workspaceEl)}
+              {mobileSurface === 'detail' && (
+                detailReady ? (
+                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderEditor(mobileMastheadActions)}</div>
+                ) : (
+                  <MobileDetailLoading name={pendingDetailStack ?? ''} onBack={goToMobileList} headerActions={mobileMastheadActions} />
+                )
+              )}
+            </div>
+            <MobileTabBar
+              navItems={navItems}
+              activeView={activeView}
+              mobileView={mobileView}
+              detailOpen={detailOpen}
+              onHome={() => navigateMobileAware('dashboard')}
+              onStacks={goToMobileList}
+              onNavigate={navigateMobileAware}
+              onSettings={openSettingsMobileAware}
+            />
+            {shellOverlaysEl}
+          </div>
+        );
+      }
+
+      return (
+        <div className="flex h-screen w-screen overflow-hidden app-canvas text-foreground">
+          {commandPaletteEl}
+          {/* Left Sidebar (Stacks) */}
+          {sidebarEl}
+          {/* Main Content Area */}
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {topBarEl}
+            {/* Main Workspace */}
+            {workspaceEl}
+          </div>
+          {shellOverlaysEl}
+        </div>
+      );
+    })()}
     </GlobalCommandPaletteProvider>
+  );
+}
+
+// Optimistic stack-detail placeholder shown on mobile the instant a row is
+// tapped, until loadFile resolves and the real EditorView mounts. Keeps the tap
+// feeling immediate on slow networks.
+function MobileDetailLoading({ name, onBack, headerActions }: { name: string; onBack: () => void; headerActions?: ReactNode }) {
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="flex items-center gap-1 border-b border-hairline px-3 py-2">
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="Back to stacks"
+          className="inline-flex min-h-11 items-center gap-1 pr-3 font-mono text-xs text-brand"
+        >
+          <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
+          Stacks
+        </button>
+        <span className="min-w-0 flex-1 truncate font-display text-2xl italic text-stat-value">
+          {name.replace(/\.(ya?ml)$/, '')}
+        </span>
+        {headerActions ? <div className="shrink-0">{headerActions}</div> : null}
+      </div>
+      <div className="flex flex-1 items-center justify-center text-stat-subtitle">
+        <Loader2 className="h-5 w-5 animate-spin" strokeWidth={1.5} />
+      </div>
+    </div>
   );
 }

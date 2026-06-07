@@ -56,7 +56,7 @@ export function LogViewer({ containerId, containerName, isOpen, onClose }: LogVi
     }, [isOpen, containerId]);
 
     return (
-        <Modal open={isOpen} onOpenChange={(open) => !open && onClose()} className="max-w-4xl h-[80vh] flex flex-col">
+        <Modal open={isOpen} onOpenChange={(open) => !open && onClose()} mobileFullScreen className="max-w-4xl h-[80vh] flex flex-col">
             <ModalHeader
                 kicker={`LOGS · ${containerName.toUpperCase()}`}
                 title={

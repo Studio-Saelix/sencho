@@ -153,6 +153,7 @@ export function SidebarActivityTicker({ summary, onAction }: SidebarActivityTick
       onClick={() => onAction(config.action)}
       disabled={!isClickable}
       data-state={summary.kind}
+      data-testid="activity-ticker"
       className={cn(
         'w-full flex flex-col gap-0.5 px-4 py-2 border-t border-glass-border text-left',
         'bg-sidebar/80',

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Bell } from 'lucide-react';
 import type { Stats, SystemStats, NotificationItem, HealthLevel } from './types';
+import { deriveHealth } from './deriveHealth';
 
 interface HealthStatusBarProps {
   stats: Stats;
@@ -11,33 +12,6 @@ interface HealthStatusBarProps {
   lastSyncAt: number | null;
   /** True after several consecutive metrics polls have failed (Docker socket or metrics path down). */
   metricsStale?: boolean;
-}
-
-interface HealthResult {
-  level: HealthLevel;
-  reasons: string[];
-}
-
-function deriveHealth(stats: Stats, systemStats: SystemStats | null, notifications: NotificationItem[]): HealthResult {
-  const cpu = parseFloat(systemStats?.cpu.usage || '0');
-  const ram = parseFloat(systemStats?.memory.usagePercent || '0');
-  const disk = parseFloat(systemStats?.disk?.usagePercent || '0');
-  const unreadErrors = notifications.filter(n => !n.is_read && n.level === 'error').length;
-
-  const reasons: string[] = [];
-  if (cpu >= 80) reasons.push(`CPU ${cpu.toFixed(0)}%`);
-  if (ram >= 80) reasons.push(`RAM ${ram.toFixed(0)}%`);
-  if (disk >= 80) reasons.push(`Disk ${disk.toFixed(0)}%`);
-  if (stats.exited > 0) reasons.push(`${stats.exited} exited`);
-  if (unreadErrors > 0) reasons.push(`${unreadErrors} unread ${unreadErrors === 1 ? 'error' : 'errors'}`);
-
-  if (cpu >= 90 || ram >= 90 || disk >= 90 || (stats.exited > 0 && unreadErrors > 0)) {
-    return { level: 'critical', reasons };
-  }
-  if (cpu >= 80 || ram >= 80 || disk >= 80 || stats.exited > 0 || unreadErrors > 0) {
-    return { level: 'degraded', reasons };
-  }
-  return { level: 'healthy', reasons: ['All systems nominal'] };
 }
 
 const healthConfig: Record<HealthLevel, { label: string; dotClass: string; textClass: string; railClass: string; tintClass: string }> = {

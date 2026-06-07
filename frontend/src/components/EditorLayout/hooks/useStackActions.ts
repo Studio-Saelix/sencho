@@ -341,6 +341,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     } catch (error) {
       if (isAbortError(error) || signal.aborted) return;
       console.error('Failed to load file:', error);
+      // Surface the failure so a tap that cannot load (offline, dead remote
+      // node, 5xx) is not a silent no-op, especially on mobile where the row
+      // tap optimistically opens the detail surface.
+      toast.error(`Could not open "${filename.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
       stackListState.setSelectedFile(null);
       editorState.setContent('');
       editorState.setOriginalContent('');
@@ -890,18 +894,40 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  // Guard a navigation that would leave (and discard) a dirty editor: back to
+  // the list, Home, or any bottom-tab / hamburger / command-palette
+  // destination. When the editor is dirty the navigation is stashed and the
+  // unsaved-changes dialog opens; discardAndLoadPending runs it on confirm.
+  // When clean it runs immediately.
+  const attemptLeaveEditor = (perform: () => void) => {
+    if (stackListState.selectedFile && hasUnsavedChanges()) {
+      overlayState.setPendingLeaveAction({ run: perform });
+      return;
+    }
+    perform();
+  };
+
   const cancelPendingUnsavedLoad = () => {
     overlayState.setPendingUnsavedLoad(null);
     overlayState.setPendingUnsavedNode(null);
+    overlayState.setPendingLeaveAction(null);
   };
 
   const discardAndLoadPending = () => {
+    const leave = overlayState.pendingLeaveAction;
     const target = overlayState.pendingUnsavedLoad;
     const targetNode = overlayState.pendingUnsavedNode;
     editorState.setContent(editorState.originalContent);
     editorState.setEnvContent(editorState.originalEnvContent);
     overlayState.setPendingUnsavedLoad(null);
     overlayState.setPendingUnsavedNode(null);
+    overlayState.setPendingLeaveAction(null);
+    // A stashed "leave editor" navigation takes precedence; it already knows
+    // how to tear down editor state (resetEditorState) and move the surface.
+    if (leave) {
+      leave.run();
+      return;
+    }
     if (target === NODE_SWITCH_PENDING_TOKEN) {
       if (targetNode) setActiveNode(targetNode);
       return;
@@ -1060,6 +1086,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     serviceAction,
     updateStack,
     deleteStack,
+    attemptLeaveEditor,
     cancelPendingUnsavedLoad,
     discardAndLoadPending,
     requestDeleteStack,

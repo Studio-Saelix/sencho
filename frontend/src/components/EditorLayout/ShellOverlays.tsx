@@ -50,7 +50,7 @@ export function ShellOverlays({
 }: ShellOverlaysProps) {
   const {
     deleteDialogOpen, closeDeleteDialog, stackToDelete,
-    pendingUnsavedLoad,
+    pendingUnsavedLoad, pendingLeaveAction,
     bashModalOpen, selectedContainer,
     logViewerOpen, logContainer,
     stackMonitor, closeStackMonitor,
@@ -69,7 +69,7 @@ export function ShellOverlays({
       />
 
       <UnsavedChangesDialog
-        open={!!pendingUnsavedLoad}
+        open={!!pendingUnsavedLoad || !!pendingLeaveAction}
         onCancel={stackActions.cancelPendingUnsavedLoad}
         onConfirm={stackActions.discardAndLoadPending}
       />

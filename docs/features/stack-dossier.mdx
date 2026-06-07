@@ -1,0 +1,76 @@
+---
+title: Stack Dossier
+description: Turn each Compose stack into living documentation by pairing the facts Sencho already derives with operator notes it cannot infer, then export the whole thing as Markdown.
+---
+
+The **Dossier** tab in the right-hand **Anatomy** panel turns a stack into living documentation. Sencho fills in the operational facts it already knows from your Compose file, and you add the context it cannot infer: what the stack is for, who owns it, where it lives on your network, and how to recover it. The `files` and `edit` actions on the same strip belong to the panel as a whole and stay available regardless of which tab is active.
+
+The goal is to stop scattering this information across spreadsheets, `.env` comments, and memory. Sencho is already close to the source of truth, so it keeps the generated half in sync while you maintain the rest.
+
+## Generated facts
+
+The top of the tab shows a read-only summary derived live from the stack's current Compose anatomy. It is never copied into a field you have to maintain, so it can never drift:
+
+| Fact | Source |
+|------|--------|
+| **Services** | Service names declared in the Compose file |
+| **Ports** | Published host ports across all services |
+| **Volumes** | Mounted volumes count |
+| **Network** | The stack's network |
+| **Restart** | The restart policy |
+| **Env file** | The env file, its variable count, and any referenced `${VAR}` with no value |
+| **Source** | Git source when the stack is linked, otherwise local |
+
+Secret values are never read or shown. Only env variable **names** and **counts** appear, exactly as in the Anatomy tab.
+
+## Operator notes
+
+Below the generated facts is a form for the details Sencho cannot derive. Every field is optional:
+
+| Field | What to record |
+|-------|----------------|
+| **Purpose** | What this stack is for |
+| **Owner** | Who maintains it |
+| **Access URLs** | Where it is reached (one URL per line) |
+| **Static IP** | The stack's static or LAN IP |
+| **VLAN** | The VLAN it sits on |
+| **Firewall** | Ports opened, rules, zones |
+| **Reverse proxy** | Hostnames, upstreams, TLS notes |
+| **Backup** | What to back up and how |
+| **Upgrade** | Upgrade steps and gotchas |
+| **Recovery** | How to rebuild the stack from scratch |
+| **Notes** | Anything else worth recording |
+
+Notes are saved per stack and per node, so the same stack name on two different nodes keeps its own dossier. Anyone can read a dossier; saving changes requires stack edit permission, so read-only users see the notes but not a Save button.
+
+## Markdown export
+
+Two actions in the tab header produce a single Markdown document combining the generated facts and your notes:
+
+- **copy md** copies it to the clipboard.
+- **download** saves it as `<stack>-dossier.md`.
+
+The export is clean Markdown that reads well in Git, Obsidian, BookStack, a README, or stored alongside a backup. The generated facts never include `.env` values, only variable names and counts. Your operator notes are exported exactly as you write them, so treat them like any document you might share and avoid pasting secrets you do not want in the export.
+
+## Accessing the Dossier tab
+
+1. Click any stack in the left sidebar to open it.
+2. Switch to the **Dossier** tab in the Anatomy panel header.
+3. Fill in any fields you want and click **Save**. An **unsaved changes** marker appears while edits are pending.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The Save button stays greyed out">
+    Save is enabled only when there are unsaved changes. Edit any field and it activates. If it never activates, you may be signed in as a read-only user: editing a dossier requires stack edit permission, while reading it does not.
+  </Accordion>
+  <Accordion title="The generated facts say 'Unable to parse compose.yaml'">
+    The summary is built from the stack's Compose file. If the file is empty or not valid YAML, the facts cannot be generated and the export buttons are disabled. Fix the Compose file in the editor and the facts reappear. Your operator notes are unaffected and still save.
+  </Accordion>
+  <Accordion title="My notes for the same stack differ between two nodes">
+    That is expected. A dossier is stored per stack and per node, so a stack with the same name on two nodes has an independent dossier on each. Edit the dossier while that node is the active node to update the right one.
+  </Accordion>
+  <Accordion title="An access URL spilled onto one line in the export">
+    The Access URLs field treats each line as a separate URL. Put one URL per line in the form and they are preserved as separate lines in the exported Markdown.
+  </Accordion>
+</AccordionGroup>

@@ -42,7 +42,9 @@ export function SidebarFilterChips({ active, counts, onChange, visible, onToggle
                 type="button"
                 onClick={() => onChange(id)}
                 className={cn(
-                  'flex items-center gap-1 min-w-0 overflow-hidden rounded px-1.5 py-0.5 whitespace-nowrap',
+                  'flex items-center justify-center gap-1 min-w-0 overflow-hidden rounded px-1.5 py-0.5 whitespace-nowrap',
+                  // 44px tap target on touch viewports; desktop density unchanged.
+                  'max-md:min-h-11 max-md:py-2',
                   'font-mono text-[10px] tracking-[0.08em] uppercase leading-none',
                   'border transition-colors duration-150',
                   isActive
@@ -70,7 +72,7 @@ export function SidebarFilterChips({ active, counts, onChange, visible, onToggle
       <button
         type="button"
         onClick={onToggle}
-        className="px-2 shrink-0 text-stat-icon hover:text-stat-title transition-colors duration-150"
+        className="px-2 max-md:min-h-11 max-md:px-3 shrink-0 text-stat-icon hover:text-stat-title transition-colors duration-150"
         aria-label={visible ? 'Hide filters' : 'Show filters'}
       >
         {visible

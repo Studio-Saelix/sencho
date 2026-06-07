@@ -37,7 +37,7 @@ export function SettingsSidebar({ currentSection, onSectionChange, dirtyFlags, o
     }
 
     return (
-        <aside className="w-[240px] rounded-lg border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors flex flex-col shrink-0 min-h-0 overflow-hidden">
+        <aside className="w-[240px] max-md:w-full rounded-lg border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors flex flex-col shrink-0 min-h-0 overflow-hidden">
             <div className="px-3 pt-5 pb-2">
                 <button
                     onClick={onOpenPalette}

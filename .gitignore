@@ -39,6 +39,8 @@ html-report/
 .coverage/
 coverage/
 .playwright-mcp/
+# Visual-regression baselines are environment-specific; regenerate per env.
+e2e/**/*-snapshots/
 
 # Logs
 *.log
@@ -57,6 +59,7 @@ CLAUDE.md
 # Design system (local-only authoritative reference)
 frontend/DESIGN.md
 .design-bundle/
+docs/design/
 
 # Local-only projects (separate repos)
 demo-video/

@@ -1,11 +1,12 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
+import { z } from 'zod';
 import path from 'path';
 import YAML from 'yaml';
 import multer from 'multer';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { MeshService } from '../services/MeshService';
 import { CacheService } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
@@ -652,6 +653,58 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
   }
 });
 
+// Stack Dossier: operator-authored documentation persisted per (node, stack).
+// All fields default to '' so a PUT is a full-document save (an omitted field
+// clears it) and a GET for a stack with no dossier yet returns a clean blank.
+const dossierField = (max: number) => z.string().max(max).default('');
+const StackDossierUpdateSchema = z.object({
+  purpose: dossierField(1000),
+  owner: dossierField(1000),
+  access_urls: dossierField(2000),
+  static_ip: dossierField(255),
+  vlan: dossierField(255),
+  firewall_notes: dossierField(8000),
+  reverse_proxy_notes: dossierField(8000),
+  backup_notes: dossierField(8000),
+  upgrade_notes: dossierField(8000),
+  recovery_notes: dossierField(8000),
+  custom_notes: dossierField(8000),
+});
+const emptyDossierFields = (): StackDossierFields => StackDossierUpdateSchema.parse({});
+
+stacksRouter.get('/:stackName/dossier', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const row = DatabaseService.getInstance().getStackDossier(req.nodeId, stackName);
+    // No dossier yet: answer 200 with a blank document so the editor loads clean
+    // rather than forcing the client to special-case a 404.
+    res.json(row ?? { node_id: req.nodeId, stack_name: stackName, ...emptyDossierFields(), created_at: 0, updated_at: 0 });
+  } catch (error) {
+    console.error('[Stacks] Failed to read dossier:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to read dossier' });
+  }
+});
+
+stacksRouter.put('/:stackName/dossier', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  const parsed = StackDossierUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' });
+    return;
+  }
+  try {
+    const row = DatabaseService.getInstance().upsertStackDossier(req.nodeId, stackName, parsed.data);
+    res.json(row);
+  } catch (error) {
+    console.error('[Stacks] Failed to save dossier:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to save dossier' });
+  }
+});
+
 stacksRouter.post('/', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:create')) return;
   try {
@@ -885,6 +938,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().clearStackScanAttempts(req.nodeId, stackName);
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);
+    DatabaseService.getInstance().deleteStackDossier(req.nodeId, stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
   } catch (dbErr) {
     console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);
