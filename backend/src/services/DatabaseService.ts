@@ -85,8 +85,27 @@ export interface StackDossier extends StackDossierFields {
     id?: number;
     node_id: number;
     stack_name: string;
+    /** SHA-256 of the compose file's UTF-8 text at the last deploy through Sencho (baseline for temporal drift). */
+    source_hash?: string | null;
+    /** SHA-256 of the parsed compose model at the last deploy (ignores comments/whitespace). */
+    rendered_hash?: string | null;
     created_at: number;
     updated_at: number;
+}
+
+/** A persisted drift finding: one service-scoped divergence, open until resolved. */
+export interface StackDriftFindingRow {
+    id: number;
+    node_id: number;
+    stack_name: string;
+    service: string;
+    finding_type: string;
+    severity: string;
+    message: string;
+    expected_json: string | null;
+    actual_json: string | null;
+    detected_at: number;
+    resolved_at: number | null;
 }
 
 export interface Node {
@@ -697,6 +716,7 @@ export class DatabaseService {
         this.migrateAddBlueprintPinnedNode();
         this.migrateAutoHealNodeId();
         this.migrateFleetSyncStickyError();
+        this.migrateStackDossierHashes();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1175,6 +1195,22 @@ export class DatabaseService {
         UNIQUE(node_id, stack_name)
       );
 
+      CREATE TABLE IF NOT EXISTS stack_drift_findings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        service TEXT NOT NULL,
+        finding_type TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'warning',
+        message TEXT NOT NULL,
+        expected_json TEXT,
+        actual_json TEXT,
+        detected_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_stack_drift_findings_open
+        ON stack_drift_findings(node_id, stack_name, resolved_at);
+
       CREATE TABLE IF NOT EXISTS secrets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
@@ -1471,6 +1507,11 @@ export class DatabaseService {
     private migrateNotificationHistoryContext(): void {
         this.tryAddColumn('notification_history', 'stack_name', 'TEXT');
         this.tryAddColumn('notification_history', 'container_name', 'TEXT');
+    }
+
+    private migrateStackDossierHashes(): void {
+        this.tryAddColumn('stack_dossiers', 'source_hash', 'TEXT');
+        this.tryAddColumn('stack_dossiers', 'rendered_hash', 'TEXT');
     }
 
     private migrateScanPolicyFleetColumns(): void {
@@ -2109,6 +2150,55 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM stack_dossiers WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
+    /**
+     * Record the deploy-time baseline hashes for a stack. Creates a dossier row
+     * with empty operator notes if none exists; on conflict updates only the hash
+     * columns so operator-authored notes and their updated_at are left untouched.
+     */
+    public setStackDossierHashes(nodeId: number, stackName: string, sourceHash: string, renderedHash: string): void {
+        const now = Date.now();
+        this.db.prepare(
+            `INSERT INTO stack_dossiers (node_id, stack_name, source_hash, rendered_hash, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, stack_name) DO UPDATE SET
+                source_hash = excluded.source_hash,
+                rendered_hash = excluded.rendered_hash`
+        ).run(nodeId, stackName, sourceHash, renderedHash, now, now);
+    }
+
+    // --- Stack Drift Findings (the persisted drift ledger) ---
+
+    public insertDriftFinding(f: Omit<StackDriftFindingRow, 'id' | 'resolved_at'>): number {
+        const res = this.db.prepare(
+            `INSERT INTO stack_drift_findings
+                (node_id, stack_name, service, finding_type, severity, message, expected_json, actual_json, detected_at, resolved_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+        ).run(f.node_id, f.stack_name, f.service, f.finding_type, f.severity, f.message, f.expected_json, f.actual_json, f.detected_at);
+        return res.lastInsertRowid as number;
+    }
+
+    public resolveDriftFinding(id: number, resolvedAt: number): void {
+        this.db.prepare('UPDATE stack_drift_findings SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL').run(resolvedAt, id);
+    }
+
+    /** Open (unresolved) findings for a stack, oldest first. */
+    public getOpenDriftFindings(nodeId: number, stackName: string): StackDriftFindingRow[] {
+        return this.db.prepare(
+            'SELECT * FROM stack_drift_findings WHERE node_id = ? AND stack_name = ? AND resolved_at IS NULL ORDER BY detected_at ASC, id ASC'
+        ).all(nodeId, stackName) as StackDriftFindingRow[];
+    }
+
+    /** Recent findings for a stack: open ones first, then resolved, each newest first. */
+    public getRecentDriftFindings(nodeId: number, stackName: string, limit: number): StackDriftFindingRow[] {
+        return this.db.prepare(
+            'SELECT * FROM stack_drift_findings WHERE node_id = ? AND stack_name = ? ORDER BY (resolved_at IS NOT NULL) ASC, detected_at DESC, id DESC LIMIT ?'
+        ).all(nodeId, stackName, limit) as StackDriftFindingRow[];
+    }
+
+    public deleteStackDriftFindings(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    }
+
     // --- Notification History ---
 
     private mapNotificationRow(row: any): NotificationHistory {
@@ -2446,6 +2536,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_label_assignments WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_dossiers WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);

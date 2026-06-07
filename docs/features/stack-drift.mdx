@@ -5,7 +5,7 @@ description: See at a glance whether a stack's running containers still match th
 
 The **Drift** tab in the right-hand **Anatomy** panel answers a single day-two question: does what is actually running still match the Compose file on disk? Sencho treats your Compose file as the source of truth, so it compares the file against the live Docker runtime and reports exactly where the two have diverged.
 
-The check is read-only. It tells you what changed and never alters a stack on its own, so you can trust the report before deciding what to do about it. The report is built fresh each time you open the tab, with no separate state to maintain.
+The check is read-only. It tells you what changed and never alters a stack on its own, so you can trust the report before deciding what to do about it. Opening the tab builds the comparison fresh. When you deploy a stack through Sencho, it also records the Compose file it deployed as a baseline, so it can later tell you whether the file has changed since then, and it keeps a short history of the findings it has seen.
 
 ## Status
 
@@ -17,6 +17,18 @@ Every stack resolves to one of four states, shown as a badge at the top of the t
 | **Drifted** | Something running differs from the file. The specific reasons are listed below the badge. |
 | **Not running** | The stack is defined on disk but no containers are running. |
 | **Unreachable** | Docker could not be reached, so drift cannot be assessed right now. |
+
+## Since your last deploy
+
+Below the status badge, a second line compares the Compose file on disk against the version you last deployed through Sencho:
+
+| Signal | Meaning |
+|--------|---------|
+| **Matches last deploy** | The Compose file is unchanged since you last deployed it. |
+| **Source changed** | The Compose file has been edited since the last deploy. If the change affects the model (an image, port, or service), Sencho says so; a comments or formatting only edit is called out separately. |
+| **No deploy baseline** | This stack has not been deployed through Sencho yet, so there is nothing to compare against. Deploy it once to start tracking. |
+
+This is independent of the runtime status above: a stack can be **In sync** with its running containers while its file has already **changed** for the next deploy.
 
 ## Findings
 
@@ -30,6 +42,12 @@ When a stack is drifted, each reason is listed against the service it affects:
 | **Ports** | The published ports of a service differ from what the Compose file declares. |
 
 Image references are compared after normalizing the implicit Docker Hub registry and a missing tag to `:latest`, so `nginx` and `docker.io/library/nginx:latest` are treated as the same image. A running container pinned to a digest is compared against the declared tag as written.
+
+## Drift history
+
+Each time you **re-check** a stack, and after every deploy, Sencho records the findings it sees. The **Drift history** list under the findings shows recent entries with when each was first **detected** and, once it clears, when it was **resolved**. This turns a point-in-time check into a short ledger of how a stack has drifted and recovered over time.
+
+Drift that appears or clears is also written to the stack's **Activity** timeline, so **Drift detected** and **Drift resolved** events sit alongside deploys and restarts.
 
 ## Accessing the Drift tab
 
@@ -52,6 +70,9 @@ On a phone, the same report appears under the **Compose** section of the stack d
     A Compose port range such as `8000-8002:8000-8002` is compared conservatively and can read as a ports difference even when the deployment is correct. Sencho errs toward surfacing a possible difference rather than hiding one. The status reflects this as drift you can confirm against the file.
   </Accordion>
   <Accordion title="The status says 'Unreachable'">
-    Sencho could not reach Docker on the active node, so it cannot compare the runtime. Confirm the Docker engine is running and the node is online, then use **re-check**. Other stacks on the same node will show the same state until Docker responds.
+    Sencho could not reach Docker on the active node, so it cannot compare the runtime. Confirm the Docker engine is running and the node is online, then use **re-check**. Other stacks on the same node will show the same state until Docker responds. While Docker is unreachable, Sencho does not change the recorded drift history, so an open finding is never cleared just because the check could not run.
+  </Accordion>
+  <Accordion title="The tab says 'No deploy baseline'">
+    Sencho records a baseline the first time you deploy a stack through it. A stack you imported or have not yet deployed from Sencho has nothing to compare against. Deploy it once from Sencho and the line changes to **Matches last deploy**.
   </Accordion>
 </AccordionGroup>

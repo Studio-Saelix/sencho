@@ -12,7 +12,8 @@ import { CacheService } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
-import { buildStackDriftReport } from '../services/DriftDetectionService';
+import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
+import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
@@ -54,6 +55,27 @@ function notifyActionSuccess(category: NotificationCategory, message: string, st
   NotificationService.getInstance()
     .dispatchAlert('info', category, message, { stackName, actor })
     .catch(err => console.error('[Stacks] Failed to dispatch activity for %s:', sanitizeForLog(stackName), err));
+}
+
+/**
+ * After a successful deploy/update/rollback, record the new compose hashes as the
+ * drift baseline and reconcile the ledger (a fresh deploy clears prior findings,
+ * and any service that did not come up surfaces as a new finding). Fire-and-forget:
+ * it runs after the response is sent. recordBaseline self-guards; the reconcile step
+ * relies on the outer catch below, so a post-deploy failure is logged and never
+ * affects the already-sent deploy result.
+ */
+function recordDeployBaseline(nodeId: number, stackName: string): void {
+  const ledger = DriftLedgerService.getInstance();
+  void ledger.recordBaseline(nodeId, stackName)
+    .then(async () => {
+      const report = await buildStackDriftReport(nodeId, stackName);
+      // Right after `up`, a container can still be 'created' rather than 'running',
+      // so a transient missing-runtime snapshot would falsely resolve open findings.
+      // Leave that to the next explicit re-check, which sees the settled runtime.
+      if (report.status !== 'missing-runtime') ledger.reconcile(nodeId, stackName, report);
+    })
+    .catch(err => console.error('[Stacks] Post-deploy drift reconcile failed for %s:', sanitizeForLog(stackName), err));
 }
 
 const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
@@ -939,6 +961,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);
     DatabaseService.getInstance().deleteStackDossier(req.nodeId, stackName);
+    DatabaseService.getInstance().deleteStackDriftFindings(req.nodeId, stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
   } catch (dbErr) {
     console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);
@@ -1009,15 +1032,74 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
   }
 });
 
+/** A persisted finding as the Drift tab consumes it (no internal column names). */
+interface DriftLedgerEntry {
+  service: string;
+  kind: DriftFindingKind;
+  message: string;
+  detectedAt: number;
+  resolvedAt: number | null;
+}
+
+/**
+ * Assemble the full Drift tab payload: the spatial report (compose vs runtime),
+ * the temporal overlay (source changed since last deploy), and the persisted
+ * ledger history. When `reconcile` is set, the current findings are persisted
+ * into the ledger (new ones recorded, cleared ones resolved) before the ledger
+ * is read back, so the returned history reflects the just-observed state.
+ */
+async function buildDriftPayload(
+  nodeId: number,
+  stackName: string,
+  reconcile: boolean,
+): Promise<StackDriftReport & { temporal: DriftTemporal; ledger: DriftLedgerEntry[] }> {
+  const report = await buildStackDriftReport(nodeId, stackName);
+  // Temporal needs the on-disk content. If it is unreadable the engine already
+  // reported a parse error, so temporal simply reports no baseline/no change.
+  let temporal: DriftTemporal = { hasBaseline: false, sourceChanged: false, renderedChanged: false };
+  try {
+    const content = await FileSystemService.getInstance(nodeId).getStackContent(stackName);
+    temporal = DriftLedgerService.getInstance().computeTemporal(nodeId, stackName, content);
+  } catch (error) {
+    // The common case is an unreadable compose, which the report already surfaces as
+    // a parse error, so temporal degrades to neutral. Log so a rarer failure (a DB or
+    // hashing fault inside computeTemporal) still leaves a breadcrumb.
+    console.error('[Stacks] Temporal overlay skipped for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+  }
+  if (reconcile) {
+    DriftLedgerService.getInstance().reconcile(nodeId, stackName, report);
+  }
+  // finding_type is a free-text column, but reconcile only ever writes a DriftFindingKind.
+  const ledger: DriftLedgerEntry[] = DatabaseService.getInstance()
+    .getRecentDriftFindings(nodeId, stackName, 20)
+    .map(r => ({ service: r.service, kind: r.finding_type as DriftFindingKind, message: r.message, detectedAt: r.detected_at, resolvedAt: r.resolved_at }));
+  return { ...report, temporal, ledger };
+}
+
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
-    const report = await buildStackDriftReport(req.nodeId, stackName);
-    res.json(report);
+    res.json(await buildDriftPayload(req.nodeId, stackName, false));
   } catch (error) {
     console.error('[Stacks] Failed to build drift report for %s:', sanitizeForLog(stackName), error);
     res.status(500).json({ error: 'Failed to build drift report' });
+  }
+});
+
+// Re-check is the one place a passive drift view becomes a ledger write: it
+// reconciles the current findings into stack_drift_findings (recording newly
+// detected and newly resolved ones) before returning the fresh payload, so the
+// GET above can stay a side-effect-free read.
+stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildDriftPayload(req.nodeId, stackName, true));
+  } catch (error) {
+    console.error('[Stacks] Failed to re-check drift for %s:', sanitizeForLog(stackName), error);
+    res.status(500).json({ error: 'Failed to re-check drift' });
   }
 });
 
@@ -1042,6 +1124,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     ok = true;
     res.json({ message: 'Deployed successfully' });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
+    recordDeployBaseline(req.nodeId, stackName);
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
@@ -1311,6 +1394,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     ok = true;
     res.json({ status: 'Update completed' });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
+    recordDeployBaseline(req.nodeId, stackName);
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
@@ -1363,6 +1447,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
     res.json({ message: 'Stack rolled back successfully.' });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
+    recordDeployBaseline(req.nodeId, stackName);
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
     const message = getErrorMessage(error, 'Rollback failed.');
