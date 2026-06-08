@@ -84,13 +84,13 @@ describe('split section save payloads', () => {
         expect(patchedKeys()).toEqual(['docker_janitor_gb', 'prune_on_update', 'reclaim_hero']);
     });
 
-    it('FleetMeshSection patches only the mesh key', async () => {
+    it('FleetMeshSection patches only the fleet keys', async () => {
         render(<FleetMeshSection />);
         const save = await screen.findByRole('button', { name: /save settings/i });
-        fireEvent.click(screen.getByRole('switch')); // mesh_auto_recreate
+        fireEvent.click(screen.getAllByRole('switch')[0]); // mesh_auto_recreate
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
-        expect(patchedKeys()).toEqual(['mesh_auto_recreate']);
+        expect(patchedKeys()).toEqual(['mesh_auto_recreate', 'snapshot_documentation']);
     });
 
     it('DataRetentionSection patches only retention keys, never developer_mode', async () => {
