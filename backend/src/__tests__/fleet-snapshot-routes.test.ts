@@ -489,7 +489,9 @@ describe('Snapshot restore: remote dossier notes (proxy PUT)', () => {
     });
 
     it('restore-all records a per-row notesError but keeps the stack success when the remote notes PUT fails', async () => {
-        const { id, remoteId } = remoteDocSnapshot('rweb3', 'documented');
+        // restore-all is driven by snapshot id; the target node is resolved from
+        // the snapshot's stored files, so the returned remoteId is not needed here.
+        const { id } = remoteDocSnapshot('rweb3', 'documented');
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok' });
         vi.stubGlobal('fetch', vi.fn(async (url: string) => {
             if (/\/dossier$/.test(url)) return { ok: false, status: 500, text: async () => 'boom' } as unknown as Response;
