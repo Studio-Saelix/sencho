@@ -79,6 +79,28 @@ function nodeSlugs(nodes: FleetDossierNode[]): Map<number, string> {
   return map;
 }
 
+/**
+ * Map each (distinct) stack name on one node to a unique slug, disambiguating
+ * collisions with a numeric suffix. Stack names are unique per node, but two
+ * names can slugify to the same value (e.g. `Web` and `web` on a case-sensitive
+ * host), which would otherwise overwrite a stack's page in the file map.
+ */
+function stackSlugs(names: string[]): Map<string, string> {
+  const used = new Set<string>();
+  const map = new Map<string, string>();
+  for (const name of names) {
+    let slug = slugify(name);
+    if (used.has(slug)) {
+      let i = 2;
+      while (used.has(`${slug}-${i}`)) i++;
+      slug = `${slug}-${i}`;
+    }
+    used.add(slug);
+    map.set(name, slug);
+  }
+  return map;
+}
+
 function stackPageMarkdown(stack: FleetDossierStack): string {
   if (stack.anatomy) {
     return `${buildStackDossierMarkdown(stack.anatomy, stack.dossier)}\n`;
@@ -90,7 +112,7 @@ function stackPageMarkdown(stack: FleetDossierStack): string {
   return `${notes ? `${body}\n\n${notes}` : body}\n`;
 }
 
-function nodePageMarkdown(node: FleetDossierNode, slug: string): string {
+function nodePageMarkdown(node: FleetDossierNode, slug: string, slugForStack: Map<string, string>): string {
   const lines = [`# ${node.name}`, ''];
   lines.push(`- **Type:** ${node.type}`);
   lines.push(`- **Status:** ${node.reachable ? 'reachable' : 'unreachable'}`);
@@ -104,7 +126,7 @@ function nodePageMarkdown(node: FleetDossierNode, slug: string): string {
     lines.push('_none_');
   } else {
     for (const stack of node.stacks) {
-      lines.push(`- [${stack.stackName}](../stacks/${slug}--${slugify(stack.stackName)}.md)`);
+      lines.push(`- [${stack.stackName}](../stacks/${slug}--${slugForStack.get(stack.stackName)}.md)`);
     }
   }
   return `${lines.join('\n')}\n`;
@@ -218,10 +240,14 @@ export function buildFleetDossier(input: FleetDossierInput): Record<string, stri
 
   for (const node of input.nodes) {
     const slug = slugs.get(node.id)!;
-    files[`nodes/${slug}.md`] = nodePageMarkdown(node, slug);
+    // One stack-slug map per node, shared by the node-page links and the file
+    // emission below so a slug collision never points a link at the wrong page
+    // or silently overwrites a stack's file.
+    const slugForStack = node.reachable ? stackSlugs(node.stacks.map(s => s.stackName)) : new Map<string, string>();
+    files[`nodes/${slug}.md`] = nodePageMarkdown(node, slug, slugForStack);
     if (!node.reachable) continue;
     for (const stack of node.stacks) {
-      files[`stacks/${slug}--${slugify(stack.stackName)}.md`] = stackPageMarkdown(stack);
+      files[`stacks/${slug}--${slugForStack.get(stack.stackName)}.md`] = stackPageMarkdown(stack);
     }
   }
 

@@ -169,7 +169,12 @@ export function useFleetDossierExport(): { exporting: boolean; exportDossier: ()
       // `homelab-dossier/` directory rather than scattering files into the cwd.
       const zippable: Record<string, Uint8Array> = {};
       for (const [path, content] of Object.entries(files)) zippable[`homelab-dossier/${path}`] = strToU8(content);
-      const archive = zipSync(zippable);
+      // Pin a fixed entry timestamp so the archive bytes are a pure function of
+      // the file map (fflate stamps entries with the current wall-clock time by
+      // default). The file map still carries the generation time in its text.
+      // fflate encodes the DOS date from local components, so a component-built
+      // date keeps the bytes stable across timezones and inside its 1980+ range.
+      const archive = zipSync(zippable, { mtime: new Date(1985, 0, 1) });
       downloadBlob('homelab-dossier.zip', new Blob([archive], { type: 'application/zip' }));
 
       const skipped = collected.filter(n => !n.reachable).length;

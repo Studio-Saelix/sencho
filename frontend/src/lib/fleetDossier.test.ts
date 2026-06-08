@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildFleetDossier, type FleetDossierInput } from './fleetDossier';
+import { buildFleetDossier, type FleetDossierInput, type FleetDossierStack } from './fleetDossier';
 import { EMPTY_DOSSIER_FIELDS, type StackDossierFields } from './dossierMarkdown';
 import type { AnatomyMarkdownInput } from './anatomyMarkdown';
 
@@ -161,6 +161,22 @@ describe('buildFleetDossier', () => {
     });
     expect(files['index.md']).toContain('node\\|x');
     expect(files['network.md']).toContain('| node\\|x | app |');
+  });
+
+  it('disambiguates stack names on one node that slugify to the same value', () => {
+    const mk = (name: string): FleetDossierStack => ({ stackName: name, anatomy: { ...plexAnatomy, stackName: name }, dossier: fields() });
+    const files = buildFleetDossier({
+      generatedAt: 't', senchoVersion: 'v',
+      nodes: [{ id: 1, name: 'local', type: 'local', reachable: true, stacks: [mk('Web'), mk('web')] }],
+    });
+    // Both stacks keep their own page instead of one overwriting the other...
+    expect(files['stacks/local--web.md']).toBeDefined();
+    expect(files['stacks/local--web-2.md']).toBeDefined();
+    expect(files['stacks/local--web.md']).toContain('# Web');
+    expect(files['stacks/local--web-2.md']).toContain('# web');
+    // ...and the node page links to each distinct file.
+    expect(files['nodes/local.md']).toContain('(../stacks/local--web.md)');
+    expect(files['nodes/local.md']).toContain('(../stacks/local--web-2.md)');
   });
 
   it('never leaks .env values and is deterministic', () => {
