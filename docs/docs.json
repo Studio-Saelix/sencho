@@ -140,6 +140,7 @@
                   "features/pilot-agent",
                   "features/sencho-mesh",
                   "features/fleet-view",
+                  "features/fleet-dossier",
                   "features/fleet-federation",
                   "features/fleet-actions",
                   "features/fleet-sync",

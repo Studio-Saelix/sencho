@@ -1,5 +1,5 @@
 import {
-    RefreshCw, Search, Camera, Plus,
+    RefreshCw, Search, Camera, Plus, FileDown,
     Network, SlidersHorizontal,
     Send, KeyRound, ArrowLeftRight, Wrench, Workflow,
 } from 'lucide-react';
@@ -12,6 +12,7 @@ import { useFleetPreferences } from './FleetView/hooks/useFleetPreferences';
 import { useFleetUpdateStatus } from './FleetView/hooks/useFleetUpdateStatus';
 import { useFleetPolling } from './FleetView/hooks/useFleetPolling';
 import { useFleetOverview } from './FleetView/hooks/useFleetOverview';
+import { useFleetDossierExport } from './FleetView/hooks/useFleetDossierExport';
 import { useTopologyPreferences } from '@/hooks/useTopologyPreferences';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
@@ -42,6 +43,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
     const updateStatus = useFleetUpdateStatus();
     const overview = useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses: updateStatus.updateStatuses });
     const topology = useTopologyPreferences();
+    const { exporting, exportDossier } = useFleetDossierExport();
 
     useFleetPolling({
         fetchOverview: overview.fetchOverview,
@@ -151,6 +153,18 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                             Refresh
                         </Button>
+                        {isAdmin && (
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => { void exportDossier(); }}
+                                disabled={exporting}
+                                className="gap-2"
+                            >
+                                <FileDown className={`w-4 h-4 ${exporting ? 'animate-pulse' : ''}`} />
+                                {exporting ? 'Exporting…' : 'Export Dossier'}
+                            </Button>
+                        )}
                         {isAdmin && (
                             <SettingsPrimaryButton
                                 size="sm"

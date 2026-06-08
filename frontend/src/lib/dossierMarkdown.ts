@@ -67,7 +67,7 @@ const BLOCK_FIELDS: Array<[keyof StackDossierFields, string]> = [
   ['custom_notes', 'Notes'],
 ];
 
-function operatorNotesSection(d: StackDossierFields): string | null {
+export function operatorNotesSection(d: StackDossierFields): string | null {
   const bullets = SHORT_FIELDS
     .filter(([k]) => d[k].trim() !== '')
     .map(([k, label]) => `- **${label}:** ${d[k].trim().replace(/\s*\r?\n\s*/g, ' ')}`);
