@@ -10,6 +10,7 @@ import type { ScheduledTask } from '../services/DatabaseService';
 const {
   mockGetDueScheduledTasks, mockCreateScheduledTaskRun, mockUpdateScheduledTaskRun,
   mockUpdateScheduledTask, mockCleanupOldTaskRuns, mockGetScheduledTask, mockGetNodes, mockGetNode,
+  mockGetGlobalSettings, mockGetStackDossier,
   mockCreateSnapshot, mockInsertSnapshotFiles, mockClearStackUpdateStatus,
   mockMarkStaleRunsAsFailed, mockDeleteOldScans,
   mockGetTier, mockGetProxyHeaders,
@@ -36,6 +37,8 @@ const {
   mockGetScheduledTask: vi.fn(),
   mockGetNodes: vi.fn().mockReturnValue([]),
   mockGetNode: vi.fn().mockReturnValue({ id: 1, name: 'local', type: 'local', status: 'online' }),
+  mockGetGlobalSettings: vi.fn().mockReturnValue({}),
+  mockGetStackDossier: vi.fn().mockReturnValue(undefined),
   mockCreateSnapshot: vi.fn().mockReturnValue(1),
   mockInsertSnapshotFiles: vi.fn(),
   mockClearStackUpdateStatus: vi.fn(),
@@ -80,6 +83,8 @@ vi.mock('../services/DatabaseService', () => ({
       getScheduledTask: mockGetScheduledTask,
       getNodes: mockGetNodes,
       getNode: mockGetNode,
+      getGlobalSettings: mockGetGlobalSettings,
+      getStackDossier: mockGetStackDossier,
       createSnapshot: mockCreateSnapshot,
       insertSnapshotFiles: mockInsertSnapshotFiles,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
@@ -201,6 +206,10 @@ beforeEach(() => {
   mockGetTier.mockReturnValue('paid');
   mockGetNode.mockReturnValue({ id: 1, name: 'local', type: 'local', status: 'online' });
   mockGetProxyTarget.mockReturnValue(null);
+  // Documentation capture is opt-in and off by default; reset so a test that
+  // enables it does not leak into later snapshot tests.
+  mockGetGlobalSettings.mockReturnValue({});
+  mockGetStackDossier.mockReturnValue(undefined);
   // Default: the scan-policy gate allows. Individual tests override to a block.
   mockEnforcePolicyPreDeploy.mockResolvedValue({ ok: true, bypassed: false, violations: [] });
   (SchedulerService as any).instance = undefined;
@@ -1391,6 +1400,7 @@ describe('SchedulerService - executeSnapshot', () => {
       1,
       expect.any(String),
       expect.any(String),
+      '',
     );
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
@@ -1422,6 +1432,30 @@ describe('SchedulerService - executeSnapshot', () => {
       1,
       expect.objectContaining({ status: 'success' })
     );
+  });
+
+  it('captures dossier documentation when the snapshot_documentation setting is on', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 77,
+      name: 'documented-snapshot',
+      action: 'snapshot',
+      target_type: 'fleet',
+      cron_expression: '0 3 * * *',
+      enabled: true,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetStacks.mockResolvedValue(['app1']);
+    mockGetStackContent.mockResolvedValue('services: {}\n');
+    mockGetGlobalSettings.mockReturnValue({ snapshot_documentation: '1' });
+    mockGetStackDossier.mockReturnValue({ purpose: 'documented', owner: '', access_urls: '', static_ip: '', vlan: '', firewall_notes: '', reverse_proxy_notes: '', backup_notes: '', upgrade_notes: '', recovery_notes: '', custom_notes: '' });
+
+    await SchedulerService.getInstance().triggerTask(77);
+
+    const docArg = mockCreateSnapshot.mock.calls.at(-1)?.[6] as string;
+    expect(docArg).toBeTruthy();
+    expect(JSON.parse(docArg).stacks[0]).toMatchObject({ stackName: 'app1', dossier: { purpose: 'documented' } });
   });
 });
 

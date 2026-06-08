@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
+import { requireAdmin, requireBody } from '../middleware/tierGates';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeLabelService } from '../services/NodeLabelService';
 import { parseIntParam } from '../utils/parseIntParam';
@@ -10,7 +10,6 @@ export const nodeLabelsRouter = Router();
 nodeLabelsRouter.use(authMiddleware);
 
 nodeLabelsRouter.get('/', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     try {
         const map = NodeLabelService.getInstance().listAll();
         res.json(map);
@@ -21,7 +20,6 @@ nodeLabelsRouter.get('/', (req: Request, res: Response): void => {
 });
 
 nodeLabelsRouter.get('/all', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     try {
         const labels = NodeLabelService.getInstance().listDistinct();
         res.json({ labels });
@@ -32,7 +30,6 @@ nodeLabelsRouter.get('/all', (req: Request, res: Response): void => {
 });
 
 nodeLabelsRouter.get('/:nodeId', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     const nodeId = parseIntParam(req, res, 'nodeId');
     if (nodeId === null) return;
     try {
@@ -50,7 +47,6 @@ nodeLabelsRouter.get('/:nodeId', (req: Request, res: Response): void => {
 });
 
 nodeLabelsRouter.post('/:nodeId', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const nodeId = parseIntParam(req, res, 'nodeId');
@@ -75,7 +71,6 @@ nodeLabelsRouter.post('/:nodeId', (req: Request, res: Response): void => {
 });
 
 nodeLabelsRouter.delete('/:nodeId/:label', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const nodeId = parseIntParam(req, res, 'nodeId');
     if (nodeId === null) return;

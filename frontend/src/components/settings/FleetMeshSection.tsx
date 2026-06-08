@@ -25,10 +25,11 @@ function SectionSkeleton() {
     );
 }
 
-type FleetMeshFields = Pick<PatchableSettings, 'mesh_auto_recreate'>;
+type FleetMeshFields = Pick<PatchableSettings, 'mesh_auto_recreate' | 'snapshot_documentation'>;
 
 const DEFAULT_FLEET_MESH: FleetMeshFields = {
     mesh_auto_recreate: DEFAULT_SETTINGS.mesh_auto_recreate,
+    snapshot_documentation: DEFAULT_SETTINGS.snapshot_documentation,
 };
 
 export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
@@ -44,6 +45,7 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
         const baseline = serverSettingsRef.current;
         let n = 0;
         if (settings.mesh_auto_recreate !== baseline.mesh_auto_recreate) n++;
+        if (settings.snapshot_documentation !== baseline.snapshot_documentation) n++;
         return n;
     }, [settings]);
 
@@ -73,6 +75,7 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
                 const nodeData: Record<string, string> = nodeRes.ok ? await nodeRes.json() : {};
                 const safe: FleetMeshFields = {
                     mesh_auto_recreate: (nodeData.mesh_auto_recreate as '0' | '1') ?? DEFAULT_SETTINGS.mesh_auto_recreate,
+                    snapshot_documentation: (nodeData.snapshot_documentation as '0' | '1') ?? DEFAULT_SETTINGS.snapshot_documentation,
                 };
                 setSettings(safe);
                 serverSettingsRef.current = { ...safe };
@@ -103,7 +106,7 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
                 return;
             }
             serverSettingsRef.current = { ...settings };
-            toast.success('Mesh settings saved.');
+            toast.success('Fleet settings saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
         } finally {
@@ -123,6 +126,18 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
                     <TogglePill
                         checked={settings.mesh_auto_recreate === '1'}
                         onChange={(next) => onSettingChange('mesh_auto_recreate', next ? '1' : '0')}
+                    />
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsSection title="Documentation snapshots">
+                <SettingsField
+                    label="Capture stack documentation in snapshots"
+                    helper="Preserve each stack's Dossier notes alongside its captured files. Restoring a stack never overwrites current notes unless you explicitly choose to. Off by default."
+                >
+                    <TogglePill
+                        checked={settings.snapshot_documentation === '1'}
+                        onChange={(next) => onSettingChange('snapshot_documentation', next ? '1' : '0')}
                     />
                 </SettingsField>
             </SettingsSection>
