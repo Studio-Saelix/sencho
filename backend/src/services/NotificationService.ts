@@ -22,6 +22,11 @@ export type NotificationCategory =
     | 'blueprint_deployment_failed'
     | 'blueprint_drift_detected'
     | 'blueprint_drift_correction_failed'
+    // Stack drift ledger transitions. Written to history only (the Activity
+    // timeline), never dispatched to channels, so they are deliberately excluded
+    // from ALL_NOTIFICATION_CATEGORIES (the routable-category whitelist) below.
+    | 'drift_detected'
+    | 'drift_resolved'
     | 'system';
 
 export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [

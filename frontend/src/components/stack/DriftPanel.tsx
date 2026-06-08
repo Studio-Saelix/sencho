@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react';
-import { Check, TriangleAlert, CircleSlash, WifiOff, RefreshCw, type LucideIcon } from 'lucide-react';
+import {
+  Check, TriangleAlert, CircleSlash, WifiOff, RefreshCw,
+  FileClock, FileCheck2, FileQuestion, type LucideIcon,
+} from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
+import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 
-// Mirrors the backend StackDriftReport shape (the frontend never imports backend).
+// Mirrors the backend payload shape (the frontend never imports backend).
 type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
 type DriftFindingKind = 'service-missing' | 'service-undeclared' | 'image-mismatch' | 'ports-mismatch';
 
@@ -17,6 +21,20 @@ interface StackDriftFinding {
   actual?: string;
 }
 
+interface DriftTemporal {
+  hasBaseline: boolean;
+  sourceChanged: boolean;
+  renderedChanged: boolean;
+}
+
+interface DriftLedgerEntry {
+  service: string;
+  kind: DriftFindingKind;
+  message: string;
+  detectedAt: number;
+  resolvedAt: number | null;
+}
+
 interface StackDriftReport {
   stack: string;
   status: StackDriftStatus;
@@ -24,11 +42,15 @@ interface StackDriftReport {
   hasContainers: boolean;
   findings: StackDriftFinding[];
   parseError?: string;
+  // Optional so a report from an older remote node (no ledger layer) still renders.
+  temporal?: DriftTemporal;
+  ledger?: DriftLedgerEntry[];
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const ACTION_CLASS =
   'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
+const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
 const STATUS_META: Record<StackDriftStatus, { label: string; icon: LucideIcon; tone: string; line: string }> = {
   'in-sync': {
@@ -64,6 +86,37 @@ const FINDING_LABEL: Record<DriftFindingKind, string> = {
   'ports-mismatch': 'ports',
 };
 
+/** The temporal overlay: how the on-disk compose compares to the last deploy baseline. */
+function temporalMeta(temporal: DriftTemporal): { label: string; icon: LucideIcon; tone: string; line: string; key: string } {
+  if (!temporal.hasBaseline) {
+    return {
+      key: 'no-baseline',
+      label: 'no deploy baseline',
+      icon: FileQuestion,
+      tone: 'border-muted bg-card/40 text-stat-subtitle',
+      line: 'Deploy through Sencho to start tracking changes since deploy.',
+    };
+  }
+  if (temporal.sourceChanged) {
+    return {
+      key: 'source-changed',
+      label: 'source changed',
+      icon: FileClock,
+      tone: 'border-warning/40 bg-warning/[0.06] text-warning',
+      line: temporal.renderedChanged
+        ? 'The compose model changed since the last deploy.'
+        : 'The compose file changed since the last deploy (formatting only).',
+    };
+  }
+  return {
+    key: 'matches',
+    label: 'matches last deploy',
+    icon: FileCheck2,
+    tone: 'border-success/40 bg-success/[0.06] text-success',
+    line: 'The compose source is unchanged since the last deploy.',
+  };
+}
+
 function Finding({ finding }: { finding: StackDriftFinding }) {
   return (
     <div className="border-t border-muted py-2 first:border-t-0">
@@ -84,6 +137,26 @@ function Finding({ finding }: { finding: StackDriftFinding }) {
   );
 }
 
+function LedgerRow({ entry }: { entry: DriftLedgerEntry }) {
+  const resolved = entry.resolvedAt != null;
+  return (
+    <div className="border-t border-muted py-2 first:border-t-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{entry.service}</span>
+        <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{FINDING_LABEL[entry.kind] ?? entry.kind}</span>
+        <span className={cn('font-mono text-[10px] uppercase tracking-wide', resolved ? 'text-success' : 'text-warning')}>
+          {resolved ? 'resolved' : 'open'}
+        </span>
+      </div>
+      <div className="mt-1 text-[12px] text-foreground/90">{entry.message}</div>
+      <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
+        detected {formatTimeAgo(entry.detectedAt)}
+        {entry.resolvedAt != null ? ` · resolved ${formatTimeAgo(entry.resolvedAt)}` : ''}
+      </div>
+    </div>
+  );
+}
+
 export default function DriftPanel({ stackName }: { stackName: string }) {
   const { activeNode } = useNodes();
   const nodeId = activeNode?.id;
@@ -91,16 +164,16 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [rechecking, setRechecking] = useState(false);
 
-  // Refetch when the stack OR the active node changes (the same stack can exist on
-  // two nodes), and on an explicit re-check. Drift is a point-in-time snapshot, so
-  // a failed load shows a distinct retry state rather than a stale or blank report.
+  // Passive load when the stack OR active node changes (the same stack can exist on
+  // two nodes), and on an explicit retry. Read-only: it never writes the ledger, so
+  // opening the tab has no side effects. A failed load shows a distinct retry state
+  // rather than a stale or blank report.
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       setLoading(true);
-      // Clear any prior failure so an in-flight re-check shows the checking
-      // affordance instead of leaving the error card up.
       setLoadError(false);
       try {
         const res = await apiFetch(`/stacks/${stackName}/drift`);
@@ -125,8 +198,34 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
     return () => { cancelled = true; };
   }, [stackName, nodeId, reloadKey]);
 
+  // Re-check reconciles the ledger server-side (recording newly detected / resolved
+  // findings) and returns the fresh payload, so the history reflects this check.
+  const recheck = async () => {
+    setRechecking(true);
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/drift/recheck`, { method: 'POST' });
+      if (!res.ok) {
+        toast.error('Failed to re-check drift.');
+        return;
+      }
+      setReport((await res.json()) as StackDriftReport);
+      setLoadError(false);
+    } catch {
+      toast.error('Failed to re-check drift.');
+    } finally {
+      setRechecking(false);
+    }
+  };
+
   const meta = report ? STATUS_META[report.status] : null;
   const StatusIcon = meta?.icon;
+  // Only render the temporal card when the payload actually carries it. A report
+  // proxied from an older node without the ledger layer omits it; showing "no deploy
+  // baseline" there would be misleading, so the card is left out entirely.
+  const temporal = report?.temporal ? temporalMeta(report.temporal) : null;
+  const TemporalIcon = temporal?.icon;
+  const ledger = report?.ledger ?? [];
+  const busy = loading || rechecking;
 
   return (
     <div data-testid="drift-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
@@ -135,11 +234,11 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
         <button
           type="button"
           data-testid="drift-recheck-btn"
-          onClick={() => setReloadKey(k => k + 1)}
-          disabled={loading}
+          onClick={recheck}
+          disabled={busy}
           className={ACTION_CLASS}
         >
-          <RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} strokeWidth={1.5} /> re-check
+          <RefreshCw className={cn('h-3 w-3', busy && 'animate-spin')} strokeWidth={1.5} /> re-check
         </button>
       </div>
 
@@ -160,7 +259,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
       ) : (
         <>
           {meta && StatusIcon && (
-            <div data-testid="drift-status" data-status={report.status} className={cn('rounded-lg border px-3 py-2.5', meta.tone)}>
+            <div data-testid="drift-status" data-status={report.status} className={cn(CARD_CLASS, meta.tone)}>
               <div className="flex items-center gap-2">
                 <StatusIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
                 <span className="font-mono text-[11px] uppercase tracking-wide">{meta.label}</span>
@@ -171,6 +270,16 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
                 )}
               </div>
               <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">{meta.line}</div>
+            </div>
+          )}
+
+          {temporal && TemporalIcon && (
+            <div data-testid="drift-temporal" data-temporal={temporal.key} className={cn(CARD_CLASS, temporal.tone)}>
+              <div className="flex items-center gap-2">
+                <TemporalIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+                <span className="font-mono text-[11px] uppercase tracking-wide">{temporal.label}</span>
+              </div>
+              <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">{temporal.line}</div>
             </div>
           )}
 
@@ -186,6 +295,17 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
               <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
                 {report.findings.map((f, i) => (
                   <Finding key={`${f.service}-${f.kind}-${i}`} finding={f} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {ledger.length > 0 && (
+            <section>
+              <div className={cn(LABEL_CLASS, 'mb-1.5')}>drift history</div>
+              <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
+                {ledger.map((e, i) => (
+                  <LedgerRow key={`${e.service}-${e.kind}-${e.detectedAt}-${i}`} entry={e} />
                 ))}
               </div>
             </section>

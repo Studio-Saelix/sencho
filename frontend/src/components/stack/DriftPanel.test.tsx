@@ -21,6 +21,8 @@ interface DriftReport {
   hasContainers: boolean;
   findings: Array<{ kind: string; service: string; detail: string; expected?: string; actual?: string }>;
   parseError?: string;
+  temporal?: { hasBaseline: boolean; sourceChanged: boolean; renderedChanged: boolean };
+  ledger?: Array<{ service: string; kind: string; message: string; detectedAt: number; resolvedAt: number | null }>;
 }
 
 function report(partial: Partial<DriftReport>): DriftReport {
@@ -133,12 +135,79 @@ describe('DriftPanel', () => {
     expect(screen.queryByTestId('drift-retry-btn')).not.toBeInTheDocument();
   });
 
-  it('re-checks on demand', async () => {
+  it('re-checks on demand via the recheck endpoint (a POST), not the read GET', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'in-sync' })));
     render(<DriftPanel stackName="web" />);
     await screen.findByTestId('drift-status');
     expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(apiFetch).toHaveBeenLastCalledWith('/stacks/web/drift');
     fireEvent.click(screen.getByTestId('drift-recheck-btn'));
     await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+    expect(apiFetch).toHaveBeenLastCalledWith('/stacks/web/drift/recheck', { method: 'POST' });
+  });
+
+  it('omits the temporal card when the report carries no temporal field (older node)', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'in-sync' }))); // no temporal field
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    expect(screen.queryByTestId('drift-temporal')).not.toBeInTheDocument();
+  });
+
+  it('shows "no deploy baseline" when the report has no temporal baseline', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'in-sync',
+      temporal: { hasBaseline: false, sourceChanged: false, renderedChanged: false },
+    })));
+    render(<DriftPanel stackName="web" />);
+    const temporal = await screen.findByTestId('drift-temporal');
+    expect(temporal).toHaveAttribute('data-temporal', 'no-baseline');
+  });
+
+  it('flags a source change since the last deploy', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'in-sync',
+      temporal: { hasBaseline: true, sourceChanged: true, renderedChanged: true },
+    })));
+    render(<DriftPanel stackName="web" />);
+    const temporal = await screen.findByTestId('drift-temporal');
+    expect(temporal).toHaveAttribute('data-temporal', 'source-changed');
+    expect(screen.getByText(/changed since the last deploy/i)).toBeInTheDocument();
+  });
+
+  it('notes a formatting-only change when source changed but the model did not', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'in-sync',
+      temporal: { hasBaseline: true, sourceChanged: true, renderedChanged: false },
+    })));
+    render(<DriftPanel stackName="web" />);
+    const temporal = await screen.findByTestId('drift-temporal');
+    expect(temporal).toHaveAttribute('data-temporal', 'source-changed');
+    expect(screen.getByText(/formatting only/i)).toBeInTheDocument();
+  });
+
+  it('shows "matches last deploy" when the source is unchanged', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'in-sync',
+      temporal: { hasBaseline: true, sourceChanged: false, renderedChanged: false },
+    })));
+    render(<DriftPanel stackName="web" />);
+    const temporal = await screen.findByTestId('drift-temporal');
+    expect(temporal).toHaveAttribute('data-temporal', 'matches');
+  });
+
+  it('renders the persisted drift history with open and resolved entries', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'drifted',
+      findings: [{ kind: 'image-mismatch', service: 'web', detail: 'image differs' }],
+      ledger: [
+        { service: 'web', kind: 'image-mismatch', message: 'image differs', detectedAt: Date.now(), resolvedAt: null },
+        { service: 'db', kind: 'service-missing', message: 'db not running', detectedAt: Date.now() - 1000, resolvedAt: Date.now() },
+      ],
+    })));
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    expect(screen.getByText(/drift history/i)).toBeInTheDocument();
+    expect(screen.getByText('open')).toBeInTheDocument();
+    expect(screen.getByText('resolved')).toBeInTheDocument();
   });
 });
