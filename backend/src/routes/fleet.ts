@@ -17,7 +17,7 @@ import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierGates';
 import { scheduleLocalUpdate } from './license';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
-import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
+import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
 import { getLatestVersion } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
@@ -1946,8 +1946,14 @@ function findSnapshotDossier(snapshotId: number, nodeId: number, stackName: stri
     console.error(`[Fleet Snapshot] Failed to parse documentation for snapshot ${snapshotId}:`, getErrorMessage(e, 'parse error'));
     return undefined;
   }
-  const entry = doc.stacks.find(s => s.nodeId === nodeId && s.stackName === stackName);
-  return entry ? pickDossierFields(entry.dossier) : undefined;
+  // Guard against a malformed-but-parseable blob: `stacks` must be an array, and
+  // only restore notes that actually carry content, so a blank or tampered entry
+  // can never silently clobber the operator's current notes with empty fields.
+  if (!Array.isArray(doc.stacks)) return undefined;
+  const entry = doc.stacks.find(s => s?.nodeId === nodeId && s?.stackName === stackName);
+  if (!entry) return undefined;
+  const fields = pickDossierFields(entry.dossier);
+  return dossierHasContent(fields) ? fields : undefined;
 }
 
 // Writes captured dossier notes back to a stack: local nodes upsert into the
@@ -1975,7 +1981,10 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
   try {
     const snapshotId = parseIntParam(req, res, 'id', 'snapshot ID');
     if (snapshotId === null) return;
-    const { nodeId, stackName, redeploy = false, restoreNotes = false } = req.body;
+    const { nodeId, stackName, redeploy = false } = req.body;
+    // Strict boolean: only an explicit `true` opts in, so a stray `"false"` or
+    // truthy value can never trigger an overwrite of the operator's notes.
+    const restoreNotes: boolean = req.body?.restoreNotes === true;
 
     if (!nodeId || !stackName) {
       res.status(400).json({ error: 'nodeId and stackName are required' });
@@ -2013,13 +2022,21 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
     await applySnapshotStackFiles(node, stackName, files);
 
     // Dossier notes are restored only on explicit opt-in, so a routine file
-    // restore never clobbers the operator's current notes.
+    // restore never clobbers the operator's current notes. The note write is
+    // best-effort relative to the file restore: the files are already on disk,
+    // so a notes failure (e.g. a remote dossier PUT) is reported, not fatal.
     let notesRestored = false;
+    let notesError: string | undefined;
     if (restoreNotes) {
       const fields = findSnapshotDossier(snapshotId, nodeId, stackName);
       if (fields) {
-        await restoreSnapshotStackDossier(node, stackName, fields);
-        notesRestored = true;
+        try {
+          await restoreSnapshotStackDossier(node, stackName, fields);
+          notesRestored = true;
+        } catch (e) {
+          notesError = getErrorMessage(e, 'Failed to restore documentation notes');
+          console.error(`[Fleet Snapshot] Note restore failed for stack "${sanitizeForLog(stackName)}":`, notesError);
+        }
       }
     }
 
@@ -2031,7 +2048,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
     }
 
     console.log('[Fleet] Snapshot restore: snapshot=%s node=%s stack=%s', snapshotId, sanitizeForLog(nodeId), sanitizeForLog(stackName));
-    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored });
+    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored, notesError });
   } catch (error) {
     if (error instanceof SnapshotProxyTargetError) {
       res.status(503).json({ error: error.message });
@@ -2052,6 +2069,8 @@ interface SnapshotRestoreResult {
   redeployed: boolean;
   notesRestored: boolean;
   error?: string;
+  /** A non-fatal documentation-notes restore failure; files still restored. */
+  notesError?: string;
 }
 
 fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -2101,12 +2120,20 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
 
         await applySnapshotStackFiles(node, group.stackName, group.files);
 
+        // Files are restored; a notes failure is recorded but does not fail the
+        // stack (and must not block the redeploy below).
         let notesRestored = false;
+        let notesError: string | undefined;
         if (restoreNotes) {
           const fields = findSnapshotDossier(snapshotId, group.nodeId, group.stackName);
           if (fields) {
-            await restoreSnapshotStackDossier(node, group.stackName, fields);
-            notesRestored = true;
+            try {
+              await restoreSnapshotStackDossier(node, group.stackName, fields);
+              notesRestored = true;
+            } catch (e) {
+              notesError = getErrorMessage(e, 'Failed to restore documentation notes');
+              console.error(`[Fleet Snapshot] Note restore failed for stack "${sanitizeForLog(group.stackName)}":`, notesError);
+            }
           }
         }
 
@@ -2116,7 +2143,7 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
           await redeploySnapshotStack(node, group.stackName);
           redeployed = true;
         }
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError });
       } catch (e) {
         results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed') });
       }

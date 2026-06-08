@@ -17,6 +17,7 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 let CryptoService: typeof import('../services/CryptoService').CryptoService;
 let ComposeService: typeof import('../services/ComposeService').ComposeService;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
+let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 let adminCookie: string;
 let viewerCookie: string;
 let snapshotId: number;
@@ -37,6 +38,7 @@ beforeAll(async () => {
     ({ CryptoService } = await import('../services/CryptoService'));
     ({ ComposeService } = await import('../services/ComposeService'));
     ({ LicenseService } = await import('../services/LicenseService'));
+    ({ NodeRegistry } = await import('../services/NodeRegistry'));
     ({ app } = await import('../index'));
     adminCookie = await loginAsTestAdmin(app);
 
@@ -346,6 +348,58 @@ describe('Snapshot restore: dossier notes opt-in', () => {
         expect(res.body.notesRestored).toBe(false);
     });
 
+    it('ignores a non-boolean restoreNotes (string "false") and leaves notes untouched', async () => {
+        const db = DatabaseService.getInstance();
+        db.upsertStackDossier(LOCAL_NODE_ID, 'notes-strict', { ...BLANK_FIELDS, purpose: 'current' });
+        const id = snapWithNotes('notes-strict', 'snapshot-version');
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'notes-strict', restoreNotes: 'false' });
+        expect(res.status).toBe(200);
+        expect(res.body.notesRestored).toBe(false);
+        expect(db.getStackDossier(LOCAL_NODE_ID, 'notes-strict')?.purpose).toBe('current');
+    });
+
+    it('does not restore notes from a malformed documentation blob', async () => {
+        const db = DatabaseService.getInstance();
+        db.upsertStackDossier(LOCAL_NODE_ID, 'notes-malformed', { ...BLANK_FIELDS, purpose: 'current' });
+        const id = db.createSnapshot('notes-bad-doc', 'admin', 1, 1, '[]', '[]', JSON.stringify({ generated_at: 'x', stacks: null, warnings: [] }));
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'notes-malformed', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        seedStackDir('notes-malformed');
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'notes-malformed', restoreNotes: true });
+        expect(res.status).toBe(200);
+        expect(res.body.notesRestored).toBe(false);
+        expect(db.getStackDossier(LOCAL_NODE_ID, 'notes-malformed')?.purpose).toBe('current');
+    });
+
+    it('does not overwrite current notes with an all-blank captured dossier', async () => {
+        const db = DatabaseService.getInstance();
+        db.upsertStackDossier(LOCAL_NODE_ID, 'notes-blank', { ...BLANK_FIELDS, purpose: 'current' });
+        const docJson = JSON.stringify({
+            generated_at: 'x',
+            stacks: [{ nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'notes-blank', dossier: { ...BLANK_FIELDS } }],
+            warnings: [],
+        });
+        const id = db.createSnapshot('notes-blank-doc', 'admin', 1, 1, '[]', '[]', docJson);
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'notes-blank', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        seedStackDir('notes-blank');
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'notes-blank', restoreNotes: true });
+        expect(res.status).toBe(200);
+        expect(res.body.notesRestored).toBe(false);
+        expect(db.getStackDossier(LOCAL_NODE_ID, 'notes-blank')?.purpose).toBe('current');
+    });
+
     it('restore-all restores notes only for stacks the snapshot documented', async () => {
         const db = DatabaseService.getInstance();
         // Only 'all-a' carries dossier notes; 'all-b' has files but no notes.
@@ -374,6 +428,87 @@ describe('Snapshot restore: dossier notes opt-in', () => {
         expect(results.find(r => r.stackName === 'allnotes-b')?.notesRestored).toBe(false);
         expect(db.getStackDossier(LOCAL_NODE_ID, 'allnotes-a')?.purpose).toBe('documented');
         expect(db.getStackDossier(LOCAL_NODE_ID, 'allnotes-b')).toBeUndefined();
+    });
+});
+
+describe('Snapshot restore: remote dossier notes (proxy PUT)', () => {
+    afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+    function remoteDocSnapshot(stackName: string, purpose: string): { id: number; remoteId: number } {
+        const db = DatabaseService.getInstance();
+        const remoteId = db.addNode({ name: `remote-${stackName}`, type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+        const docJson = JSON.stringify({
+            generated_at: 'x',
+            stacks: [{ nodeId: remoteId, nodeName: `remote-${stackName}`, stackName, dossier: { ...BLANK_FIELDS, purpose } }],
+            warnings: [],
+        });
+        const id = db.createSnapshot(`remote-notes-${stackName}`, 'admin', 1, 1, '[]', '[]', docJson);
+        db.insertSnapshotFiles(id, [
+            { nodeId: remoteId, nodeName: `remote-${stackName}`, stackName, filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        return { id, remoteId };
+    }
+
+    it('writes notes to a remote node via the proxy dossier PUT when opted in', async () => {
+        const { id, remoteId } = remoteDocSnapshot('rweb', 'documented');
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok' });
+        const calls: Array<{ url: string; method?: string }> = [];
+        vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: { method?: string }) => {
+            calls.push({ url, method: opts?.method });
+            return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+        }));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'rweb', restoreNotes: true });
+
+        expect(res.status).toBe(200);
+        expect(res.body.notesRestored).toBe(true);
+        expect(res.body.notesError).toBeUndefined();
+        expect(calls.some(c => /\/dossier$/.test(c.url) && c.method === 'PUT')).toBe(true);
+    });
+
+    it('reports a non-fatal notesError when the remote dossier PUT fails but files restored', async () => {
+        const { id, remoteId } = remoteDocSnapshot('rweb2', 'documented');
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok' });
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+            if (/\/dossier$/.test(url)) return { ok: false, status: 500, text: async () => 'boom' } as unknown as Response;
+            return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+        }));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'rweb2', restoreNotes: true });
+
+        // File restore succeeded; only the optional notes write failed.
+        expect(res.status).toBe(200);
+        expect(res.body.notesRestored).toBe(false);
+        expect(res.body.notesError).toBeTruthy();
+    });
+
+    it('restore-all records a per-row notesError but keeps the stack success when the remote notes PUT fails', async () => {
+        const { id, remoteId } = remoteDocSnapshot('rweb3', 'documented');
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok' });
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+            if (/\/dossier$/.test(url)) return { ok: false, status: 500, text: async () => 'boom' } as unknown as Response;
+            return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+        }));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({ restoreNotes: true });
+
+        expect(res.status).toBe(200);
+        expect(res.body.restored).toBe(1);
+        expect(res.body.failed).toBe(0);
+        const row = (res.body.results as Array<{ stackName: string; success: boolean; notesRestored: boolean; notesError?: string }>)
+            .find(r => r.stackName === 'rweb3');
+        expect(row?.success).toBe(true);
+        expect(row?.notesRestored).toBe(false);
+        expect(row?.notesError).toBeTruthy();
     });
 });
 

@@ -292,9 +292,14 @@ export default function FleetSnapshots() {
                 body: JSON.stringify({ nodeId, stackName, redeploy, restoreNotes }),
             });
             if (res.ok) {
-                const data: { message: string; redeployed: boolean; notesRestored: boolean } = await res.json();
-                const notesNote = data.notesRestored ? ' Documentation notes restored.' : '';
-                toast.success((data.redeployed ? 'Stack restored and redeployed.' : 'Stack restored successfully.') + notesNote);
+                const data: { message: string; redeployed: boolean; notesRestored: boolean; notesError?: string } = await res.json();
+                const base = data.redeployed ? 'Stack restored and redeployed.' : 'Stack restored successfully.';
+                if (data.notesError) {
+                    // Files restored; only the optional notes write failed.
+                    toast.warning(`${base} Documentation notes could not be restored.`);
+                } else {
+                    toast.success(base + (data.notesRestored ? ' Documentation notes restored.' : ''));
+                }
             } else {
                 const err = await res.json().catch(() => null);
                 toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore stack.');
@@ -338,21 +343,26 @@ export default function FleetSnapshots() {
                     restored: number;
                     failed: number;
                     redeploy: boolean;
-                    results: Array<{ stackName: string; success: boolean; error?: string }>;
+                    results: Array<{ stackName: string; success: boolean; error?: string; notesError?: string }>;
                 } = await res.json();
                 const noun = (n: number) => `${n} stack${n === 1 ? '' : 's'}`;
                 const firstFailed = data.results?.find(r => !r.success);
                 const failDetail = firstFailed
                     ? ` First failure: ${firstFailed.stackName} · ${firstFailed.error || 'unknown error'}`
                     : '';
-                if (data.failed === 0) {
+                // Files restored but the optional notes write failed on some stacks.
+                const notesFailed = data.results?.filter(r => r.notesError).length ?? 0;
+                const notesSuffix = notesFailed > 0 ? ` Documentation notes could not be restored for ${noun(notesFailed)}.` : '';
+                if (data.failed === 0 && notesFailed === 0) {
                     toast.success(data.redeploy
                         ? `Restored and redeployed ${noun(data.restored)}.`
                         : `Restored ${noun(data.restored)}.`);
                 } else if (data.restored === 0) {
                     toast.error(`Restore failed for ${noun(data.failed)}.${failDetail}`);
+                } else if (data.failed === 0) {
+                    toast.warning(`Restored ${noun(data.restored)}.${notesSuffix}`);
                 } else {
-                    toast.warning(`${data.restored} restored, ${data.failed} failed.${failDetail}`);
+                    toast.warning(`${data.restored} restored, ${data.failed} failed.${failDetail}${notesSuffix}`);
                 }
             } else {
                 const err = await res.json().catch(() => null);
@@ -448,7 +458,7 @@ export default function FleetSnapshots() {
                                 {isAdmin && selectedSnapshot.nodes.length > 0 && (
                                     <RestoreAllButton
                                         restoring={restoringAll}
-                                        hasDocumentation={!!selectedSnapshot.documentation}
+                                        hasDocumentation={(selectedSnapshot.documentation?.stacks.length ?? 0) > 0}
                                         onRestoreAll={handleRestoreAll}
                                     />
                                 )}
@@ -460,7 +470,7 @@ export default function FleetSnapshots() {
                                 <Badge variant="secondary" className="font-mono tabular-nums">
                                     {selectedSnapshot.stack_count} stack{selectedSnapshot.stack_count !== 1 ? 's' : ''}
                                 </Badge>
-                                {selectedSnapshot.documentation && (
+                                {(selectedSnapshot.documentation?.stacks.length ?? 0) > 0 && (
                                     <Badge variant="outline" className="gap-1">
                                         <BookText className="w-3 h-3" strokeWidth={1.5} />
                                         Documentation captured
@@ -514,6 +524,33 @@ export default function FleetSnapshots() {
                                                 <span className="font-mono">{stack.stackName}</span>
                                                 {' - '}
                                                 {stack.reason}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            );
+                        })()}
+
+                        {/* Documentation capture warnings (notes that could not be fetched) */}
+                        {(() => {
+                            const warnings = selectedSnapshot.documentation?.warnings ?? [];
+                            if (warnings.length === 0) return null;
+                            return (
+                                <div className="rounded-xl border border-warning/30 bg-warning/5 p-4">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <AlertTriangle className="w-4 h-4 text-warning shrink-0" />
+                                        <span className="text-sm font-medium text-warning">
+                                            Some stack documentation could not be captured:
+                                        </span>
+                                    </div>
+                                    <ul className="ml-6 space-y-1">
+                                        {warnings.map((w, i) => (
+                                            <li key={`${w.nodeId}:${w.stackName}:${i}`} className="text-sm text-muted-foreground">
+                                                <span className="font-medium">{w.nodeName}</span>
+                                                {' / '}
+                                                <span className="font-mono">{w.stackName}</span>
+                                                {' - '}
+                                                {w.reason}
                                             </li>
                                         ))}
                                     </ul>
