@@ -420,7 +420,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
           <div className="text-xs text-stat-subtitle">{TRIVY_SOURCE_DESCRIPTIONS[trivy.source]}</div>
         )}
 
-        {trivy.source === 'managed' && isPaid && isAdmin && (
+        {trivy.source === 'managed' && isAdmin && (
           <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
             <div>
               <Label className="text-sm">Auto-update Trivy</Label>

@@ -35,7 +35,6 @@ interface OverviewTabProps {
     onCordonChange?: () => void;
     onEditNode?: (node: Node) => void;
     onDeleteNode?: (node: Node) => void;
-    isPaid: boolean;
     topologyMode: LayoutMode;
     onTopologyModeChange: (mode: LayoutMode) => void;
     topologyPositions: SavedPositions;
@@ -68,7 +67,6 @@ export function OverviewTab({
     onCordonChange,
     onEditNode,
     onDeleteNode,
-    isPaid,
     topologyMode,
     onTopologyModeChange,
     topologyPositions,
@@ -121,7 +119,6 @@ export function OverviewTab({
                         <FleetTopology
                             nodes={topologyNodes}
                             onNodeClick={(id) => onNavigateToNode(id, '')}
-                            isPaid={isPaid}
                             mode={topologyMode}
                             onModeChange={onTopologyModeChange}
                             savedPositions={topologyPositions}

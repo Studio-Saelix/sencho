@@ -5,28 +5,23 @@ import type { FleetNode } from '../types';
 export interface UseNodeLabelsResult {
     labelsByNodeId: Record<number, string[]>;
     distinctLabels: string[];
-    isAvailable: boolean;
 }
 
 interface UseNodeLabelsOptions {
-    isPaid: boolean;
     nodes: FleetNode[];
 }
 
-export function useNodeLabels({ isPaid, nodes }: UseNodeLabelsOptions): UseNodeLabelsResult {
+export function useNodeLabels({ nodes }: UseNodeLabelsOptions): UseNodeLabelsResult {
     const [labelsByNodeId, setLabelsByNodeId] = useState<Record<number, string[]>>({});
 
     const fetchLabels = useCallback(async () => {
-        if (!isPaid) {
-            setLabelsByNodeId({});
-            return;
-        }
         try {
             const res = await apiFetch('/node-labels', {
                 localOnly: true,
                 signal: AbortSignal.timeout(5000),
             });
             if (!res.ok) {
+                console.error(`[useNodeLabels] node-label fetch failed: ${res.status}`);
                 setLabelsByNodeId({});
                 return;
             }
@@ -38,10 +33,11 @@ export function useNodeLabels({ isPaid, nodes }: UseNodeLabelsOptions): UseNodeL
                 if (!Number.isNaN(id) && Array.isArray(v)) map[id] = v;
             }
             setLabelsByNodeId(map);
-        } catch {
+        } catch (err) {
+            console.error('[useNodeLabels] node-label fetch errored:', err);
             setLabelsByNodeId({});
         }
-    }, [isPaid]);
+    }, []);
 
     // Refetch only when the set of node ids actually changes, not on every poll
     // (poll mints a fresh nodes array reference).
@@ -51,13 +47,8 @@ export function useNodeLabels({ isPaid, nodes }: UseNodeLabelsOptions): UseNodeL
     );
 
     useEffect(() => {
-        if (!isPaid) {
-            setLabelsByNodeId({});
-            return;
-        }
         void fetchLabels();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isPaid, nodeIdKey, fetchLabels]);
+    }, [nodeIdKey, fetchLabels]);
 
     const distinctLabels = useMemo(() => {
         const set = new Set<string>();
@@ -67,5 +58,5 @@ export function useNodeLabels({ isPaid, nodes }: UseNodeLabelsOptions): UseNodeL
         return Array.from(set).sort((a, b) => a.localeCompare(b));
     }, [labelsByNodeId]);
 
-    return { labelsByNodeId, distinctLabels, isAvailable: isPaid };
+    return { labelsByNodeId, distinctLabels };
 }
