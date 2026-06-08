@@ -4,7 +4,7 @@ description: Store credentials for private Docker registries so Sencho can authe
 ---
 
 <Note>
-  Private Registries is an **Admiral** tier, admin-only feature. Each Sencho instance stores its own registry credentials; the Registries section is hidden when you are viewing another node through the node switcher.
+  Private Registries is an admin-only feature. Credentials for Docker Hub, GitHub Container Registry (GHCR), and custom or self-hosted registries are available on every tier; AWS ECR requires a Sencho **Admiral** license. Each Sencho instance stores its own registry credentials; the Registries section is hidden when you are viewing another node through the node switcher.
 </Note>
 
 Sencho stores credentials for your private Docker registries and injects them automatically whenever it runs `docker compose pull` or `docker compose up`. Stacks can reference private images without anyone having to run `docker login` on the host.
@@ -19,8 +19,10 @@ Sencho stores credentials for your private Docker registries and injects them au
 |------|-------------|-------------|
 | **Docker Hub** | Private Docker Hub organizations and repositories | Username + access token |
 | **GitHub Container Registry (GHCR)** | `ghcr.io` images for users and organizations | GitHub username + personal access token (PAT) |
-| **AWS Elastic Container Registry (ECR)** | Amazon ECR private registries | AWS Access Key ID + Secret Access Key (+ region) |
+| **AWS Elastic Container Registry (ECR)** | Amazon ECR private registries (Admiral) | AWS Access Key ID + Secret Access Key (+ region) |
 | **Custom / Self-hosted** | Any Docker V2 compatible registry | Username + password or token |
+
+AWS ECR requires a Sencho **Admiral** license; Docker Hub, GHCR, and custom registries are available on every tier.
 
 ## Where to find it
 
@@ -154,7 +156,7 @@ AWS ECR uses short-lived authentication tokens (valid for 12 hours) derived from
 - **Encrypted storage.** Registry secrets are encrypted at rest with the same encryption layer used for remote-node tokens and SSO secrets.
 - **No persistent Docker login.** Credentials are written to a temporary file for the duration of each compose operation and deleted afterward.
 - **Secrets never exposed.** The API never returns decrypted secrets. The UI shows only whether a secret is stored.
-- **Admin role required.** Registry management is restricted to admin operators, even on Admiral. Viewers and operators with non-admin roles cannot see the section.
+- **Admin role required.** Registry management is restricted to admin operators. Viewers and operators with non-admin roles cannot see the section.
 - **API tokens cannot manage registries.** Registry credentials can only be created, edited, or deleted from an admin browser session. Automation tokens are scoped away from this surface so a leaked CI key cannot rewrite pull credentials.
 - **Audit trail.** Registry create, update, and delete operations are recorded in the [Audit Log](/features/audit-log).
 
@@ -184,7 +186,7 @@ Because the Registries section is hidden when you view another node through the 
   </Accordion>
 
   <Accordion title="The Registries section is not visible">
-    The section is shown on the instance you are signed into directly, and only when that instance's license is Admiral and the signed-in operator has the admin role. On a remote node viewed through the node switcher, the section is hidden by design; sign into that node's own Sencho instance to manage its registries. If a non-admin operator should be able to manage registries, change their role under **Settings → Access → Users** first.
+    The section is shown on the instance you are signed into directly, to operators with the admin role. On a remote node viewed through the node switcher, the section is hidden by design; sign into that node's own Sencho instance to manage its registries. If a non-admin operator should be able to manage registries, change their role under **Settings → Access → Users** first. Adding an **AWS ECR** registry requires Admiral; Docker Hub, GHCR, and custom registries are available on every tier.
   </Accordion>
 
   <Accordion title="A node displays a 'Private Registries is not available on this node' lock card">
