@@ -24,10 +24,12 @@ const signToken = (payload: Record<string, unknown>, expiresIn: string | number 
   jwt.sign(payload, TEST_JWT_SECRET, { expiresIn: expiresIn as jwt.SignOptions['expiresIn'] });
 
 // We need a Paid-gated route that doesn't depend on Docker or remote nodes.
-// /api/webhooks/... triggers are public, but the management routes are
-// admin-gated, so we use a Paid-gated route that just reads from the DB.
-// /api/audit-log is paid-gated and reads from the DB.
-const PAID_ROUTE = '/api/audit-log';
+// The bare /api/audit-log list is Community (recent-activity window), but
+// /api/audit-log/stats keeps requirePaid and reads from the DB, so it is a
+// stable stand-in for exercising the distributed-license trust chain. The
+// node_proxy and admin session tokens used below both satisfy its
+// system:audit permission gate.
+const PAID_ROUTE = '/api/audit-log/stats';
 
 // ─── authMiddleware: proxyTier propagation ──────────────────────────────────
 

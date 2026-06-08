@@ -11,7 +11,7 @@ import type { ImageCheckResult } from './ImageUpdateService';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { captureLocalNodeFiles, captureRemoteNodeFiles, type SnapshotNodeData } from '../utils/snapshot-capture';
+import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, type SnapshotNodeData } from '../utils/snapshot-capture';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import TrivyService from './TrivyService';
@@ -533,13 +533,14 @@ export class SchedulerService {
     private async executeSnapshot(task: ScheduledTask): Promise<string> {
         const db = DatabaseService.getInstance();
         const nodes = db.getNodes();
+        const captureDocs = db.getGlobalSettings().snapshot_documentation === '1';
 
         const results = await Promise.allSettled(
             nodes.map(async (node) => {
                 if (node.type === 'remote') {
-                    return captureRemoteNodeFiles(node);
+                    return captureRemoteNodeFiles(node, captureDocs);
                 }
-                return captureLocalNodeFiles(node);
+                return captureLocalNodeFiles(node, captureDocs);
             })
         );
 
@@ -585,6 +586,10 @@ export class SchedulerService {
             }
         }
 
+        const documentation = captureDocs
+            ? buildSnapshotDocumentation(capturedNodes, new Date().toISOString())
+            : null;
+
         const description = `Scheduled snapshot: ${task.name}`;
         const snapshotId = db.createSnapshot(
             description,
@@ -593,6 +598,7 @@ export class SchedulerService {
             totalStacks,
             JSON.stringify(skippedNodes),
             JSON.stringify(skippedStacks),
+            documentation ? JSON.stringify(documentation) : '',
         );
 
         if (allFiles.length > 0) {

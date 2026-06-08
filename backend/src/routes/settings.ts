@@ -26,6 +26,7 @@ const ALLOWED_SETTING_KEYS = new Set([
   'scan_history_per_image_limit',
   'prune_on_update',
   'reclaim_hero',
+  'snapshot_documentation',
 ]);
 
 // Keys whose write requires a paid license, not just an admin role.
@@ -50,6 +51,7 @@ const SettingsPatchSchema = z.object({
   scan_history_per_image_limit: z.coerce.number().int().min(5).max(1000).transform(String),
   prune_on_update: z.enum(['0', '1']),
   reclaim_hero: z.enum(['0', '1']),
+  snapshot_documentation: z.enum(['0', '1']),
 }).partial();
 
 export const settingsRouter = Router();

@@ -252,11 +252,12 @@ export class CloudBackupService {
         const snapshot = db.getSnapshot(snapshotId);
         if (!snapshot) throw new Error(`Snapshot ${snapshotId} not found.`);
         const files = db.getSnapshotFiles(snapshotId);
+        const documentation = db.getSnapshotDocumentation(snapshotId);
         const objectKey = this.buildObjectKey(cfg, snapshot.id, snapshot.description, snapshot.created_at);
 
         this.setStatus(snapshotId, { status: 'uploading', objectKey, updatedAt: Date.now() });
         try {
-            const archive = await this.buildArchive(snapshot, files);
+            const archive = await this.buildArchive(snapshot, files, documentation);
             const { client, sdk } = await this.buildS3Client(cfg);
             await client.send(new sdk.PutObjectCommand({
                 Bucket: cfg.bucket,
@@ -364,6 +365,7 @@ export class CloudBackupService {
     private async buildArchive(
         snapshot: { id: number; description: string; created_by: string; node_count: number; stack_count: number; skipped_nodes: string; created_at: number },
         files: FleetSnapshotFile[],
+        documentation = '',
     ): Promise<Buffer> {
         const pack = tar.pack();
         const metadata = {
@@ -374,10 +376,18 @@ export class CloudBackupService {
             node_count: snapshot.node_count,
             stack_count: snapshot.stack_count,
             skipped_nodes: safeParseJson(snapshot.skipped_nodes, []),
+            has_documentation: documentation !== '',
             instance_id: this.getInstanceId(),
-            archive_version: 1,
+            // Version 2 adds the optional documentation.json entry; readers of
+            // version 1 archives simply will not find that file.
+            archive_version: 2,
         };
         pack.entry({ name: 'metadata.json' }, JSON.stringify(metadata, null, 2));
+
+        // Captured Stack Dossier metadata travels with the archive when present.
+        if (documentation !== '') {
+            pack.entry({ name: 'documentation.json' }, documentation);
+        }
 
         for (const file of files) {
             const safeNodeName = sanitizePathSegment(file.node_name);

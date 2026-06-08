@@ -41,7 +41,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
-    const overview = useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses: updateStatus.updateStatuses });
+    const overview = useFleetOverview({ prefs, updatePrefs, updateStatuses: updateStatus.updateStatuses });
     const topology = useTopologyPreferences();
     const { exporting, exportDossier } = useFleetDossierExport();
 
@@ -205,7 +205,6 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         onCordonChange={() => { void overview.fetchOverview(true); }}
                         onEditNode={isAdmin ? openEdit : undefined}
                         onDeleteNode={isAdmin ? openDelete : undefined}
-                        isPaid={isPaid}
                         topologyMode={topology.prefs.mode}
                         onTopologyModeChange={topology.setMode}
                         topologyPositions={topology.prefs.positions}
