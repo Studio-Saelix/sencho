@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.91.0](https://github.com/Studio-Saelix/sencho/compare/v0.90.0...v0.91.0) (2026-06-08)
+
+
+### Added
+
+* allow local Docker Hub, GHCR, and custom registry credentials on Community ([#1338](https://github.com/Studio-Saelix/sencho/issues/1338)) ([2298f47](https://github.com/Studio-Saelix/sencho/commit/2298f470bd195cd64513a182852f49f28406085f))
+* **fleet:** add read-only dependency map tab ([#1324](https://github.com/Studio-Saelix/sencho/issues/1324)) ([af40831](https://github.com/Studio-Saelix/sencho/commit/af4083175cddcf8346fb23fe9e4bd7caf16ca965))
+* **fleet:** export a whole-fleet Markdown dossier ([#1334](https://github.com/Studio-Saelix/sencho/issues/1334)) ([842ee7d](https://github.com/Studio-Saelix/sencho/commit/842ee7dd0ca0a75793663866f9c9bc7f666009bc))
+* give Community a 14-day in-app audit log ([#1337](https://github.com/Studio-Saelix/sencho/issues/1337)) ([ea1267b](https://github.com/Studio-Saelix/sencho/commit/ea1267b32f8b603ac2008b6a14f8c8115111bb7e))
+* **mobile:** bespoke phone layouts for dashboard, fleet, schedules, and settings ([#1330](https://github.com/Studio-Saelix/sencho/issues/1330)) ([928a3a8](https://github.com/Studio-Saelix/sencho/commit/928a3a8343a557a0ecc3cf346df8974456ec2ce2))
+* move trivy auto-update, node labels, fleet topology, and single-scan SBOM to Community ([#1336](https://github.com/Studio-Saelix/sencho/issues/1336)) ([54119be](https://github.com/Studio-Saelix/sencho/commit/54119be0c21253a00f1aeee74eafe0be3741e25e))
+* **snapshots:** preserve stack dossiers with fleet snapshots ([#1339](https://github.com/Studio-Saelix/sencho/issues/1339)) ([710647a](https://github.com/Studio-Saelix/sencho/commit/710647a44fa0aff703cf4aed6f3b069ba5bba26f))
+* **stacks:** add compose-vs-runtime drift detection ([#1329](https://github.com/Studio-Saelix/sencho/issues/1329)) ([421177e](https://github.com/Studio-Saelix/sencho/commit/421177e4a602e8ce2c5cde41f56309a6ee984bb3))
+* **stacks:** add Stack Dossier tab with operator notes and Markdown export ([#1326](https://github.com/Studio-Saelix/sencho/issues/1326)) ([57fe430](https://github.com/Studio-Saelix/sencho/commit/57fe430db8c166dabd71643d9920fe759ce87568))
+* **stacks:** copy stack anatomy as Markdown ([#1323](https://github.com/Studio-Saelix/sencho/issues/1323)) ([13b6aca](https://github.com/Studio-Saelix/sencho/commit/13b6acab16660f0474160f6776b7bbca8cffbc64))
+* **stacks:** persist a drift ledger with temporal source-change detection ([#1333](https://github.com/Studio-Saelix/sencho/issues/1333)) ([b21324f](https://github.com/Studio-Saelix/sencho/commit/b21324f97ab49efca91dde84b171a16e7e99712b))
+* **ui:** make Fleet, Settings, and the dashboard table usable on mobile ([#1331](https://github.com/Studio-Saelix/sencho/issues/1331)) ([2072378](https://github.com/Studio-Saelix/sencho/commit/20723783961ae4605814fa6f4b5da84f68c3556c))
+* **ui:** make the core stack flow usable on mobile ([#1327](https://github.com/Studio-Saelix/sencho/issues/1327)) ([e8f271f](https://github.com/Studio-Saelix/sencho/commit/e8f271f5f6500340ed95bfda9f6f114c826860e5))
+
 ## [0.90.0](https://github.com/Studio-Saelix/sencho/compare/v0.89.0...v0.90.0) (2026-06-06)
 
 
