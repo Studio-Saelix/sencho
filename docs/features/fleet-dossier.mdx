@@ -1,0 +1,65 @@
+---
+title: Fleet Dossier
+description: Export a whole-homelab Markdown dossier from your nodes and stacks, combining the facts Sencho derives with the operator notes you add, ready to commit to Git or store with your backups.
+---
+
+The **Export Dossier** action in the Fleet view turns your entire fleet into a single documentation archive. It walks every node and every stack, pairs the operational facts Sencho derives from each Compose file with the notes you have written in each [Stack Dossier](/features/stack-dossier), and produces a folder of Markdown files you can commit to Git, drop into a wiki, or keep beside your backups.
+
+It is the fleet-wide companion to the per-stack dossier: where the Stack Dossier documents one stack, the Fleet Dossier documents the whole homelab in one download, replacing the spreadsheet many self-hosters keep for ports, services, static IPs, VLANs, and firewall notes.
+
+## What the export contains
+
+The download is a `homelab-dossier.zip` with a browsable folder structure:
+
+```text
+homelab-dossier/
+├─ index.md        # generation time, Sencho version, node summary, skipped nodes
+├─ network.md      # fleet-wide port, volume, and network maps + checklists
+├─ nodes/          # one page per node
+│  └─ local.md
+└─ stacks/         # one page per stack: generated anatomy + your notes
+   ├─ local--radarr.md
+   └─ local--sonarr.md
+```
+
+- **`index.md`** lists every node with its type, reachability, and stack count, plus an explicit section for any node that was skipped and why.
+- **`network.md`** aggregates across the fleet: a **port map**, **volume map**, and **network map**, an **environment checklist** by stack, an **access-URL inventory**, and a **VLAN / static IP / firewall** table. The last two are populated from your Stack Dossier notes.
+- **`nodes/<node>.md`** summarises a node and links to its stacks.
+- **`stacks/<node>--<stack>.md`** is the same combined document the Stack Dossier's own export produces: generated anatomy followed by your operator notes.
+
+## Generated facts and your notes
+
+Everything Sencho can derive (services, published ports, volumes, networks, restart policy, env file and its variable count, missing `${VAR}` references, and Git source) is generated live from each stack's current Compose file, so it never drifts. Everything Sencho cannot infer (purpose, owner, access URLs, static IP, VLAN, firewall, reverse proxy, backup, upgrade, and recovery notes) comes from the Stack Dossier you maintain per stack. Stacks without notes are still included, documented from their generated facts alone.
+
+## Unreachable nodes
+
+A remote node that is offline or unreachable when you export is never allowed to block the rest of the fleet. It appears in `index.md` under **Skipped nodes** with the reason, gets its own node page marked unreachable, and contributes no stack pages. Everything reachable still exports normally.
+
+## Secrets are never included
+
+As with the Stack Dossier, the generated facts only ever carry env variable **names** and **counts**, never `.env` values. Your operator notes are exported exactly as you wrote them, so treat them like any document you might share and avoid pasting secrets into them.
+
+## Exporting
+
+Administrators can export the fleet dossier:
+
+1. Open the **Fleet** view.
+2. Click **Export Dossier** in the toolbar.
+3. Your browser downloads `homelab-dossier.zip`. Unzip it wherever you keep documentation.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="A node is listed as skipped in index.md">
+    The node was offline or unreachable at export time. Its reason is shown in the **Skipped nodes** section and on its node page. Bring the node back online and export again to include its stacks.
+  </Accordion>
+  <Accordion title="A stack page says compose.yaml could not be parsed">
+    That stack's Compose file is empty or not valid YAML, so its generated facts could not be built. The stack is still included with any operator notes you have written. Fix the Compose file and re-export to restore the full anatomy.
+  </Accordion>
+  <Accordion title="The Access URLs and VLAN / firewall tables are empty">
+    Those sections come from Stack Dossier notes. Add access URLs, static IP, VLAN, or firewall notes to a stack's Dossier tab, then export again and they appear in `network.md` and on that stack's page.
+  </Accordion>
+  <Accordion title="The same stack name appears under two nodes">
+    Dossiers and stacks are scoped per node, so a stack with the same name on two nodes exports as two separate pages, each prefixed with its node (for example `local--radarr.md` and `media-node--radarr.md`).
+  </Accordion>
+</AccordionGroup>
