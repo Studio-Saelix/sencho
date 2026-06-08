@@ -23,7 +23,7 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 **Community** is the complete self-hosted control plane. It includes:
 
 - Unlimited nodes, the Monaco compose editor, the full stack file explorer (browse, view, edit, upload, download, rename, chmod, delete; admin role for writes), and the App Store with 199+ one-click templates
-- Real-time container stats, global logs, the interactive network topology graph, and stack labels
+- Real-time container stats, global logs, the interactive network topology graph (Hub, Grouped, and Free layouts), node labels, and stack labels
 - Git sources for compose stacks
 - Multi-node management in both Proxy and Pilot Agent modes
 - Fleet View with search, sort, filter, and node-card drill-down
@@ -35,7 +35,9 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 - Scheduled operations across the full action catalog (lifecycle, updates, scans, snapshots, prune)
 - Webhooks (incoming, to trigger deploys from CI/CD) and notification routing (per-stack and per-category rules to Discord, Slack, or any webhook)
 - Custom S3-compatible backup target (bring your own AWS S3, Cloudflare R2, MinIO, Backblaze B2, or Wasabi bucket)
-- Vulnerability scanning: install, update, and uninstall Trivy, on-demand scans for vulnerabilities, secrets, and misconfigurations, scan comparison, and CVE suppressions
+- Vulnerability scanning: install, update, uninstall, and auto-update the managed Trivy binary, on-demand scans for vulnerabilities, secrets, and misconfigurations, scan comparison, CVE suppressions, and single-scan SBOM export (SPDX, CycloneDX)
+- Private registry credentials for Docker Hub, GitHub Container Registry (GHCR), and custom or self-hosted registries (admin role required)
+- A 14-day recent-activity audit log with Stream and Table views and filtering
 - Alert rules with Discord, Slack, and webhook targets
 - API tokens for CI/CD pipelines and scripts (admin role required)
 - Unlimited accounts with the Admin and Viewer roles
@@ -44,9 +46,9 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 
 **Admiral** adds governance, security, and fleet control for teams. It includes everything in Community, plus:
 
-- **Governance:** advanced RBAC roles (Deployer, Node Admin, Auditor), scoped permissions per stack or node, and the audit log with CSV export
-- **Security:** Fleet Secrets, private and custom registry credentials, deploy enforcement (scan policies with `block_on_deploy`), SBOM (SPDX, CycloneDX) and SARIF export, auto-update of the managed Trivy binary, and LDAP / Active Directory authentication
-- **Fleet operations:** node labels, node cordon, Blueprints, and Sencho Mesh (cross-node container networking)
+- **Governance:** advanced RBAC roles (Deployer, Node Admin, Auditor), scoped permissions per stack or node, and audit log export (CSV, JSON), anomaly detection, and configurable retention beyond the recent window
+- **Security:** Fleet Secrets, AWS ECR registry credentials, deploy enforcement (scan policies with `block_on_deploy`), SARIF export, and LDAP / Active Directory authentication
+- **Fleet operations:** node cordon, Blueprints, and Sencho Mesh (cross-node container networking)
 - **Managed continuity:** Sencho Cloud Backup (a managed, off-site snapshot allowance)
 - **Operator access:** the Host Console (a browser-based terminal on the Sencho host)
 

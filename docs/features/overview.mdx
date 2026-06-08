@@ -87,7 +87,7 @@ Route alerts to specific channels with per-stack routing rules. Send production 
 
 ### Audit log
 
-Track every mutating action across your Sencho instance with a searchable audit trail. See who deployed, stopped, deleted, or changed settings, with timestamps, user attribution, and node context. Admiral only. [Learn more →](/features/audit-log)
+Track every mutating action across your Sencho instance with a searchable audit trail. See who deployed, stopped, deleted, or changed settings, with timestamps, user attribution, and node context. The recent 14-day window is available on every tier; export, anomaly detection, and extended retention come with Admiral. [Learn more →](/features/audit-log)
 
 ## Fleet & Multi-Node
 
@@ -159,7 +159,7 @@ Generate scoped API tokens for CI/CD pipelines, scripts, and automation workflow
 
 ### Vulnerability scanning
 
-Scan container images for known CVEs with [Trivy](https://trivy.dev). Install Trivy with one click from Settings → Security → Vulnerability Scanning on first use; the [setup guide](/operations/trivy-setup) covers bind-mounted and air-gapped alternatives. Manual scanning, secret and misconfiguration detection, scan comparison, scheduled scans, and CVE suppressions are available on every tier; scan policies that gate deploys, SBOM generation, SARIF export, and auto-update of the managed Trivy binary are Admiral. [Learn more →](/features/vulnerability-scanning)
+Scan container images for known CVEs with [Trivy](https://trivy.dev). Install Trivy with one click from Settings → Security → Vulnerability Scanning on first use; the [setup guide](/operations/trivy-setup) covers bind-mounted and air-gapped alternatives. Manual scanning, secret and misconfiguration detection, scan comparison, scheduled scans, CVE suppressions, single-scan SBOM export, and auto-update of the managed Trivy binary are available on every tier; scan policies that gate deploys and SARIF export are Admiral. [Learn more →](/features/vulnerability-scanning)
 
 ### CVE suppressions
 
@@ -167,7 +167,7 @@ Accept known-benign vulnerabilities so scan results stay focused on findings tha
 
 ### Private registries
 
-Store credentials for private Docker registries: Docker Hub organizations, GHCR, AWS ECR, and self-hosted registries. Sencho injects them automatically during deploy and pull operations. ECR short-lived tokens are refreshed on every operation. Admiral only. [Learn more →](/features/private-registries)
+Store credentials for private Docker registries: Docker Hub organizations, GHCR, and self-hosted registries on every tier, plus AWS ECR on Admiral. Sencho injects them automatically during deploy and pull operations. ECR short-lived tokens are refreshed on every operation. [Learn more →](/features/private-registries)
 
 ## Automation
 
@@ -201,4 +201,4 @@ When you manage multiple nodes running different Sencho versions, the dashboard 
 
 ### Licensing & billing
 
-Community is the complete self-hosted control plane, free forever. Admiral adds governance, security, and fleet control for teams: advanced RBAC, the audit log, Fleet Secrets, deploy enforcement, Blueprints, Sencho Mesh, and more. Manage your license, view subscription details, and access the billing portal from Settings. [Learn more →](/features/licensing)
+Community is the complete self-hosted control plane, free forever. Admiral adds governance, security, and fleet control for teams: advanced RBAC, audit log export and retention, Fleet Secrets, deploy enforcement, Blueprints, Sencho Mesh, and more. Manage your license, view subscription details, and access the billing portal from Settings. [Learn more →](/features/licensing)
