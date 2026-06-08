@@ -25,6 +25,12 @@ const VIEWER_USER = 'viewer-snap';
 const VIEWER_PASS = 'viewer-pass-123';
 const ENV_SECRET = 'DB_PASSWORD=s3cr3t-value\n';
 
+// Every operator-authored dossier field, blank, for building test dossiers.
+const BLANK_FIELDS = {
+    purpose: '', owner: '', access_urls: '', static_ip: '', vlan: '', firewall_notes: '',
+    reverse_proxy_notes: '', backup_notes: '', upgrade_notes: '', recovery_notes: '', custom_notes: '',
+};
+
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ DatabaseService } = await import('../services/DatabaseService'));
@@ -229,6 +235,145 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         expect(res.status).toBe(200);
         expect(res.body.redeployed).toBe(true);
         expect(deploySpy).toHaveBeenCalledWith('redeploy-web');
+    });
+});
+
+describe('Snapshot documentation capture (persistence)', () => {
+    const docJson = JSON.stringify({
+        generated_at: '2026-01-01T00:00:00Z',
+        stacks: [{ nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'doc-web', dossier: { ...BLANK_FIELDS, purpose: 'edge', owner: 'ops' } }],
+        warnings: [],
+    });
+
+    it('stores documentation encrypted at rest and flags has_documentation', () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('doc-snap', 'admin', 1, 1, '[]', '[]', docJson);
+        expect(db.getSnapshot(id)!.has_documentation).toBe(1);
+        const raw = db.getDb().prepare('SELECT documentation FROM fleet_snapshots WHERE id = ?').get(id) as { documentation: string };
+        expect(CryptoService.getInstance().isEncrypted(raw.documentation)).toBe(true);
+        expect(raw.documentation).not.toContain('edge');
+        expect(db.getSnapshotDocumentation(id)).toBe(docJson);
+    });
+
+    it('leaves documentation empty and has_documentation 0 when none captured', () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('no-doc', 'admin', 1, 1, '[]', '[]');
+        expect(db.getSnapshot(id)!.has_documentation).toBe(0);
+        expect(db.getSnapshotDocumentation(id)).toBe('');
+    });
+
+    it('GET detail surfaces the documentation object for an admin', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('doc-detail', 'admin', 1, 1, '[]', '[]', docJson);
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'doc-web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        const res = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+        expect(res.status).toBe(200);
+        expect(res.body.has_documentation).toBe(1);
+        expect(res.body.documentation.stacks[0]).toMatchObject({ nodeId: LOCAL_NODE_ID, stackName: 'doc-web', dossier: { purpose: 'edge' } });
+    });
+
+    it('detail degrades to no documentation (still 200) when the blob is unparseable', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('doc-corrupt', 'admin', 1, 1, '[]', '[]', JSON.stringify({ generated_at: 'x', stacks: [], warnings: [] }));
+        // Overwrite the encrypted column with non-JSON plaintext to simulate a
+        // corrupt or tampered blob; getSnapshotDocumentation returns it verbatim
+        // (decrypt passes non-ciphertext through) and the route's JSON.parse fails.
+        db.getDb().prepare('UPDATE fleet_snapshots SET documentation = ? WHERE id = ?').run('not-json', id);
+        const res = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+        expect(res.status).toBe(200);
+        expect(res.body.documentation).toBeUndefined();
+    });
+});
+
+describe('Snapshot restore: dossier notes opt-in', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    function snapWithNotes(stackName: string, purpose: string): number {
+        const db = DatabaseService.getInstance();
+        const docJson = JSON.stringify({
+            generated_at: 'x',
+            stacks: [{ nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName, dossier: { ...BLANK_FIELDS, purpose } }],
+            warnings: [],
+        });
+        const id = db.createSnapshot(`notes-${stackName}`, 'admin', 1, 1, '[]', '[]', docJson);
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName, filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        seedStackDir(stackName);
+        return id;
+    }
+
+    it('does NOT overwrite current notes when restoreNotes is omitted', async () => {
+        const db = DatabaseService.getInstance();
+        db.upsertStackDossier(LOCAL_NODE_ID, 'notes-keep', { ...BLANK_FIELDS, purpose: 'current' });
+        const id = snapWithNotes('notes-keep', 'snapshot-version');
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'notes-keep' });
+        expect(res.status).toBe(200);
+        expect(res.body.notesRestored).toBe(false);
+        expect(db.getStackDossier(LOCAL_NODE_ID, 'notes-keep')?.purpose).toBe('current');
+    });
+
+    it('restores notes when restoreNotes is true', async () => {
+        const db = DatabaseService.getInstance();
+        db.upsertStackDossier(LOCAL_NODE_ID, 'notes-overwrite', { ...BLANK_FIELDS, purpose: 'current' });
+        const id = snapWithNotes('notes-overwrite', 'snapshot-version');
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'notes-overwrite', restoreNotes: true });
+        expect(res.status).toBe(200);
+        expect(res.body.notesRestored).toBe(true);
+        expect(db.getStackDossier(LOCAL_NODE_ID, 'notes-overwrite')?.purpose).toBe('snapshot-version');
+    });
+
+    it('reports notesRestored false when the snapshot has no documentation', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('notes-none', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'notes-none-web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        seedStackDir('notes-none-web');
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'notes-none-web', restoreNotes: true });
+        expect(res.status).toBe(200);
+        expect(res.body.notesRestored).toBe(false);
+    });
+
+    it('restore-all restores notes only for stacks the snapshot documented', async () => {
+        const db = DatabaseService.getInstance();
+        // Only 'all-a' carries dossier notes; 'all-b' has files but no notes.
+        const docJson = JSON.stringify({
+            generated_at: 'x',
+            stacks: [{ nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'allnotes-a', dossier: { ...BLANK_FIELDS, purpose: 'documented' } }],
+            warnings: [],
+        });
+        const id = db.createSnapshot('restore-all-notes', 'admin', 1, 2, '[]', '[]', docJson);
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'allnotes-a', filename: 'compose.yaml', content: 'services: {}\n' },
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'allnotes-b', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        seedStackDir('allnotes-a');
+        seedStackDir('allnotes-b');
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({ restoreNotes: true });
+
+        expect(res.status).toBe(200);
+        expect(res.body.restored).toBe(2);
+        const results = res.body.results as Array<{ stackName: string; notesRestored: boolean }>;
+        expect(results.find(r => r.stackName === 'allnotes-a')?.notesRestored).toBe(true);
+        expect(results.find(r => r.stackName === 'allnotes-b')?.notesRestored).toBe(false);
+        expect(db.getStackDossier(LOCAL_NODE_ID, 'allnotes-a')?.purpose).toBe('documented');
+        expect(db.getStackDossier(LOCAL_NODE_ID, 'allnotes-b')).toBeUndefined();
     });
 });
 

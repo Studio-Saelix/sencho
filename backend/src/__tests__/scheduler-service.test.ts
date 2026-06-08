@@ -80,6 +80,7 @@ vi.mock('../services/DatabaseService', () => ({
       getScheduledTask: mockGetScheduledTask,
       getNodes: mockGetNodes,
       getNode: mockGetNode,
+      getGlobalSettings: vi.fn().mockReturnValue({}),
       createSnapshot: mockCreateSnapshot,
       insertSnapshotFiles: mockInsertSnapshotFiles,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
@@ -1391,6 +1392,7 @@ describe('SchedulerService - executeSnapshot', () => {
       1,
       expect.any(String),
       expect.any(String),
+      '',
     );
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,

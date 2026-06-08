@@ -278,6 +278,10 @@ export interface FleetSnapshot {
     skipped_nodes: string; // JSON: Array<{ nodeId; nodeName; reason }>
     skipped_stacks: string; // JSON: Array<{ nodeId; nodeName; stackName; reason }>
     created_at: number;
+    /** 1 when the snapshot captured Stack Dossier metadata, 0 otherwise. The
+     *  encrypted blob itself is never projected into list/detail rows; read it
+     *  with getSnapshotDocumentation(). */
+    has_documentation: number;
 }
 
 export interface FleetSnapshotFile {
@@ -867,6 +871,7 @@ export class DatabaseService {
         stack_count INTEGER NOT NULL,
         skipped_nodes TEXT NOT NULL DEFAULT '[]',
         skipped_stacks TEXT NOT NULL DEFAULT '[]',
+        documentation TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL
       );
 
@@ -1280,6 +1285,8 @@ export class DatabaseService {
 
         // Fleet snapshot per-stack capture warnings (partial-capture surfacing)
         maybeAddCol('fleet_snapshots', 'skipped_stacks', "TEXT NOT NULL DEFAULT '[]'");
+        // Captured Stack Dossier metadata (opt-in documentation snapshots)
+        maybeAddCol('fleet_snapshots', 'documentation', "TEXT NOT NULL DEFAULT ''");
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -3084,10 +3091,14 @@ export class DatabaseService {
 
     // --- Fleet Snapshots ---
 
-    public createSnapshot(description: string, createdBy: string, nodeCount: number, stackCount: number, skippedNodes: string, skippedStacks = '[]'): number {
+    public createSnapshot(description: string, createdBy: string, nodeCount: number, stackCount: number, skippedNodes: string, skippedStacks = '[]', documentation = ''): number {
+        // Dossier metadata can carry operational notes (static IPs, firewall
+        // rules); encrypt it at rest with the same instance key as the file
+        // bodies. An empty string means the snapshot captured no documentation.
+        const storedDocs = documentation === '' ? '' : CryptoService.getInstance().encrypt(documentation);
         const result = this.db.prepare(
-            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(description, createdBy, nodeCount, stackCount, skippedNodes, skippedStacks, Date.now());
+            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, documentation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        ).run(description, createdBy, nodeCount, stackCount, skippedNodes, skippedStacks, storedDocs, Date.now());
         return result.lastInsertRowid as number;
     }
 
@@ -3108,14 +3119,37 @@ export class DatabaseService {
         insertMany(files);
     }
 
+    // The encrypted `documentation` blob is deliberately excluded from these
+    // projections (it can be large and is decrypted only on demand). Callers
+    // get a cheap `has_documentation` flag; read the blob with
+    // getSnapshotDocumentation().
+    private static readonly SNAPSHOT_COLUMNS =
+        "id, description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, created_at, (documentation != '') AS has_documentation";
+
     public getSnapshots(limit = 50, offset = 0): FleetSnapshot[] {
         return this.db.prepare(
-            'SELECT * FROM fleet_snapshots ORDER BY created_at DESC LIMIT ? OFFSET ?'
+            `SELECT ${DatabaseService.SNAPSHOT_COLUMNS} FROM fleet_snapshots ORDER BY created_at DESC LIMIT ? OFFSET ?`
         ).all(limit, offset) as FleetSnapshot[];
     }
 
     public getSnapshot(id: number): FleetSnapshot | undefined {
-        return this.db.prepare('SELECT * FROM fleet_snapshots WHERE id = ?').get(id) as FleetSnapshot | undefined;
+        return this.db.prepare(`SELECT ${DatabaseService.SNAPSHOT_COLUMNS} FROM fleet_snapshots WHERE id = ?`).get(id) as FleetSnapshot | undefined;
+    }
+
+    /** Decrypted Stack Dossier metadata JSON captured with the snapshot, or '' when none. */
+    public getSnapshotDocumentation(id: number): string {
+        const row = this.db.prepare('SELECT documentation FROM fleet_snapshots WHERE id = ?').get(id) as { documentation: string } | undefined;
+        if (!row || row.documentation === '') return '';
+        try {
+            // decrypt() returns non-ciphertext input unchanged, mirroring the file path.
+            return CryptoService.getInstance().decrypt(row.documentation);
+        } catch (e) {
+            // A corrupt blob or a key rotation must not break the primary backup
+            // flows: documentation is an optional side payload, so degrade to
+            // "no documentation" rather than failing upload/detail/restore.
+            console.error(`[DatabaseService] Failed to decrypt documentation for snapshot ${id}:`, (e as Error).message);
+            return '';
+        }
     }
 
     public getSnapshotFiles(snapshotId: number): FleetSnapshotFile[] {

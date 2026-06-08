@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
     Camera, ArrowLeft, Server, Layers, FileText, AlertTriangle, Trash2,
     Eye, ChevronDown, ChevronLeft, ChevronRight, Plus, Loader2, RotateCcw,
-    Cloud, CloudUpload, Download,
+    Cloud, CloudUpload, Download, BookText,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -31,6 +31,7 @@ interface FleetSnapshot {
     skipped_nodes: string; // JSON string
     skipped_stacks: string; // JSON string
     created_at: number;
+    has_documentation?: number;
 }
 
 interface SnapshotStackFile {
@@ -49,9 +50,41 @@ interface SnapshotNode {
     stacks: SnapshotStack[];
 }
 
+/** Operator-authored dossier fields preserved with the snapshot. */
+type SnapshotDossierFields = Record<string, string>;
+
+interface SnapshotDocumentationStack {
+    nodeId: number;
+    nodeName: string;
+    stackName: string;
+    dossier: SnapshotDossierFields;
+}
+
+interface SnapshotDocumentation {
+    generated_at: string;
+    stacks: SnapshotDocumentationStack[];
+    warnings: Array<{ nodeId: number; nodeName: string; stackName: string; reason: string }>;
+}
+
 interface FleetSnapshotDetail extends FleetSnapshot {
     nodes: SnapshotNode[];
+    documentation?: SnapshotDocumentation;
 }
+
+// Ordered labels for the read-only dossier block; only non-empty fields render.
+const DOSSIER_FIELD_LABELS: ReadonlyArray<[string, string]> = [
+    ['purpose', 'Purpose'],
+    ['owner', 'Owner'],
+    ['access_urls', 'Access URLs'],
+    ['static_ip', 'Static IP'],
+    ['vlan', 'VLAN'],
+    ['firewall_notes', 'Firewall'],
+    ['reverse_proxy_notes', 'Reverse proxy'],
+    ['backup_notes', 'Backup'],
+    ['upgrade_notes', 'Upgrade'],
+    ['recovery_notes', 'Recovery'],
+    ['custom_notes', 'Notes'],
+];
 
 interface SkippedNode {
     nodeId: number;
@@ -248,7 +281,7 @@ export default function FleetSnapshots() {
         }
     };
 
-    const handleRestore = async (nodeId: number, stackName: string, redeploy: boolean) => {
+    const handleRestore = async (nodeId: number, stackName: string, redeploy: boolean, restoreNotes: boolean) => {
         if (!selectedSnapshot) return;
         const key = `${nodeId}:${stackName}`;
         setRestoringStack(key);
@@ -256,11 +289,12 @@ export default function FleetSnapshots() {
             const res = await apiFetch(`/fleet/snapshots/${selectedSnapshot.id}/restore`, {
                 method: 'POST',
                 localOnly: true,
-                body: JSON.stringify({ nodeId, stackName, redeploy }),
+                body: JSON.stringify({ nodeId, stackName, redeploy, restoreNotes }),
             });
             if (res.ok) {
-                const data: { message: string; redeployed: boolean } = await res.json();
-                toast.success(data.redeployed ? 'Stack restored and redeployed.' : 'Stack restored successfully.');
+                const data: { message: string; redeployed: boolean; notesRestored: boolean } = await res.json();
+                const notesNote = data.notesRestored ? ' Documentation notes restored.' : '';
+                toast.success((data.redeployed ? 'Stack restored and redeployed.' : 'Stack restored successfully.') + notesNote);
             } else {
                 const err = await res.json().catch(() => null);
                 toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore stack.');
@@ -290,14 +324,14 @@ export default function FleetSnapshots() {
         }
     };
 
-    const handleRestoreAll = async (redeploy: boolean) => {
+    const handleRestoreAll = async (redeploy: boolean, restoreNotes: boolean) => {
         if (!selectedSnapshot) return;
         setRestoringAll(true);
         try {
             const res = await apiFetch(`/fleet/snapshots/${selectedSnapshot.id}/restore-all`, {
                 method: 'POST',
                 localOnly: true,
-                body: JSON.stringify({ redeploy }),
+                body: JSON.stringify({ redeploy, restoreNotes }),
             });
             if (res.ok) {
                 const data: {
@@ -412,7 +446,11 @@ export default function FleetSnapshots() {
                                     </p>
                                 </div>
                                 {isAdmin && selectedSnapshot.nodes.length > 0 && (
-                                    <RestoreAllButton restoring={restoringAll} onRestoreAll={handleRestoreAll} />
+                                    <RestoreAllButton
+                                        restoring={restoringAll}
+                                        hasDocumentation={!!selectedSnapshot.documentation}
+                                        onRestoreAll={handleRestoreAll}
+                                    />
                                 )}
                             </div>
                             <div className="flex items-center gap-2">
@@ -422,6 +460,12 @@ export default function FleetSnapshots() {
                                 <Badge variant="secondary" className="font-mono tabular-nums">
                                     {selectedSnapshot.stack_count} stack{selectedSnapshot.stack_count !== 1 ? 's' : ''}
                                 </Badge>
+                                {selectedSnapshot.documentation && (
+                                    <Badge variant="outline" className="gap-1">
+                                        <BookText className="w-3 h-3" strokeWidth={1.5} />
+                                        Documentation captured
+                                    </Badge>
+                                )}
                             </div>
                         </div>
 
@@ -505,6 +549,8 @@ export default function FleetSnapshots() {
                                                 {node.stacks.map(stack => {
                                                     const stackKey = `${node.nodeId}:${stack.stackName}`;
                                                     const stackExpanded = expandedStacks.has(stackKey);
+                                                    const dossier = selectedSnapshot.documentation?.stacks
+                                                        .find(s => s.nodeId === node.nodeId && s.stackName === stack.stackName)?.dossier;
                                                     return (
                                                         <div key={stackKey}>
                                                             <button
@@ -565,12 +611,16 @@ export default function FleetSnapshots() {
                                                                         );
                                                                     })}
 
+                                                                    {/* Preserved dossier notes (read-only) */}
+                                                                    {dossier && <DossierBlock dossier={dossier} />}
+
                                                                     {/* Restore button (admin only) */}
                                                                     {isAdmin && (
                                                                         <RestoreButton
                                                                             nodeId={node.nodeId}
                                                                             nodeName={node.nodeName}
                                                                             stackName={stack.stackName}
+                                                                            hasDossier={!!dossier}
                                                                             restoring={restoringStack === `${node.nodeId}:${stack.stackName}`}
                                                                             onRestore={handleRestore}
                                                                         />
@@ -817,14 +867,16 @@ export default function FleetSnapshots() {
 
 // --- Restore Button Sub-Component ---
 
-function RestoreButton({ nodeId, nodeName, stackName, restoring, onRestore }: {
+function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, onRestore }: {
     nodeId: number;
     nodeName: string;
     stackName: string;
+    hasDossier: boolean;
     restoring: boolean;
-    onRestore: (nodeId: number, stackName: string, redeploy: boolean) => Promise<void>;
+    onRestore: (nodeId: number, stackName: string, redeploy: boolean, restoreNotes: boolean) => Promise<void>;
 }) {
     const [redeploy, setRedeploy] = useState(false);
+    const [restoreNotes, setRestoreNotes] = useState(false);
     const [open, setOpen] = useState(false);
 
     return (
@@ -852,7 +904,7 @@ function RestoreButton({ nodeId, nodeName, stackName, restoring, onRestore }: {
                 confirming={restoring}
                 onConfirm={async () => {
                     try {
-                        await onRestore(nodeId, stackName, redeploy);
+                        await onRestore(nodeId, stackName, redeploy, restoreNotes);
                     } finally {
                         setOpen(false);
                     }
@@ -874,18 +926,58 @@ function RestoreButton({ nodeId, nodeName, stackName, restoring, onRestore }: {
                         Redeploy stack after restore
                     </Label>
                 </div>
+                {hasDossier && (
+                    <div className="flex items-center space-x-2 pt-1">
+                        <Checkbox
+                            id={`notes-${nodeId}-${stackName}`}
+                            checked={restoreNotes}
+                            onCheckedChange={(checked) => setRestoreNotes(checked === true)}
+                        />
+                        <Label
+                            htmlFor={`notes-${nodeId}-${stackName}`}
+                            className="text-sm cursor-pointer"
+                        >
+                            Restore documentation notes (overwrites current notes)
+                        </Label>
+                    </div>
+                )}
             </ConfirmModal>
         </>
     );
 }
 
+// --- Preserved Dossier Sub-Component ---
+
+function DossierBlock({ dossier }: { dossier: SnapshotDossierFields }) {
+    const entries = DOSSIER_FIELD_LABELS.filter(([key]) => (dossier[key] ?? '').trim() !== '');
+    if (entries.length === 0) return null;
+    return (
+        <div className="ml-3 mt-1 rounded-lg border border-card-border bg-muted/30 px-3 py-2">
+            <div className="flex items-center gap-1.5 mb-1.5">
+                <BookText className="w-3 h-3 text-muted-foreground shrink-0" strokeWidth={1.5} />
+                <span className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">Dossier notes</span>
+            </div>
+            <dl className="space-y-1">
+                {entries.map(([key, label]) => (
+                    <div key={key} className="grid grid-cols-[7rem_1fr] gap-2">
+                        <dt className="text-xs text-muted-foreground">{label}</dt>
+                        <dd className="text-xs whitespace-pre-wrap break-words">{dossier[key]}</dd>
+                    </div>
+                ))}
+            </dl>
+        </div>
+    );
+}
+
 // --- Restore All Button Sub-Component ---
 
-function RestoreAllButton({ restoring, onRestoreAll }: {
+function RestoreAllButton({ restoring, hasDocumentation, onRestoreAll }: {
     restoring: boolean;
-    onRestoreAll: (redeploy: boolean) => Promise<void>;
+    hasDocumentation: boolean;
+    onRestoreAll: (redeploy: boolean, restoreNotes: boolean) => Promise<void>;
 }) {
     const [redeploy, setRedeploy] = useState(false);
+    const [restoreNotes, setRestoreNotes] = useState(false);
     const [open, setOpen] = useState(false);
 
     return (
@@ -914,7 +1006,7 @@ function RestoreAllButton({ restoring, onRestoreAll }: {
                 confirming={restoring}
                 onConfirm={async () => {
                     try {
-                        await onRestoreAll(redeploy);
+                        await onRestoreAll(redeploy, restoreNotes);
                     } finally {
                         setOpen(false);
                     }
@@ -933,6 +1025,18 @@ function RestoreAllButton({ restoring, onRestoreAll }: {
                         Redeploy all stacks after restore
                     </Label>
                 </div>
+                {hasDocumentation && (
+                    <div className="flex items-center space-x-2 pt-1">
+                        <Checkbox
+                            id="notes-all"
+                            checked={restoreNotes}
+                            onCheckedChange={(checked) => setRestoreNotes(checked === true)}
+                        />
+                        <Label htmlFor="notes-all" className="text-sm cursor-pointer">
+                            Restore documentation notes (overwrites current notes)
+                        </Label>
+                    </div>
+                )}
             </ConfirmModal>
         </>
     );

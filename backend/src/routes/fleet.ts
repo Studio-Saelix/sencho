@@ -3,7 +3,7 @@ import path from 'path';
 import semver from 'semver';
 import si from 'systeminformation';
 import type Dockerode from 'dockerode';
-import { DatabaseService, type Node } from '../services/DatabaseService';
+import { DatabaseService, type Node, type StackDossierFields } from '../services/DatabaseService';
 import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPDATE_TIMEOUT_MS, UPDATE_TIMEOUT_MSG, TERMINAL_TTL_MS } from '../services/FleetUpdateTrackerService';
@@ -17,7 +17,7 @@ import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierGates';
 import { scheduleLocalUpdate } from './license';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
-import { captureLocalNodeFiles, captureRemoteNodeFiles, type SnapshotNodeData } from '../utils/snapshot-capture';
+import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
 import { getLatestVersion } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
@@ -1629,14 +1629,15 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
     const username = req.user?.username || 'admin';
+    const captureDocs = db.getGlobalSettings().snapshot_documentation === '1';
 
     const captureStart = Date.now();
     const results = await Promise.allSettled(
       nodes.map(async (node) => {
         if (node.type === 'remote') {
-          return captureRemoteNodeFiles(node);
+          return captureRemoteNodeFiles(node, captureDocs);
         }
-        return captureLocalNodeFiles(node);
+        return captureLocalNodeFiles(node, captureDocs);
       }),
     );
 
@@ -1683,6 +1684,10 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
       }
     }
 
+    const documentation = captureDocs
+      ? buildSnapshotDocumentation(capturedNodes, new Date().toISOString())
+      : null;
+
     const snapshotId = db.createSnapshot(
       description,
       username,
@@ -1690,6 +1695,7 @@ fleetRouter.post('/snapshots', authMiddleware, async (req: Request, res: Respons
       totalStacks,
       JSON.stringify(skippedNodes),
       JSON.stringify(skippedStacks),
+      documentation ? JSON.stringify(documentation) : '',
     );
 
     if (allFiles.length > 0) {
@@ -1785,8 +1791,30 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
       })),
     }));
 
+    // Surface the captured dossier metadata when present so the detail view can
+    // render notes and offer to restore them. The list payload stays lean (only
+    // the has_documentation flag); the blob is decrypted here on demand.
+    let documentation: SnapshotDocumentation | undefined;
+    if (snapshot.has_documentation) {
+      const raw = db.getSnapshotDocumentation(id);
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as SnapshotDocumentation;
+          // Re-project each dossier through pickDossierFields so the client
+          // receives the same shape restore writes back, and never any field
+          // outside the eleven operator notes.
+          documentation = {
+            ...parsed,
+            stacks: parsed.stacks.map(s => ({ ...s, dossier: pickDossierFields(s.dossier) })),
+          };
+        } catch (e) {
+          console.error(`[Fleet Snapshot] Failed to parse documentation for snapshot ${id}:`, getErrorMessage(e, 'parse error'));
+        }
+      }
+    }
+
     if (isDebugEnabled()) console.debug('[Fleet:debug] Snapshot detail:', id, files.length, 'files');
-    res.json({ ...snapshot, nodes });
+    res.json({ ...snapshot, nodes, documentation });
   } catch (error) {
     console.error('[Fleet Snapshot] Detail error:', error);
     res.status(500).json({ error: 'Failed to fetch snapshot details' });
@@ -1905,13 +1933,49 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (!deployRes.ok) throw await remoteStackError('Failed to redeploy stack', deployRes);
 }
 
+// Looks up the dossier notes a snapshot preserved for one stack, or undefined
+// when no usable dossier entry exists for that stack (no documentation, an
+// unparseable blob, or no matching entry).
+function findSnapshotDossier(snapshotId: number, nodeId: number, stackName: string): StackDossierFields | undefined {
+  const raw = DatabaseService.getInstance().getSnapshotDocumentation(snapshotId);
+  if (!raw) return undefined;
+  let doc: SnapshotDocumentation;
+  try {
+    doc = JSON.parse(raw) as SnapshotDocumentation;
+  } catch (e) {
+    console.error(`[Fleet Snapshot] Failed to parse documentation for snapshot ${snapshotId}:`, getErrorMessage(e, 'parse error'));
+    return undefined;
+  }
+  const entry = doc.stacks.find(s => s.nodeId === nodeId && s.stackName === stackName);
+  return entry ? pickDossierFields(entry.dossier) : undefined;
+}
+
+// Writes captured dossier notes back to a stack: local nodes upsert into the
+// DB, remote nodes receive them over the proxy. Only ever called when the
+// operator explicitly opted in to restoring notes.
+async function restoreSnapshotStackDossier(node: Node, stackName: string, fields: StackDossierFields): Promise<void> {
+  if (node.type === 'local') {
+    DatabaseService.getInstance().upsertStackDossier(node.id, stackName, fields);
+    return;
+  }
+  const ctx = buildRemoteProxyContext(node);
+  if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
+  const putRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/dossier`, {
+    method: 'PUT',
+    headers: ctx.headers,
+    body: JSON.stringify(fields),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!putRes.ok) throw await remoteStackError('Failed to restore dossier notes', putRes);
+}
+
 fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
 
   try {
     const snapshotId = parseIntParam(req, res, 'id', 'snapshot ID');
     if (snapshotId === null) return;
-    const { nodeId, stackName, redeploy = false } = req.body;
+    const { nodeId, stackName, redeploy = false, restoreNotes = false } = req.body;
 
     if (!nodeId || !stackName) {
       res.status(400).json({ error: 'nodeId and stackName are required' });
@@ -1948,6 +2012,17 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
 
     await applySnapshotStackFiles(node, stackName, files);
 
+    // Dossier notes are restored only on explicit opt-in, so a routine file
+    // restore never clobbers the operator's current notes.
+    let notesRestored = false;
+    if (restoreNotes) {
+      const fields = findSnapshotDossier(snapshotId, nodeId, stackName);
+      if (fields) {
+        await restoreSnapshotStackDossier(node, stackName, fields);
+        notesRestored = true;
+      }
+    }
+
     if (redeploy) {
       // Local deploys are gated centrally here; remote deploys are gated by the
       // remote node's own deploy endpoint.
@@ -1956,7 +2031,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
     }
 
     console.log('[Fleet] Snapshot restore: snapshot=%s node=%s stack=%s', snapshotId, sanitizeForLog(nodeId), sanitizeForLog(stackName));
-    res.json({ message: 'Stack restored successfully', redeployed: redeploy });
+    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored });
   } catch (error) {
     if (error instanceof SnapshotProxyTargetError) {
       res.status(503).json({ error: error.message });
@@ -1975,6 +2050,7 @@ interface SnapshotRestoreResult {
   stackName: string;
   success: boolean;
   redeployed: boolean;
+  notesRestored: boolean;
   error?: string;
 }
 
@@ -1985,6 +2061,7 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
     const snapshotId = parseIntParam(req, res, 'id', 'snapshot ID');
     if (snapshotId === null) return;
     const redeploy: boolean = req.body?.redeploy === true;
+    const restoreNotes: boolean = req.body?.restoreNotes === true;
 
     const db = DatabaseService.getInstance();
     const snapshot = db.getSnapshot(snapshotId);
@@ -2024,15 +2101,24 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
 
         await applySnapshotStackFiles(node, group.stackName, group.files);
 
+        let notesRestored = false;
+        if (restoreNotes) {
+          const fields = findSnapshotDossier(snapshotId, group.nodeId, group.stackName);
+          if (fields) {
+            await restoreSnapshotStackDossier(node, group.stackName, fields);
+            notesRestored = true;
+          }
+        }
+
         let redeployed = false;
         if (redeploy) {
           if (node.type === 'local') await assertPolicyGateAllows(group.stackName, node.id, policyOptions);
           await redeploySnapshotStack(node, group.stackName);
           redeployed = true;
         }
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored });
       } catch (e) {
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, error: getErrorMessage(e, 'Restore failed') });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed') });
       }
     }
 
