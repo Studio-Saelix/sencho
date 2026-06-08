@@ -28,7 +28,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 interface FleetTopologyProps {
     nodes: FleetTopologyNode[];
     onNodeClick?: (nodeId: number) => void;
-    isPaid: boolean;
     mode: LayoutMode;
     onModeChange: (mode: LayoutMode) => void;
     savedPositions: SavedPositions;
@@ -274,7 +273,6 @@ function TopologyToolbar({
 export function FleetTopology({
     nodes: fleetNodes,
     onNodeClick,
-    isPaid,
     mode,
     onModeChange,
     savedPositions,
@@ -289,13 +287,7 @@ export function FleetTopology({
     const savedPositionsRef = useRef(savedPositions);
     savedPositionsRef.current = savedPositions;
 
-    // Defensive: a Community user who somehow lands in a paid mode (older
-    // localStorage value, manual edit) gets snapped back to Hub. The toolbar
-    // also hides these modes for them, so this is a belt-and-suspenders guard.
-    const effectiveMode: LayoutMode = useMemo(() => {
-        if ((mode === 'grouped' || mode === 'free') && !isPaid) return 'hub';
-        return mode;
-    }, [mode, isPaid]);
+    const effectiveMode: LayoutMode = mode;
 
     // Only re-layout when the topology *shape* changes (nodes added/removed,
     // type/status/label flips, mode flips). Metric value changes alone must
@@ -397,8 +389,8 @@ export function FleetTopology({
 
     return (
         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-            {isPaid && <TopologyToolbar mode={effectiveMode} onModeChange={onModeChange} />}
-            {isPaid && allRemotesUnlabeled && (
+            <TopologyToolbar mode={effectiveMode} onModeChange={onModeChange} />
+            {allRemotesUnlabeled && (
                 <div className="px-3 py-1.5 text-[11px] text-muted-foreground bg-muted/30 border-b border-card-border">
                     No node labels assigned. Add labels in Settings · Nodes to see remotes cluster.
                 </div>

@@ -18,13 +18,12 @@ interface MastheadStats {
 }
 
 interface UseFleetOverviewOptions {
-    isPaid: boolean;
     prefs: FleetPreferences;
     updatePrefs: (updates: Partial<FleetPreferences>) => void;
     updateStatuses: NodeUpdateStatus[];
 }
 
-export function useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses }: UseFleetOverviewOptions) {
+export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFleetOverviewOptions) {
     const [nodes, setNodes] = useState<FleetNode[]>([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
@@ -35,7 +34,7 @@ export function useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses }:
     const abortRef = useRef<AbortController | null>(null);
 
     const { fleetPalette, fleetStackLabelMap } = useFleetLabels({ nodes });
-    const { labelsByNodeId, distinctLabels, isAvailable: nodeLabelsAvailable } = useNodeLabels({ isPaid, nodes });
+    const { labelsByNodeId, distinctLabels } = useNodeLabels({ nodes });
 
     const fetchOverview = useCallback(async (showRefresh = false) => {
         abortRef.current?.abort();
@@ -217,7 +216,6 @@ export function useFleetOverview({ isPaid, prefs, updatePrefs, updateStatuses }:
         fleetStackLabelMap,
         labelsByNodeId,
         distinctNodeLabels: distinctLabels,
-        nodeLabelsAvailable,
         activeFilterCount,
         clearFilters,
     };

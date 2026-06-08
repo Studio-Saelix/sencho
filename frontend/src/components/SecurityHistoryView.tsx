@@ -338,7 +338,8 @@ export function SecurityHistoryView({ open, onClose }: SecurityHistoryViewProps)
       <VulnerabilityScanSheet
         scanId={inspectScanId}
         onClose={() => setInspectScanId(null)}
-        canGenerateSbom={isPaid && isAdmin}
+        canGenerateSbom={isAdmin}
+        canExportSarif={isPaid && isAdmin}
         canCompare={false}
         canManageSuppressions={isAdmin}
       />

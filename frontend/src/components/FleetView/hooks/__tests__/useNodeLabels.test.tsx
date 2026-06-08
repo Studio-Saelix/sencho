@@ -25,23 +25,13 @@ function node(id: number): FleetNode {
 beforeEach(() => apiFetchMock.mockReset());
 afterEach(() => vi.clearAllMocks());
 
-describe('useNodeLabels (node-tag aggregation stays paid)', () => {
-  it('does not fetch and reports unavailable when not paid', async () => {
-    const { result } = renderHook(() => useNodeLabels({ isPaid: false, nodes: [node(2)] }));
-    expect(result.current.isAvailable).toBe(false);
-    expect(result.current.labelsByNodeId).toEqual({});
-    // Allow any effect to flush; still no call.
-    await Promise.resolve();
-    expect(apiFetchMock).not.toHaveBeenCalled();
-  });
-
-  it('fetches and normalizes string keys to numbers when paid', async () => {
+describe('useNodeLabels (Community node-tag aggregation)', () => {
+  it('fetches and normalizes string keys to numbers on every tier', async () => {
     apiFetchMock.mockResolvedValue(okJson({ '2': ['prod', 'edge'], '3': ['db'] }));
 
-    const { result } = renderHook(() => useNodeLabels({ isPaid: true, nodes: [node(2), node(3)] }));
+    const { result } = renderHook(() => useNodeLabels({ nodes: [node(2), node(3)] }));
 
     await waitFor(() => expect(Object.keys(result.current.labelsByNodeId).length).toBe(2));
-    expect(result.current.isAvailable).toBe(true);
     expect(result.current.labelsByNodeId[2]).toEqual(['prod', 'edge']);
     expect(result.current.labelsByNodeId[3]).toEqual(['db']);
     // distinctLabels is the sorted union.
@@ -51,7 +41,7 @@ describe('useNodeLabels (node-tag aggregation stays paid)', () => {
 
   it('clears the map on a non-ok response', async () => {
     apiFetchMock.mockResolvedValue(new Response('nope', { status: 403 }));
-    const { result } = renderHook(() => useNodeLabels({ isPaid: true, nodes: [node(2)] }));
+    const { result } = renderHook(() => useNodeLabels({ nodes: [node(2)] }));
     await waitFor(() => expect(apiFetchMock).toHaveBeenCalled());
     expect(result.current.labelsByNodeId).toEqual({});
   });

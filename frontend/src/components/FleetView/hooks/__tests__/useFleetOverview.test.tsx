@@ -36,7 +36,7 @@ function setup(prefs: Partial<FleetPreferences> = {}) {
   const updatePrefs = vi.fn();
   const merged = { ...DEFAULT_PREFS, ...prefs };
   const hook = renderHook(
-    (p: { prefs: FleetPreferences }) => useFleetOverview({ isPaid: false, prefs: p.prefs, updatePrefs, updateStatuses: [] }),
+    (p: { prefs: FleetPreferences }) => useFleetOverview({ prefs: p.prefs, updatePrefs, updateStatuses: [] }),
     { initialProps: { prefs: merged } },
   );
   return { ...hook, updatePrefs };

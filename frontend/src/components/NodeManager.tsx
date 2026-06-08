@@ -36,7 +36,7 @@ export interface SenchoNavigateDetail {
 export function NodeManager() {
   const { isPaid } = useLicense();
   const { isAdmin, can } = useAuth();
-  const canEditLabels = isPaid && isAdmin;
+  const canEditLabels = isAdmin;
   // Mirror the backend node:manage guard. This top-level flag checks the global
   // role only (admin or global node-admin); the per-row Test/Edit/Delete buttons
   // below additionally honor scoped per-node grants via can('node:manage', 'node', id).
@@ -368,11 +368,7 @@ export function NodeManager() {
                 </TableCell>
                 <TableCell>{getStatusBadge(node.status)}</TableCell>
                 <TableCell>
-                  {isPaid ? (
-                    <NodeLabelPicker nodeId={node.id} canEdit={canEditLabels} />
-                  ) : (
-                    <span className="text-muted-foreground text-sm">—</span>
-                  )}
+                  <NodeLabelPicker nodeId={node.id} canEdit={canEditLabels} />
                 </TableCell>
                 <TableCell>
                   {(() => {
