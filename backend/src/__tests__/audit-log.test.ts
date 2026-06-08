@@ -3,7 +3,8 @@
  * - getAuditSummary() pure function (wildcard, prefix, fallback)
  * - DatabaseService audit log CRUD (insert, query, filter, paginate, cleanup)
  * - API endpoints (GET /api/audit-log, GET /api/audit-log/export)
- * - Permission gating (Admiral + system:audit required)
+ * - Tier gating: the list endpoint is Community (recent-activity window) +
+ *   system:audit; export and stats stay Admiral (paid)
  * - Audit middleware integration (logs mutating requests, skips GETs)
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
@@ -412,14 +413,15 @@ describe('DatabaseService audit methods', () => {
 // ---- API endpoint tests ----
 
 describe('GET /api/audit-log', () => {
-  it('returns 403 without a paid license', async () => {
+  it('returns 200 for a Community admin (recent-activity window, no tier gate)', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
 
     const res = await request(app)
       .get('/api/audit-log')
       .set('Authorization', `Bearer ${adminToken()}`);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.entries)).toBe(true);
   });
 
   it('returns 403 for viewer role (no system:audit permission)', async () => {
@@ -560,6 +562,87 @@ describe('GET /api/audit-log', () => {
     expect(res.status).toBe(200);
     expect(res.body.entries.length).toBeGreaterThan(0);
     expect(res.body.entries.length).toBeLessThanOrEqual(50);
+  });
+});
+
+describe('GET /api/audit-log (Community recent-activity window)', () => {
+  const windowUser = 'communitywindowuser';
+
+  it('clamps Community results to the last 14 days', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    db.insertAuditLog({
+      timestamp: now - 20 * 24 * 60 * 60 * 1000,
+      username: windowUser, method: 'POST', path: '/api/stacks/old',
+      status_code: 200, node_id: null, ip_address: '127.0.0.1', summary: 'old windowed entry',
+    });
+    db.insertAuditLog({
+      timestamp: now - 1 * 24 * 60 * 60 * 1000,
+      username: windowUser, method: 'POST', path: '/api/stacks/recent',
+      status_code: 200, node_id: null, ip_address: '127.0.0.1', summary: 'recent windowed entry',
+    });
+
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app)
+      .get(`/api/audit-log?search=${windowUser}&limit=100`)
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    const summaries = res.body.entries.map((e: { summary: string }) => e.summary);
+    expect(summaries).toContain('recent windowed entry');
+    expect(summaries).not.toContain('old windowed entry');
+  });
+
+  it('clamps even when a Community caller passes an explicit from older than the window', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const explicitOldFrom = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const res = await request(app)
+      .get(`/api/audit-log?search=${windowUser}&from=${explicitOldFrom}&limit=100`)
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    const summaries = res.body.entries.map((e: { summary: string }) => e.summary);
+    expect(summaries).toContain('recent windowed entry');
+    expect(summaries).not.toContain('old windowed entry');
+  });
+
+  it('does not let a non-numeric from lift the Community window clamp', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app)
+      .get(`/api/audit-log?search=${windowUser}&from=abc&limit=100`)
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    const summaries = res.body.entries.map((e: { summary: string }) => e.summary);
+    expect(summaries).toContain('recent windowed entry');
+    expect(summaries).not.toContain('old windowed entry');
+  });
+
+  it('paid tier still sees entries older than the Community window', async () => {
+    // The suite default mock is the paid tier (no clamp).
+    const res = await request(app)
+      .get(`/api/audit-log?search=${windowUser}&limit=100`)
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    const summaries = res.body.entries.map((e: { summary: string }) => e.summary);
+    expect(summaries).toContain('old windowed entry');
+  });
+
+  it('does not annotate anomalies for Community even when with_anomalies=1', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    const res = await request(app)
+      .get('/api/audit-log?with_anomalies=1&limit=5')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    expect(res.status).toBe(200);
+    for (const entry of res.body.entries) {
+      expect(entry.flags).toBeUndefined();
+    }
   });
 });
 

@@ -1,27 +1,41 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService, AUDIT_ANOMALY_HISTORY_CAP } from '../services/DatabaseService';
 import { annotateEntries, computeAuditStats, HISTORY_WINDOW_MS } from '../services/AuditAnomalyService';
-import { requirePaid } from '../middleware/tierGates';
+import { requirePaid, effectiveTier } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import { isDebugEnabled } from '../utils/debug';
 import { escapeCsvField } from '../utils/csv';
 import { sanitizeForLog } from '../utils/safeLog';
 
+// Community sees a rolling recent-activity window; full retention, export, and
+// anomaly annotation are paid. The list endpoint clamps `from` to this window
+// for unpaid tiers so older entries are not reachable through the API.
+const COMMUNITY_AUDIT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
 export const auditLogRouter = Router();
 
 auditLogRouter.get('/', async (req: Request, res: Response): Promise<void> => {
-  if (!requirePaid(req, res)) return;
   if (!requirePermission(req, res, 'system:audit')) return;
 
   try {
+    const isPaid = effectiveTier(req) === 'paid';
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const limit = Math.min(Math.max(1, parseInt(req.query.limit as string) || 50), 200);
     const username = req.query.username as string | undefined;
     const method = req.query.method as string | undefined;
     const search = req.query.search as string | undefined;
-    const from = req.query.from ? parseInt(req.query.from as string) : undefined;
+    // Normalize a non-numeric `from` (e.g. ?from=abc) to undefined. A raw NaN
+    // would survive Math.max() below and then be dropped as falsy at the SQL
+    // boundary, which would silently lift the Community window clamp.
+    const parsedFrom = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+    let from = Number.isFinite(parsedFrom) ? parsedFrom : undefined;
     const to = req.query.to ? parseInt(req.query.to as string) : undefined;
-    const withAnomalies = req.query.with_anomalies === '1';
+    const withAnomalies = isPaid && req.query.with_anomalies === '1';
+
+    if (!isPaid) {
+      const windowStart = Date.now() - COMMUNITY_AUDIT_WINDOW_MS;
+      from = from === undefined ? windowStart : Math.max(from, windowStart);
+    }
 
     if (isDebugEnabled()) {
       console.log(`[Audit:diag] Query: page=${page} limit=${limit} username=${sanitizeForLog(username || '-')} method=${sanitizeForLog(method || '-')} search=${sanitizeForLog(search || '-')}`);
