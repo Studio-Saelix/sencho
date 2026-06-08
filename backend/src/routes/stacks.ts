@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import path from 'path';
+import { inspect } from 'node:util';
 import YAML from 'yaml';
 import multer from 'multer';
 import { FileSystemService } from '../services/FileSystemService';
@@ -1062,7 +1063,8 @@ stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
   try {
     res.json(await buildDriftPayload(req.nodeId, stackName, false));
   } catch (error) {
-    console.error('[Stacks] Failed to build drift report for %s:', sanitizeForLog(stackName), error);
+    console.error('[Stacks] Failed to build drift report for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build drift report' });
   }
 });
@@ -1078,7 +1080,8 @@ stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Respons
   try {
     res.json(await buildDriftPayload(req.nodeId, stackName, true));
   } catch (error) {
-    console.error('[Stacks] Failed to re-check drift for %s:', sanitizeForLog(stackName), error);
+    console.error('[Stacks] Failed to re-check drift for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to re-check drift' });
   }
 });
