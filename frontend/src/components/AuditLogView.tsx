@@ -11,6 +11,7 @@ import { Sparkline } from '@/components/ui/sparkline';
 import { ChevronLeft, ChevronRight, Search, ScrollText, RefreshCw, Download, ChevronDown, Activity, Table2 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
+import { useLicense } from '@/context/LicenseContext';
 
 type AnomalyFlag = 'unusual_hour' | 'new_ip' | 'first_seen_actor';
 
@@ -109,6 +110,11 @@ function isExpiredSession(err: unknown): boolean {
 }
 
 export function AuditLogView() {
+    // Community gets the recent-activity stream; CSV/JSON export, the stat
+    // tiles, and per-row anomaly annotation are paid. The backend clamps the
+    // list to a 14-day window for unpaid tiers, so this flag only governs the
+    // export, stats, and anomaly-annotation affordances, not the list itself.
+    const { isPaid } = useLicense();
     const [entries, setEntries] = useState<AuditEntry[]>([]);
     const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
@@ -151,7 +157,7 @@ export function AuditLogView() {
             const params = buildFilterParams();
             params.set('page', String(page));
             params.set('limit', String(limit));
-            params.set('with_anomalies', '1');
+            if (isPaid) params.set('with_anomalies', '1');
 
             const res = await apiFetch(`/audit-log?${params}`, { localOnly: true });
             if (res.ok) {
@@ -170,7 +176,7 @@ export function AuditLogView() {
         } finally {
             setLoading(false);
         }
-    }, [page, buildFilterParams]);
+    }, [page, buildFilterParams, isPaid]);
 
     const fetchStats = useCallback(async () => {
         try {
@@ -194,8 +200,8 @@ export function AuditLogView() {
     }, [fetchLogs]);
 
     useEffect(() => {
-        if (view === 'stream') fetchStats();
-    }, [view, fetchStats]);
+        if (view === 'stream' && isPaid) fetchStats();
+    }, [view, fetchStats, isPaid]);
 
     const totalPages = Math.max(1, Math.ceil(total / limit));
 
@@ -284,20 +290,22 @@ export function AuditLogView() {
                                     Table
                                 </Button>
                             </div>
-                            <DropdownMenu modal={false}>
-                                <DropdownMenuTrigger asChild>
-                                    <Button variant="outline" size="sm" className="border-border">
-                                        <Download className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                        Export
-                                        <ChevronDown className="w-3 h-3 ml-1" strokeWidth={1.5} />
-                                    </Button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="end">
-                                    <DropdownMenuItem onClick={() => handleExport('csv')}>Export as CSV</DropdownMenuItem>
-                                    <DropdownMenuItem onClick={() => handleExport('json')}>Export as JSON</DropdownMenuItem>
-                                </DropdownMenuContent>
-                            </DropdownMenu>
-                            <Button variant="outline" size="sm" className="border-border" onClick={() => { fetchLogs(); if (view === 'stream') fetchStats(); }} disabled={loading}>
+                            {isPaid && (
+                                <DropdownMenu modal={false}>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button variant="outline" size="sm" className="border-border">
+                                            <Download className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                            Export
+                                            <ChevronDown className="w-3 h-3 ml-1" strokeWidth={1.5} />
+                                        </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end">
+                                        <DropdownMenuItem onClick={() => handleExport('csv')}>Export as CSV</DropdownMenuItem>
+                                        <DropdownMenuItem onClick={() => handleExport('json')}>Export as JSON</DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            )}
+                            <Button variant="outline" size="sm" className="border-border" onClick={() => { fetchLogs(); if (view === 'stream' && isPaid) fetchStats(); }} disabled={loading}>
                                 <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
                                 Refresh
                             </Button>
@@ -311,6 +319,7 @@ export function AuditLogView() {
                     {view === 'stream' ? (
                         <StreamView
                             stats={stats}
+                            showStats={isPaid}
                             loading={loading && entries.length === 0}
                             groups={groupedEntries}
                             now={now}
@@ -460,6 +469,7 @@ export function AuditLogView() {
 
 interface StreamViewProps {
     stats: AuditStats | null;
+    showStats: boolean;
     loading: boolean;
     groups: { key: string; day: number; entries: AuditEntry[] }[];
     now: number;
@@ -468,7 +478,7 @@ interface StreamViewProps {
     onPage: (n: number) => void;
 }
 
-function StreamView({ stats, loading, groups, now, page, totalPages, onPage }: StreamViewProps) {
+function StreamView({ stats, showStats, loading, groups, now, page, totalPages, onPage }: StreamViewProps) {
     const tiles: AuditStatTile[] = stats
         ? [stats.events_24h, stats.actors_24h, stats.failure_rate, stats.unusual_hour]
         : [];
@@ -477,6 +487,7 @@ function StreamView({ stats, loading, groups, now, page, totalPages, onPage }: S
 
     return (
         <div className="space-y-5">
+            {showStats && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0 rounded-md border border-card-border bg-card/40 overflow-hidden">
                 {tiles.length === 0 ? (
                     Array.from({ length: 4 }).map((_, i) => (
@@ -522,6 +533,7 @@ function StreamView({ stats, loading, groups, now, page, totalPages, onPage }: S
                     ))
                 )}
             </div>
+            )}
 
             {loading ? (
                 <div className="py-10 text-center text-muted-foreground text-sm">Loading audit stream...</div>
