@@ -4,14 +4,14 @@ description: Track every mutating action on your Sencho instance with a searchab
 ---
 
 <Note>
-  The Audit Log requires a Sencho **Admiral** license.
+  The recent-activity audit log, scoped to the last 14 days, is available on every tier. CSV and JSON export, anomaly detection, and configurable retention beyond the recent window require a Sencho **Admiral** license.
 </Note>
 
 <Note>
   Audit is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
 </Note>
 
-Sencho Admiral records every mutating action (deploy, stop, delete, settings changes, user management) with full attribution. The audit log answers the question every team eventually asks: **"Who changed what, and when?"**
+Sencho records every mutating action (deploy, stop, delete, settings changes, user management) with full attribution. The audit log answers the question every team eventually asks: **"Who changed what, and when?"**
 
 ## What gets logged
 
@@ -64,7 +64,7 @@ Expanding a row in the Table view reveals additional detail:
 
 ## Viewing the audit log
 
-Navigate to the **Audit** tab in the sidebar. The tab is visible on Admiral to users with the **Admin** or **Auditor** role.
+Navigate to the **Audit** tab in the sidebar. The tab is available to users whose role grants the `system:audit` permission, which by default means **Admin** or **Auditor**. On every tier the feed is scoped to the last 14 days; the full retention window, along with export and anomaly detection, comes with Admiral.
 
 The page has two views, toggled from the segmented control in the card header: **Stream** (default) and **Table**. The card subtitle reports the total number of entries that match the current filters.
 
@@ -105,6 +105,10 @@ Both views share the **Refresh** button and the **Export** dropdown in the card 
 
 ## Anomaly detection
 
+<Note>
+  Anomaly detection requires a Sencho **Admiral** license.
+</Note>
+
 In Stream view, Sencho annotates individual entries with lightweight anomaly flags that help you spot activity that deviates from an actor's normal pattern. Flags appear inline in the entry's meta line, after the IP address.
 
 | Flag | When it fires |
@@ -129,6 +133,10 @@ All filters AND together and are applied server-side with pagination.
 
 ## Export
 
+<Note>
+  CSV and JSON export require a Sencho **Admiral** license.
+</Note>
+
 Export the currently filtered audit log as **CSV** or **JSON** using the **Export** dropdown in the card header. The export respects every active filter, so you can narrow down to a date range or specific user before exporting.
 
 Exports are capped at 10,000 entries per download. To export a larger window, narrow the date range and download in chunks.
@@ -148,7 +156,11 @@ To create an Auditor user, go to **Settings · Users** and select the **Auditor*
 
 ## Configurable data retention
 
-Audit log entries are automatically pruned based on your configured retention period. The default is **90 days**.
+<Note>
+  Every tier can read the most recent 14 days of activity. Configurable retention beyond that window requires a Sencho **Admiral** license.
+</Note>
+
+On Admiral, audit log entries are automatically pruned based on your configured retention period. The default is **90 days**.
 
 To change the retention period:
 
@@ -170,7 +182,7 @@ Sensitive database values (such as remote node API tokens) are encrypted at rest
 
 <AccordionGroup>
   <Accordion title="The Audit tab is missing from the sidebar">
-    The Audit log requires an **Admiral** license, and the tab is shown only to users whose role grants the `system:audit` permission. By default that means **Admin** or **Auditor**. If you are signed in as a Deployer or Viewer on an Admiral instance, ask an admin to assign you the Auditor role from **Settings · Users**.
+    The Audit tab is shown to users whose role grants the `system:audit` permission. By default that means **Admin** or **Auditor**. If you are signed in as a Deployer or Viewer, ask an admin to assign you the Auditor role from **Settings · Users**. The recent-activity feed is available on every tier; export, anomaly detection, and retention beyond the recent window come with Admiral.
   </Accordion>
   <Accordion title="Stream view shows everything but I want to filter to a specific user, action, or date">
     Filters live in **Table view only**. Toggle the segmented control in the card header from **Stream** to **Table** and the search box, method dropdown, and From / To date pickers will appear above the grid. Switching back to Stream clears the filter strip but does not remember the last filter.

@@ -169,7 +169,7 @@ The Nodes table surfaces routing, status, and per-node automation at a glance fo
 | **Mode** | `-` for the local node; `Proxy` or `Pilot Agent` badge for remotes, with an icon matching the mode. |
 | **Endpoint** | `docker.sock` for local; the full Sencho API URL for proxy nodes; `tunnel (seen X ago)` or `tunnel (waiting)` for pilot agents. |
 | **Status** | `Online`, `Offline`, or `Unknown` badge. |
-| **Labels** | Per-node label palette. On Admiral the cell shows the picker (an empty cell reads `No labels` with an Add label control); on Community the cell shows a single dash. |
+| **Labels** | Per-node label palette. The cell shows the label picker; an empty cell reads `No labels` with an Add label control. |
 | **Schedules** | Number of active scheduled tasks targeting this node, plus a `next X` countdown to the next run. Click the count or the calendar icon in the Actions column to filter the Schedules view to that node. |
 | **Updates** | `Auto` if at least one enabled `Auto-update Stack` or `Auto-update All Stacks` schedule targets the node; `Off` otherwise. A pulsing dot and count appear when stacks have pending image updates. |
 | **Actions** | **View Schedules**, **Test Connection**, **Edit Node**, and **Delete Node** icon buttons. The local row hides Delete because the local node cannot be removed. |

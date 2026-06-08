@@ -290,7 +290,7 @@ Click **Save settings** to apply.
 ## Registries
 
 <Note>
-  Private Registries require a Sencho Admiral license.
+  Docker Hub, GHCR, and custom registry credentials are available on every tier. AWS ECR requires a Sencho Admiral license.
 </Note>
 
 **Scope:** Global, admin-only
@@ -435,7 +435,7 @@ See [Stack Labels](/features/stack-labels) for the full walkthrough.
 ## Vulnerability Scanning
 
 <Note>
-  Vulnerability Scanning is admin-only. The Trivy installer and CVE/misconfig suppressions are available on all tiers; scan policies and the **Auto-update Trivy** toggle require an Admiral license (the toggle also requires a managed Trivy binary).
+  Vulnerability Scanning is admin-only. The Trivy installer, the **Auto-update Trivy** toggle (which also requires a managed Trivy binary), and CVE/misconfig suppressions are available on all tiers; scan policies require an Admiral license.
 </Note>
 
 **Scope:** Per-node
@@ -453,7 +453,7 @@ Manage the Trivy scanner, scan policies, suppressions, and acknowledgements that
 | **Status** | `Installed (managed)` when Sencho manages the binary, `Installed (host)` when an existing host binary is being reused, or empty when nothing is detected. |
 | **Version** | The current Trivy version, when installed. |
 | **Install / Update / Uninstall** | Lifecycle actions for the managed binary. Uninstall asks for confirmation. |
-| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires Admiral and a managed Trivy binary. |
+| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires a managed Trivy binary. |
 
 ### Scan policies
 
