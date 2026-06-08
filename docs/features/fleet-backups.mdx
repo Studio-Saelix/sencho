@@ -30,6 +30,12 @@ If a remote node is offline or unreachable, it is **skipped gracefully**. The sn
 
 Fleet snapshots can also be created automatically on a recurring schedule. Navigate to the **Schedules** view, create a new scheduled operation, and select **Fleet Snapshot** as the action type. Scheduled snapshots appear in the snapshot list with a "Scheduled snapshot" prefix in their description.
 
+### Capturing stack documentation
+
+Snapshots can also preserve each stack's [Dossier](/features/stack-dossier) notes (purpose, owner, access URLs, firewall and recovery notes, and the rest) alongside the captured files, so a recovery restores the operational knowledge around a stack, not just its configuration.
+
+This is off by default. Turn it on in **Settings → Infrastructure → Fleet** with **Capture stack documentation in snapshots**. Once enabled, every manual and scheduled snapshot records the current Dossier notes for each captured stack. Stacks with no notes are simply omitted, and a stack's notes are never required. Secret values are never included: a Dossier only ever holds the notes an operator typed, never the contents of a `.env`.
+
 ## Browsing snapshots
 
 The snapshot list shows each snapshot in a table with the following columns:
@@ -48,9 +54,9 @@ The snapshot list shows each snapshot in a table with the following columns:
 
 Click **View** on any snapshot to open the detail view. Use **Back to Snapshots** in the top-left to return to the list.
 
-The header shows the snapshot's title (or "Untitled Snapshot"), who created it, when, and badge counts for nodes and stacks captured.
+The header shows the snapshot's title (or "Untitled Snapshot"), who created it, when, and badge counts for nodes and stacks captured. When the snapshot preserved Dossier notes, a **Documentation captured** badge appears alongside those counts.
 
-Below the header, each node appears as a collapsible card. Expand a node to see its stacks, then expand a stack to see individual files. Each file has a **Preview** button that renders the full file contents inline in a scrollable panel, and a **Download** button that saves that single file to your machine (named `<stack>-<filename>`, for example `web-compose.yaml`).
+Below the header, each node appears as a collapsible card. Expand a node to see its stacks, then expand a stack to see individual files. If documentation was captured for a stack, its preserved Dossier notes are shown read-only beneath the file list. Each file has a **Preview** button that renders the full file contents inline in a scrollable panel, and a **Download** button that saves that single file to your machine (named `<stack>-<filename>`, for example `web-compose.yaml`).
 
 <Frame>
   <img src="/images/fleet-backups/snapshot-detail.png" alt="Snapshot detail view with a node expanded, showing a stack expanded with a compose file, Preview button, and Restore button" />
@@ -65,8 +71,10 @@ Admins can restore individual stacks from any snapshot:
 1. Open a snapshot's detail view
 2. Expand the node and stack you want to restore
 3. Click **Restore** below the stack's file list
-4. A confirmation dialog appears. Optionally check **Redeploy stack after restore** to immediately apply the restored configuration.
+4. A confirmation dialog appears. Optionally check **Redeploy stack after restore** to immediately apply the restored configuration. When the snapshot preserved Dossier notes for this stack, a **Restore documentation notes** option also appears.
 5. Click **Restore** to confirm
+
+By default, restoring a stack only writes back its files and leaves the stack's current Dossier notes untouched. Notes are restored only when you explicitly check **Restore documentation notes**, which overwrites the current notes with the captured ones. The same option appears on **Restore all** when the snapshot has documentation.
 
 <Frame>
   <img src="/images/fleet-backups/restore-dialog.png" alt="Restore confirmation dialog showing the target stack and node name, a redeploy checkbox, and Cancel and Restore buttons" />
@@ -133,7 +141,7 @@ To upload a single snapshot on demand, open the **Snapshots** tab in Fleet View.
 
 ### Browsing and downloading cloud snapshots
 
-The **Cloud Snapshots** panel in **Settings → Infrastructure → Cloud Backup** lists every archive currently in your bucket, with size and last-modified timestamp. Click the download icon to save a `.tar.gz` archive locally for off-host disaster recovery. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack.
+The **Cloud Snapshots** panel in **Settings → Infrastructure → Cloud Backup** lists every archive currently in your bucket, with size and last-modified timestamp. Click the download icon to save a `.tar.gz` archive locally for off-host disaster recovery. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack. When the snapshot preserved Dossier notes, the archive also includes a `documentation.json` with those notes.
 
 ### Restoring from a cloud snapshot
 
