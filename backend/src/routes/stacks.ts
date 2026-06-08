@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import path from 'path';
+import { inspect } from 'node:util';
 import YAML from 'yaml';
 import multer from 'multer';
 import { FileSystemService } from '../services/FileSystemService';
@@ -12,6 +13,8 @@ import { CacheService } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
+import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
@@ -938,6 +941,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);
     DatabaseService.getInstance().deleteStackDossier(req.nodeId, stackName);
+    DatabaseService.getInstance().deleteStackDriftFindings(req.nodeId, stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
   } catch (dbErr) {
     console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);
@@ -1005,6 +1009,80 @@ stacksRouter.get('/:stackName/services', async (req: Request, res: Response) => 
   } catch (error) {
     console.error('[Stacks] Failed to fetch services:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to fetch services' });
+  }
+});
+
+/** A persisted finding as the Drift tab consumes it (no internal column names). */
+interface DriftLedgerEntry {
+  service: string;
+  kind: DriftFindingKind;
+  message: string;
+  detectedAt: number;
+  resolvedAt: number | null;
+}
+
+/**
+ * Assemble the full Drift tab payload: the spatial report (compose vs runtime),
+ * the temporal overlay (source changed since last deploy), and the persisted
+ * ledger history. When `reconcile` is set, the current findings are persisted
+ * into the ledger (new ones recorded, cleared ones resolved) before the ledger
+ * is read back, so the returned history reflects the just-observed state.
+ */
+async function buildDriftPayload(
+  nodeId: number,
+  stackName: string,
+  reconcile: boolean,
+): Promise<StackDriftReport & { temporal: DriftTemporal; ledger: DriftLedgerEntry[] }> {
+  const report = await buildStackDriftReport(nodeId, stackName);
+  // Only the on-disk read is best-effort: an unreadable compose is already surfaced
+  // by the report as a parse error, so temporal degrades to neutral. computeTemporal
+  // runs outside the try so a real ledger fault (a DB or hashing error) surfaces as a
+  // 500 instead of being hidden behind a misleading "no baseline".
+  let content: string | null = null;
+  try {
+    content = await FileSystemService.getInstance(nodeId).getStackContent(stackName);
+  } catch {
+    // Unreadable compose: the report carries the parseError; temporal stays neutral.
+  }
+  const temporal: DriftTemporal = content !== null
+    ? DriftLedgerService.getInstance().computeTemporal(nodeId, stackName, content)
+    : { hasBaseline: false, sourceChanged: false, renderedChanged: false };
+  if (reconcile) {
+    DriftLedgerService.getInstance().reconcile(nodeId, stackName, report);
+  }
+  // finding_type is a free-text column, but reconcile only ever writes a DriftFindingKind.
+  const ledger: DriftLedgerEntry[] = DatabaseService.getInstance()
+    .getRecentDriftFindings(nodeId, stackName, 20)
+    .map(r => ({ service: r.service, kind: r.finding_type as DriftFindingKind, message: r.message, detectedAt: r.detected_at, resolvedAt: r.resolved_at }));
+  return { ...report, temporal, ledger };
+}
+
+stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildDriftPayload(req.nodeId, stackName, false));
+  } catch (error) {
+    console.error('[Stacks] Failed to build drift report for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to build drift report' });
+  }
+});
+
+// Re-check is the one place a passive drift view becomes a ledger write: it
+// reconciles the current findings into stack_drift_findings (recording newly
+// detected and newly resolved ones) before returning the fresh payload, so the
+// GET above can stay a side-effect-free read.
+stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildDriftPayload(req.nodeId, stackName, true));
+  } catch (error) {
+    console.error('[Stacks] Failed to re-check drift for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to re-check drift' });
   }
 });
 

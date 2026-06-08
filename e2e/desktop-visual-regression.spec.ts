@@ -1,18 +1,21 @@
 // ---------------------------------------------------------------------------
-// Zero-desktop-change gate for the mobile work.
+// Zero-desktop-change gate. Snapshots the top-level views at desktop widths;
+// any pixel diff means a desktop base class changed instead of a mobile-only
+// `max-md:` override being added.
 //
-// Snapshots every top-level view the mobile pass touches, at desktop widths.
-// Capture the baseline on the pre-change state, then run again after the mobile
-// changes: any pixel diff means a desktop base class was edited instead of a
-// mobile-only `max-md:` override being added.
+// Runs as its own Playwright project so it never blocks the functional E2E run:
+//   npx playwright test --project=visual                 # compare
+//   npx playwright test --project=visual --update-snapshots   # (re)baseline
 //
-//   # baseline (before the mobile changes):
-//   E2E_PASSWORD=admin123 npx playwright test desktop-visual-regression --update-snapshots
-//   # gate (after the changes):
-//   E2E_PASSWORD=admin123 npx playwright test desktop-visual-regression
+// In CI it runs in the Visual Regression workflow against a fresh app (empty
+// COMPOSE_DIR, so no stacks). Baselines are platform-specific, so they are
+// generated and committed on the Linux runner via that workflow's seed job, not
+// locally. Locally, baseline against your own instance with the same command.
 //
-// Snapshots are platform-specific and gitignored; regenerate the baseline in
-// the same environment (or a pinned CI/Docker image) you run the gate in.
+// stack-detail is intentionally not snapshotted: a fresh CI app has no stack to
+// open, and its live log stream is not deterministic. Resources is omitted for
+// the same async-Docker-height reason. The shell plus the four content views
+// below catch a desktop base-class regression on the mobile-touched surfaces.
 // ---------------------------------------------------------------------------
 import { test, expect, type Page } from '@playwright/test';
 import { loginAs, waitForStacksLoaded } from './helpers';
@@ -40,12 +43,6 @@ const VIEWS: View[] = [
         id: 'settings', label: 'settings', open: async (p) => {
             await p.getByRole('button', { name: /profile/i }).click();
             await p.getByRole('button', { name: 'Settings', exact: true }).click();
-        },
-    },
-    {
-        id: 'stack-detail', label: 'stack-detail', open: async (p) => {
-            await p.locator('[data-stacks-loaded="true"] [data-testid="stack-row"]').first().click();
-            await p.getByText('image', { exact: false }).first().waitFor({ timeout: 10_000 }).catch(() => {});
         },
     },
 ];

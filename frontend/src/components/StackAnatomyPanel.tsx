@@ -8,6 +8,7 @@ import { type AnatomyMarkdownInput } from '@/lib/anatomyMarkdown';
 import { parseAnatomy, parseEnvKeys, formatGitSource, type GitSourceInfo } from '@/lib/anatomy';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
+import DriftPanel from './stack/DriftPanel';
 import type { NotificationItem } from '@/components/dashboard/types';
 
 interface StackAnatomyPanelProps {
@@ -251,6 +252,7 @@ export default function StackAnatomyPanel({
           <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
           <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
           <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
+          <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
         </TabsList>
         <div className="flex items-center gap-3">
           {onOpenFiles && (
@@ -457,6 +459,9 @@ export default function StackAnatomyPanel({
       </TabsContent>
       <TabsContent value="dossier" className="flex flex-col flex-1 min-h-0 mt-0">
         <StackDossierPanel stackName={stackName} anatomy={anatomyInput} canEdit={canEdit} />
+      </TabsContent>
+      <TabsContent value="drift" className="flex flex-col flex-1 min-h-0 mt-0">
+        <DriftPanel stackName={stackName} />
       </TabsContent>
       </Tabs>
     </div>
