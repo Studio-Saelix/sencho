@@ -22,12 +22,19 @@ function isValidRegistryUrl(url: string, type: string): boolean {
   return true;
 }
 
+// Docker Hub, GHCR, and custom registry credentials are a Community capability.
+// ECR (short-lived token refresh, AWS region) stays paid. Returns true when the
+// request may proceed and false after sending the 403, mirroring the tier guards.
+function allowRegistryType(type: string | undefined, req: Request, res: Response): boolean {
+  if (type === 'ecr') return requirePaid(req, res);
+  return true;
+}
+
 export const registriesRouter = Router();
 
 registriesRouter.get('/', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     res.json(RegistryService.getInstance().getAll());
   } catch (error) {
@@ -39,7 +46,6 @@ registriesRouter.get('/', (req: Request, res: Response): void => {
 registriesRouter.post('/', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const { name, url, type, username, secret, aws_region } = req.body;
 
@@ -52,6 +58,7 @@ registriesRouter.post('/', (req: Request, res: Response): void => {
     if (!type || !(VALID_REGISTRY_TYPES as readonly string[]).includes(type)) {
       res.status(400).json({ error: `Type must be one of: ${VALID_REGISTRY_TYPES.join(', ')}` }); return;
     }
+    if (!allowRegistryType(type, req, res)) return;
     if (!isValidRegistryUrl(url, type)) {
       res.status(400).json({ error: 'Registry URL must use http:// or https:// (or no protocol).' }); return;
     }
@@ -76,7 +83,6 @@ registriesRouter.post('/', (req: Request, res: Response): void => {
 registriesRouter.put('/:id', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'registry ID');
     if (id === null) return;
@@ -96,6 +102,7 @@ registriesRouter.put('/:id', (req: Request, res: Response): void => {
       res.status(400).json({ error: `Type must be one of: ${VALID_REGISTRY_TYPES.join(', ')}` }); return;
     }
     const effectiveType = type ?? existing.type;
+    if (!allowRegistryType(effectiveType, req, res)) return;
     if (url !== undefined && !isValidRegistryUrl(url, effectiveType)) {
       res.status(400).json({ error: 'Registry URL must use http:// or https:// (or no protocol).' }); return;
     }
@@ -114,7 +121,6 @@ registriesRouter.put('/:id', (req: Request, res: Response): void => {
 registriesRouter.delete('/:id', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'registry ID');
     if (id === null) return;
@@ -133,10 +139,13 @@ registriesRouter.delete('/:id', (req: Request, res: Response): void => {
 registriesRouter.post('/:id/test', async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'registry ID');
     if (id === null) return;
+
+    const existing = RegistryService.getInstance().getById(id);
+    if (!existing) { res.status(404).json({ error: 'Registry not found' }); return; }
+    if (!allowRegistryType(existing.type, req, res)) return;
 
     const result = await RegistryService.getInstance().testConnection(id);
     res.json(result);
@@ -149,13 +158,13 @@ registriesRouter.post('/:id/test', async (req: Request, res: Response): Promise<
 registriesRouter.post('/test', async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const { type, url, username, secret, aws_region } = req.body;
 
     if (!type || !(VALID_REGISTRY_TYPES as readonly string[]).includes(type)) {
       res.status(400).json({ error: `Type must be one of: ${VALID_REGISTRY_TYPES.join(', ')}` }); return;
     }
+    if (!allowRegistryType(type, req, res)) return;
     if (typeof url !== 'string' || url.length === 0 || url.length > 500) {
       res.status(400).json({ error: 'URL is required (max 500 characters).' }); return;
     }

@@ -205,7 +205,6 @@ securityRouter.post('/trivy-update', trivyInstallLimiter, authMiddleware, async 
 
 securityRouter.put('/trivy-auto-update', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   const enabled = req.body?.enabled === true;
   try {
     DatabaseService.getInstance().updateGlobalSetting('trivy_auto_update', enabled ? '1' : '0');
@@ -440,7 +439,6 @@ securityRouter.get('/image-summaries', authMiddleware, (req: Request, res: Respo
 
 securityRouter.post('/sbom', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   const svc = TrivyService.getInstance();
   if (!svc.isTrivyAvailable()) {
     res.status(503).json({ error: 'Trivy is not available on this host' }); return;

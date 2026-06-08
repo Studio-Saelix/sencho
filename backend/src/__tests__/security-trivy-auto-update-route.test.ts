@@ -1,9 +1,10 @@
 /**
- * Tests for the role + tier gate on PUT /api/security/trivy-auto-update.
+ * Tests for the admin-role gate on PUT /api/security/trivy-auto-update.
  *
  * The route flips the global `trivy_auto_update` setting that the scheduler
  * reads every 24h to decide whether to pull newer Trivy binary releases.
- * It must be reachable only by an admin on a paid (Admiral) tier.
+ * It must be reachable by any admin, on Community as well as Admiral; only the
+ * admin role is required (no tier gate).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
@@ -51,7 +52,7 @@ describe('PUT /api/security/trivy-auto-update', () => {
     expect(res.status).toBe(403);
   });
 
-  it('rejects Community tier with 403', async () => {
+  it('accepts a Community admin (no tier gate) and persists the setting', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     const spy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
     try {
@@ -59,7 +60,9 @@ describe('PUT /api/security/trivy-auto-update', () => {
         .put('/api/security/trivy-auto-update')
         .set('Cookie', adminCookie)
         .send({ enabled: true });
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(200);
+      expect(res.body.autoUpdate).toBe(true);
+      expect(DatabaseService.getInstance().getGlobalSettings().trivy_auto_update).toBe('1');
     } finally {
       spy.mockReturnValue('paid');
     }

@@ -14,6 +14,7 @@ export interface PatchableSettings {
     scan_history_per_image_limit?: string;
     prune_on_update?: '0' | '1';
     reclaim_hero?: '0' | '1';
+    snapshot_documentation?: '0' | '1';
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -32,6 +33,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     scan_history_per_image_limit: '50',
     prune_on_update: '1',
     reclaim_hero: '1',
+    snapshot_documentation: '0',
 };
 
 export type SectionId =

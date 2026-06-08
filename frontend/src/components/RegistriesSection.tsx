@@ -8,7 +8,7 @@ import { Combobox } from '@/components/ui/combobox';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
-import { PaidGate } from './PaidGate';
+import { useLicense } from '@/context/LicenseContext';
 import { CapabilityGate } from './CapabilityGate';
 import { Database, Plus, Trash2, Pencil, RefreshCw, CheckCircle, XCircle, Clock, Zap } from 'lucide-react';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
@@ -88,6 +88,10 @@ function formatDate(ts: number): string {
 }
 
 export function RegistriesSection() {
+    // Docker Hub, GHCR, and custom registry credentials are free; AWS ECR
+    // (short-lived token refresh) stays paid, so the ECR type is gated.
+    const { isPaid } = useLicense();
+    const typeOptions = isPaid ? TYPE_OPTIONS : TYPE_OPTIONS.filter(o => o.value !== 'ecr');
     const [registries, setRegistries] = useState<RegistryItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
@@ -283,8 +287,7 @@ export function RegistriesSection() {
     };
 
     return (
-        <PaidGate>
-          <CapabilityGate capability="registries" featureName="Private Registries">
+        <CapabilityGate capability="registries" featureName="Private Registries">
             <div className="space-y-6">
                 <div className="flex justify-end">
                     <SettingsPrimaryButton size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
@@ -298,12 +301,15 @@ export function RegistriesSection() {
                         <div className="space-y-2">
                             <Label>Registry Type</Label>
                             <Combobox
-                                options={TYPE_OPTIONS}
+                                options={typeOptions}
                                 value={formType}
                                 onValueChange={(v) => handleTypeChange(v as RegistryType)}
                                 placeholder="Select a registry type"
                                 searchPlaceholder="Search types..."
                             />
+                            {!isPaid && (
+                                <p className="text-xs text-stat-subtitle">AWS ECR requires Admiral.</p>
+                            )}
                         </div>
                         <div className="space-y-2">
                             <Label>Name</Label>
@@ -473,7 +479,6 @@ export function RegistriesSection() {
                     </p>
                 </ConfirmModal>
             </div>
-          </CapabilityGate>
-        </PaidGate>
+        </CapabilityGate>
     );
 }

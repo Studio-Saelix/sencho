@@ -36,7 +36,6 @@ function props(overrides: Partial<React.ComponentProps<typeof OverviewTab>> = {}
     updateStatusMap: new Map(),
     onNavigateToNode: vi.fn(),
     updatingNodeId: null,
-    isPaid: false,
     topologyMode: 'hub' as const,
     onTopologyModeChange: vi.fn(),
     topologyPositions: {},

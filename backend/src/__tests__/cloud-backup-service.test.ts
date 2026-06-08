@@ -190,7 +190,10 @@ describe('CloudBackupService — uploadSnapshot', () => {
         const parsed = JSON.parse(meta!.content);
         expect(parsed.id).toBe(snapshotId);
         expect(parsed.instance_id).toBe('test-instance-id');
-        expect(parsed.archive_version).toBe(1);
+        expect(parsed.archive_version).toBe(2);
+        expect(parsed.has_documentation).toBe(false);
+        // No dossier metadata was captured, so the archive omits documentation.json.
+        expect(entries.find(e => e.name === 'documentation.json')).toBeUndefined();
 
         // Content is encrypted at rest but the archive must carry plaintext so a
         // downloaded snapshot restores on any instance (portability contract).
@@ -200,6 +203,48 @@ describe('CloudBackupService — uploadSnapshot', () => {
         expect(envEntry?.content).toBe('KEY=value\n');
 
         expect(CloudBackupService.getInstance().getUploadStatus(snapshotId).status).toBe('success');
+    });
+
+    it('includes documentation.json when the snapshot captured dossier metadata', async () => {
+        seedCustomProvider();
+        const db = DatabaseService.getInstance();
+
+        const docJson = JSON.stringify({
+            generated_at: '2026-01-01T00:00:00Z',
+            stacks: [{ nodeId: 1, nodeName: 'gateway', stackName: 'web', dossier: { purpose: 'edge proxy' } }],
+            warnings: [],
+        });
+        const snapshotId = db.createSnapshot('Documented backup', 'admin', 1, 1, '[]', '[]', docJson);
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+
+        const putCall = sentSpy.mock.calls.find(c => c[0].name === 'PutObjectCommand');
+        const input = putCall![0].input as { Body: Buffer };
+        const decompressed = zlib.gunzipSync(input.Body);
+        const entries: Array<{ name: string; content: string }> = await new Promise((resolve, reject) => {
+            const extract = tar.extract();
+            const list: Array<{ name: string; content: string }> = [];
+            extract.on('entry', (header, stream, next) => {
+                const chunks: Buffer[] = [];
+                stream.on('data', (c: Buffer) => chunks.push(c));
+                stream.on('end', () => { list.push({ name: header.name, content: Buffer.concat(chunks).toString('utf-8') }); next(); });
+                stream.resume();
+            });
+            extract.on('finish', () => resolve(list));
+            extract.on('error', reject);
+            Readable.from(decompressed).pipe(extract);
+        });
+
+        const meta = JSON.parse(entries.find(e => e.name === 'metadata.json')!.content);
+        expect(meta.has_documentation).toBe(true);
+        const docEntry = entries.find(e => e.name === 'documentation.json');
+        expect(docEntry).toBeDefined();
+        // The archive carries plaintext dossier metadata for portability.
+        expect(JSON.parse(docEntry!.content).stacks[0].dossier.purpose).toBe('edge proxy');
     });
 
     it('records failure status when upload throws', async () => {
