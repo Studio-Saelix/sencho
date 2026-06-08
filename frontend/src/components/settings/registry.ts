@@ -139,7 +139,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         label: 'Registries',
         description: 'Private Docker registries and pull credentials.',
         keywords: ['docker', 'ghcr', 'ecr', 'private', 'pull', 'auth'],
-        tier: 'paid',
+        tier: null,
         scope: 'global',
         adminOnly: true,
         hiddenOnRemote: true,

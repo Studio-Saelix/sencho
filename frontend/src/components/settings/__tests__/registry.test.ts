@@ -66,8 +66,9 @@ describe('settings registry', () => {
         expect(byId.get('security')?.label).toBe('Vulnerability Scanning');
     });
 
-    it('preserves the paid gate on Registries', () => {
+    it('opens Registries to Community while keeping it admin-only', () => {
         const registries = SETTINGS_ITEMS.find(i => i.id === 'registries');
-        expect(registries?.tier).toBe('paid');
+        expect(registries?.tier).toBeNull();
+        expect(registries?.adminOnly).toBe(true);
     });
 });
