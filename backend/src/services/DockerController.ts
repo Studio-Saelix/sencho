@@ -23,6 +23,10 @@ const COMPOSE_FILE_NAMES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml'
 /** Cached mapping from compose `name:` field to stack directory name. TTL-based to avoid re-parsing YAML on every poll. */
 const PROJECT_NAME_CACHE_TTL_MS = 60_000;
 const PROJECT_NAME_CACHE_KEY = 'project-name-map';
+/** How long a resolved container StartedAt stays fresh before re-inspecting. */
+const STARTED_AT_CACHE_TTL_MS = 20_000;
+/** Cap on concurrent inspect() calls when resolving StartedAt in bulk. */
+const STARTED_AT_INSPECT_CONCURRENCY = 10;
 
 /** Common web-UI private ports, checked in priority order when detecting the main app port. */
 const WEB_UI_PORTS = [32400, 8989, 7878, 9696, 5055, 8080, 80, 443, 3000, 9000];
@@ -32,7 +36,7 @@ const IGNORE_PORTS = [1900, 53, 22];
 export interface BulkStackInfo {
   status: 'running' | 'exited' | 'unknown';
   mainPort?: number;
-  /** Unix seconds of the oldest running container (approximates stack uptime). */
+  /** Unix seconds of the oldest running container's last start (approximates stack uptime). */
   runningSince?: number;
 }
 
@@ -165,6 +169,12 @@ export interface CreateNetworkOptions {
 
 class DockerController {
   private static readonly SYSTEM_NETWORKS = new Set(['bridge', 'host', 'none']);
+  /**
+   * Cache of container last-start times (unix seconds), keyed by `${nodeId}:${containerId}`.
+   * Static because getInstance() hands out throwaway instances per request; the cache must
+   * outlive them so status polls do not re-inspect every container every few seconds.
+   */
+  private static startedAtCache = new Map<string, { startedAtSeconds: number; cachedAtMs: number }>();
   private docker: Docker;
   private nodeId: number;
 
@@ -1108,6 +1118,11 @@ class DockerController {
       result[name] = { status: 'unknown' };
     }
 
+    // Per stack, collect running container ids plus the oldest Created as a
+    // fallback. Uptime is resolved from StartedAt after the loop; Created is
+    // only used if an inspect fails, since it never moves on restart.
+    const runningByStack: Record<string, { ids: string[]; oldestCreated?: number }> = {};
+
     for (const container of allContainers as any[]) {
       const stackDir = DockerController.resolveContainerStack(
         container.Labels, projectToStack, knownStackSet, absDirToStack, resolvedBase,
@@ -1118,16 +1133,11 @@ class DockerController {
       if (container.State === 'running') {
         result[stackDir].status = 'running';
 
-        // Track the oldest running container's creation time as a proxy for
-        // stack uptime. Docker's listContainers payload exposes Created (unix
-        // seconds) but not StartedAt; for compose stacks the gap is small
-        // enough to treat as uptime without paying for a per-container inspect.
+        const acc = (runningByStack[stackDir] ??= { ids: [] });
+        if (typeof container.Id === 'string') acc.ids.push(container.Id);
         const created = typeof container.Created === 'number' ? container.Created : undefined;
-        if (created !== undefined) {
-          const existing = result[stackDir].runningSince;
-          if (existing === undefined || created < existing) {
-            result[stackDir].runningSince = created;
-          }
+        if (created !== undefined && (acc.oldestCreated === undefined || created < acc.oldestCreated)) {
+          acc.oldestCreated = created;
         }
 
         // Detect main web port (first running container with a matchable port wins)
@@ -1149,7 +1159,72 @@ class DockerController {
       }
     }
 
+    // Resolve real uptime: oldest StartedAt across each stack's running
+    // containers, falling back to the oldest Created when inspect is unavailable.
+    const allRunningIds = Object.values(runningByStack).flatMap(s => s.ids);
+    const startedAts = await this.getRunningStartedAts(allRunningIds);
+    for (const [stackDir, acc] of Object.entries(runningByStack)) {
+      let oldest: number | undefined;
+      for (const id of acc.ids) {
+        const started = startedAts.get(id);
+        if (started !== undefined && (oldest === undefined || started < oldest)) {
+          oldest = started;
+        }
+      }
+      result[stackDir].runningSince = oldest ?? acc.oldestCreated;
+    }
+
     return result;
+  }
+
+  /**
+   * Resolve each container's last start time (unix seconds) from State.StartedAt,
+   * which Docker exposes only via inspect() (listContainers carries Created, which
+   * does not move on restart). Results are cached briefly per node+container so
+   * steady-state status polls avoid re-inspecting. A container whose inspect fails
+   * (e.g. it vanished between listing and inspect) is omitted; callers fall back to
+   * Created for those rather than failing the whole batch.
+   */
+  private async getRunningStartedAts(containerIds: string[]): Promise<Map<string, number>> {
+    const now = Date.now();
+    const cache = DockerController.startedAtCache;
+    const out = new Map<string, number>();
+    const misses: string[] = [];
+
+    for (const id of containerIds) {
+      const cached = cache.get(`${this.nodeId}:${id}`);
+      if (cached && now - cached.cachedAtMs < STARTED_AT_CACHE_TTL_MS) {
+        out.set(id, cached.startedAtSeconds);
+      } else {
+        misses.push(id);
+      }
+    }
+
+    for (let i = 0; i < misses.length; i += STARTED_AT_INSPECT_CONCURRENCY) {
+      const chunk = misses.slice(i, i + STARTED_AT_INSPECT_CONCURRENCY);
+      await Promise.all(chunk.map(async (id) => {
+        try {
+          const info = await this.docker.getContainer(id).inspect();
+          const startedAt = info.State?.StartedAt;
+          const seconds = startedAt ? Math.floor(Date.parse(startedAt) / 1000) : NaN;
+          // Skip the Docker zero-time (0001-01-01...) and unparseable values.
+          if (Number.isFinite(seconds) && seconds > 0) {
+            cache.set(`${this.nodeId}:${id}`, { startedAtSeconds: seconds, cachedAtMs: now });
+            out.set(id, seconds);
+          }
+        } catch (err: unknown) {
+          console.warn('[DockerController] StartedAt inspect failed for %s: %s', sanitizeForLog(id), sanitizeForLog((err as Error)?.message ?? String(err)));
+        }
+      }));
+    }
+
+    // Bound the cache: drop entries past their TTL so removed containers that
+    // will never be queried again do not accumulate.
+    for (const [key, entry] of cache) {
+      if (now - entry.cachedAtMs >= STARTED_AT_CACHE_TTL_MS) cache.delete(key);
+    }
+
+    return out;
   }
 
   /**
