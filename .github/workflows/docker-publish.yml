@@ -1,5 +1,10 @@
 name: Build and Publish Docker Image
 
+# Release-only path: fires on v* tag pushes and publishes the public release
+# (Docker Hub + GHCR, latest/semver/moving-minor, SBOM, cosign, GitHub Release).
+# Integration images for pre-release testing are built on every push to main by
+# docker-dev.yml and published as ghcr.io/studio-saelix/sencho-dev:dev; nothing
+# here runs for those. Keep release artifacts out of the dev path and vice versa.
 on:
   push:
     tags:

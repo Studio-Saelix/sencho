@@ -1,0 +1,165 @@
+name: Build and Publish Dev Image
+
+# ---------------------------------------------------------------------------
+# Integration (dev) build  vs  release build
+# ---------------------------------------------------------------------------
+# This workflow produces the INTEGRATION image: the running artifact of main
+# HEAD, published so a maintainer can pull and smoke-test the exact code queued
+# for the next release BEFORE it is ever promoted to a public release tag.
+#
+#   Integration build (this file)        Release build (docker-publish.yml)
+#   ----------------------------------   -----------------------------------
+#   trigger: push to main                trigger: push of a v* tag
+#   registry: GHCR only                  registries: Docker Hub + GHCR
+#   image:  ghcr.io/studio-saelix/       images: saelix/sencho (Docker Hub)
+#           sencho-dev                           ghcr.io/studio-saelix/sencho
+#   tags:   :dev (moving) + :dev-<sha>   tags: latest, X.Y.Z, X.Y
+#   signing / SBOM / VEX / Release: no   signing / SBOM / VEX / Release: yes
+#   approval gate: none                  approval gate: production environment
+#
+# Public release tags (latest, semver, moving-minor), Docker Hub publishing,
+# cosign signatures, SBOM/VEX attestations, and GitHub Releases are RELEASE-ONLY
+# and live exclusively in docker-publish.yml. The dev tags here are never
+# promoted: `:dev` is a moving pointer at main HEAD, and `:dev-<short-sha>` pins
+# one build for reproducible testing on a host. Nothing in this file touches
+# Docker Hub or the `latest` tag.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  # A moving `:dev` tag only ever needs to reflect the newest main commit, so a
+  # superseded in-flight build can be cancelled. Ref-scoped to match the rest of
+  # the workflow suite.
+  group: docker-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege: GHCR push only. No id-token (no cosign) and no contents:write
+# (no GitHub Release). Deliberately no `production` environment, so an
+# integration image publishes automatically with no Docker Hub credentials ever
+# in scope for this workflow.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push_dev_image:
+    name: Build and push dev image to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      # Feeds the Dockerfile's APK_CACHE_BUST arg so the `apk upgrade` layer
+      # rebuilds at least once per calendar day even when every other input is
+      # cached, so the Trivy scan below sees a fresh layer. Same rationale as the
+      # release workflow; see the APK_CACHE_BUST arg in the Dockerfile.
+      - name: Compute daily apk cache bust value
+        id: apk-bust
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ghcr.io
+          # repository_owner is a fixed value (studio-saelix) on every event
+          # type; GITHUB_TOKEN is what actually authenticates the GHCR push.
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
+        with:
+          # Dedicated dev package, separate from the release package
+          # ghcr.io/studio-saelix/sencho. Never published to Docker Hub.
+          images: ghcr.io/studio-saelix/sencho-dev
+          # :dev         moving pointer at the latest main build
+          # :dev-<sha>   immutable per-commit tag for pinning a build on a host
+          # No latest / semver / moving-minor here: those are release-only and
+          # live in docker-publish.yml.
+          tags: |
+            type=raw,value=dev
+            type=sha,prefix=dev-,format=short
+
+      # Build an amd64-only variant into the local daemon first so Trivy scans
+      # the exact image before it is pushed, and the multi-arch push below reuses
+      # these layers from the buildkit daemon cache. Same gate the PR and release
+      # builds apply. Scanning only amd64 is a defensible proxy for the multi-arch
+      # manifest: distro package CVEs are arch-agnostic.
+      - name: Build dev image for pre-publish scan (amd64, loaded)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: localhost/sencho:dev-scan
+          cache-from: type=gha
+          build-args: |
+            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+
+      - name: Scan dev image for vulnerabilities (Trivy)
+        # Same HIGH/CRITICAL policy and OpenVEX source of truth (trivy.yaml ->
+        # security/vex/sencho.openvex.json) as PR and release CI. A failing scan
+        # blocks the `:dev` push, so a vulnerable integration image is never
+        # published for testing.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: localhost/sencho:dev-scan
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+          trivy-config: trivy.yaml
+
+      # Mirror of the release pre-publish smoke gate in docker-publish.yml:
+      # verify the source-built Docker CLI/Compose binaries exec, then start the
+      # container and poll /api/health until it returns 200. Runs BEFORE the push
+      # so a broken image never moves the `:dev` tag.
+      - name: Smoke test dev image (pre-publish)
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh localhost/sencho:dev-scan -c \
+            'docker --version && docker compose version'
+
+          docker run -d --name sencho-dev-smoke -p 1852:1852 localhost/sencho:dev-scan
+          trap 'docker logs sencho-dev-smoke 2>&1 || true; docker rm -f sencho-dev-smoke >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:1852/api/health >/dev/null 2>&1; then
+              echo "Container healthy after ${i}s"
+              curl -s http://localhost:1852/api/health
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "FAILED: /api/health did not become ready within 30s"
+          exit 1
+
+      - name: Build and push dev image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # gha cache, kept separate from the release buildcache
+          # (saelix/sencho:buildcache) so integration builds never pollute the
+          # cache that release publishes pull from.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
