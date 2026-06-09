@@ -1,7 +1,6 @@
 // Shared building blocks for the bespoke mobile (<md) screens. These translate
-// the approved prototype's inline-styled primitives (docs/design/mobile-reference)
-// onto our design tokens. No new colors or fonts. Rendered only on the mobile
-// shell surfaces.
+// the approved prototype's inline-styled primitives onto our design tokens.
+// No new colors or fonts. Rendered only on the mobile shell surfaces.
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import { Sparkline } from '@/components/ui/sparkline';
