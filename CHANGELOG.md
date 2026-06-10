@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.91.1](https://github.com/Studio-Saelix/sencho/compare/v0.91.0...v0.91.1) (2026-06-10)
+
+
+### Fixed
+
+* base Stack health uptime on container start, not creation ([#1341](https://github.com/Studio-Saelix/sencho/issues/1341)) ([e7895c8](https://github.com/Studio-Saelix/sencho/commit/e7895c889d439b05eaafef290c9d94468da248b3))
+
 ## [0.91.0](https://github.com/Studio-Saelix/sencho/compare/v0.90.0...v0.91.0) (2026-06-08)
 
 
