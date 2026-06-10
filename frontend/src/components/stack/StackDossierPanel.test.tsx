@@ -126,4 +126,67 @@ describe('StackDossierPanel', () => {
     fireEvent.click(screen.getByTestId('dossier-download-btn'));
     expect(downloadTextFile).toHaveBeenCalledWith('web-dossier.md', expect.stringContaining('# web'));
   });
+
+  // Anatomy that publishes a single TCP host port, for documentation-drift tests.
+  const anatomyPublishing = (host: string): AnatomyMarkdownInput => ({
+    ...anatomy,
+    ports: { web: [{ host, container: '80', proto: 'tcp' }] },
+  });
+
+  it('warns when an access URL names a port the stack does not publish', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...EMPTY_DOSSIER_FIELDS, access_urls: 'http://host:32400' }));
+    render(<StackDossierPanel stackName="web" anatomy={anatomyPublishing('32401')} canEdit />);
+    expect(await screen.findByTestId('dossier-doc-drift')).toHaveTextContent(':32400');
+  });
+
+  it('does not warn when the access URL port is published', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...EMPTY_DOSSIER_FIELDS, access_urls: 'http://host:32400' }));
+    render(<StackDossierPanel stackName="web" anatomy={anatomyPublishing('32400')} canEdit />);
+    await screen.findByTestId('dossier-panel');
+    expect(screen.queryByTestId('dossier-doc-drift')).not.toBeInTheDocument();
+  });
+
+  it('shows the drift warning to read-only viewers', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...EMPTY_DOSSIER_FIELDS, access_urls: 'http://host:32400' }));
+    render(<StackDossierPanel stackName="web" anatomy={anatomyPublishing('32401')} canEdit={false} />);
+    expect(await screen.findByTestId('dossier-doc-drift')).toBeInTheDocument();
+  });
+
+  it('updates the warning live as access_urls is edited', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...EMPTY_DOSSIER_FIELDS }));
+    render(<StackDossierPanel stackName="web" anatomy={anatomyPublishing('8080')} canEdit />);
+    await screen.findByTestId('dossier-panel');
+    expect(screen.queryByTestId('dossier-doc-drift')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('dossier-field-access_urls'), { target: { value: 'http://host:9000' } });
+    expect(await screen.findByTestId('dossier-doc-drift')).toHaveTextContent(':9000');
+  });
+
+  it('clears the warning when the URL is edited to a published port', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...EMPTY_DOSSIER_FIELDS, access_urls: 'http://host:9000' }));
+    render(<StackDossierPanel stackName="web" anatomy={anatomyPublishing('8080')} canEdit />);
+    await screen.findByTestId('dossier-doc-drift');
+    fireEvent.change(screen.getByTestId('dossier-field-access_urls'), { target: { value: 'http://host:8080' } });
+    await waitFor(() => expect(screen.queryByTestId('dossier-doc-drift')).not.toBeInTheDocument());
+  });
+
+  it('renders one row per unpublished port', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...EMPTY_DOSSIER_FIELDS, access_urls: 'http://host:9000\nhttp://host:9001' }));
+    render(<StackDossierPanel stackName="web" anatomy={anatomyPublishing('8080')} canEdit />);
+    const section = await screen.findByTestId('dossier-doc-drift');
+    expect(section).toHaveTextContent(':9000');
+    expect(section).toHaveTextContent(':9001');
+  });
+
+  it('suppresses the warning when a reload fails, never showing the previous stack stale', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes({ ...EMPTY_DOSSIER_FIELDS, access_urls: 'http://host:9000' }))
+      .mockResolvedValueOnce(jsonRes({ error: 'down' }, false));
+    const { rerender } = render(<StackDossierPanel stackName="web" anatomy={anatomyPublishing('8080')} canEdit />);
+    expect(await screen.findByTestId('dossier-doc-drift')).toHaveTextContent(':9000');
+    // Switch stacks: the reload fails, so the prior stack's drifting fields stay
+    // resident but must not keep a warning on screen.
+    rerender(<StackDossierPanel stackName="web2" anatomy={anatomyPublishing('8080')} canEdit />);
+    await screen.findByTestId('dossier-retry-btn');
+    expect(screen.queryByTestId('dossier-doc-drift')).not.toBeInTheDocument();
+  });
 });
