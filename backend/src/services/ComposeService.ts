@@ -652,8 +652,11 @@ export class ComposeService {
     if (!isValidStackName(stackName)) {
       return Promise.reject(new Error('Invalid stack path'));
     }
-    const stackDir = path.resolve(this.baseDir, stackName);
-    if (!isPathWithinBase(stackDir, this.baseDir) || path.resolve(this.baseDir) === stackDir) {
+    // Canonical js/path-injection barrier inline at the spawn-cwd sink: CodeQL
+    // does not credit the wrapped isPathWithinBase helper as a sanitizer.
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = path.resolve(baseResolved, stackName);
+    if (stackDir === baseResolved || !stackDir.startsWith(baseResolved + path.sep)) {
       return Promise.reject(new Error('Invalid stack path'));
     }
     return new Promise((resolve, reject) => {
