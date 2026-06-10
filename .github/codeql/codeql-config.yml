@@ -1,6 +1,20 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
 
+# End-to-end Playwright specs are test-harness code, not shipped product code.
+# They seed fixture files directly into the backend's COMPOSE_DIR (a fixed path
+# under /tmp: both the spec fallback and the CI start-app default are
+# /tmp/compose) so the API under test can read them back, which CodeQL flags as
+# js/insecure-temporary-file. A randomized mkdtemp does not apply: the backend
+# resolves paths against its own COMPOSE_DIR, so a fixture written elsewhere
+# would be invisible to it, and the predictable-temp-path threat is moot on the
+# ephemeral, single-tenant CI runners. paths-ignore is used (not a query-filters
+# entry) because only paths-ignore scopes analysis by source path; a paths key
+# inside a query-filters exclude is ignored, since query-filters match on query
+# metadata rather than file location.
+paths-ignore:
+  - e2e/**
+
 query-filters:
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the
   # correct construction. js/insufficient-password-hash exists to catch weak
@@ -13,16 +27,3 @@ query-filters:
         - backend/src/utils/apiTokenFormat.ts
         - backend/src/routes/apiTokens.ts
         - backend/src/__tests__/**
-  # End-to-end fixtures seed files directly into the backend's COMPOSE_DIR so
-  # the API under test can read them back. Both the test runner and the backend
-  # use a fixed path under /tmp (the spec fallback and the CI start-app default
-  # are both /tmp/compose), so CodeQL flags the hardcoded literal as
-  # js/insecure-temporary-file. A randomized mkdtemp does not apply here: the
-  # backend resolves paths against its own COMPOSE_DIR, so a fixture written
-  # elsewhere would be invisible to it. The predictable-temp-path threat is also
-  # moot on the ephemeral, single-tenant machines these specs run on.
-  # Scoped to e2e/** so production code is still analyzed.
-  - exclude:
-      id: js/insecure-temporary-file
-      paths:
-        - e2e/**
