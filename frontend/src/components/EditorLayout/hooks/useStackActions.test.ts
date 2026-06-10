@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { renderHook } from '@testing-library/react';
+import { renderHook, act } from '@testing-library/react';
 import { useStackActions } from './useStackActions';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
@@ -62,6 +62,12 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     isStackBusy: vi.fn().mockReturnValue(false),
     refreshStacks: vi.fn(),
     setSearchQuery: vi.fn(),
+    fetchImageUpdates: vi.fn(),
+    lastActionResult: {},
+    recordActionFailure: vi.fn(),
+    recordActionSuccess: vi.fn(),
+    clearActionRecords: vi.fn(),
+    dismissActionResult: vi.fn(),
   };
   return { ...base, ...over } as unknown as StackListState;
 }
@@ -85,9 +91,14 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
 const runWithLog: Parameters<typeof useStackActions>[0]['runWithLog'] = async (_p, run) =>
   run(Promise.resolve(), 'test-session');
 
-function setup(over: { editorState?: Partial<EditorState>; overlay?: Partial<OverlayState> } = {}) {
+function setup(over: {
+  editorState?: Partial<EditorState>;
+  overlay?: Partial<OverlayState>;
+  stackList?: Partial<StackListState>;
+  getLastDeployOutputLine?: (stackName: string) => string | undefined;
+} = {}) {
   const editorState = makeEditorState(over.editorState);
-  const stackListState = makeStackListState();
+  const stackListState = makeStackListState(over.stackList);
   const navState = { setActiveView: vi.fn() } as unknown as NavState;
   const overlayState = makeOverlay(over.overlay);
 
@@ -101,6 +112,7 @@ function setup(over: { editorState?: Partial<EditorState>; overlay?: Partial<Ove
       setActiveNode: vi.fn(),
       nodes: [],
       runWithLog,
+      getLastDeployOutputLine: over.getLastDeployOutputLine ?? (() => undefined),
       diffPreviewEnabled: false,
     }),
   );
@@ -146,6 +158,7 @@ describe('useStackActions.saveFile', () => {
         setActiveNode: vi.fn(),
         nodes: [],
         runWithLog,
+        getLastDeployOutputLine: () => undefined,
         diffPreviewEnabled: false,
       }),
     );
@@ -349,5 +362,155 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
     const { result, overlayState } = setup({ overlay: { pendingLeaveAction: { run: vi.fn() } } });
     result.current.cancelPendingUnsavedLoad();
     expect(overlayState.setPendingLeaveAction).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('useStackActions recovery records', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  // Route every apiFetch by URL so the failure paths (which also refetch
+  // /containers) get sensible responses.
+  function routeApi(updateStatus: number, body = '{"error":"boom"}') {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/update') || u.includes('/deploy') || u.includes('/restart')) {
+        return Promise.resolve(new Response(body, { status: updateStatus }));
+      }
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.includes('/backup')) return Promise.resolve(new Response('{"exists":false,"timestamp":null}', { status: 200 }));
+      return Promise.resolve(new Response('[]', { status: 200 }));
+    });
+  }
+
+  it('records a failure and refetches containers when an update fails', async () => {
+    routeApi(500);
+    const { result, stackListState, editorState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({ action: 'update', errorMessage: 'boom', rolledBack: false }),
+    );
+    expect(editorState.setContainers).toHaveBeenCalled();
+    expect(stackListState.recordActionSuccess).not.toHaveBeenCalled();
+  });
+
+  it('clears the record on a successful update', async () => {
+    routeApi(200, '');
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
+
+  it('does not record a failure for a stack-op-in-progress 409', async () => {
+    const inProgress = JSON.stringify({
+      code: 'stack_op_in_progress',
+      inProgress: { action: 'update', startedAt: 1, user: 'someone' },
+    });
+    vi.mocked(apiFetch).mockResolvedValue(new Response(inProgress, { status: 409 }));
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
+
+  it('stores the deploy-feedback last line only for the matching stack', async () => {
+    routeApi(500);
+    const getLastDeployOutputLine = (stackName: string) =>
+      stackName === 'web' ? 'pulling app ...' : undefined;
+    const { result, stackListState } = setup({ getLastDeployOutputLine });
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({ lastOutputLine: 'pulling app ...' }),
+    );
+  });
+
+  it('does not record a recovery panel for a failed stop (not recoverable)', async () => {
+    routeApi(500);
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.stopStack(); });
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
+
+  it('records a deploy failure and carries the rolledBack flag', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/deploy')) {
+        return Promise.resolve(new Response('{"error":"crash","rolledBack":true}', { status: 500 }));
+      }
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      return Promise.resolve(new Response('[]', { status: 200 }));
+    });
+    const { result, stackListState } = setup();
+    await act(async () => {
+      await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({ action: 'deploy', rolledBack: true, errorMessage: 'crash' }),
+    );
+  });
+
+  it('records a rollback failure', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/rollback')) return Promise.resolve(new Response('{"error":"no backup"}', { status: 500 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      return Promise.resolve(new Response('[]', { status: 200 }));
+    });
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({ action: 'rollback', rolledBack: false, errorMessage: 'no backup' }),
+    );
+  });
+
+  it('does not record a failure when only the post-rollback refetch fails', async () => {
+    let rolledBack = false;
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/rollback')) { rolledBack = true; return Promise.resolve(new Response(null, { status: 200 })); }
+      // After a successful rollback, the cosmetic content refetch throws.
+      if (rolledBack && u.endsWith('/stacks/web.yml')) return Promise.reject(new Error('network blip'));
+      return Promise.resolve(new Response('[]', { status: 200 }));
+    });
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
+
+  it('refreshes containers after a successful rollback (rollback redeploys)', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/rollback')) return Promise.resolve(new Response(null, { status: 200 }));
+      if (u.includes('/containers')) {
+        return Promise.resolve(new Response('[{"Id":"c1","Names":["/web"],"State":"running"}]', { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 200 }));
+    });
+    const { result, stackListState, editorState } = setup();
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
+    expect(editorState.setContainers).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ Id: 'c1' })]),
+    );
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
+
+  it('does not record a rollback failure when the post-rollback container refresh fails', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/rollback')) return Promise.resolve(new Response(null, { status: 200 }));
+      if (u.includes('/containers')) return Promise.reject(new Error('network blip'));
+      return Promise.resolve(new Response('', { status: 200 }));
+    });
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
   });
 });
