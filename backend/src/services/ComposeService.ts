@@ -674,4 +674,78 @@ export class ComposeService {
       });
     });
   }
+
+  /**
+   * Render the fully-resolved effective Compose model via `docker compose
+   * config --format json`. This is the AUTHORED model: it does NOT splice in
+   * the Sencho Mesh override, so it stays read-only (the override is
+   * write-generated) and reflects what the user actually edits. The override
+   * would also add the managed `sencho_mesh` external network and per-service
+   * mesh attachments, which would make preflight emit a false "external network
+   * not found" finding, so rendering the authored model is both safer and more
+   * accurate here.
+   * Captures stderr (where Compose reports unset variables) and never rejects
+   * on a non-zero exit, so the Compose Doctor can turn a failed render into a
+   * finding rather than an exception. Bounded by a timeout and an output cap.
+   * Rejects only when the docker binary cannot be spawned.
+   */
+  public renderConfig(
+    stackName: string,
+  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean }> {
+    if (!isValidStackName(stackName)) {
+      return Promise.reject(new Error('Invalid stack path'));
+    }
+    // Canonical inline js/path-injection barrier, kept in the same scope as the
+    // spawn cwd sink below. CodeQL credits neither the wrapped isPathWithinBase
+    // helper nor a barrier separated from the sink by the Promise-executor
+    // closure, so the spawn is hoisted out of the executor. startsWith already
+    // rejects the base dir itself, since base does not start with base + sep.
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = path.resolve(baseResolved, stackName);
+    if (!stackDir.startsWith(baseResolved + path.sep)) {
+      return Promise.reject(new Error('Invalid stack path'));
+    }
+    const child = spawn('docker', ['compose', 'config', '--format', 'json'], {
+      cwd: stackDir,
+      env: {
+        ...process.env,
+        PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      },
+    });
+    return new Promise((resolve, reject) => {
+      const MAX_OUTPUT = 5 * 1024 * 1024; // 5 MiB cap on each stream
+      const TIMEOUT_MS = 20_000;
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+      let capped = false;
+      let settled = false;
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, TIMEOUT_MS);
+      const finish = (result: { rendered: string | null; stderr: string; code: number | null; timedOut: boolean }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      child.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+        if (stdout.length > MAX_OUTPUT && !capped) { capped = true; child.kill('SIGKILL'); }
+      });
+      child.stderr.on('data', (data: Buffer) => {
+        if (stderr.length < MAX_OUTPUT) stderr += data.toString();
+      });
+      child.on('error', (err: NodeJS.ErrnoException) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(new Error(describeSpawnError(err, { command: 'docker compose' }).message));
+      });
+      child.on('close', (code) => {
+        if (timedOut) finish({ rendered: null, stderr: stderr.trim() || 'docker compose config timed out', code, timedOut: true });
+        else if (capped) finish({ rendered: null, stderr: 'Rendered model exceeded the size limit', code, timedOut: false });
+        else if (code === 0) finish({ rendered: stdout, stderr, code, timedOut: false });
+        else finish({ rendered: null, stderr: stderr.trim() || `docker compose config failed with code ${code}`, code, timedOut: false });
+      });
+    });
+  }
 }

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { apiFetch } from '@/lib/api';
@@ -9,6 +9,8 @@ import { parseAnatomy, parseEnvKeys, formatGitSource, type GitSourceInfo } from 
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
+import PreflightPanel from './stack/PreflightPanel';
+import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from '@/components/dashboard/types';
 
 interface StackAnatomyPanelProps {
@@ -75,13 +77,70 @@ export default function StackAnatomyPanel({
 
   const envVarCount = envKeys.size;
 
+  const { hasCapability, activeNode } = useNodes();
+  const doctorEnabled = hasCapability('compose-doctor');
+
   const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo } | null>(null);
   const [updatePreview, setUpdatePreview] = useState<UpdatePreview | null>(null);
+  // Last preflight severity, used only to dot the Doctor tab. Radix mounts the
+  // active tab content lazily, so the badge cannot come from PreflightPanel; the
+  // parent reads the stored run once per stack/node change.
+  const [preflightSeverity, setPreflightSeverity] = useState<string | null>(null);
   const [scanStatus, setScanStatus] = useState<{
     status: 'ok' | 'partial' | 'failed' | 'skipped' | null;
     attemptedAt?: number;
     errorMessage?: string | null;
   } | null>(null);
+
+  // Best-effort badge: read the last stored preflight severity to dot the tab.
+  // Skipped when the active node does not advertise the capability.
+  useEffect(() => {
+    // The dot and tab are gated on doctorEnabled, so a stale severity is never
+    // shown; no synchronous reset needed when the capability is absent.
+    if (!doctorEnabled) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch(`/stacks/${stackName}/preflight`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setPreflightSeverity(typeof data?.highestSeverity === 'string' ? data.highestSeverity : null);
+      } catch {
+        if (!cancelled) setPreflightSeverity(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [stackName, activeNode?.id, doctorEnabled]);
+
+  // The tab row scrolls horizontally when its tabs overflow the panel width.
+  // Clickable arrows appear only while there is more to scroll in that direction
+  // (a wide panel that fits every tab looks unchanged), and a vertical mouse
+  // wheel over the row is translated into horizontal scroll.
+  const tabScrollRef = useRef<HTMLDivElement>(null);
+  const [tabEdges, setTabEdges] = useState({ left: false, right: false });
+  const measureTabEdges = useCallback((el: HTMLElement) => {
+    setTabEdges({ left: el.scrollLeft > 1, right: Math.ceil(el.scrollLeft + el.clientWidth) < el.scrollWidth });
+  }, []);
+  const scrollTabs = useCallback((direction: -1 | 1) => {
+    const el = tabScrollRef.current;
+    if (el) el.scrollBy({ left: direction * Math.max(96, el.clientWidth * 0.7), behavior: 'smooth' });
+  }, []);
+  useEffect(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    measureTabEdges(el);
+    // Non-passive so preventDefault works: turn a vertical wheel into horizontal
+    // scroll only when the row overflows (trackpads already scroll horizontally).
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      el.scrollLeft += e.deltaY;
+      e.preventDefault();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => measureTabEdges(el)) : null;
+    ro?.observe(el);
+    return () => { el.removeEventListener('wheel', onWheel); ro?.disconnect(); };
+  }, [measureTabEdges, doctorEnabled, preflightSeverity]);
 
   useEffect(() => {
     let cancelled = false;
@@ -248,13 +307,57 @@ export default function StackAnatomyPanel({
     <div className="flex h-full min-h-0 flex-col rounded-xl border border-muted bg-card/40">
       <Tabs defaultValue="anatomy" className="flex flex-col h-full min-h-0">
       <div className="flex items-center justify-between border-b border-muted px-3 py-1.5 gap-2">
-        <TabsList className="h-7 gap-0.5 bg-transparent border-none p-0">
-          <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
-          <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
-          <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
-          <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
-        </TabsList>
-        <div className="flex items-center gap-3">
+        <div className="relative min-w-0 flex-1">
+          <div
+            ref={tabScrollRef}
+            onScroll={e => measureTabEdges(e.currentTarget)}
+            className="overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          >
+            <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">
+              <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
+              <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
+              <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
+              <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
+              {doctorEnabled && (
+                <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">
+                  <span className="inline-flex items-center gap-1">
+                    Doctor
+                    {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && (
+                      <span
+                        data-testid="doctor-tab-dot"
+                        className={cn('h-1.5 w-1.5 rounded-full', preflightSeverity === 'blocker' ? 'bg-destructive' : 'bg-warning')}
+                      />
+                    )}
+                  </span>
+                </TabsTrigger>
+              )}
+            </TabsList>
+          </div>
+          {/* Clickable arrows over a fade: shown only when the row overflows that edge. */}
+          {tabEdges.left && (
+            <button
+              type="button"
+              aria-label="Scroll tabs left"
+              data-testid="tab-scroll-left"
+              onClick={() => scrollTabs(-1)}
+              className="absolute inset-y-0 left-0 flex w-7 items-center justify-start bg-gradient-to-r from-card via-card/90 to-transparent text-stat-subtitle hover:text-brand transition-colors"
+            >
+              <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
+            </button>
+          )}
+          {tabEdges.right && (
+            <button
+              type="button"
+              aria-label="Scroll tabs right"
+              data-testid="tab-scroll-right"
+              onClick={() => scrollTabs(1)}
+              className="absolute inset-y-0 right-0 flex w-7 items-center justify-end bg-gradient-to-l from-card via-card/90 to-transparent text-stat-subtitle hover:text-brand transition-colors"
+            >
+              <ChevronRight className="h-4 w-4" strokeWidth={1.5} />
+            </button>
+          )}
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
           {onOpenFiles && (
             <button
               type="button"
@@ -463,6 +566,11 @@ export default function StackAnatomyPanel({
       <TabsContent value="drift" className="flex flex-col flex-1 min-h-0 mt-0">
         <DriftPanel stackName={stackName} />
       </TabsContent>
+      {doctorEnabled && (
+        <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
+          <PreflightPanel stackName={stackName} />
+        </TabsContent>
+      )}
       </Tabs>
     </div>
   );

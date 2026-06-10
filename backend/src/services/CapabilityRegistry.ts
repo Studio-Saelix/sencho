@@ -35,6 +35,7 @@ export const CAPABILITIES = [
   'registries',
   'self-update',
   'vulnerability-scanning',
+  'compose-doctor',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
