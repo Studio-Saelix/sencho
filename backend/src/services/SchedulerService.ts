@@ -6,6 +6,7 @@ import { PROXY_TIER_HEADER } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
+import { HealthGateService } from './HealthGateService';
 import { ImageUpdateService } from './ImageUpdateService';
 import type { ImageCheckResult } from './ImageUpdateService';
 import { isDebugEnabled } from '../utils/debug';
@@ -861,6 +862,7 @@ export class SchedulerService {
         const atomic = true;
         await compose.updateStack(stackName, undefined, atomic);
         db.clearStackUpdateStatus(nodeId, stackName);
+        HealthGateService.getInstance().begin(nodeId, stackName, 'update', 'system:scheduler');
 
         this.safeDispatch(
             'info',

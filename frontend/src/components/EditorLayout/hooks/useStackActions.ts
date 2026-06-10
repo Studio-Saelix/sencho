@@ -15,7 +15,22 @@ interface RunResult {
   ok: boolean;
   errorMessage?: string;
   rolledBack?: boolean;
+  /** Health gate run id from the success body, when the backend started one. */
+  healthGateId?: string | null;
 }
+
+/** healthGateId from a success body, or null when absent or unreadable. */
+const parseHealthGateId = async (response: Response): Promise<string | null> => {
+  try {
+    const body: unknown = await response.json();
+    if (isRecord(body) && typeof body.healthGateId === 'string') return body.healthGateId;
+  } catch (e) {
+    // A success body should always parse; the warn surfaces a future
+    // double-read bug instead of silently disabling the gate UI.
+    console.warn('[HealthGate] could not read the success body:', e);
+  }
+  return null;
+};
 
 // Sentinel stored in overlayState.pendingUnsavedLoad to mark that the pending
 // confirmation is a node switch (not a stack load). When the user confirms the
@@ -672,6 +687,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         throw parseStackActionError(rawBody, 'Deploy failed', response.status);
       }
       overlayState.setPolicyBlock(null);
+      const healthGateId = await parseHealthGateId(response);
       toast.success(
         ignorePolicy ? 'Stack deployed (policy bypassed).' : 'Stack deployed successfully!',
       );
@@ -683,7 +699,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         /* ignore */
       }
       stackListState.recordActionSuccess(stackFile);
-      return { ok: true };
+      return { ok: true, healthGateId };
     } catch (error) {
       console.error('Failed to deploy:', error);
       if (previousStatus !== undefined)
@@ -911,11 +927,12 @@ export function useStackActions(options: UseStackActionsOptions) {
             };
           }
           overlayState.setPolicyBlock(null);
+          const healthGateId = await parseHealthGateId(response);
           toast.success(successMessage);
           if (action === 'update') stackListState.fetchImageUpdates();
           await refreshSelectedContainers(stackName, stackFile);
           stackListState.recordActionSuccess(stackFile);
-          return { ok: true as const };
+          return { ok: true as const, healthGateId };
         } catch (err) {
           const message = (err as Error).message || `${action} failed`;
           recordActionFailureFor(stackFile, stackName, action, startedAt, message, false);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Rocket, RefreshCcw, CircleStop, Play, ArrowUp, Activity, Loader2, AlertCircle,
-  TriangleAlert, CircleCheck,
+  TriangleAlert, CircleCheck, HeartPulse, HeartCrack,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -36,6 +36,9 @@ const CATEGORY_ICON: Record<string, LucideIcon> = {
   image_update_applied: ArrowUp,
   drift_detected: TriangleAlert,
   drift_resolved: CircleCheck,
+  update_started: ArrowUp,
+  health_gate_passed: HeartPulse,
+  health_gate_failed: HeartCrack,
 };
 
 const DAY_MS = 86_400_000;

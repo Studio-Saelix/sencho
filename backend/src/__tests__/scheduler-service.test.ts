@@ -647,6 +647,32 @@ describe('SchedulerService - executeUpdate', () => {
     );
   });
 
+  it('begins a health gate after a scheduled update succeeds', async () => {
+    const { HealthGateService } = await import('../services/HealthGateService');
+    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-1');
+    try {
+      mockGetScheduledTask.mockReturnValue({
+        id: 83,
+        name: 'update-gated',
+        action: 'update',
+        cron_expression: '0 4 * * *',
+        enabled: true,
+        target_id: 'web-app',
+        node_id: 1,
+        created_by: 'admin',
+        last_status: null,
+      });
+      mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
+      mockCheckImage.mockResolvedValue({ hasUpdate: true });
+
+      await SchedulerService.getInstance().triggerTask(83);
+
+      expect(beginSpy).toHaveBeenCalledWith(1, 'web-app', 'update', 'system:scheduler');
+    } finally {
+      beginSpy.mockRestore();
+    }
+  });
+
   it('skips when all images up to date', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 81,

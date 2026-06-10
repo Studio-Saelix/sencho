@@ -8,6 +8,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { NotificationService } from '../services/NotificationService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { HealthGateService } from '../services/HealthGateService';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
@@ -297,6 +298,7 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
 
         await compose.updateStack(stackName, undefined, atomic);
         db.clearStackUpdateStatus(req.nodeId, stackName);
+        HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`);
 
         NotificationService.getInstance().broadcastEvent({
           type: 'state-invalidate',

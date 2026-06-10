@@ -110,6 +110,50 @@ describe('GET /api/stacks/:stackName/rollback-readiness', () => {
   });
 });
 
+describe('GET /api/stacks/:stackName/health-gate', () => {
+  const seedRun = async (id: string, status: 'observing' | 'passed' | 'failed' | 'unknown', startedAt: number, reason: string | null = null) => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    // The route resolves req.nodeId to the seeded default node, so the rows
+    // must carry that id, not a literal.
+    const defaultNodeId = db.getNodes().find(n => n.is_default)!.id;
+    db.insertHealthGateRun({
+      id, node_id: defaultNodeId, stack_name: 'web', trigger_action: 'update', status, reason,
+      window_seconds: 90, containers_json: '[]', started_at: startedAt, ended_at: status === 'observing' ? null : startedAt + 1000, created_by: 'tester',
+    });
+  };
+
+  it('requires authentication', async () => {
+    const res = await request(app).get('/api/stacks/web/health-gate');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns the never-run sentinel before any run exists', async () => {
+    const res = await request(app).get('/api/stacks/web/health-gate').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ stack: 'web', id: null, status: 'never-run' });
+  });
+
+  it('returns the latest run without a gateId and a specific (superseded) run with one', async () => {
+    await seedRun('gate-old', 'unknown', 1_000, 'superseded by a newer update');
+    await seedRun('gate-new', 'passed', 2_000);
+
+    const latest = await request(app).get('/api/stacks/web/health-gate').set('Cookie', authCookie);
+    expect(latest.status).toBe(200);
+    expect(latest.body).toMatchObject({ id: 'gate-new', status: 'passed' });
+
+    const byId = await request(app).get('/api/stacks/web/health-gate?gateId=gate-old').set('Cookie', authCookie);
+    expect(byId.status).toBe(200);
+    expect(byId.body).toMatchObject({ id: 'gate-old', status: 'unknown', reason: 'superseded by a newer update' });
+  });
+
+  it('returns never-run for an unknown gateId', async () => {
+    const res = await request(app).get('/api/stacks/web/health-gate?gateId=no-such-id').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'never-run' });
+  });
+});
+
 describe('GET /api/fleet/snapshots/coverage', () => {
   it('requires authentication', async () => {
     const res = await request(app).get('/api/fleet/snapshots/coverage?nodeId=0&stackName=web');

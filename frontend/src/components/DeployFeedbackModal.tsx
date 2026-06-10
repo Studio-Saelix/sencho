@@ -4,6 +4,8 @@ import {
   CheckCircle2,
   AlertCircle,
   AlertTriangle,
+  CircleHelp,
+  HeartPulse,
   X,
   Minimize2,
   Terminal as TerminalIcon,
@@ -13,7 +15,7 @@ import { DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { StructuredLogRow } from '@/components/log-rendering/StructuredLogRow';
 import TerminalComponent from '@/components/Terminal';
-import { useDeployFeedback, VERB_LABELS } from '@/context/DeployFeedbackContext';
+import { useDeployFeedback, VERB_LABELS, type HealthGateUiState } from '@/context/DeployFeedbackContext';
 
 const AUTO_CLOSE_SECONDS = 4;
 
@@ -37,7 +39,7 @@ function formatElapsed(seconds: number): string {
 }
 
 export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackModalProps) {
-  const { panelState, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose } = useDeployFeedback();
+  const { panelState, healthGate, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose } = useDeployFeedback();
 
   const [showRaw, setShowRaw] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -110,8 +112,12 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
     }, 1000);
   }, [clearCountdownInterval, onPanelClose]);
 
+  // Auto-close only when there is nothing left to watch: success with no gate,
+  // or success whose gate passed. An observing gate suspends the countdown; a
+  // failed/unknown gate keeps the modal open until the user closes it.
+  const gateHoldsOpen = healthGate !== null && healthGate.status !== 'passed';
   useEffect(() => {
-    if (status === 'succeeded' && isOpen) {
+    if (status === 'succeeded' && isOpen && !gateHoldsOpen) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       startCountdown();
     } else {
@@ -121,7 +127,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
     return () => {
       clearCountdownInterval();
     };
-  }, [status, isOpen, startCountdown, clearCountdownInterval]);
+  }, [status, isOpen, gateHoldsOpen, startCountdown, clearCountdownInterval]);
 
   useEffect(() => {
     if (!userScrolledUp && scrollRef.current) {
@@ -143,10 +149,10 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
 
   const handleMouseLeave = useCallback(() => {
     autoCloseHoveredRef.current = false;
-    if (status === 'succeeded' && isOpen) {
+    if (status === 'succeeded' && isOpen && !gateHoldsOpen) {
       startCountdown();
     }
-  }, [status, isOpen, startCountdown]);
+  }, [status, isOpen, gateHoldsOpen, startCountdown]);
 
   const handleOpenChange = useCallback(
     (open: boolean) => {
@@ -207,6 +213,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
               rowCount={logRows.length}
               errorMessage={errorMessage}
               countdown={countdown}
+              showCountdown={!gateHoldsOpen}
             />
             <Button
               variant="ghost"
@@ -228,6 +235,11 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
             </Button>
           </div>
         </div>
+
+        {/* Post-update health gate status */}
+        {status === 'succeeded' && healthGate && (
+          <HealthGateBanner gate={healthGate} />
+        )}
 
         {/* Stalled-output warning: in-flight but quiet */}
         {stalled && (
@@ -319,15 +331,63 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
   );
 }
 
+// Re-renders every second via the elapsed-time interval, so the observing
+// elapsed count stays live without its own timer.
+function HealthGateBanner({ gate }: { gate: HealthGateUiState }) {
+  const elapsed = gate.startedAt ? Math.max(0, Math.floor((Date.now() - gate.startedAt) / 1000)) : 0;
+  const windowLabel = gate.windowSeconds ? ` of ${gate.windowSeconds}s` : '';
+
+  if (gate.status === 'observing') {
+    return (
+      <div data-testid="health-gate-banner" data-status="observing" className="flex items-start gap-2 px-4 py-2 border-b border-glass-border bg-card/40 shrink-0">
+        <HeartPulse className="h-3.5 w-3.5 mt-0.5 shrink-0 text-brand" />
+        <p className="min-w-0 text-xs text-muted-foreground">
+          Health gate: observing containers ({elapsed}s{windowLabel}). Closing this panel does not stop the observation.
+        </p>
+      </div>
+    );
+  }
+  if (gate.status === 'passed') {
+    return (
+      <div data-testid="health-gate-banner" data-status="passed" className="flex items-start gap-2 px-4 py-2 border-b border-success/30 bg-success/5 shrink-0">
+        <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0 text-success" />
+        <p className="min-w-0 text-xs text-success">
+          Health gate passed: containers stayed healthy through the observation window.
+        </p>
+      </div>
+    );
+  }
+  if (gate.status === 'failed') {
+    return (
+      <div data-testid="health-gate-banner" data-status="failed" className="flex items-start gap-2 px-4 py-2 border-b border-destructive/30 bg-destructive/5 shrink-0">
+        <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-destructive" />
+        <p className="min-w-0 text-xs text-destructive">
+          Health gate failed{gate.reason ? `: ${gate.reason}` : ''}. Rollback options are available on the stack.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div data-testid="health-gate-banner" data-status="unknown" className="flex items-start gap-2 px-4 py-2 border-b border-glass-border bg-card/40 shrink-0">
+      <CircleHelp className="h-3.5 w-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+      <p className="min-w-0 text-xs text-muted-foreground">
+        Health gate result is unknown{gate.reason ? `: ${gate.reason}` : ''}. Check the stack's containers directly.
+      </p>
+    </div>
+  );
+}
+
 interface StatusIndicatorProps {
   status: 'preparing' | 'streaming' | 'succeeded' | 'failed';
   progressUnavailable: boolean;
   rowCount: number;
   errorMessage?: string;
   countdown: number;
+  /** False while a health gate is observing or terminal-unhealthy (no auto-close). */
+  showCountdown: boolean;
 }
 
-function StatusIndicator({ status, progressUnavailable, rowCount, errorMessage, countdown }: StatusIndicatorProps) {
+function StatusIndicator({ status, progressUnavailable, rowCount, errorMessage, countdown, showCountdown }: StatusIndicatorProps) {
   // While the deploy is still in flight (preparing/streaming) but the progress
   // socket is gone, the deploy keeps running server-side with no live output.
   if (progressUnavailable && (status === 'preparing' || status === 'streaming')) {
@@ -362,7 +422,7 @@ function StatusIndicator({ status, progressUnavailable, rowCount, errorMessage, 
       <div className="flex items-center gap-1.5 text-xs text-success">
         <CheckCircle2 className="h-3 w-3 text-success" />
         <span>Succeeded</span>
-        <span className="text-muted-foreground">closes in {countdown}s</span>
+        {showCountdown && <span className="text-muted-foreground">closes in {countdown}s</span>}
       </div>
     );
   }

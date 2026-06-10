@@ -29,7 +29,7 @@ function SectionSkeleton() {
     );
 }
 
-type HostAlertFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'global_crash'>;
+type HostAlertFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'global_crash' | 'health_gate_enabled' | 'health_gate_window_seconds'>;
 
 const DEFAULT_HOST_ALERTS: HostAlertFields = {
     host_cpu_limit: DEFAULT_SETTINGS.host_cpu_limit,
@@ -37,6 +37,8 @@ const DEFAULT_HOST_ALERTS: HostAlertFields = {
     host_disk_limit: DEFAULT_SETTINGS.host_disk_limit,
     host_alert_suppression_mins: DEFAULT_SETTINGS.host_alert_suppression_mins,
     global_crash: DEFAULT_SETTINGS.global_crash,
+    health_gate_enabled: DEFAULT_SETTINGS.health_gate_enabled,
+    health_gate_window_seconds: DEFAULT_SETTINGS.health_gate_window_seconds,
 };
 
 export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
@@ -56,6 +58,8 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
         if (settings.host_disk_limit !== baseline.host_disk_limit) n++;
         if (settings.host_alert_suppression_mins !== baseline.host_alert_suppression_mins) n++;
         if (settings.global_crash !== baseline.global_crash) n++;
+        if (settings.health_gate_enabled !== baseline.health_gate_enabled) n++;
+        if (settings.health_gate_window_seconds !== baseline.health_gate_window_seconds) n++;
         return n;
     }, [settings]);
 
@@ -89,6 +93,8 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                     host_disk_limit: nodeData.host_disk_limit ?? DEFAULT_SETTINGS.host_disk_limit,
                     host_alert_suppression_mins: nodeData.host_alert_suppression_mins ?? DEFAULT_SETTINGS.host_alert_suppression_mins,
                     global_crash: (nodeData.global_crash as '0' | '1') ?? DEFAULT_SETTINGS.global_crash,
+                    health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
+                    health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
                 };
                 setSettings(safe);
                 serverSettingsRef.current = { ...safe };
@@ -193,6 +199,30 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                     <TogglePill
                         checked={settings.global_crash === '1'}
                         onChange={(next) => onSettingChange('global_crash', next ? '1' : '0')}
+                    />
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsSection title="Update health gate">
+                <SettingsField
+                    label="Observe health after updates"
+                    helper="After a stack deploy or update succeeds, watch its containers for the observation window and record a passed or failed verdict on the stack timeline. Observational only: nothing is restarted or rolled back automatically. On by default."
+                >
+                    <TogglePill
+                        checked={settings.health_gate_enabled === '1'}
+                        onChange={(next) => onSettingChange('health_gate_enabled', next ? '1' : '0')}
+                    />
+                </SettingsField>
+                <SettingsField
+                    label="Observation window"
+                    helper="How long to watch containers before declaring the update healthy. Raise it for stacks that take a while to settle. Default 90 seconds."
+                >
+                    <NumberChip
+                        value={settings.health_gate_window_seconds || '90'}
+                        onChange={(v) => onSettingChange('health_gate_window_seconds', v)}
+                        suffix="s"
+                        min={15}
+                        max={600}
                     />
                 </SettingsField>
             </SettingsSection>

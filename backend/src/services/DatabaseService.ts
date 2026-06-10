@@ -106,6 +106,23 @@ export interface PreflightRunRow {
     created_by: string | null;
 }
 
+/** One post-update health gate observation run. */
+export interface HealthGateRunRow {
+    id: string;
+    node_id: number;
+    stack_name: string;
+    /** Named trigger_action because TRIGGER is reserved in SQLite. */
+    trigger_action: 'update' | 'deploy';
+    status: 'observing' | 'passed' | 'failed' | 'unknown';
+    reason: string | null;
+    window_seconds: number;
+    /** JSON array of per-container end states for display. */
+    containers_json: string;
+    started_at: number;
+    ended_at: number | null;
+    created_by: string | null;
+}
+
 /** One finding within a stored preflight run. Never carries an environment value. */
 export interface PreflightFindingRow {
     id: string;
@@ -1273,6 +1290,22 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_preflight_findings_run
         ON preflight_findings(run_id);
 
+      CREATE TABLE IF NOT EXISTS health_gate_runs (
+        id TEXT PRIMARY KEY,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy')),
+        status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
+        reason TEXT,
+        window_seconds INTEGER NOT NULL,
+        containers_json TEXT NOT NULL DEFAULT '[]',
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        created_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_health_gate_runs_node_stack
+        ON health_gate_runs(node_id, stack_name, started_at);
+
       CREATE TABLE IF NOT EXISTS secrets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
@@ -1401,6 +1434,8 @@ export class DatabaseService {
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
         stmt.run('reclaim_hero', '1');
+        stmt.run('health_gate_enabled', '1');
+        stmt.run('health_gate_window_seconds', '90');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
@@ -2302,6 +2337,61 @@ export class DatabaseService {
         ).all(runId) as PreflightFindingRow[];
     }
 
+    // --- Health Gate Runs ---
+
+    public insertHealthGateRun(run: HealthGateRunRow): void {
+        this.db.prepare(
+            `INSERT INTO health_gate_runs
+               (id, node_id, stack_name, trigger_action, status, reason, window_seconds, containers_json, started_at, ended_at, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+            run.id, run.node_id, run.stack_name, run.trigger_action, run.status, run.reason,
+            run.window_seconds, run.containers_json, run.started_at, run.ended_at, run.created_by,
+        );
+        // Bounded history: keep only the 10 most recent runs per stack.
+        this.db.prepare(
+            `DELETE FROM health_gate_runs
+             WHERE node_id = ? AND stack_name = ?
+               AND id NOT IN (
+                 SELECT id FROM health_gate_runs
+                 WHERE node_id = ? AND stack_name = ?
+                 ORDER BY started_at DESC, id DESC LIMIT 10
+               )`
+        ).run(run.node_id, run.stack_name, run.node_id, run.stack_name);
+    }
+
+    public finalizeHealthGateRun(
+        id: string,
+        status: 'passed' | 'failed' | 'unknown',
+        reason: string | null,
+        endedAt: number,
+        containersJson: string,
+    ): void {
+        this.db.prepare(
+            'UPDATE health_gate_runs SET status = ?, reason = ?, ended_at = ?, containers_json = ? WHERE id = ?'
+        ).run(status, reason, endedAt, containersJson, id);
+    }
+
+    public getHealthGateRun(nodeId: number, stackName: string, id: string): HealthGateRunRow | undefined {
+        return this.db.prepare(
+            'SELECT * FROM health_gate_runs WHERE node_id = ? AND stack_name = ? AND id = ?'
+        ).get(nodeId, stackName, id) as HealthGateRunRow | undefined;
+    }
+
+    public getLatestHealthGateRun(nodeId: number, stackName: string): HealthGateRunRow | undefined {
+        return this.db.prepare(
+            'SELECT * FROM health_gate_runs WHERE node_id = ? AND stack_name = ? ORDER BY started_at DESC, id DESC LIMIT 1'
+        ).get(nodeId, stackName) as HealthGateRunRow | undefined;
+    }
+
+    /** Finalize runs left observing by a previous process (startup sweep). */
+    public markInterruptedHealthGateRuns(reason: string, endedAt: number): number {
+        const result = this.db.prepare(
+            "UPDATE health_gate_runs SET status = 'unknown', reason = ?, ended_at = ? WHERE status = 'observing'"
+        ).run(reason, endedAt);
+        return result.changes;
+    }
+
     // --- Notification History ---
 
     private mapNotificationRow(row: any): NotificationHistory {
@@ -2642,6 +2732,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);

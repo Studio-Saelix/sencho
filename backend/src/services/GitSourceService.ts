@@ -8,6 +8,7 @@ import { CryptoService } from './CryptoService';
 import { DatabaseService, type StackGitSource, type GitSourceAuthType } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeService } from './ComposeService';
+import { HealthGateService } from './HealthGateService';
 import { NodeRegistry } from './NodeRegistry';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import { isDebugEnabled } from '../utils/debug';
@@ -1062,6 +1063,7 @@ export class GitSourceService {
                     }),
                 );
                 await ComposeService.getInstance().deployStack(stackName);
+                HealthGateService.getInstance().begin(nodeId, stackName, 'deploy', 'system:git-source');
                 console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
                 return { applied: true, deployed: true };
             } catch (e) {

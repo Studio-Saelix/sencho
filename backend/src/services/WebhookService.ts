@@ -3,6 +3,7 @@ import { ComposeService } from './ComposeService';
 import { DatabaseService, type Webhook } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { GitSourceService } from './GitSourceService';
+import { HealthGateService } from './HealthGateService';
 import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER } from './license-headers';
 import { NodeRegistry } from './NodeRegistry';
@@ -133,6 +134,7 @@ export class WebhookService {
                         buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
                     );
                     await compose.deployStack(stackName, undefined, atomic);
+                    HealthGateService.getInstance().begin(nodeId, stackName, 'deploy', 'system:webhook');
                     break;
                 case 'restart':
                     await compose.runCommand(stackName, 'restart');
@@ -150,6 +152,7 @@ export class WebhookService {
                         buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
                     );
                     await compose.updateStack(stackName, undefined, atomic);
+                    HealthGateService.getInstance().begin(nodeId, stackName, 'update', 'system:webhook');
                     break;
                 case 'git-pull':
                     return this.executeLocalGitPull(webhookId, stackName, action, triggerSource, startTime);

@@ -52,7 +52,7 @@ import type { SectionId } from './settings/types';
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
   const { status: trivy } = useTrivyStatus();
-  const { runWithLog, panelState, logRows } = useDeployFeedback();
+  const { runWithLog, panelState, logRows, healthGate } = useDeployFeedback();
 
   // The last live output line captured for a stack while its deploy-feedback
   // session is still streaming, used to enrich a failure record's diagnostics.
@@ -198,6 +198,37 @@ export default function EditorLayout() {
 
   // Wire the ref now that stackActions is available
   resetEditorStateRef.current = stackActions.resetEditorState;
+
+  // A failed health gate routes into the existing recovery affordance: record
+  // a failure for the stack so RecoveryChip/RecoveryPanel offer the same
+  // explicit, user-confirmed rollback as any failed operation. Keyed by gate
+  // id so one verdict records exactly once.
+  const handledGateRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!healthGate || healthGate.status !== 'failed' || handledGateRef.current === healthGate.gateId) return;
+    const stackFile = stackListState.files.find(
+      f => f.replace(/\.(yml|yaml)$/, '') === healthGate.stackName,
+    );
+    if (!stackFile) {
+      // Do not mark handled: the files list may be mid-refresh, and the
+      // effect's files dependency retries once it lands.
+      console.warn('[HealthGate] no stack file matches failed gate for', healthGate.stackName);
+      return;
+    }
+    handledGateRef.current = healthGate.gateId;
+    stackListState.recordActionFailure(stackFile, {
+      action: healthGate.trigger,
+      rolledBack: false,
+      errorMessage: `Health gate failed: ${healthGate.reason ?? 'containers did not stay healthy after the update'}`,
+      startedAt: healthGate.startedAt ?? Date.now(),
+      endedAt: Date.now(),
+      failure: {
+        reason: 'healthcheck_failed',
+        label: 'Health gate failed',
+        suggestion: 'Check the container logs; roll back if the previous version was healthy.',
+      },
+    });
+  }, [healthGate, stackListState.files, stackListState.recordActionFailure]);
 
   const buildMenuCtx = useSidebarContextMenu({
     stackListState,

@@ -17,6 +17,7 @@ import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } f
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { UpdateGuardService } from '../services/UpdateGuardService';
+import { HealthGateService } from '../services/HealthGateService';
 import { classifyFailure } from '../services/updateGuard/failureClassifier';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
@@ -353,6 +354,8 @@ interface BulkResultItem {
   ok: boolean;
   error?: string;
   code?: string;
+  /** Health gate run started for a successful update, when gating is enabled. */
+  healthGateId?: string | null;
 }
 
 async function runStackBulkOp(
@@ -415,6 +418,8 @@ async function runStackBulkOp(
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
       );
+      const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', req.user?.username ?? null);
+      return { stackName, ok: true, healthGateId };
     } else {
       const outcome = await containerActionForStack(req.nodeId, stackName, action);
       if (outcome.kind === 'no-containers') {
@@ -1154,6 +1159,23 @@ stacksRouter.get('/:stackName/rollback-readiness', async (req: Request, res: Res
   }
 });
 
+// Post-update health gate result. `gateId` returns that specific run so a
+// superseded gate still resolves to its terminal state; without it, the
+// latest run (or a never-run sentinel).
+stacksRouter.get('/:stackName/health-gate', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const gateId = typeof req.query.gateId === 'string' && req.query.gateId.trim() ? req.query.gateId : undefined;
+    res.json(HealthGateService.getInstance().getReport(req.nodeId, stackName, gateId));
+  } catch (error) {
+    console.error('[Stacks] Failed to load health gate for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to load health gate' });
+  }
+});
+
 stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
@@ -1173,7 +1195,8 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
     ok = true;
-    res.json({ message: 'Deployed successfully' });
+    const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'deploy', req.user?.username ?? null);
+    res.json({ message: 'Deployed successfully', healthGateId });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
@@ -1444,7 +1467,8 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     dlog(`[Stacks] Update completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
     ok = true;
-    res.json({ status: 'Update completed' });
+    const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', req.user?.username ?? null);
+    res.json({ status: 'Update completed', healthGateId });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>

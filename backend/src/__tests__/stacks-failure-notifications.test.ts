@@ -7,7 +7,7 @@
  * ComposeService and DockerController are mocked so no real Docker daemon is
  * required. NotificationService.dispatchAlert is spied on to assert dispatch.
  */
-import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -239,6 +239,73 @@ describe('deploy_failure notification on /deploy error', () => {
 
     expect(res.status).toBe(200);
     expect(mockDeployStack.mock.calls[0][2]).toBe(true);
+  });
+});
+
+describe('health gate begin call sites', () => {
+  let beginSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    const { HealthGateService } = await import('../services/HealthGateService');
+    beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-123') as ReturnType<typeof vi.spyOn>;
+  });
+
+  afterEach(() => {
+    beginSpy.mockRestore();
+  });
+
+  it('begins a gate after a manual deploy and returns its id', async () => {
+    mockDeployStack.mockResolvedValue(undefined);
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie)
+      .send({ skip_scan: true });
+    expect(res.status).toBe(200);
+    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'deploy', 'testadmin');
+    expect(res.body.healthGateId).toBe('gate-123');
+  });
+
+  it('begins a gate after a manual update and returns its id', async () => {
+    mockUpdateStack.mockResolvedValue(undefined);
+    const res = await request(app)
+      .post('/api/stacks/myapp/update')
+      .set('Cookie', authCookie)
+      .send({ skip_scan: true });
+    expect(res.status).toBe(200);
+    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'update', 'testadmin');
+    expect(res.body.healthGateId).toBe('gate-123');
+  });
+
+  it('begins a gate per stack in a bulk update and carries ids in the results', async () => {
+    mockUpdateStack.mockResolvedValue(undefined);
+    const res = await request(app)
+      .post('/api/stacks/bulk')
+      .set('Cookie', authCookie)
+      .send({ action: 'update', stackNames: ['myapp', 'webapp'] });
+    expect(res.status).toBe(200);
+    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'update', 'testadmin');
+    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'webapp', 'update', 'testadmin');
+    const items = res.body.results as Array<{ stackName: string; ok: boolean; healthGateId?: string | null }>;
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      expect(item.ok).toBe(true);
+      expect(item.healthGateId).toBe('gate-123');
+    }
+  });
+
+  it('does not begin a gate on a failed deploy', async () => {
+    mockDeployStack.mockRejectedValue(new Error('boom'));
+    await request(app).post('/api/stacks/myapp/deploy').set('Cookie', authCookie);
+    expect(beginSpy).not.toHaveBeenCalled();
+  });
+
+  it('never begins a gate for the rollback recovery path', async () => {
+    mockDeployStack.mockResolvedValue(undefined);
+    const res = await request(app)
+      .post('/api/stacks/myapp/rollback')
+      .set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(beginSpy).not.toHaveBeenCalled();
   });
 });
 

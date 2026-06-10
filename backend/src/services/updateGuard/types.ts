@@ -62,6 +62,31 @@ export interface ContainerProbe {
   mounts: string[];
 }
 
+/** Lifecycle of a post-update health gate observation. */
+export type HealthGateStatus = 'observing' | 'passed' | 'failed' | 'unknown';
+
+/** Per-container end state captured when a gate run finalizes. */
+export interface HealthGateContainer {
+  name: string;
+  /** Docker container state, or 'missing' when it vanished mid-observation. */
+  state: string;
+  health: string | null;
+  restarts: number;
+}
+
+/** Payload of GET /:stackName/health-gate ('never-run' when no run exists). */
+export interface HealthGateReport {
+  stack: string;
+  id: string | null;
+  status: HealthGateStatus | 'never-run';
+  trigger: 'update' | 'deploy' | null;
+  reason: string | null;
+  windowSeconds: number | null;
+  startedAt: number | null;
+  endedAt: number | null;
+  containers: HealthGateContainer[];
+}
+
 /** Categories a failed stack deploy or update can be classified into. */
 export type FailureReason =
   | 'image_pull_failed'

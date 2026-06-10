@@ -9,6 +9,7 @@ import SelfUpdateService from '../services/SelfUpdateService';
 import SelfIdentityService from '../services/SelfIdentityService';
 import { MonitorService } from '../services/MonitorService';
 import { AutoHealService } from '../services/AutoHealService';
+import { HealthGateService } from '../services/HealthGateService';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
 import TrivyService, { sweepStaleTrivyTempDirs } from '../services/TrivyService';
@@ -118,6 +119,7 @@ export async function startServer(server: Server): Promise<void> {
   // safely run alongside the async initializers below.
   MonitorService.getInstance().start();
   AutoHealService.getInstance().start();
+  HealthGateService.getInstance().start();
   FleetSyncRetryService.getInstance().start();
   ImageUpdateService.getInstance().start();
   SchedulerService.getInstance().start();

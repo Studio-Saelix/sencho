@@ -15,6 +15,8 @@ export interface PatchableSettings {
     prune_on_update?: '0' | '1';
     reclaim_hero?: '0' | '1';
     snapshot_documentation?: '0' | '1';
+    health_gate_enabled?: '0' | '1';
+    health_gate_window_seconds?: string;
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -34,6 +36,8 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     prune_on_update: '1',
     reclaim_hero: '1',
     snapshot_documentation: '0',
+    health_gate_enabled: '1',
+    health_gate_window_seconds: '90',
 };
 
 export type SectionId =

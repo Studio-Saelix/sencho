@@ -27,6 +27,8 @@ const ALLOWED_SETTING_KEYS = new Set([
   'prune_on_update',
   'reclaim_hero',
   'snapshot_documentation',
+  'health_gate_enabled',
+  'health_gate_window_seconds',
 ]);
 
 // Keys whose write requires a paid license, not just an admin role.
@@ -52,6 +54,8 @@ const SettingsPatchSchema = z.object({
   prune_on_update: z.enum(['0', '1']),
   reclaim_hero: z.enum(['0', '1']),
   snapshot_documentation: z.enum(['0', '1']),
+  health_gate_enabled: z.enum(['0', '1']),
+  health_gate_window_seconds: z.coerce.number().int().min(15).max(600).transform(String),
 }).partial();
 
 export const settingsRouter = Router();
