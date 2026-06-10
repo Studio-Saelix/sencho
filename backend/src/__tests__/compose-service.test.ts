@@ -787,4 +787,30 @@ describe('ComposeService - idle-output stall backstop', () => {
     await vi.advanceTimersByTimeAsync(3100); // health probe
     await promise;
   });
+
+  it('preserves STACK_STALLED_OUTPUT through the atomic rollback wrapper', async () => {
+    process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
+    const pullProc = createMockProcess();
+    let call = 0;
+    // First spawn is the stalling pull; later spawns (the rollback restore's
+    // `up`) close cleanly, proving the restore is not idle-timeout armed.
+    mockSpawn.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return pullProc;
+      const p = createMockProcess();
+      Promise.resolve().then(() => p.emit('close', 0));
+      return p;
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.updateStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+    await vi.advanceTimersByTimeAsync(1000); // idle backstop fires on the silent pull
+    pullProc.emit('close', null);
+    await vi.runAllTimersAsync();
+
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('STACK_STALLED_OUTPUT');
+    expect(getComposeRollbackInfo(error)).toMatchObject({ attempted: true });
+  });
 });

@@ -160,10 +160,12 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
 
   // Re-evaluated each second by the elapsed-time interval's re-render. Warns
   // while the operation is still streaming but has produced no output for a
-  // while, including the case where no first line ever arrived.
+  // while, including the case where no first line ever arrived. Suppressed once
+  // the progress stream is unavailable: no more output can arrive, so the modal
+  // already shows "Live progress unavailable" and a stall warning would be noise.
   const lastLine = logRows.length > 0 ? logRows[logRows.length - 1].message : null;
   const secondsSinceOutput = lastOutputAt > 0 ? Math.floor((Date.now() - lastOutputAt) / 1000) : 0;
-  const stalled = status === 'streaming' && lastOutputAt > 0 && Date.now() - lastOutputAt > STALL_WARN_MS;
+  const stalled = status === 'streaming' && !progressUnavailable && lastOutputAt > 0 && Date.now() - lastOutputAt > STALL_WARN_MS;
 
   return (
     <Modal

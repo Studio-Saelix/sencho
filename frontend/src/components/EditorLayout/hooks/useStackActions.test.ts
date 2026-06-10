@@ -482,4 +482,35 @@ describe('useStackActions recovery records', () => {
     expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
     expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
   });
+
+  it('refreshes containers after a successful rollback (rollback redeploys)', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/rollback')) return Promise.resolve(new Response(null, { status: 200 }));
+      if (u.includes('/containers')) {
+        return Promise.resolve(new Response('[{"Id":"c1","Names":["/web"],"State":"running"}]', { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 200 }));
+    });
+    const { result, stackListState, editorState } = setup();
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
+    expect(editorState.setContainers).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ Id: 'c1' })]),
+    );
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
+
+  it('does not record a rollback failure when the post-rollback container refresh fails', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/rollback')) return Promise.resolve(new Response(null, { status: 200 }));
+      if (u.includes('/containers')) return Promise.reject(new Error('network blip'));
+      return Promise.resolve(new Response('', { status: 200 }));
+    });
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
 });

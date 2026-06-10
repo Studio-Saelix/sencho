@@ -741,9 +741,11 @@ export function useStackActions(options: UseStackActionsOptions) {
       overlayState.setPolicyBlock(null);
       toast.success('Stack rolled back successfully.');
       stackListState.recordActionSuccess(stackFile);
-      // The rollback already succeeded; a failure of the cosmetic content/backup
-      // refetch below must not be mis-recorded as a rollback failure.
+      // The rollback already succeeded; a failure of the cosmetic refetches below
+      // (containers redeployed by the rollback, restored compose content, backup
+      // info) must not be mis-recorded as a rollback failure.
       try {
+        await refreshSelectedContainers(stackName, stackFile);
         const contentRes = await apiFetch(`/stacks/${stackFile}`);
         const text = await contentRes.text();
         editorState.setContent(text || '');

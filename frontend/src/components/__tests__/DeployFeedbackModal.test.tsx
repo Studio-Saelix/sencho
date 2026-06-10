@@ -4,11 +4,18 @@ import { render, screen, act } from '@testing-library/react';
 import { DeployFeedbackProvider, useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { DeployFeedbackModal } from '../DeployFeedbackModal';
 
+// Lets a test simulate a mid-stream drop (onReady then onError) so the panel
+// reaches 'streaming' with progressUnavailable set.
+const ctl = vi.hoisted(() => ({ drop: false }));
+
 // The real Terminal mounts xterm + a WebSocket; mock it to a no-op that signals
 // the stream connected on mount so the panel reaches the 'streaming' state.
 vi.mock('@/components/Terminal', () => {
-  const MockTerminal = ({ onReady }: { onReady?: () => void }) => {
-    React.useEffect(() => { onReady?.(); }, [onReady]);
+  const MockTerminal = ({ onReady, onError }: { onReady?: () => void; onError?: () => void }) => {
+    React.useEffect(() => {
+      onReady?.();
+      if (ctl.drop) onError?.();
+    }, [onReady, onError]);
     return null;
   };
   return { default: MockTerminal };
@@ -47,6 +54,7 @@ describe('DeployFeedbackModal stalled-output warning', () => {
     vi.useFakeTimers();
     localStorage.clear();
     resolveRun = null;
+    ctl.drop = false;
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -76,6 +84,14 @@ describe('DeployFeedbackModal stalled-output warning', () => {
       resolveRun?.({ ok: false, errorMessage: 'boom' });
       await Promise.resolve();
     });
+    expect(screen.queryByTestId('deploy-feedback-stalled')).toBeNull();
+  });
+
+  it('suppresses the stall warning when the progress stream is unavailable', async () => {
+    ctl.drop = true; // the stream connects then immediately drops mid-operation
+    await renderStreaming();
+    // Past the threshold, but with the stream gone the warning would be noise.
+    await act(async () => { await vi.advanceTimersByTimeAsync(80_000); });
     expect(screen.queryByTestId('deploy-feedback-stalled')).toBeNull();
   });
 });
