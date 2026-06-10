@@ -29,6 +29,7 @@ When you point `COMPOSE_DIR` at a directory, Sencho expects each stack to live i
 | `SENCHO_USER` | *(unset)* | When set to a username present inside the container (`sencho` is pre-created for this purpose), the entrypoint drops privileges to that user at startup instead of running as `root`. See [Running as a non-root user](#running-as-a-non-root-user) below. |
 | `API_RATE_LIMIT` | `200` | Global API requests per minute per user session. Applies in production only; development uses a fixed higher cap. Authenticated requests are keyed by user ID, unauthenticated by IP. Internal node-to-node traffic bypasses this limit. |
 | `API_POLLING_RATE_LIMIT` | `300` | Rate limit for dashboard polling endpoints, in requests per minute. Applies in production only; development uses a fixed higher cap. Raise it for environments with many concurrent browser sessions behind shared NAT. |
+| `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update compose steps (pull and recreate). If a step produces no output for this long while still running, Sencho treats it as stalled and stops it, so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
 
 ## Listen port
 

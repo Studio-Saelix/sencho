@@ -7,7 +7,7 @@ import type { useViewNavigationState } from './useViewNavigationState';
 import type { OverlayState } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
 import type { ActionVerb } from '@/context/DeployFeedbackContext';
-import type { StackAction } from '../EditorView';
+import type { StackAction, RecoverableAction } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
 
@@ -62,6 +62,9 @@ interface UseStackActionsOptions {
     params: { stackName: string; action: ActionVerb },
     run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>,
   ) => Promise<RunResult>;
+  // Last live output line for a stack, but only while a deploy-feedback session
+  // is streaming that exact stack; used to enrich failure diagnostics safely.
+  getLastDeployOutputLine: (stackName: string) => string | undefined;
   diffPreviewEnabled: boolean;
 }
 
@@ -128,6 +131,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     setActiveNode,
     nodes,
     runWithLog,
+    getLastDeployOutputLine,
     diffPreviewEnabled,
   } = options;
 
@@ -192,6 +196,55 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEnvExists(false);
     editorState.setContainers([]);
     editorState.setIsEditing(false);
+  };
+
+  // Re-sync the open stack's container list. Used after both successful and
+  // failed/stalled operations so the detail never shows containers that no
+  // longer reflect reality. Returns true only when the live list was fetched;
+  // false on a non-applicable stack, a non-ok response, or a network error, so
+  // callers (e.g. the recovery panel's Refresh) can report the real outcome.
+  const refreshSelectedContainers = async (stackName: string, stackFile: string): Promise<boolean> => {
+    if (stackListState.selectedFile !== stackFile) return false;
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/containers`);
+      if (!res.ok) return false;
+      const conts = await res.json();
+      editorState.setContainers(Array.isArray(conts) ? conts : []);
+      return true;
+    } catch {
+      // Non-critical when called from an action's failure path: refreshStacks(true)
+      // in the caller's finally still reconciles the sidebar status.
+      return false;
+    }
+  };
+
+  // Stack operations whose failure produces a recovery panel. A failed
+  // stop/start/delete is not recoverable through retry/restart/rollback.
+  const RECOVERABLE_ACTIONS: readonly StackAction[] = ['deploy', 'update', 'restart', 'rollback'];
+  const isRecoverableAction = (action: StackAction): action is RecoverableAction =>
+    RECOVERABLE_ACTIONS.includes(action);
+
+  // Store a terminal failure so the in-detail recovery panel can offer next
+  // steps. Non-recoverable actions are skipped. Snapshots the last output line
+  // only when the deploy-feedback panel is streaming this stack at failure time
+  // (see getLastDeployOutputLine); undefined otherwise.
+  const recordActionFailureFor = (
+    stackFile: string,
+    stackName: string,
+    action: StackAction,
+    startedAt: number,
+    errorMessage: string | undefined,
+    rolledBack: boolean,
+  ) => {
+    if (!isRecoverableAction(action)) return;
+    stackListState.recordActionFailure(stackFile, {
+      action,
+      errorMessage,
+      rolledBack,
+      startedAt,
+      endedAt: Date.now(),
+      lastOutputLine: getLastDeployOutputLine(stackName),
+    });
   };
 
   const refreshGitSourcePending = async () => {
@@ -538,6 +591,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     deploySessionId?: string,
   ): Promise<RunResult> => {
     const previousStatus = stackListState.stackStatuses[stackFile];
+    const startedAt = Date.now();
     stackListState.setOptimisticStatus(stackFile, 'running');
     try {
       const path = ignorePolicy
@@ -571,17 +625,14 @@ export function useStackActions(options: UseStackActionsOptions) {
       toast.success(
         ignorePolicy ? 'Stack deployed (policy bypassed).' : 'Stack deployed successfully!',
       );
-      if (stackListState.selectedFile === stackFile) {
-        const containersRes = await apiFetch(`/stacks/${stackName}/containers`);
-        const conts = await containersRes.json();
-        editorState.setContainers(Array.isArray(conts) ? conts : []);
-      }
+      await refreshSelectedContainers(stackName, stackFile);
       try {
         const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
         if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
       } catch {
         /* ignore */
       }
+      stackListState.recordActionSuccess(stackFile);
       return { ok: true };
     } catch (error) {
       console.error('Failed to deploy:', error);
@@ -594,6 +645,8 @@ export function useStackActions(options: UseStackActionsOptions) {
           ? `${errorMessage} - automatically rolled back to previous version.`
           : errorMessage,
       );
+      recordActionFailureFor(stackFile, stackName, 'deploy', startedAt, errorMessage, deployError.rolledBack === true);
+      await refreshSelectedContainers(stackName, stackFile);
       return { ok: false, errorMessage, rolledBack: deployError.rolledBack };
     }
   };
@@ -660,6 +713,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       return;
     const stackFile = stackListState.selectedFile;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const startedAt = Date.now();
     stackListState.setStackAction(stackFile, 'rollback');
     stackListState.setOptimisticStatus(stackFile, 'running');
     try {
@@ -686,15 +740,24 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
       overlayState.setPolicyBlock(null);
       toast.success('Stack rolled back successfully.');
-      const contentRes = await apiFetch(`/stacks/${stackFile}`);
-      const text = await contentRes.text();
-      editorState.setContent(text || '');
-      editorState.setOriginalContent(text || '');
-      const backupRes = await apiFetch(`/stacks/${stackFile}/backup`);
-      if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
+      stackListState.recordActionSuccess(stackFile);
+      // The rollback already succeeded; a failure of the cosmetic content/backup
+      // refetch below must not be mis-recorded as a rollback failure.
+      try {
+        const contentRes = await apiFetch(`/stacks/${stackFile}`);
+        const text = await contentRes.text();
+        editorState.setContent(text || '');
+        editorState.setOriginalContent(text || '');
+        const backupRes = await apiFetch(`/stacks/${stackFile}/backup`);
+        if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
+      } catch (refetchError) {
+        console.error('Post-rollback refetch failed:', refetchError);
+      }
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Rollback failed';
       toast.error(msg);
+      recordActionFailureFor(stackFile, stackName, 'rollback', startedAt, msg, false);
+      await refreshSelectedContainers(stackName, stackFile);
     } finally {
       stackListState.clearStackAction(stackFile);
       stackListState.refreshStacks(true);
@@ -756,6 +819,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (stackListState.isStackBusy(stackFile)) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const previousStatus = stackListState.stackStatuses[stackFile];
+    const startedAt = Date.now();
     stackListState.setStackAction(stackFile, action);
     stackListState.setOptimisticStatus(stackFile, optimisticStatus);
     try {
@@ -785,6 +849,8 @@ export function useStackActions(options: UseStackActionsOptions) {
               }
             }
             const actionError = parseStackActionError(errText, `${action} failed`);
+            recordActionFailureFor(stackFile, stackName, action, startedAt, actionError.message, actionError.rolledBack === true);
+            await refreshSelectedContainers(stackName, stackFile);
             return {
               ok: false as const,
               errorMessage: actionError.message,
@@ -794,14 +860,14 @@ export function useStackActions(options: UseStackActionsOptions) {
           overlayState.setPolicyBlock(null);
           toast.success(successMessage);
           if (action === 'update') stackListState.fetchImageUpdates();
-          if (stackListState.selectedFile === stackFile) {
-            const containersRes = await apiFetch(`/stacks/${stackName}/containers`);
-            const conts = await containersRes.json();
-            editorState.setContainers(Array.isArray(conts) ? conts : []);
-          }
+          await refreshSelectedContainers(stackName, stackFile);
+          stackListState.recordActionSuccess(stackFile);
           return { ok: true as const };
         } catch (err) {
-          return { ok: false as const, errorMessage: (err as Error).message || `${action} failed` };
+          const message = (err as Error).message || `${action} failed`;
+          recordActionFailureFor(stackFile, stackName, action, startedAt, message, false);
+          await refreshSelectedContainers(stackName, stackFile);
+          return { ok: false as const, errorMessage: message };
         }
       });
     } catch (error) {
@@ -949,6 +1015,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   ) => {
     if (stackListState.isStackBusy(stackFile)) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const startedAt = Date.now();
     stackListState.setStackAction(stackFile, action);
 
     if (action === 'stop') {
@@ -978,11 +1045,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         throw parseStackActionError(errText, `${action} failed`);
       }
       toast.success(`Stack ${action}ed successfully!`);
-      if (stackListState.selectedFile === stackFile) {
-        const containersRes = await apiFetch(`/stacks/${stackName}/containers`);
-        const conts = await containersRes.json();
-        editorState.setContainers(Array.isArray(conts) ? conts : []);
-      }
+      await refreshSelectedContainers(stackName, stackFile);
       if (action === 'update') stackListState.fetchImageUpdates();
       if (action === 'deploy') {
         try {
@@ -992,6 +1055,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           /* ignore */
         }
       }
+      stackListState.recordActionSuccess(stackFile);
     } catch (error) {
       console.error(`Failed to ${action}:`, error);
       const actionError = error as StackActionError;
@@ -1001,6 +1065,8 @@ export function useStackActions(options: UseStackActionsOptions) {
           ? `${msg} - automatically rolled back to previous version.`
           : msg,
       );
+      recordActionFailureFor(stackFile, stackName, action, startedAt, msg, actionError.rolledBack === true);
+      await refreshSelectedContainers(stackName, stackFile);
     } finally {
       stackListState.clearStackAction(stackFile);
       stackListState.refreshStacks(true);
@@ -1065,6 +1131,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     getStackMenuVisibility,
     openStackApp,
     resetEditorState,
+    refreshSelectedContainers,
     refreshGitSourcePending,
     loadFile,
     loadFileOnNode,

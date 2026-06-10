@@ -113,12 +113,12 @@ Density affects the dashboard stack table, the resource gauge strip, the Setting
 
 ### Deploy progress modal
 
-When enabled, Sencho streams live output in a modal whenever you deploy, restart, update, install, or run a Git operation. The modal closes automatically on success or stays open on failure so you can read the error output.
+Sencho streams live output in a modal whenever you deploy, restart, update, install, or run a Git operation. The modal closes automatically on success or stays open on failure so you can read the error output, and it warns when an operation goes quiet. It is on by default; turn it off to run operations without the panel.
 
 | Value | Behavior |
 |-------|----------|
-| **Enabled** | A progress modal opens for every long-running operation |
-| **Disabled** (default) | Operations run silently; results surface via toast notifications only |
+| **Enabled** (default) | A progress modal opens for every long-running operation |
+| **Disabled** | Operations run without the panel; results surface via toast notifications, and a failed operation still shows recovery actions on the stack page |
 
 ### Diff preview before save
 

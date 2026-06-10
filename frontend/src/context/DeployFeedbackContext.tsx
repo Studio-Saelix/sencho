@@ -53,6 +53,14 @@ interface DeployFeedbackContextValue {
   ) => Promise<RunResult>;
   panelState: DeployPanelState;
   logRows: ParsedLogRow[];
+  /**
+   * Epoch ms of the most recent activity for the current session: stamped when
+   * the deploy starts, again when the stream connects, and on every output
+   * chunk. The modal compares it against now to warn that an in-flight
+   * operation has gone quiet (a possible stall), covering the no-first-line
+   * case because it is seeded at start rather than at first output.
+   */
+  lastOutputAt: number;
   onTerminalReady: () => void;
   onTerminalError: () => void;
   onMessage: (text: string) => void;
@@ -92,6 +100,7 @@ const DeployFeedbackContext = createContext<DeployFeedbackContextValue | undefin
 export function DeployFeedbackProvider({ children }: { children: React.ReactNode }): React.ReactElement {
   const [panelState, setPanelState] = useState<DeployPanelState>(DEFAULT_PANEL_STATE);
   const [logRows, setLogRows] = useState<ParsedLogRow[]>([]);
+  const [lastOutputAt, setLastOutputAt] = useState<number>(0);
 
   // Idempotent resolver for the current session's deployStarted gate. Set at the
   // start of each runWithLog call; called by onTerminalReady (stream connected),
@@ -116,6 +125,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
   const onTerminalReady = useCallback(() => {
     streamReadyRef.current = true;
+    setLastOutputAt(Date.now());
     setPanelState((prev) => (prev.status === 'preparing' ? { ...prev, status: 'streaming' } : prev));
     // Give the connectTerminal handshake a beat to register on the backend
     // before the deploy POST fires, so the first lines are not missed.
@@ -134,6 +144,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   const onMessage = useCallback((text: string) => {
     const newRows = parseLogChunk(text, idCounterRef.current);
     idCounterRef.current += newRows.length;
+    setLastOutputAt(Date.now());
     setLogRows((prev) => {
       const combined = prev.length > 0 && prev[0].id === TRUNCATION_ROW_ID
         ? [...prev.slice(1), ...newRows]
@@ -182,6 +193,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
       // idCounterRef is intentionally not reset; keys must remain globally unique across sessions.
       setLogRows([]);
+      setLastOutputAt(Date.now());
 
       setPanelState({
         isOpen: true,
@@ -236,7 +248,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
   return (
     <DeployFeedbackContext.Provider
-      value={{ runWithLog, panelState, logRows, onTerminalReady, onTerminalError, onMessage, onPanelClose }}
+      value={{ runWithLog, panelState, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose }}
     >
       {children}
     </DeployFeedbackContext.Provider>

@@ -9,7 +9,7 @@ import { useBulkStackActions, type BulkAction } from '@/hooks/useBulkStackAction
 import { useCrossNodeStackSearch } from '@/hooks/useCrossNodeStackSearch';
 import { SENCHO_LABELS_CHANGED } from '@/lib/events';
 import { isInputFocused, isPaletteOpen } from '@/lib/keyboard-guards';
-import type { StackAction, ContainerInfo } from '../EditorView';
+import type { StackAction, StackActionResult, ContainerInfo } from '../EditorView';
 import type { Label as StackLabel } from '../../label-types';
 import type { FilterChip } from '../../sidebar/sidebar-types';
 import type { StackRowStatus } from '../../sidebar/stack-status-utils';
@@ -37,6 +37,12 @@ export function useStackListState() {
   const [isLoading, setIsLoading] = useState(false);
   const [stackActions, setStackActions] = useState<Record<string, StackAction>>({});
   const stackActionsRef = useRef<Record<string, StackAction>>({});
+
+  // Per-stack terminal failure records driving the in-detail recovery panel.
+  // In-memory only. Node scoping is enforced by the caller, which clears these
+  // on active-node change (see EditorLayout's node-switch effect) so a repeated
+  // stack filename cannot carry a failure across nodes.
+  const [lastActionResult, setLastActionResult] = useState<Record<string, StackActionResult>>({});
 
   const [isScanning, setIsScanning] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -84,6 +90,27 @@ export function useStackListState() {
   const setOptimisticStatus = (stackFile: string, status: 'running' | 'exited') => {
     setStackStatuses(prev => ({ ...prev, [stackFile]: status }));
   };
+
+  // Recovery record lifecycle. recordActionFailure stores a terminal failure;
+  // recordActionSuccess / dismissActionResult drop it; clearActionRecords wipes
+  // all (node switch). The recovery panel itself renders only when the stack is
+  // not mid-operation, so a stale record never shows during a retry.
+  const clearStackResult = useCallback((stackFile: string) => {
+    setLastActionResult(prev => {
+      if (!(stackFile in prev)) return prev;
+      const next = { ...prev };
+      delete next[stackFile];
+      return next;
+    });
+  }, []);
+  const recordActionFailure = useCallback((stackFile: string, result: StackActionResult) => {
+    setLastActionResult(prev => ({ ...prev, [stackFile]: result }));
+  }, []);
+  const recordActionSuccess = clearStackResult;
+  const dismissActionResult = clearStackResult;
+  const clearActionRecords = useCallback(() => {
+    setLastActionResult({});
+  }, []);
 
   const refreshLabels = useCallback(async () => {
     try {
@@ -333,6 +360,8 @@ export function useStackListState() {
     remoteResults,
     setStackAction, clearStackAction, isStackBusy,
     setOptimisticStatus,
+    lastActionResult,
+    recordActionFailure, recordActionSuccess, clearActionRecords, dismissActionResult,
     refreshLabels,
     refreshStacks,
     handleScanStacks,

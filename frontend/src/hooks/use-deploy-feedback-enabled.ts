@@ -3,12 +3,15 @@ import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 
 export const DEPLOY_FEEDBACK_KEY = 'sencho.deploy-feedback.enabled';
 
+// Default on (opt-out): the live deploy/update output panel shows unless the
+// user has explicitly turned it off, so update progress and the stalled-output
+// warning are visible without a setting hunt. Only a stored 'false' disables it.
 function readStored(): boolean {
-    if (typeof window === 'undefined') return false;
+    if (typeof window === 'undefined') return true;
     try {
-        return window.localStorage.getItem(DEPLOY_FEEDBACK_KEY) === 'true';
+        return window.localStorage.getItem(DEPLOY_FEEDBACK_KEY) !== 'false';
     } catch {
-        return false;
+        return true;
     }
 }
 
@@ -26,7 +29,9 @@ export function useDeployFeedbackEnabled(): [boolean, (next: boolean) => void] {
     useEffect(() => {
         function onStorage(event: StorageEvent) {
             if (event.key !== DEPLOY_FEEDBACK_KEY) return;
-            setEnabledState(event.newValue === 'true');
+            // Opt-out: anything other than an explicit 'false' (including a
+            // cleared key) means enabled.
+            setEnabledState(event.newValue !== 'false');
         }
         window.addEventListener('storage', onStorage);
         return () => window.removeEventListener('storage', onStorage);

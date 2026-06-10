@@ -50,6 +50,22 @@ function getComposeCommandTimeoutMs(): number {
   return DEFAULT_COMPOSE_COMMAND_TIMEOUT_MS;
 }
 
+// Idle backstop for long-running pull/recreate steps: if the child emits no
+// output for this window while still running, the step is treated as stalled
+// and terminated, so a hung `docker compose pull` surfaces a fast failure
+// instead of spinning until the much longer command timeout above. Conservative
+// by default because a working pull can be briefly silent while a large layer
+// extracts; operators on slow links or heavy local builds can raise it.
+const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+function getComposeStallTimeoutMs(): number {
+  const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return DEFAULT_COMPOSE_STALL_TIMEOUT_MS;
+}
+
 /**
  * ComposeService - local docker compose CLI execution.
  *
@@ -98,7 +114,11 @@ export class ComposeService {
     cwd: string,
     ws?: WebSocket,
     throwOnError = true,
-    env?: Record<string, string | undefined>
+    env?: Record<string, string | undefined>,
+    // When set, terminate the child if it emits no output for this long while
+    // still running (idle stall backstop). Appended last so the existing
+    // registry-auth call sites that pass `env` are unaffected.
+    idleTimeoutMs?: number
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
@@ -116,6 +136,7 @@ export class ComposeService {
       const timeoutMs = getComposeCommandTimeoutMs();
       let timeout: ReturnType<typeof setTimeout> | null = null;
       let forceKillTimeout: ReturnType<typeof setTimeout> | null = null;
+      let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 
       const sendOutput = (text: string) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -131,6 +152,10 @@ export class ComposeService {
         if (forceKillTimeout) {
           clearTimeout(forceKillTimeout);
           forceKillTimeout = null;
+        }
+        if (idleTimeout) {
+          clearTimeout(idleTimeout);
+          idleTimeout = null;
         }
       };
 
@@ -159,21 +184,39 @@ export class ComposeService {
         }, 5000);
       };
 
+      // Idle stall backstop. Armed once below and reset on every output chunk;
+      // if it ever fires, the step has been silent for idleTimeoutMs while still
+      // running, so terminate it. Never rearmed after a termination is pending or
+      // the child has exited, so it cannot re-fire during the SIGTERM grace.
+      const armIdleTimeout = () => {
+        if (idleTimeoutMs === undefined) return;
+        if (exited || settled || pendingTerminationError) return;
+        if (idleTimeout) clearTimeout(idleTimeout);
+        idleTimeout = setTimeout(() => {
+          const seconds = Math.round(idleTimeoutMs / 1000);
+          sendOutput(`=== No output for ${seconds}s; the operation appears stalled and was stopped ===\n`);
+          terminateChild(new Error(`STACK_STALLED_OUTPUT: no output for ${seconds}s`));
+        }, idleTimeoutMs);
+      };
+
       // The progress socket is output-only: a deploy/update/down is owned by the
       // HTTP request that started it, so closing or losing the socket (the user
       // minimizes the panel, navigates away, or the connection blips) must not
       // terminate the compose process. Termination is driven solely by the
-      // command timeout below.
+      // command timeout here and the optional idle stall backstop above.
       timeout = setTimeout(() => {
         const message = `Command timed out after ${Math.round(timeoutMs / 1000)}s`;
         sendOutput(`${message}\n`);
         terminateChild(new Error(message));
       }, timeoutMs);
 
+      armIdleTimeout();
+
       const onData = (data: Buffer) => {
         const text = data.toString();
         errorLog += text;
         sendOutput(text);
+        armIdleTimeout();
       };
 
       child.stdout.on('data', onData);
@@ -328,7 +371,7 @@ export class ComposeService {
       }
 
       await this.withRegistryAuth(async (env) => {
-        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
+        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
 
       // Post-Deploy Health Probe
@@ -505,10 +548,10 @@ export class ComposeService {
 
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Pulling latest images ===\n');
-        await this.execute('docker', ['compose', 'pull'], stackDir, ws, true, env);
+        await this.execute('docker', ['compose', 'pull'], stackDir, ws, true, env, getComposeStallTimeoutMs());
 
         sendOutput('=== Recreating containers ===\n');
-        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
+        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
 
       // Post-Update Health Probe

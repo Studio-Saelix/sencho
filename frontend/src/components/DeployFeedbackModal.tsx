@@ -3,6 +3,7 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   X,
   Minimize2,
   Terminal as TerminalIcon,
@@ -15,6 +16,11 @@ import TerminalComponent from '@/components/Terminal';
 import { useDeployFeedback, VERB_LABELS } from '@/context/DeployFeedbackContext';
 
 const AUTO_CLOSE_SECONDS = 4;
+
+// Warn that an in-flight operation has gone quiet after this much silence. The
+// backend idle-output timeout terminates a truly hung step later (default
+// ~10min); this earlier heads-up keeps the modal from looking falsely busy.
+const STALL_WARN_MS = 75_000;
 
 interface DeployFeedbackModalProps {
   isMinimized: boolean;
@@ -31,7 +37,7 @@ function formatElapsed(seconds: number): string {
 }
 
 export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackModalProps) {
-  const { panelState, logRows, onTerminalReady, onTerminalError, onMessage, onPanelClose } = useDeployFeedback();
+  const { panelState, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose } = useDeployFeedback();
 
   const [showRaw, setShowRaw] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -152,6 +158,13 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
   const isDialogOpen = isOpen && !isMinimized;
   const verbLabel = VERB_LABELS[action];
 
+  // Re-evaluated each second by the elapsed-time interval's re-render. Warns
+  // while the operation is still streaming but has produced no output for a
+  // while, including the case where no first line ever arrived.
+  const lastLine = logRows.length > 0 ? logRows[logRows.length - 1].message : null;
+  const secondsSinceOutput = lastOutputAt > 0 ? Math.floor((Date.now() - lastOutputAt) / 1000) : 0;
+  const stalled = status === 'streaming' && lastOutputAt > 0 && Date.now() - lastOutputAt > STALL_WARN_MS;
+
   return (
     <Modal
       open={isDialogOpen}
@@ -213,6 +226,28 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
             </Button>
           </div>
         </div>
+
+        {/* Stalled-output warning: in-flight but quiet */}
+        {stalled && (
+          <div
+            data-testid="deploy-feedback-stalled"
+            className="flex items-start gap-2 px-4 py-2 border-b border-warning/30 bg-warning/5 shrink-0"
+          >
+            <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-warning" />
+            <div className="min-w-0 text-xs text-warning">
+              <p>
+                {lastLine
+                  ? `No new output for ${formatElapsed(secondsSinceOutput)}. The operation may be stalled.`
+                  : 'No output received yet. The operation may be stalled.'}
+              </p>
+              {lastLine && (
+                <p className="mt-0.5 truncate font-mono text-[11px] text-warning/80" title={lastLine}>
+                  {lastLine}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Body */}
         <div
