@@ -652,21 +652,24 @@ export class ComposeService {
     if (!isValidStackName(stackName)) {
       return Promise.reject(new Error('Invalid stack path'));
     }
-    // Canonical js/path-injection barrier inline at the spawn-cwd sink: CodeQL
-    // does not credit the wrapped isPathWithinBase helper as a sanitizer.
+    // Canonical inline js/path-injection barrier, kept in the same scope as the
+    // spawn cwd sink below. CodeQL credits neither the wrapped isPathWithinBase
+    // helper nor a barrier separated from the sink by the Promise-executor
+    // closure, so the spawn is hoisted out of the executor. startsWith already
+    // rejects the base dir itself, since base does not start with base + sep.
     const baseResolved = path.resolve(this.baseDir);
     const stackDir = path.resolve(baseResolved, stackName);
-    if (stackDir === baseResolved || !stackDir.startsWith(baseResolved + path.sep)) {
+    if (!stackDir.startsWith(baseResolved + path.sep)) {
       return Promise.reject(new Error('Invalid stack path'));
     }
+    const child = spawn('docker', ['compose', 'config', '--format', 'json'], {
+      cwd: stackDir,
+      env: {
+        ...process.env,
+        PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      },
+    });
     return new Promise((resolve, reject) => {
-      const child = spawn('docker', ['compose', 'config', '--format', 'json'], {
-        cwd: stackDir,
-        env: {
-          ...process.env,
-          PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-        },
-      });
       const MAX_OUTPUT = 5 * 1024 * 1024; // 5 MiB cap on each stream
       const TIMEOUT_MS = 20_000;
       let stdout = '';
