@@ -103,6 +103,9 @@ describe('DeployFeedbackModal health gate', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
     expect(screen.getByTestId('health-gate-banner')).toHaveAttribute('data-status', 'observing');
     expect(screen.queryByText(/closes in/)).toBeNull();
+    // The verdict is withheld while observing: no green Succeeded yet.
+    expect(screen.queryByText('Succeeded')).toBeNull();
+    expect(screen.getByText('Verifying health')).toBeInTheDocument();
     // Far past the normal 4s auto-close: the modal must still be open.
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(screen.getByTestId('deploy-feedback-modal')).toBeInTheDocument();
@@ -130,6 +133,9 @@ describe('DeployFeedbackModal health gate', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
     expect(screen.getByTestId('health-gate-banner')).toHaveAttribute('data-status', 'failed');
     expect(screen.getByText(/exited during observation/)).toBeInTheDocument();
+    // The headline indicator reports the gate verdict, never a green Succeeded.
+    expect(screen.queryByText('Succeeded')).toBeNull();
+    expect(screen.getAllByText(/Health gate failed/).length).toBeGreaterThan(0);
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(screen.getByTestId('deploy-feedback-modal')).toBeInTheDocument();
   });

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { AlertTriangle, ChevronDown, X } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '../ui/button';
-import { RecoveryActions } from './RecoveryActions';
+import { RecoveryActions, RecoveryClassification } from './RecoveryActions';
 import { capitalize, formatElapsed } from './recovery-format';
 import type { Node } from '@/context/NodeContext';
 import type { StackActionResult } from './EditorView';
@@ -64,6 +64,9 @@ export function RecoveryChip({
                         {result.errorMessage ?? 'The operation did not complete.'}
                         {result.rolledBack && ' · rolled back to previous version'}
                     </p>
+                    <div className="mt-1.5">
+                        <RecoveryClassification result={result} />
+                    </div>
                 </div>
                 <div className="border-t border-glass-border p-1">
                     <RecoveryActions

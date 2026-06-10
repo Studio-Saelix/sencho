@@ -214,6 +214,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
               errorMessage={errorMessage}
               countdown={countdown}
               showCountdown={!gateHoldsOpen}
+              gateStatus={healthGate?.status ?? null}
             />
             <Button
               variant="ghost"
@@ -385,9 +386,11 @@ interface StatusIndicatorProps {
   countdown: number;
   /** False while a health gate is observing or terminal-unhealthy (no auto-close). */
   showCountdown: boolean;
+  /** Active health gate status, or null when no gate was started. */
+  gateStatus: 'observing' | 'passed' | 'failed' | 'unknown' | null;
 }
 
-function StatusIndicator({ status, progressUnavailable, rowCount, errorMessage, countdown, showCountdown }: StatusIndicatorProps) {
+function StatusIndicator({ status, progressUnavailable, rowCount, errorMessage, countdown, showCountdown, gateStatus }: StatusIndicatorProps) {
   // While the deploy is still in flight (preparing/streaming) but the progress
   // socket is gone, the deploy keeps running server-side with no live output.
   if (progressUnavailable && (status === 'preparing' || status === 'streaming')) {
@@ -418,6 +421,33 @@ function StatusIndicator({ status, progressUnavailable, rowCount, errorMessage, 
   }
 
   if (status === 'succeeded') {
+    // The compose operation finished, but while a health gate is active the
+    // verdict is not "succeeded" yet: withhold the green state until the gate
+    // passes, and report a failed/unknown gate as the headline result.
+    if (gateStatus === 'observing') {
+      return (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin text-brand" />
+          <span>Verifying health</span>
+        </div>
+      );
+    }
+    if (gateStatus === 'failed') {
+      return (
+        <div className="flex items-center gap-1.5 text-xs text-destructive">
+          <AlertCircle className="h-3 w-3 text-destructive" />
+          <span>Health gate failed</span>
+        </div>
+      );
+    }
+    if (gateStatus === 'unknown') {
+      return (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <CircleHelp className="h-3 w-3" />
+          <span>Health unknown</span>
+        </div>
+      );
+    }
     return (
       <div className="flex items-center gap-1.5 text-xs text-success">
         <CheckCircle2 className="h-3 w-3 text-success" />

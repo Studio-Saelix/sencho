@@ -22,6 +22,18 @@ interface RecoveryActionsProps {
     variant?: 'inline' | 'list';
 }
 
+// The classified cause + suggested next step, rendered by both recovery
+// surfaces above their action sets. Nothing renders without a classification.
+export function RecoveryClassification({ result }: { result: StackActionResult }) {
+    if (!result.failure) return null;
+    return (
+        <div data-testid="recovery-classification">
+            <p className="text-xs font-medium text-foreground">{result.failure.label}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{result.failure.suggestion}</p>
+        </div>
+    );
+}
+
 // The recovery action set shared by the mobile inline panel and the desktop
 // chip popover, so retry/restart/rollback/refresh/copy have one implementation.
 export function RecoveryActions({
@@ -64,12 +76,6 @@ export function RecoveryActions({
 
     return (
         <div className={container}>
-            {result.failure && (
-                <div className={list ? 'mb-1 px-2 pb-1' : 'mb-1 w-full'}>
-                    <p className="text-xs font-medium text-foreground">{result.failure.label}</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">{result.failure.suggestion}</p>
-                </div>
-            )}
             {canDeploy && (
                 <Button variant={list ? 'ghost' : 'outline'} size="sm" className={primary} onClick={onRetry}>
                     <RotateCcw className="h-3.5 w-3.5" />

@@ -33,6 +33,10 @@ Admins also see whether a [fleet snapshot](/features/fleet-backups) covers this 
 
 Every verdict keeps the **Update now** button enabled. The dialog informs the decision; it does not make it for you.
 
+<Frame>
+  <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog for a stack, showing the verdict chip, the signal rows for Compose Doctor, drift, containers, pending update, rollback backup and node disk, the fleet snapshot row with the create-snapshot checkbox, and the Cancel and Update now buttons" />
+</Frame>
+
 ## The post-update health gate
 
 The 3-second crash probe from [atomic deployments](/features/atomic-deployments) catches instant failures. The health gate is the longer observational layer behind it: after a deploy or update succeeds, Sencho watches the stack's containers for an observation window (90 seconds by default) and records a verdict.
@@ -45,7 +49,15 @@ During the window, the gate checks every container that came up with the stack:
 
 A clear failure ends the observation immediately. Passing requires the full window, and a healthcheck still in its start period when the window ends records the verdict as unknown rather than claiming success.
 
-The deploy progress modal shows the observation live ("Health gate: observing containers") and holds off its auto-close until the verdict lands. Closing the modal never stops the observation; the gate runs server-side and its result appears on the stack timeline either way, as **health gate passed** or **health gate failed** events alongside the **update started** marker.
+The deploy progress modal treats the gate verdict as the real result: while the gate observes, the status reads **Verifying health** rather than claiming success, and the auto-close waits. A passed gate shows the success state; a failed or unknown gate becomes the headline result with its reason. Closing the modal never stops the observation; the gate runs server-side and its result appears on the stack timeline either way, as **health gate passed** or **health gate failed** events alongside the **update started** marker.
+
+<Frame>
+  <img src="/images/health-gated-updates/modal-verifying.png" alt="Deploy progress modal after an update finished, with the status indicator showing Verifying health and the health gate banner reading observing containers" />
+</Frame>
+
+<Frame>
+  <img src="/images/health-gated-updates/modal-gate-failed.png" alt="Deploy progress modal with the headline status Health gate failed and the banner naming the unhealthy container, with the hint that rollback options are available on the stack" />
+</Frame>
 
 When the gate fails, the stack page surfaces the same [recovery actions](/features/deploy-progress#recovery-actions) as a failed update: retry, restart, roll back when a backup exists, refresh the container state, or copy diagnostics. Rolling back is always your call; the gate never rolls anything back on its own.
 
@@ -58,6 +70,10 @@ Open **Settings > Host Alerts > Update health gate** on the node you want to con
 - **Observe health after updates** turns the gate on or off for that node. On by default; turning it off only stops the observation and its timeline events, never the update itself.
 - **Observation window** sets how long containers are watched, from 15 to 600 seconds. The default is 90 seconds; raise it for stacks that take a while to settle, since a healthcheck still starting at the end of the window records an unknown verdict instead of a pass.
 
+<Frame>
+  <img src="/images/health-gated-updates/settings.png" alt="Host Alerts settings page with the Update health gate group, showing the Observe health after updates toggle and the Observation window field" />
+</Frame>
+
 ## Rollback readiness
 
 The Stack Dossier carries a **Rollback readiness** section that answers one question honestly: if this update goes wrong, what can a rollback actually restore? It reports an overall state of Ready, Partial, or Not ready, built from:
@@ -68,6 +84,10 @@ The Stack Dossier carries a **Rollback readiness** section that answers one ques
 - **Last successful deploy**: whether the backup reflects a configuration that actually deployed successfully.
 - **Healthchecks**: whether a rollback can be verified beyond run state.
 - **Application data**: always reported as not covered. Named volumes and bind-mounted data are not included in file backups; a rollback restores compose and env files only, and your application data keeps its current state. This row exists so the limit is stated where you decide, not discovered during an incident.
+
+<Frame>
+  <img src="/images/health-gated-updates/dossier-rollback-readiness.png" alt="Rollback readiness section in the Stack Dossier with the overall Ready chip and the six rows: previous compose file, previous env file with variable names only, previous image tag, last successful deploy, healthchecks, and the application data non-coverage disclosure" />
+</Frame>
 
 ## Classified failures
 

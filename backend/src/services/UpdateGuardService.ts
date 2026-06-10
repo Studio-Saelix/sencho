@@ -129,7 +129,8 @@ export class UpdateGuardService {
         withTimeout(UpdatePreviewService.getInstance().getPreview(nodeId, stackName), INPUT_TIMEOUT_MS, 'rollback readiness update preview')),
       this.collect('activity history', stackName, async () => {
         const events = db.getStackActivity(nodeId, stackName, { limit: 50 });
-        return events.find(e => e.category === 'deploy_success')?.timestamp ?? null;
+        // A successful update is as good a known-good marker as a deploy.
+        return events.find(e => e.category === 'deploy_success' || e.category === 'image_update_applied')?.timestamp ?? null;
       }),
       this.collect('containers', stackName, () =>
         withTimeout(this.probeContainers(nodeId, stackName), INPUT_TIMEOUT_MS, 'rollback readiness container probe')),

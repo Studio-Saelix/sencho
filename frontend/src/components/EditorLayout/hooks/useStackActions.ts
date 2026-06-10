@@ -688,9 +688,13 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
       overlayState.setPolicyBlock(null);
       const healthGateId = await parseHealthGateId(response);
-      toast.success(
-        ignorePolicy ? 'Stack deployed (policy bypassed).' : 'Stack deployed successfully!',
-      );
+      // With a health gate observing, the operation finishing is not the
+      // final verdict yet; soften the toast so success is not claimed twice.
+      if (healthGateId) {
+        toast.info(ignorePolicy ? 'Stack deployed (policy bypassed). Verifying health...' : 'Stack deployed. Verifying health...');
+      } else {
+        toast.success(ignorePolicy ? 'Stack deployed (policy bypassed).' : 'Stack deployed successfully!');
+      }
       await refreshSelectedContainers(stackName, stackFile);
       try {
         const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
@@ -928,7 +932,13 @@ export function useStackActions(options: UseStackActionsOptions) {
           }
           overlayState.setPolicyBlock(null);
           const healthGateId = await parseHealthGateId(response);
-          toast.success(successMessage);
+          // With a health gate observing, the operation finishing is not the
+          // final verdict yet; soften the toast so success is not claimed twice.
+          if (healthGateId && action === 'update') {
+            toast.info('Stack updated. Verifying health...');
+          } else {
+            toast.success(successMessage);
+          }
           if (action === 'update') stackListState.fetchImageUpdates();
           await refreshSelectedContainers(stackName, stackFile);
           stackListState.recordActionSuccess(stackFile);
