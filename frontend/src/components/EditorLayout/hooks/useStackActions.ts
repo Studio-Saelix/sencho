@@ -7,7 +7,7 @@ import type { useViewNavigationState } from './useViewNavigationState';
 import type { OverlayState } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
 import type { ActionVerb } from '@/context/DeployFeedbackContext';
-import type { StackAction, RecoverableAction } from '../EditorView';
+import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
 
@@ -23,7 +23,34 @@ interface RunResult {
 // stack-load branch.
 export const NODE_SWITCH_PENDING_TOKEN = '__node-switch-pending__';
 
-type StackActionError = Error & { rolledBack?: boolean };
+type StackActionError = Error & { rolledBack?: boolean; failure?: FailureClassification };
+
+// Fallback classification when the response never reached a Sencho backend
+// (proxy 502/504 for a dead remote, or a 503 with no classified body).
+const NODE_UNREACHABLE_FAILURE: FailureClassification = {
+  reason: 'node_unreachable',
+  label: 'Node or Docker unreachable',
+  suggestion: 'Check that the node is online and Docker is running, then retry.',
+};
+
+const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
+
+const parseFailureClassification = (value: unknown): FailureClassification | undefined => {
+  if (
+    isRecord(value) &&
+    typeof value.reason === 'string' &&
+    typeof value.label === 'string' && value.label.trim() &&
+    typeof value.suggestion === 'string' && value.suggestion.trim()
+  ) {
+    return { reason: value.reason, label: value.label, suggestion: value.suggestion };
+  }
+  if (value !== undefined) {
+    // Likely hub/node version skew or a mangled proxy body; the raw error
+    // message still renders, only the classification panel is degraded.
+    console.warn('Unrecognized failure classification shape in error response:', value);
+  }
+  return undefined;
+};
 
 type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update';
 
@@ -100,24 +127,40 @@ const stackOpInProgressMessage = (stackName: string, info: StackOpInProgressInfo
   return `${stackName} is already ${verb}${actor}.`;
 };
 
-const parseStackActionError = (rawBody: string, fallback: string): StackActionError => {
+const parseStackActionError = (rawBody: string, fallback: string, status?: number): StackActionError => {
   let message = rawBody || fallback;
   let rolledBack = false;
+  let failure: FailureClassification | undefined;
+  let parsedCode: string | undefined;
+  let bodyWasJson = false;
 
   try {
     const parsed: unknown = JSON.parse(rawBody);
+    bodyWasJson = true;
     if (isRecord(parsed)) {
       if (typeof parsed.error === 'string' && parsed.error.trim()) {
         message = parsed.error;
       }
       rolledBack = parsed.rolledBack === true;
+      failure = parseFailureClassification(parsed.failure);
+      if (typeof parsed.code === 'string') parsedCode = parsed.code;
     }
   } catch {
     /* not JSON */
   }
 
+  // A gateway-style status with no classified body means the request likely
+  // never reached the owning node's backend; surface that as the cause. A 503
+  // qualifies only when it is body-less (proxy generated) or the backend's own
+  // docker_unavailable shape, so an unrelated future 503 is not mislabeled.
+  if (!failure && status !== undefined && UNREACHABLE_STATUSES.has(status)) {
+    const qualifies = status !== 503 || !bodyWasJson || parsedCode === 'docker_unavailable';
+    if (qualifies) failure = { ...NODE_UNREACHABLE_FAILURE };
+  }
+
   const error = new Error(message) as StackActionError;
   error.rolledBack = rolledBack;
+  error.failure = failure;
   return error;
 };
 
@@ -235,6 +278,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     startedAt: number,
     errorMessage: string | undefined,
     rolledBack: boolean,
+    failure?: FailureClassification,
   ) => {
     if (!isRecoverableAction(action)) return;
     stackListState.recordActionFailure(stackFile, {
@@ -244,6 +288,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       startedAt,
       endedAt: Date.now(),
       lastOutputLine: getLastDeployOutputLine(stackName),
+      failure,
     });
   };
 
@@ -619,7 +664,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             return { ok: false, errorMessage: message };
           }
         }
-        throw parseStackActionError(rawBody, 'Deploy failed');
+        throw parseStackActionError(rawBody, 'Deploy failed', response.status);
       }
       overlayState.setPolicyBlock(null);
       toast.success(
@@ -645,7 +690,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           ? `${errorMessage} - automatically rolled back to previous version.`
           : errorMessage,
       );
-      recordActionFailureFor(stackFile, stackName, 'deploy', startedAt, errorMessage, deployError.rolledBack === true);
+      recordActionFailureFor(stackFile, stackName, 'deploy', startedAt, errorMessage, deployError.rolledBack === true, deployError.failure);
       await refreshSelectedContainers(stackName, stackFile);
       return { ok: false, errorMessage, rolledBack: deployError.rolledBack };
     }
@@ -736,7 +781,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             return;
           }
         }
-        throw parseStackActionError(rawBody, 'Rollback failed');
+        throw parseStackActionError(rawBody, 'Rollback failed', res.status);
       }
       overlayState.setPolicyBlock(null);
       toast.success('Stack rolled back successfully.');
@@ -758,7 +803,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Rollback failed';
       toast.error(msg);
-      recordActionFailureFor(stackFile, stackName, 'rollback', startedAt, msg, false);
+      recordActionFailureFor(stackFile, stackName, 'rollback', startedAt, msg, false,
+        error instanceof Error ? (error as StackActionError).failure : undefined);
       await refreshSelectedContainers(stackName, stackFile);
     } finally {
       stackListState.clearStackAction(stackFile);
@@ -850,8 +896,8 @@ export function useStackActions(options: UseStackActionsOptions) {
                 }
               }
             }
-            const actionError = parseStackActionError(errText, `${action} failed`);
-            recordActionFailureFor(stackFile, stackName, action, startedAt, actionError.message, actionError.rolledBack === true);
+            const actionError = parseStackActionError(errText, `${action} failed`, response.status);
+            recordActionFailureFor(stackFile, stackName, action, startedAt, actionError.message, actionError.rolledBack === true, actionError.failure);
             await refreshSelectedContainers(stackName, stackFile);
             return {
               ok: false as const,
@@ -1044,7 +1090,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             }
           }
         }
-        throw parseStackActionError(errText, `${action} failed`);
+        throw parseStackActionError(errText, `${action} failed`, response.status);
       }
       toast.success(`Stack ${action}ed successfully!`);
       await refreshSelectedContainers(stackName, stackFile);
@@ -1067,7 +1113,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           ? `${msg} - automatically rolled back to previous version.`
           : msg,
       );
-      recordActionFailureFor(stackFile, stackName, action, startedAt, msg, actionError.rolledBack === true);
+      recordActionFailureFor(stackFile, stackName, action, startedAt, msg, actionError.rolledBack === true, actionError.failure);
       await refreshSelectedContainers(stackName, stackFile);
     } finally {
       stackListState.clearStackAction(stackFile);

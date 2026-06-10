@@ -82,6 +82,43 @@ describe('RecoveryPanel', () => {
     expect(blob).toContain('Last output: pulling app ...');
   });
 
+  it('renders the failure classification label and suggestion when present', () => {
+    setup({
+      result: {
+        ...baseResult,
+        failure: {
+          reason: 'port_conflict',
+          label: 'Host port conflict',
+          suggestion: 'Free the conflicting host port, then retry.',
+        },
+      },
+    });
+    expect(screen.getByText('Host port conflict')).toBeInTheDocument();
+    expect(screen.getByText('Free the conflicting host port, then retry.')).toBeInTheDocument();
+  });
+
+  it('renders no classification block without a failure field', () => {
+    setup();
+    expect(screen.queryByText('Host port conflict')).not.toBeInTheDocument();
+  });
+
+  it('includes the classification in copied diagnostics', () => {
+    setup({
+      result: {
+        ...baseResult,
+        failure: {
+          reason: 'env_missing',
+          label: 'Missing environment variable',
+          suggestion: 'Define the missing variable, then retry.',
+        },
+      },
+    });
+    fireEvent.click(screen.getByText('Copy details'));
+    const blob = vi.mocked(copyToClipboard).mock.calls[0][0];
+    expect(blob).toContain('Classified: Missing environment variable');
+    expect(blob).toContain('Suggestion: Define the missing variable, then retry.');
+  });
+
   it('wires refresh and dismiss callbacks', () => {
     const props = setup();
     fireEvent.click(screen.getByText('Refresh'));

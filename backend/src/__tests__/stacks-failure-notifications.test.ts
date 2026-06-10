@@ -242,6 +242,67 @@ describe('deploy_failure notification on /deploy error', () => {
   });
 });
 
+describe('failure classification on deploy/update error responses', () => {
+  it('classifies a failed deploy and includes failure in the body', async () => {
+    mockDeployStack.mockRejectedValue(
+      new Error('Bind for 0.0.0.0:8080 failed: port is already allocated'),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.failure).toMatchObject({ reason: 'port_conflict' });
+    expect(typeof res.body.failure.label).toBe('string');
+    expect(typeof res.body.failure.suggestion).toBe('string');
+  });
+
+  it('classifies a failed update and includes failure in the body', async () => {
+    mockUpdateStack.mockRejectedValue(
+      new Error('pull access denied for private/app, repository does not exist'),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/update')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.failure).toMatchObject({ reason: 'image_pull_failed' });
+  });
+
+  it('classifies the underlying cause when the update was rolled back', async () => {
+    mockUpdateStack.mockRejectedValue(
+      new ComposeRollbackError(
+        new Error('dependency failed to start: container app-db-1 is unhealthy'),
+        true,
+        true,
+      ),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/update')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      rolledBack: true,
+      failure: { reason: 'healthcheck_failed' },
+    });
+  });
+
+  it('falls back to unknown for unrecognized failures', async () => {
+    mockDeployStack.mockRejectedValue(new Error('weird one-off explosion'));
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.failure.reason).toBe('unknown');
+  });
+});
+
 describe('post-deploy scan opt-out', () => {
   it('does not trigger a post-deploy scan when skip_scan is true', async () => {
     mockDeployStack.mockResolvedValue(undefined);

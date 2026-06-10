@@ -453,6 +453,67 @@ describe('useStackActions recovery records', () => {
     );
   });
 
+  it('carries the server failure classification into the recovery record', async () => {
+    const body = JSON.stringify({
+      error: 'port is already allocated',
+      rolledBack: false,
+      failure: { reason: 'port_conflict', label: 'Host port conflict', suggestion: 'Free the port, then retry.' },
+    });
+    routeApi(500, body);
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({
+        failure: { reason: 'port_conflict', label: 'Host port conflict', suggestion: 'Free the port, then retry.' },
+      }),
+    );
+  });
+
+  it('ignores a malformed failure field in the response body', async () => {
+    routeApi(500, JSON.stringify({ error: 'boom', failure: { reason: 42 } }));
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({ failure: undefined }),
+    );
+  });
+
+  it('synthesizes a node_unreachable classification for a gateway 502 with no body', async () => {
+    routeApi(502, 'Bad Gateway');
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({
+        failure: expect.objectContaining({ reason: 'node_unreachable' }),
+      }),
+    );
+  });
+
+  it('does not mislabel an unrelated JSON 503 as node_unreachable', async () => {
+    routeApi(503, JSON.stringify({ error: 'maintenance window' }));
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({ failure: undefined }),
+    );
+  });
+
+  it('synthesizes node_unreachable for a docker_unavailable 503 without a classified body', async () => {
+    routeApi(503, JSON.stringify({ error: 'daemon gone', code: 'docker_unavailable' }));
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({
+        failure: expect.objectContaining({ reason: 'node_unreachable' }),
+      }),
+    );
+  });
+
   it('records a rollback failure', async () => {
     vi.mocked(apiFetch).mockImplementation((url: string) => {
       const u = String(url);

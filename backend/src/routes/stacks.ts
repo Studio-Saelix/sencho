@@ -16,6 +16,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
+import { classifyFailure } from '../services/updateGuard/failureClassifier';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
@@ -1156,12 +1157,14 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       console.warn('[Stacks] Deploy failed, rollback did not complete: %s', sanitizeForLog(stackName));
     }
     const message = getErrorMessage(error, 'Failed to deploy stack');
+    // ComposeRollbackError already carries the cause's message; see classifyFailure.
+    const failure = classifyFailure(message, { dockerUnavailable: isDockerUnavailableError(error) });
     notifyActionFailure('deploy', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
-        res.status(503).json({ error: message, code: 'docker_unavailable', rolledBack });
+        res.status(503).json({ error: message, code: 'docker_unavailable', rolledBack, failure });
       } else {
-        res.status(500).json({ error: message, rolledBack });
+        res.status(500).json({ error: message, rolledBack, failure });
       }
     }
   } finally {
@@ -1426,10 +1429,13 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     }
     notifyActionFailure('update', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
+      const message = getErrorMessage(error, 'Failed to update');
+      // ComposeRollbackError already carries the cause's message; see classifyFailure.
+      const failure = classifyFailure(message, { dockerUnavailable: isDockerUnavailableError(error) });
       if (isDockerUnavailableError(error)) {
-        res.status(503).json({ error: getErrorMessage(error, 'Docker daemon is unreachable'), code: 'docker_unavailable', rolledBack });
+        res.status(503).json({ error: message, code: 'docker_unavailable', rolledBack, failure });
       } else {
-        res.status(500).json({ error: getErrorMessage(error, 'Failed to update'), rolledBack });
+        res.status(500).json({ error: message, rolledBack, failure });
       }
     }
   } finally {

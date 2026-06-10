@@ -64,6 +64,12 @@ export function RecoveryActions({
 
     return (
         <div className={container}>
+            {result.failure && (
+                <div className={list ? 'mb-1 px-2 pb-1' : 'mb-1 w-full'}>
+                    <p className="text-xs font-medium text-foreground">{result.failure.label}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{result.failure.suggestion}</p>
+                </div>
+            )}
             {canDeploy && (
                 <Button variant={list ? 'ghost' : 'outline'} size="sm" className={primary} onClick={onRetry}>
                     <RotateCcw className="h-3.5 w-3.5" />
