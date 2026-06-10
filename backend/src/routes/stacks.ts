@@ -15,6 +15,7 @@ import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../se
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
+import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
@@ -1086,6 +1087,39 @@ stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Respons
   }
 });
 
+// Compose Doctor: GET returns the last stored preflight run (or a never-run
+// sentinel); it is a side-effect-free read. Both routes auto-proxy to the active
+// node, so a remote stack is preflighted on the node that actually owns it.
+stacksRouter.get('/:stackName/preflight', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(ComposeDoctorService.getInstance().getLatest(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to load preflight for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to load preflight report' });
+  }
+});
+
+// Running preflight renders the effective model and stores the result, replacing
+// any prior run. It is advisory and never blocks a deploy; stack:read is the
+// correct gate since it mutates only the preflight tables, never the stack.
+stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const report = await ComposeDoctorService.getInstance().runPreflight(req.nodeId, stackName, req.user?.username ?? null);
+    res.json(report);
+  } catch (error) {
+    console.error('[Stacks] Failed to run preflight for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to run preflight' });
+  }
+});
+
 stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
@@ -1421,8 +1455,24 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       return;
     }
     dlog(`[Stacks] Rollback initiated: ${sanitizeForLog(stackName)}`);
+    // Snapshot the current files before restoring so a policy gate that blocks
+    // the restored target can be undone: restoreStackFiles commits to disk, and
+    // without this a blocked rollback would leave disk rolled back while the
+    // deployed state is unchanged.
+    const revertRestore = await fsSvc.snapshotStackFiles(stackName);
     await fsSvc.restoreStackFiles(stackName);
-    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
+      try {
+        await revertRestore();
+      } catch (revertError) {
+        console.error('[Stacks] Failed to revert files after a policy-blocked rollback: %s', sanitizeForLog(stackName), revertError);
+        // The 409 is already sent and the on-disk config now diverges from the
+        // running stack; surface it on the persistent alert feed so the operator
+        // can repair it rather than discovering it on the next deploy.
+        notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+      }
+      return;
+    }
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), false);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);

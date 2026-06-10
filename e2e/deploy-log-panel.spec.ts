@@ -96,8 +96,13 @@ async function syncDeployFeedbackState(page: Page): Promise<void> {
 }
 
 async function disableDeployFeedback(page: Page): Promise<void> {
+  // The panel is on by default (opt-out), so disabling means writing an
+  // explicit 'false' that survives the reload, not clearing the key.
+  await page.addInitScript((key: string) => {
+    window.localStorage.setItem(key, 'false');
+  }, DEPLOY_FEEDBACK_KEY);
   await page.evaluate((key: string) => {
-    window.localStorage.removeItem(key);
+    window.localStorage.setItem(key, 'false');
     window.dispatchEvent(new CustomEvent('SENCHO_SETTINGS_CHANGED'));
   }, DEPLOY_FEEDBACK_KEY);
 }
@@ -165,7 +170,7 @@ test.describe('Deploy feedback modal', () => {
     await waitForStacksLoaded(page);
   });
 
-  test('no modal appears when opt-in is off', async ({ page }) => {
+  test('no modal appears when the progress panel is turned off', async ({ page }) => {
     test.setTimeout(60_000);
 
     await disableDeployFeedback(page);
@@ -173,7 +178,7 @@ test.describe('Deploy feedback modal', () => {
 
     await page.getByTestId('stack-deploy-button').click();
 
-    // Modal must not appear when opt-in is disabled
+    // Modal must not appear when the panel has been explicitly disabled
     await expect(page.locator('[data-testid="deploy-feedback-modal"]')).not.toBeVisible({
       timeout: 5_000,
     });
@@ -298,6 +303,47 @@ test.describe('Deploy feedback modal', () => {
     await expect(modal).toBeVisible({ timeout: 5_000 });
     await expect(page.getByText('Succeeded')).toBeVisible({ timeout: 90_000 });
     await expect(page.getByText(/client disconnected/i)).toHaveCount(0);
+  });
+
+  test('failed operation shows a recovery panel with retry on desktop and mobile', async ({ page }) => {
+    test.setTimeout(90_000);
+    // The recovery panel lives in the stack detail and must work without the
+    // streaming modal, so disable the modal and assert the panel directly.
+    await disableDeployFeedback(page);
+
+    let opCalls = 0;
+    await page.route('**/api/stacks/**/deploy*', async (route) => {
+      opCalls += 1;
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'pull failed: connection reset' }),
+      });
+    });
+
+    await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
+
+    // Desktop: a failed operation surfaces a recovery chip and never leaves the
+    // action button stuck in a spinner. Clicking the chip opens the popover with
+    // the recovery actions.
+    await page.getByTestId('stack-deploy-button').click();
+    await expect(page.getByTestId('recovery-chip')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Deploy failed')).toBeVisible();
+    await expect(page.getByTestId('stack-deploy-button')).toBeEnabled({ timeout: 10_000 });
+
+    await page.getByTestId('recovery-chip').click();
+    await expect(page.getByTestId('recovery-panel')).toBeVisible({ timeout: 10_000 });
+    // Retry re-issues the operation through the shared handler.
+    await page.getByRole('button', { name: 'Retry deploy' }).click();
+    await expect.poll(() => opCalls, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+
+    // Mobile shell (below the md break) renders the recovery card inline.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.reload();
+    await waitForStacksLoaded(page);
+    await page.getByText(HAPPY_STACK, { exact: true }).first().click();
+    await page.getByTestId('stack-deploy-button').click();
+    await expect(page.getByTestId('recovery-panel')).toBeVisible({ timeout: 15_000 });
   });
 
   test.afterEach(async ({ page }) => {

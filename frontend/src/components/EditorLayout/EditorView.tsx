@@ -38,6 +38,8 @@ import { StackFileExplorer } from '@/components/files/StackFileExplorer';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
 import { MobileStackDetail } from './MobileStackDetail';
+import { RecoveryChip } from './RecoveryChip';
+import { retryHandlerFor } from './recovery-retry';
 import type { NotificationItem } from '../dashboard/types';
 import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
@@ -61,6 +63,32 @@ export type StackAction =
     | 'update'
     | 'delete'
     | 'rollback';
+
+/**
+ * Stack operations the recovery panel can offer safe next steps for. A failed
+ * stop/start/delete is not "recoverable" through retry/restart/rollback, so it
+ * never produces a record; narrowing the type keeps the panel's retry routing
+ * exhaustive.
+ */
+export type RecoverableAction = Extract<StackAction, 'deploy' | 'update' | 'restart' | 'rollback'>;
+
+/**
+ * Terminal record of a failed stack operation, kept in memory per stack so the
+ * recovery panel can offer safe next steps after an update/deploy fails or
+ * stalls. Cleared when the same stack's next operation succeeds or is dismissed,
+ * and on active-node change (the keyed stack filename can repeat across nodes).
+ */
+export interface StackActionResult {
+    action: RecoverableAction;
+    rolledBack: boolean;
+    errorMessage?: string;
+    startedAt: number;
+    endedAt: number;
+    // Last live output line captured only when a matching deploy-feedback
+    // session was streaming this stack at failure time; omitted otherwise so a
+    // line from another stack/session never leaks into diagnostics.
+    lastOutputLine?: string;
+}
 
 export interface ContainerStatsEntry {
     cpu: string;
@@ -143,6 +171,13 @@ export interface EditorViewProps {
     // Composed action: wraps setStackToDelete + setDeleteDialogOpen
     requestDeleteStack: () => void;
 
+    // Recovery surface for a failed/stalled operation on this stack (undefined
+    // when the last op succeeded or none has run). onRefreshState re-syncs
+    // container state; onDismissRecovery drops the record.
+    recoveryResult?: StackActionResult;
+    onRefreshState: () => void;
+    onDismissRecovery: () => void;
+
     // Mobile-only: back affordance in the detail header returns to the stack list.
     onMobileBack?: () => void;
     // Mobile-only: notifications + more-menu cluster for the detail header right
@@ -200,6 +235,9 @@ export function EditorView(props: EditorViewProps) {
         setGitSourceOpen,
         setCopiedDigest,
         requestDeleteStack,
+        recoveryResult,
+        onRefreshState,
+        onDismissRecovery,
     } = props;
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
 
@@ -262,28 +300,48 @@ export function EditorView(props: EditorViewProps) {
                     {/* Command Center Card (identity + health strip) */}
                     <Card className="rounded-xl border-muted bg-card shrink-0">
                         <CardHeader className="p-4 pb-2">
-                            <StackIdentityHeader
-                                stackName={stackName}
-                                activeNode={activeNode}
-                                safeContainers={safeContainers}
-                                isRunning={isRunning}
-                                copiedDigest={copiedDigest}
-                                setCopiedDigest={setCopiedDigest}
-                                copiedDigestTimerRef={copiedDigestTimerRef}
-                                can={can}
-                                isAdmin={isAdmin}
-                                trivy={trivy}
-                                backupInfo={backupInfo}
-                                loadingAction={loadingAction}
-                                stackMisconfigScanning={stackMisconfigScanning}
-                                deployStack={deployStack}
-                                restartStack={restartStack}
-                                stopStack={stopStack}
-                                updateStack={updateStack}
-                                rollbackStack={rollbackStack}
-                                scanStackConfig={scanStackConfig}
-                                requestDeleteStack={requestDeleteStack}
-                            />
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                    <StackIdentityHeader
+                                        stackName={stackName}
+                                        activeNode={activeNode}
+                                        safeContainers={safeContainers}
+                                        isRunning={isRunning}
+                                        copiedDigest={copiedDigest}
+                                        setCopiedDigest={setCopiedDigest}
+                                        copiedDigestTimerRef={copiedDigestTimerRef}
+                                        can={can}
+                                        isAdmin={isAdmin}
+                                        trivy={trivy}
+                                        backupInfo={backupInfo}
+                                        loadingAction={loadingAction}
+                                        stackMisconfigScanning={stackMisconfigScanning}
+                                        deployStack={deployStack}
+                                        restartStack={restartStack}
+                                        stopStack={stopStack}
+                                        updateStack={updateStack}
+                                        rollbackStack={rollbackStack}
+                                        scanStackConfig={scanStackConfig}
+                                        requestDeleteStack={requestDeleteStack}
+                                    />
+                                </div>
+                                {recoveryResult && loadingAction == null && (
+                                    <div className="shrink-0">
+                                        <RecoveryChip
+                                            stackName={stackName}
+                                            result={recoveryResult}
+                                            activeNode={activeNode}
+                                            backupInfo={backupInfo}
+                                            canDeploy={can('stack:deploy', 'stack', stackName)}
+                                            onRetry={retryHandlerFor(recoveryResult.action, { deployStack, restartStack, updateStack, rollbackStack })}
+                                            onRestart={restartStack}
+                                            onRollback={rollbackStack}
+                                            onRefreshState={onRefreshState}
+                                            onDismiss={onDismissRecovery}
+                                        />
+                                    </div>
+                                )}
+                            </div>
                         </CardHeader>
                         <CardContent className="p-4 pt-2">
                             <ContainersHealth

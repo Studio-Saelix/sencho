@@ -12,6 +12,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { ComposeRollbackError } from '../services/ComposeService';
+import * as policyGate from '../helpers/policyGate';
 
 // ── Hoisted mocks (must come before importing the app) ──────────────────────
 
@@ -26,6 +27,9 @@ const {
   mockIsTrivyAvailable,
   mockGetImageDigest,
   mockRunScanAndPersist,
+  mockGetBackupInfo,
+  mockRestoreStackFiles,
+  mockSnapshotStackFiles,
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockRunCommand: vi.fn(),
@@ -37,6 +41,9 @@ const {
   mockIsTrivyAvailable: vi.fn(),
   mockGetImageDigest: vi.fn(),
   mockRunScanAndPersist: vi.fn(),
+  mockGetBackupInfo: vi.fn(),
+  mockRestoreStackFiles: vi.fn(),
+  mockSnapshotStackFiles: vi.fn(),
 }));
 
 vi.mock('../services/ComposeService', async () => {
@@ -100,6 +107,9 @@ vi.mock('../services/FileSystemService', () => ({
       getBaseDir: () => '/tmp/compose',
       readComposeFile: vi.fn().mockResolvedValue(''),
       hasComposeFile: vi.fn().mockResolvedValue(true),
+      getBackupInfo: mockGetBackupInfo,
+      restoreStackFiles: mockRestoreStackFiles,
+      snapshotStackFiles: mockSnapshotStackFiles,
     }),
   },
 }));
@@ -145,6 +155,12 @@ beforeEach(() => {
     critical_count: 0,
     high_count: 0,
   });
+  mockGetBackupInfo.mockReset();
+  mockRestoreStackFiles.mockReset();
+  mockSnapshotStackFiles.mockReset();
+  mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: 1 });
+  mockRestoreStackFiles.mockResolvedValue(undefined);
+  mockSnapshotStackFiles.mockResolvedValue(async () => {});
   dispatchAlertSpy.mockClear();
 });
 
@@ -352,5 +368,65 @@ describe('deploy_failure notification on /update error', () => {
 
     expect(res.status).toBe(200);
     expect(mockUpdateStack.mock.calls[0][2]).toBe(true);
+  });
+});
+
+describe('rollback file-revert safety on a policy-blocked rollback', () => {
+  it('does not deploy and alerts the operator when the post-block file revert fails', async () => {
+    // The restored backup is blocked by policy after files were already restored.
+    const gateSpy = vi
+      .spyOn(policyGate, 'runPolicyGate')
+      .mockImplementation(async (_req, res) => {
+        res.status(409).json({ error: 'Rollback blocked by policy' });
+        return false;
+      });
+    // The revert that should undo the restore itself fails (e.g. EACCES on a
+    // chowned bind mount), leaving disk inconsistent with the deployed stack.
+    mockSnapshotStackFiles.mockResolvedValue(async () => {
+      throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    });
+    try {
+      const res = await request(app)
+        .post('/api/stacks/myapp/rollback')
+        .set('Cookie', authCookie);
+
+      expect(res.status).toBe(409);
+      // The rollback must not have deployed the blocked target.
+      expect(mockDeployStack).not.toHaveBeenCalled();
+      await new Promise(resolve => setImmediate(resolve));
+      // The revert failure is escalated on the persistent alert feed.
+      expect(dispatchAlertSpy).toHaveBeenCalledWith(
+        'error',
+        'deploy_failure',
+        expect.stringContaining('EACCES'),
+        { stackName: 'myapp', actor: 'testadmin' },
+      );
+    } finally {
+      gateSpy.mockRestore();
+    }
+  });
+
+  it('reverts cleanly and stays quiet when the policy block revert succeeds', async () => {
+    const revert = vi.fn().mockResolvedValue(undefined);
+    const gateSpy = vi
+      .spyOn(policyGate, 'runPolicyGate')
+      .mockImplementation(async (_req, res) => {
+        res.status(409).json({ error: 'Rollback blocked by policy' });
+        return false;
+      });
+    mockSnapshotStackFiles.mockResolvedValue(revert);
+    try {
+      const res = await request(app)
+        .post('/api/stacks/myapp/rollback')
+        .set('Cookie', authCookie);
+
+      expect(res.status).toBe(409);
+      expect(revert).toHaveBeenCalledTimes(1);
+      expect(mockDeployStack).not.toHaveBeenCalled();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(dispatchAlertSpy).not.toHaveBeenCalled();
+    } finally {
+      gateSpy.mockRestore();
+    }
   });
 });

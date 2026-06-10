@@ -50,6 +50,22 @@ function getComposeCommandTimeoutMs(): number {
   return DEFAULT_COMPOSE_COMMAND_TIMEOUT_MS;
 }
 
+// Idle backstop for long-running pull/recreate steps: if the child emits no
+// output for this window while still running, the step is treated as stalled
+// and terminated, so a hung `docker compose pull` surfaces a fast failure
+// instead of spinning until the much longer command timeout above. Conservative
+// by default because a working pull can be briefly silent while a large layer
+// extracts; operators on slow links or heavy local builds can raise it.
+const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+function getComposeStallTimeoutMs(): number {
+  const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return DEFAULT_COMPOSE_STALL_TIMEOUT_MS;
+}
+
 /**
  * ComposeService - local docker compose CLI execution.
  *
@@ -98,7 +114,11 @@ export class ComposeService {
     cwd: string,
     ws?: WebSocket,
     throwOnError = true,
-    env?: Record<string, string | undefined>
+    env?: Record<string, string | undefined>,
+    // When set, terminate the child if it emits no output for this long while
+    // still running (idle stall backstop). Appended last so the existing
+    // registry-auth call sites that pass `env` are unaffected.
+    idleTimeoutMs?: number
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
@@ -116,6 +136,7 @@ export class ComposeService {
       const timeoutMs = getComposeCommandTimeoutMs();
       let timeout: ReturnType<typeof setTimeout> | null = null;
       let forceKillTimeout: ReturnType<typeof setTimeout> | null = null;
+      let idleTimeout: ReturnType<typeof setTimeout> | null = null;
 
       const sendOutput = (text: string) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -131,6 +152,10 @@ export class ComposeService {
         if (forceKillTimeout) {
           clearTimeout(forceKillTimeout);
           forceKillTimeout = null;
+        }
+        if (idleTimeout) {
+          clearTimeout(idleTimeout);
+          idleTimeout = null;
         }
       };
 
@@ -159,21 +184,39 @@ export class ComposeService {
         }, 5000);
       };
 
+      // Idle stall backstop. Armed once below and reset on every output chunk;
+      // if it ever fires, the step has been silent for idleTimeoutMs while still
+      // running, so terminate it. Never rearmed after a termination is pending or
+      // the child has exited, so it cannot re-fire during the SIGTERM grace.
+      const armIdleTimeout = () => {
+        if (idleTimeoutMs === undefined) return;
+        if (exited || settled || pendingTerminationError) return;
+        if (idleTimeout) clearTimeout(idleTimeout);
+        idleTimeout = setTimeout(() => {
+          const seconds = Math.round(idleTimeoutMs / 1000);
+          sendOutput(`=== No output for ${seconds}s; the operation appears stalled and was stopped ===\n`);
+          terminateChild(new Error(`STACK_STALLED_OUTPUT: no output for ${seconds}s`));
+        }, idleTimeoutMs);
+      };
+
       // The progress socket is output-only: a deploy/update/down is owned by the
       // HTTP request that started it, so closing or losing the socket (the user
       // minimizes the panel, navigates away, or the connection blips) must not
       // terminate the compose process. Termination is driven solely by the
-      // command timeout below.
+      // command timeout here and the optional idle stall backstop above.
       timeout = setTimeout(() => {
         const message = `Command timed out after ${Math.round(timeoutMs / 1000)}s`;
         sendOutput(`${message}\n`);
         terminateChild(new Error(message));
       }, timeoutMs);
 
+      armIdleTimeout();
+
       const onData = (data: Buffer) => {
         const text = data.toString();
         errorLog += text;
         sendOutput(text);
+        armIdleTimeout();
       };
 
       child.stdout.on('data', onData);
@@ -328,7 +371,7 @@ export class ComposeService {
       }
 
       await this.withRegistryAuth(async (env) => {
-        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
+        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
 
       // Post-Deploy Health Probe
@@ -505,10 +548,10 @@ export class ComposeService {
 
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Pulling latest images ===\n');
-        await this.execute('docker', ['compose', 'pull'], stackDir, ws, true, env);
+        await this.execute('docker', ['compose', 'pull'], stackDir, ws, true, env, getComposeStallTimeoutMs());
 
         sendOutput('=== Recreating containers ===\n');
-        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
+        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
 
       // Post-Update Health Probe
@@ -628,6 +671,80 @@ export class ComposeService {
       child.on('close', (code) => {
         if (code === 0) resolve(stdout);
         else reject(new Error(stderr.trim() || `docker compose ${args.join(' ')} failed with code ${code}`));
+      });
+    });
+  }
+
+  /**
+   * Render the fully-resolved effective Compose model via `docker compose
+   * config --format json`. This is the AUTHORED model: it does NOT splice in
+   * the Sencho Mesh override, so it stays read-only (the override is
+   * write-generated) and reflects what the user actually edits. The override
+   * would also add the managed `sencho_mesh` external network and per-service
+   * mesh attachments, which would make preflight emit a false "external network
+   * not found" finding, so rendering the authored model is both safer and more
+   * accurate here.
+   * Captures stderr (where Compose reports unset variables) and never rejects
+   * on a non-zero exit, so the Compose Doctor can turn a failed render into a
+   * finding rather than an exception. Bounded by a timeout and an output cap.
+   * Rejects only when the docker binary cannot be spawned.
+   */
+  public renderConfig(
+    stackName: string,
+  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean }> {
+    if (!isValidStackName(stackName)) {
+      return Promise.reject(new Error('Invalid stack path'));
+    }
+    // Canonical inline js/path-injection barrier, kept in the same scope as the
+    // spawn cwd sink below. CodeQL credits neither the wrapped isPathWithinBase
+    // helper nor a barrier separated from the sink by the Promise-executor
+    // closure, so the spawn is hoisted out of the executor. startsWith already
+    // rejects the base dir itself, since base does not start with base + sep.
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = path.resolve(baseResolved, stackName);
+    if (!stackDir.startsWith(baseResolved + path.sep)) {
+      return Promise.reject(new Error('Invalid stack path'));
+    }
+    const child = spawn('docker', ['compose', 'config', '--format', 'json'], {
+      cwd: stackDir,
+      env: {
+        ...process.env,
+        PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      },
+    });
+    return new Promise((resolve, reject) => {
+      const MAX_OUTPUT = 5 * 1024 * 1024; // 5 MiB cap on each stream
+      const TIMEOUT_MS = 20_000;
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+      let capped = false;
+      let settled = false;
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, TIMEOUT_MS);
+      const finish = (result: { rendered: string | null; stderr: string; code: number | null; timedOut: boolean }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      child.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+        if (stdout.length > MAX_OUTPUT && !capped) { capped = true; child.kill('SIGKILL'); }
+      });
+      child.stderr.on('data', (data: Buffer) => {
+        if (stderr.length < MAX_OUTPUT) stderr += data.toString();
+      });
+      child.on('error', (err: NodeJS.ErrnoException) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(new Error(describeSpawnError(err, { command: 'docker compose' }).message));
+      });
+      child.on('close', (code) => {
+        if (timedOut) finish({ rendered: null, stderr: stderr.trim() || 'docker compose config timed out', code, timedOut: true });
+        else if (capped) finish({ rendered: null, stderr: 'Rendered model exceeded the size limit', code, timedOut: false });
+        else if (code === 0) finish({ rendered: stdout, stderr, code, timedOut: false });
+        else finish({ rendered: null, stderr: stderr.trim() || `docker compose config failed with code ${code}`, code, timedOut: false });
       });
     });
   }

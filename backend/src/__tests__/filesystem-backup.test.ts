@@ -228,6 +228,58 @@ describe('FileSystemService backup location', () => {
     await expect(service.restoreStackFiles(stackName)).rejects.toThrow(/Rollback aborted/i);
   });
 
+  it('snapshotStackFiles reverts a restore so a policy-blocked rollback leaves current files in place', async () => {
+    const stackName = 'revert';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    // The rollback target (older config) is captured into the backup slot.
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: old\n', 'utf-8');
+
+    const service = FileSystemService.getInstance();
+    await service.backupStackFiles(stackName);
+
+    // The current in-use config differs from the backup and adds a managed file
+    // (.env) the backup does not have.
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: current\n', 'utf-8');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'TOKEN=current\n', 'utf-8');
+
+    // Snapshot current, then restore the backup, mirroring the rollback route.
+    const revert = await service.snapshotStackFiles(stackName);
+    await service.restoreStackFiles(stackName);
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: old\n');
+    await expect(fsPromises.access(path.join(stackDir, '.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // The policy gate blocks the restored target: revert must put the current
+    // files back exactly (content restored, the removed .env recreated).
+    await revert();
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: current\n');
+    expect(await fsPromises.readFile(path.join(stackDir, '.env'), 'utf-8')).toBe('TOKEN=current\n');
+  });
+
+  it('snapshotStackFiles revert removes a managed file the snapshot did not have', async () => {
+    const stackName = 'revert-orphan';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    // Backup target has compose + .env; current has only compose.
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: target\n', 'utf-8');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'TOKEN=target\n', 'utf-8');
+
+    const service = FileSystemService.getInstance();
+    await service.backupStackFiles(stackName);
+
+    await fsPromises.rm(path.join(stackDir, '.env'));
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: current\n', 'utf-8');
+
+    const revert = await service.snapshotStackFiles(stackName);
+    await service.restoreStackFiles(stackName); // brings back the .env from the backup
+    await expect(fsPromises.access(path.join(stackDir, '.env'))).resolves.toBeUndefined();
+
+    await revert();
+    // The current state had no .env, so revert must remove the restored one.
+    await expect(fsPromises.access(path.join(stackDir, '.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: current\n');
+  });
+
   it('restoreStackFiles leaves non-managed files untouched', async () => {
     const stackName = 'userdata';
     const stackDir = path.join(composeDir, stackName);

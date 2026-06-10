@@ -110,6 +110,7 @@ vi.mock('../services/LogFormatter', () => ({
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 
 const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
+const originalStallTimeout = process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS;
 
 /** Creates an EventEmitter that mimics a child_process spawn result */
 function createMockProcess() {
@@ -168,6 +169,11 @@ afterEach(() => {
     delete process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
   } else {
     process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS = originalComposeTimeout;
+  }
+  if (originalStallTimeout === undefined) {
+    delete process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS;
+  } else {
+    process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = originalStallTimeout;
   }
 });
 
@@ -687,5 +693,124 @@ describe('ComposeService - downStack', () => {
 
     const svc = ComposeService.getInstance(1);
     await expect(svc.downStack('my-stack')).resolves.toBeUndefined();
+  });
+});
+
+// ── stall (idle-output) backstop ───────────────────────────────────────
+
+describe('ComposeService - idle-output stall backstop', () => {
+  it('terminates a silent update step and rejects with STACK_STALLED_OUTPUT', async () => {
+    process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    // The pull emits nothing; the idle backstop should fire after 1s.
+    const result = svc.updateStack('my-stack').then(() => null, (e: Error) => e);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    proc.emit('close', null);
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('STACK_STALLED_OUTPUT');
+  });
+
+  it('sends a stalled marker to the WebSocket before terminating', async () => {
+    process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const ws = createMockWs();
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.updateStack('my-stack', ws).then(() => null, (e: Error) => e);
+    await vi.advanceTimersByTimeAsync(1000);
+    proc.emit('close', null);
+    await result;
+
+    const sendCalls = ws.send.mock.calls.map(c => c[0] as string);
+    expect(sendCalls.some(msg => msg.includes('appears stalled and was stopped'))).toBe(true);
+  });
+
+  it('does not stall when output keeps arriving within the idle window', async () => {
+    process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
+    mockListContainers.mockResolvedValue([]);
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    // deployStack spawns a single `up`; emit output every 600ms (< 1s window)
+    // so the idle timer resets and never fires.
+    const promise = svc.deployStack('my-stack');
+    await vi.advanceTimersByTimeAsync(600);
+    proc.stdout.emit('data', Buffer.from('pulling layer a...'));
+    await vi.advanceTimersByTimeAsync(600);
+    proc.stdout.emit('data', Buffer.from('pulling layer b...'));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(proc.kill).not.toHaveBeenCalled();
+
+    proc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(3100); // health probe
+    await promise;
+    expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('does not arm the idle backstop for runCommand (down/restart/stop stay silent-safe)', async () => {
+    process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart');
+    // A silent restart longer than the stall window must not be killed: the
+    // idle backstop is only armed for deploy/update compose steps.
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(proc.kill).not.toHaveBeenCalled();
+
+    proc.emit('close', 0);
+    await promise;
+  });
+
+  it('falls back to the default stall window when the env value is invalid', async () => {
+    process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '0'; // invalid → default (10min)
+    mockListContainers.mockResolvedValue([]);
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.deployStack('my-stack');
+    // Far below the 10-minute default: a '0' that leaked through would fire at 0ms.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(proc.kill).not.toHaveBeenCalled();
+
+    proc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(3100); // health probe
+    await promise;
+  });
+
+  it('preserves STACK_STALLED_OUTPUT through the atomic rollback wrapper', async () => {
+    process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
+    const pullProc = createMockProcess();
+    let call = 0;
+    // First spawn is the stalling pull; later spawns (the rollback restore's
+    // `up`) close cleanly, proving the restore is not idle-timeout armed.
+    mockSpawn.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return pullProc;
+      const p = createMockProcess();
+      Promise.resolve().then(() => p.emit('close', 0));
+      return p;
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.updateStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+    await vi.advanceTimersByTimeAsync(1000); // idle backstop fires on the silent pull
+    pullProc.emit('close', null);
+    await vi.runAllTimersAsync();
+
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('STACK_STALLED_OUTPUT');
+    expect(getComposeRollbackInfo(error)).toMatchObject({ attempted: true });
   });
 });

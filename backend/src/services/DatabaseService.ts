@@ -93,6 +93,33 @@ export interface StackDossier extends StackDossierFields {
     updated_at: number;
 }
 
+/** A stored Compose Doctor run. Replace-on-run keeps one row per (node, stack). */
+export interface PreflightRunRow {
+    id: string;
+    node_id: number;
+    stack_name: string;
+    source_hash: string | null;
+    rendered_hash: string | null;
+    status: string;
+    highest_severity: string | null;
+    created_at: number;
+    created_by: string | null;
+}
+
+/** One finding within a stored preflight run. Never carries an environment value. */
+export interface PreflightFindingRow {
+    id: string;
+    run_id: string;
+    rule_id: string;
+    severity: string;
+    title: string;
+    message: string;
+    source_path: string | null;
+    remediation: string | null;
+    service: string | null;
+    created_at: number;
+}
+
 /** A persisted drift finding: one service-scoped divergence, open until resolved. */
 export interface StackDriftFindingRow {
     id: number;
@@ -1216,6 +1243,35 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_stack_drift_findings_open
         ON stack_drift_findings(node_id, stack_name, resolved_at);
 
+      CREATE TABLE IF NOT EXISTS preflight_runs (
+        id TEXT PRIMARY KEY,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        source_hash TEXT,
+        rendered_hash TEXT,
+        status TEXT NOT NULL CHECK (status IN ('pass','unrenderable','blocker','high','warning','info')),
+        highest_severity TEXT CHECK (highest_severity IN ('blocker','high','warning','info')),
+        created_at INTEGER NOT NULL,
+        created_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_preflight_runs_node_stack
+        ON preflight_runs(node_id, stack_name);
+
+      CREATE TABLE IF NOT EXISTS preflight_findings (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        rule_id TEXT NOT NULL,
+        severity TEXT NOT NULL CHECK (severity IN ('blocker','high','warning','info')),
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        source_path TEXT,
+        remediation TEXT,
+        service TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_preflight_findings_run
+        ON preflight_findings(run_id);
+
       CREATE TABLE IF NOT EXISTS secrets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
@@ -2206,6 +2262,45 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
+    // --- Compose Doctor / Preflight ---
+
+    /** Store a run and its findings, replacing any prior run for this (node, stack). */
+    public replacePreflightRun(run: PreflightRunRow, findings: PreflightFindingRow[]): void {
+        this.transaction(() => {
+            this.db.prepare(
+                'DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ? AND stack_name = ?)'
+            ).run(run.node_id, run.stack_name);
+            this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ? AND stack_name = ?').run(run.node_id, run.stack_name);
+            this.db.prepare(
+                `INSERT INTO preflight_runs
+                    (id, node_id, stack_name, source_hash, rendered_hash, status, highest_severity, created_at, created_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(run.id, run.node_id, run.stack_name, run.source_hash, run.rendered_hash, run.status, run.highest_severity, run.created_at, run.created_by);
+            const insert = this.db.prepare(
+                `INSERT INTO preflight_findings
+                    (id, run_id, rule_id, severity, title, message, source_path, remediation, service, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            );
+            for (const f of findings) {
+                insert.run(f.id, f.run_id, f.rule_id, f.severity, f.title, f.message, f.source_path, f.remediation, f.service, f.created_at);
+            }
+        });
+    }
+
+    /** The most recent stored run for a stack, or undefined when none exists. */
+    public getLatestPreflightRun(nodeId: number, stackName: string): PreflightRunRow | undefined {
+        return this.db.prepare(
+            'SELECT * FROM preflight_runs WHERE node_id = ? AND stack_name = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+        ).get(nodeId, stackName) as PreflightRunRow | undefined;
+    }
+
+    /** Findings for a run, in insertion order (the caller re-sorts by severity). */
+    public getPreflightFindings(runId: string): PreflightFindingRow[] {
+        return this.db.prepare(
+            'SELECT * FROM preflight_findings WHERE run_id = ? ORDER BY rowid ASC'
+        ).all(runId) as PreflightFindingRow[];
+    }
+
     // --- Notification History ---
 
     private mapNotificationRow(row: any): NotificationHistory {
@@ -2544,6 +2639,8 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_dossiers WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
+            this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
