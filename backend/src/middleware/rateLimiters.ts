@@ -162,10 +162,11 @@ export const webhookTriggerLimiter = rateLimit({
 });
 
 // Tier 3: Auth endpoint limiter. 15-minute window to blunt brute-force attacks.
-// Prod: 5 attempts/15min/IP. Dev: 100 attempts so E2E tests and local tooling are not blocked.
+// Prod: 5 attempts/15min/IP. Dev: 1000 attempts so the full E2E suite, which logs
+// in per test and has outgrown a 100-attempt window, plus local tooling, are not blocked.
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: process.env.NODE_ENV === 'production' ? 5 : 100,
+  max: process.env.NODE_ENV === 'production' ? 5 : 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many attempts. Please try again in 15 minutes.' },
