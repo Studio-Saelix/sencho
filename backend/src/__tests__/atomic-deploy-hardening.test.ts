@@ -17,10 +17,12 @@ const {
   mockDeployStack,
   mockGetBackupInfo,
   mockRestoreStackFiles,
+  mockSnapshotStackFiles,
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockGetBackupInfo: vi.fn(),
   mockRestoreStackFiles: vi.fn(),
+  mockSnapshotStackFiles: vi.fn(),
 }));
 
 vi.mock('../services/ComposeService', async () => {
@@ -43,6 +45,7 @@ vi.mock('../services/FileSystemService', () => ({
       hasComposeFile: vi.fn().mockResolvedValue(true),
       getBackupInfo: mockGetBackupInfo,
       restoreStackFiles: mockRestoreStackFiles,
+      snapshotStackFiles: mockSnapshotStackFiles,
     }),
   },
 }));
@@ -83,6 +86,7 @@ beforeEach(async () => {
   mockDeployStack.mockReset();
   mockGetBackupInfo.mockReset().mockResolvedValue({ exists: true, timestamp: Date.now() });
   mockRestoreStackFiles.mockReset().mockResolvedValue(undefined);
+  mockSnapshotStackFiles.mockReset().mockResolvedValue(async () => {});
   const { StackOpLockService } = await import('../services/StackOpLockService');
   StackOpLockService.resetForTests();
 });
