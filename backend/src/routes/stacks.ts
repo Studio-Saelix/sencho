@@ -1455,8 +1455,24 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       return;
     }
     dlog(`[Stacks] Rollback initiated: ${sanitizeForLog(stackName)}`);
+    // Snapshot the current files before restoring so a policy gate that blocks
+    // the restored target can be undone: restoreStackFiles commits to disk, and
+    // without this a blocked rollback would leave disk rolled back while the
+    // deployed state is unchanged.
+    const revertRestore = await fsSvc.snapshotStackFiles(stackName);
     await fsSvc.restoreStackFiles(stackName);
-    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) return;
+    if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
+      try {
+        await revertRestore();
+      } catch (revertError) {
+        console.error('[Stacks] Failed to revert files after a policy-blocked rollback: %s', sanitizeForLog(stackName), revertError);
+        // The 409 is already sent and the on-disk config now diverges from the
+        // running stack; surface it on the persistent alert feed so the operator
+        // can repair it rather than discovering it on the next deploy.
+        notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+      }
+      return;
+    }
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), false);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);

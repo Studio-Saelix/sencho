@@ -4,6 +4,8 @@ import { cn } from '@/lib/utils';
 import ErrorBoundary from '../ErrorBoundary';
 import StackAnatomyPanel from '../StackAnatomyPanel';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
+import { RecoveryPanel } from './RecoveryPanel';
+import { retryHandlerFor } from './recovery-retry';
 import type { EditorViewProps } from './EditorView';
 
 const SEGMENTS = [
@@ -55,6 +57,9 @@ export function MobileStackDetail(props: EditorViewProps) {
         requestDeleteStack,
         onMobileBack,
         headerActions,
+        recoveryResult,
+        onRefreshState,
+        onDismissRecovery,
     } = props;
 
     const [segment, setSegment] = useState<Segment>('logs');
@@ -103,6 +108,23 @@ export function MobileStackDetail(props: EditorViewProps) {
                         requestDeleteStack={requestDeleteStack}
                     />
                 </div>
+
+                {recoveryResult && loadingAction == null && (
+                    <div className="shrink-0 px-4 pt-3">
+                        <RecoveryPanel
+                            stackName={stackName}
+                            result={recoveryResult}
+                            activeNode={activeNode}
+                            backupInfo={backupInfo}
+                            canDeploy={can('stack:deploy', 'stack', stackName)}
+                            onRetry={retryHandlerFor(recoveryResult.action, { deployStack, restartStack, updateStack, rollbackStack })}
+                            onRestart={restartStack}
+                            onRollback={rollbackStack}
+                            onRefreshState={onRefreshState}
+                            onDismiss={onDismissRecovery}
+                        />
+                    </div>
+                )}
 
                 {/* Segmented control: Health · Logs · Compose */}
                 <div className="shrink-0 px-4 pt-3">

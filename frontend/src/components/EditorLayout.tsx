@@ -52,7 +52,19 @@ import type { SectionId } from './settings/types';
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
   const { status: trivy } = useTrivyStatus();
-  const { runWithLog, panelState } = useDeployFeedback();
+  const { runWithLog, panelState, logRows } = useDeployFeedback();
+
+  // The last live output line captured for a stack while its deploy-feedback
+  // session is still streaming, used to enrich a failure record's diagnostics.
+  // Guards on both the streaming status and an exact stack-name match, so
+  // neither another stack's output nor a finished session's stale line leaks in.
+  const getLastDeployOutputLine = useCallback(
+    (forStack: string): string | undefined =>
+      panelState.status === 'streaming' && panelState.stackName === forStack
+        ? logRows.at(-1)?.message
+        : undefined,
+    [panelState.status, panelState.stackName, logRows],
+  );
 
   const editorState = useEditorViewState();
   const {
@@ -101,6 +113,9 @@ export default function EditorLayout() {
     isCollapsed, toggleCollapse,
     remoteSearchLoading,
     remoteSearchFailedNodes,
+    lastActionResult,
+    clearActionRecords,
+    dismissActionResult,
   } = stackListState;
 
   const { nodes, activeNode, setActiveNode } = useNodes();
@@ -176,6 +191,7 @@ export default function EditorLayout() {
     setActiveNode,
     nodes,
     runWithLog,
+    getLastDeployOutputLine,
     diffPreviewEnabled,
   });
 
@@ -368,6 +384,16 @@ export default function EditorLayout() {
       setGitSourceOpen={setGitSourceOpen}
       setCopiedDigest={setCopiedDigest}
       requestDeleteStack={stackActions.requestDeleteStack}
+      recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}
+      onRefreshState={async () => {
+        if (!selectedFile) return;
+        const name = selectedFile.replace(/\.(yml|yaml)$/, '');
+        const ok = await stackActions.refreshSelectedContainers(name, selectedFile);
+        await refreshStacks(true);
+        if (ok) toast.success('Refreshed container state.');
+        else toast.error('Could not refresh container state.');
+      }}
+      onDismissRecovery={() => { if (selectedFile) dismissActionResult(selectedFile); }}
       onMobileBack={goToMobileList}
     />
   );
@@ -429,6 +455,9 @@ export default function EditorLayout() {
     pendingStackLoadRef.current = null;
 
     stackActions.resetEditorState();
+    // Stack filenames can repeat across nodes; drop the previous node's failure
+    // records so a stale recovery panel cannot surface on the new node.
+    clearActionRecords();
 
     if (pendingStack) {
       void stackActions.loadFile(pendingStack);

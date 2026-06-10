@@ -874,6 +874,52 @@ export class FileSystemService {
     if (debug) console.debug(`[FileSystemService:debug] Restore completed in ${Date.now() - t0}ms`, { stackName, restored: items.filter(i => i !== '.timestamp').length, removedOrphans });
   }
 
+  /**
+   * Capture the current managed stack files (PROTECTED_STACK_FILES) in memory and
+   * return a function that puts them back, faithfully (writing the captured
+   * contents and removing any managed file that did not exist when captured).
+   *
+   * Used by the rollback route to undo a restored backup when the policy gate
+   * blocks before the deploy commits: restoreStackFiles has already overwritten
+   * the on-disk files, so without this a blocked rollback would leave disk holding
+   * the rolled-back configuration while the deployed containers are unchanged.
+   */
+  async snapshotStackFiles(stackName: string): Promise<() => Promise<void>> {
+    const stackDir = this.resolveStackDir(stackName);
+    // Canonical js/path-injection barrier inline with the read/write sinks, the
+    // same pattern restoreStackFiles uses: resolve against the base and confirm
+    // containment so static analysis credits the barrier.
+    const baseResolved = path.resolve(this.baseDir);
+    const snapshot = new Map<string, Buffer>();
+    for (const file of PROTECTED_STACK_FILES) {
+      const target = path.resolve(baseResolved, path.join(stackDir, file));
+      if (!target.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      try {
+        snapshot.set(file, await fsPromises.readFile(target));
+      } catch (e: unknown) {
+        if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e;
+      }
+    }
+    return async () => {
+      for (const file of PROTECTED_STACK_FILES) {
+        const target = path.resolve(baseResolved, path.join(stackDir, file));
+        if (!target.startsWith(baseResolved + path.sep)) continue;
+        const saved = snapshot.get(file);
+        if (saved !== undefined) {
+          await fsPromises.writeFile(target, saved);
+        } else {
+          try {
+            await fsPromises.unlink(target);
+          } catch (e: unknown) {
+            if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e;
+          }
+        }
+      }
+    };
+  }
+
   async getBackupInfo(stackName: string): Promise<{ exists: boolean; timestamp: number | null }> {
     const backupDir = this.getBackupDir(stackName);
     try {

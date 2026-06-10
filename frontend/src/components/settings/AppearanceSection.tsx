@@ -188,7 +188,7 @@ export function AppearanceSection() {
 
                 <SettingsField
                     label="Deploy progress modal"
-                    helper="Stream live output for deploy, restart, update, install, and Git operations."
+                    helper="Stream live output for deploy, restart, update, install, and Git operations, with a warning when an operation goes quiet. On by default; turn it off to run operations without the panel."
                 >
                     <div className="flex items-center gap-2">
                         <Checkbox
