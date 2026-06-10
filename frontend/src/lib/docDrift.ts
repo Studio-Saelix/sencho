@@ -62,6 +62,9 @@ export function extractExplicitAccessPort(line: string): number | null {
   // `scheme:opaque` with no port, so prefix a scheme and require a host-ish
   // authority. Accepts `192.168.1.5:32400`, `localhost:8080`, `[::1]:8080`;
   // rejects prose like `note:8080` (host `note`) or `ratio 16:9` (throws).
+  // A bare single-label host (`plex:32400`) is indistinguishable from prose and
+  // is intentionally not checked here; writing it with a scheme (`http://plex:32400`)
+  // routes it through the absolute branch above, where it is checked.
   try {
     const url = new URL(`http://${s}`);
     if (!url.port) return null;

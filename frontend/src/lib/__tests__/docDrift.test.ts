@@ -64,6 +64,14 @@ describe('extractExplicitAccessPort', () => {
     expect(extractExplicitAccessPort('http://host:99999')).toBeNull();
     expect(extractExplicitAccessPort('http://host:abc')).toBeNull();
   });
+
+  it('intentionally does not check a scheme-less single-label host, but does with a scheme', () => {
+    // `plex:32400` is indistinguishable from prose like `note:8080`, so the bare
+    // form is skipped to avoid false positives. Adding a scheme opts it in.
+    expect(extractExplicitAccessPort('plex:32400')).toBeNull();
+    expect(extractExplicitAccessPort('nas:8096')).toBeNull();
+    expect(extractExplicitAccessPort('http://plex:32400')).toBe(32400);
+  });
 });
 
 describe('computeDocDrift', () => {
@@ -114,6 +122,14 @@ describe('computeDocDrift', () => {
     // ${PLEX_PORT}:32400 parses to a non-numeric host; its real value is unknown,
     // so a documented :32400 must not be flagged as a false positive.
     expect(flagged('http://host:32400', [{ host: '${PLEX_PORT}', container: '32400', proto: 'tcp' }])).toEqual([]);
+  });
+
+  it('suppresses the whole stack when a variable port is mixed with fixed ports', () => {
+    // One indeterminate (variable) port makes the published set unknowable, so
+    // even a port that is clearly unpublished stays unflagged. Pins the global
+    // suppression so it cannot regress to a partial check.
+    const published = [tcp('8080'), { host: '${PLEX_PORT}', container: '32400', proto: 'tcp' }];
+    expect(flagged('http://host:9999', published)).toEqual([]);
   });
 
   it('keeps the first source line when a port is deduped across lines', () => {
