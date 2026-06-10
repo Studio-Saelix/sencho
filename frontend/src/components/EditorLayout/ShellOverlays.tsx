@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react';
 import BashExecModal from '../BashExecModal';
 import LazyBoundary from '../LazyBoundary';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
+import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
 import { DeleteStackDialog } from './DeleteStackDialog';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import { StackAlertSheet } from '../StackAlertSheet';
@@ -55,6 +56,7 @@ export function ShellOverlays({
     logViewerOpen, logContainer,
     stackMonitor, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing,
+    updateReadiness, setUpdateReadiness,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
@@ -100,6 +102,14 @@ export function ShellOverlays({
         onOpenChange={(open) => { if (!open) closeStackMonitor(); }}
         stackName={stackMonitor?.stackName ?? ''}
         initialTab={stackMonitor?.tab ?? 'alerts'}
+      />
+
+      {/* Pre-update readiness check */}
+      <UpdateReadinessDialog
+        open={updateReadiness !== null}
+        stackName={updateReadiness?.stackName ?? ''}
+        onCancel={() => setUpdateReadiness(null)}
+        onProceed={() => updateReadiness?.proceed()}
       />
 
       {/* Pre-deploy policy block */}

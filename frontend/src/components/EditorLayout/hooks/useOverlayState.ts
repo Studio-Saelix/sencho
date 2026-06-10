@@ -88,6 +88,14 @@ export function useOverlayState() {
   const [policyBlock, setPolicyBlock] = useState<PolicyBlock | null>(null);
   const [policyBypassing, setPolicyBypassing] = useState(false);
 
+  // Pre-update readiness dialog. `proceed` runs the actual update when the
+  // user confirms; opened by useStackActions.requestStackUpdate.
+  const [updateReadiness, setUpdateReadiness] = useState<{
+    stackName: string;
+    stackFile: string;
+    proceed: () => void;
+  } | null>(null);
+
   const [stackMisconfigScanId, setStackMisconfigScanId] = useState<number | null>(null);
 
   const [diffPreview, setDiffPreview] = useState<DiffPreview | null>(null);
@@ -103,6 +111,7 @@ export function useOverlayState() {
     logViewerOpen, logContainer, openLogViewer, closeLogViewer,
     stackMonitor, openAlertSheet, openAutoHeal, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing, setPolicyBypassing,
+    updateReadiness, setUpdateReadiness,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } as const;

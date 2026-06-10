@@ -1,3 +1,67 @@
+/** Overall verdict of an update readiness check. */
+export type ReadinessVerdict = 'ready' | 'ready_with_warnings' | 'review_required' | 'blocked' | 'unknown';
+
+/** Graded status of a single readiness signal. */
+export type SignalStatus = 'ok' | 'warning' | 'attention' | 'blocked' | 'unknown';
+
+/** One input to the readiness verdict (preflight, drift, containers, ...). */
+export interface ReadinessSignal {
+  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'backup_slot' | 'disk';
+  status: SignalStatus;
+  /** Short headline ("Compose Doctor", "Running containers"). */
+  title: string;
+  /** What was observed and why it matters. Never carries an env value. */
+  detail: string;
+  /**
+   * False for informational unknowns (preflight never run, preview
+   * unavailable) that should not drag the overall verdict to `unknown`.
+   */
+  affectsVerdict: boolean;
+}
+
+/** Computed on demand; not persisted (the inputs keep their own history). */
+export interface UpdateReadinessReport {
+  stack: string;
+  computedAt: number;
+  verdict: ReadinessVerdict;
+  signals: ReadinessSignal[];
+}
+
+/** State of one rollback readiness item. */
+export type RollbackItemState = 'ready' | 'missing' | 'unknown' | 'not_covered';
+
+export interface RollbackReadinessItem {
+  id: 'compose_source' | 'env_keys' | 'previous_images' | 'last_deploy' | 'healthchecks' | 'volume_data';
+  state: RollbackItemState;
+  label: string;
+  /** Names only for env coverage; values never appear here. */
+  detail: string;
+}
+
+export type RollbackOverall = 'ready' | 'partial' | 'not_ready';
+
+export interface RollbackReadinessReport {
+  stack: string;
+  computedAt: number;
+  overall: RollbackOverall;
+  items: RollbackReadinessItem[];
+}
+
+/** Normalized per-container probe used by readiness and the health gate. */
+export interface ContainerProbe {
+  name: string;
+  /** Docker container state (running, exited, restarting, ...), or 'unknown'. */
+  state: string;
+  /** Docker health status (healthy | unhealthy | starting) or null without a healthcheck. */
+  health: string | null;
+  exitCode: number | null;
+  hasHealthcheck: boolean;
+  /** RestartPolicy.Name, or null/'no' when none is set. */
+  restartPolicy: string | null;
+  /** Mount descriptors ("volume data", "bind /srv/app"), for coverage disclosure. */
+  mounts: string[];
+}
+
 /** Categories a failed stack deploy or update can be classified into. */
 export type FailureReason =
   | 'image_pull_failed'

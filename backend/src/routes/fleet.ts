@@ -1754,6 +1754,31 @@ fleetRouter.get('/snapshots', authMiddleware, async (req: Request, res: Response
   }
 });
 
+// Registered before /snapshots/:id so "coverage" is never parsed as an id.
+// Hub-local by design: snapshot rows exist only in the hub database, so the
+// readiness UI fetches this with localOnly and merges it client-side.
+fleetRouter.get('/snapshots/coverage', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+
+  try {
+    const nodeId = parseInt(req.query.nodeId as string, 10);
+    const stackName = req.query.stackName as string;
+    if (!Number.isInteger(nodeId) || nodeId < 0) {
+      res.status(400).json({ error: 'nodeId must be a non-negative integer' });
+      return;
+    }
+    if (typeof stackName !== 'string' || !isValidStackName(stackName)) {
+      res.status(400).json({ error: 'Invalid stack name' });
+      return;
+    }
+    const latestAt = DatabaseService.getInstance().getLatestSnapshotTimestampFor(nodeId, stackName);
+    res.json({ latestAt });
+  } catch (error) {
+    console.error('[Fleet Snapshot] Coverage lookup error:', error);
+    res.status(500).json({ error: 'Failed to look up snapshot coverage' });
+  }
+});
+
 fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
 

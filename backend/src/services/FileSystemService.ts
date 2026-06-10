@@ -920,6 +920,48 @@ export class FileSystemService {
     };
   }
 
+  /**
+   * Names-only summary of the backup slot's env coverage for rollback
+   * readiness: whether a backup exists, whether it contains a .env, and the
+   * variable names defined in it. Values never leave this method.
+   */
+  async getBackupEnvSummary(stackName: string): Promise<{ exists: boolean; envPresent: boolean; keys: string[] }> {
+    if (!isValidStackName(stackName)) {
+      return { exists: false, envPresent: false, keys: [] };
+    }
+    // Canonical js/path-injection barrier inline with the read sink, mirroring
+    // backupStackFiles/restoreStackFiles.
+    const backupRoot = path.resolve(getBackupBaseDir());
+    const backupDir = path.resolve(backupRoot, String(this.nodeId), stackName);
+    if (!backupDir.startsWith(backupRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes backup directory'), { code: 'INVALID_PATH' });
+    }
+    try {
+      await fsPromises.access(backupDir);
+    } catch (e: unknown) {
+      // Only a missing slot may report "no backup"; an unreadable one (EACCES
+      // on a root-created dir) must propagate so callers degrade to unknown
+      // instead of falsely promising the next update will create one.
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e;
+      return { exists: false, envPresent: false, keys: [] };
+    }
+    try {
+      const content = await fsPromises.readFile(path.join(backupDir, '.env'), 'utf-8');
+      const keys: string[] = [];
+      for (const line of content.split(/\r?\n/)) {
+        const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)=/.exec(line);
+        if (match) keys.push(match[1]);
+      }
+      return { exists: true, envPresent: true, keys };
+    } catch (e: unknown) {
+      // ENOENT means the backup genuinely has no env file. Anything else
+      // (EACCES, EISDIR) must propagate: reporting it as "no env in backup"
+      // would falsely claim a rollback cannot restore env changes.
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') throw e;
+      return { exists: true, envPresent: false, keys: [] };
+    }
+  }
+
   async getBackupInfo(stackName: string): Promise<{ exists: boolean; timestamp: number | null }> {
     const backupDir = this.getBackupDir(stackName);
     try {

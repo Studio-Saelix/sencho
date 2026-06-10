@@ -914,6 +914,7 @@ export class DatabaseService {
       );
 
       CREATE INDEX IF NOT EXISTS idx_snapshot_files_snapshot ON fleet_snapshot_files(snapshot_id);
+      CREATE INDEX IF NOT EXISTS idx_snapshot_files_node_stack ON fleet_snapshot_files(node_id, stack_name);
 
       CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3265,6 +3266,17 @@ export class DatabaseService {
             'SELECT * FROM fleet_snapshot_files WHERE snapshot_id = ? AND node_id = ? AND stack_name = ?'
         ).all(snapshotId, nodeId, stackName) as FleetSnapshotFile[];
         return rows.map(row => ({ ...row, content: crypto.decrypt(row.content) }));
+    }
+
+    /** Created-at of the most recent fleet snapshot covering a stack, or null. */
+    public getLatestSnapshotTimestampFor(nodeId: number, stackName: string): number | null {
+        const row = this.db.prepare(
+            `SELECT MAX(s.created_at) AS latest
+             FROM fleet_snapshots s
+             JOIN fleet_snapshot_files f ON f.snapshot_id = s.id
+             WHERE f.node_id = ? AND f.stack_name = ?`
+        ).get(nodeId, stackName) as { latest: number | null } | undefined;
+        return row?.latest ?? null;
     }
 
     public deleteSnapshot(id: number): void {

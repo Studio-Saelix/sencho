@@ -93,6 +93,10 @@ interface UseStackActionsOptions {
   // is streaming that exact stack; used to enrich failure diagnostics safely.
   getLastDeployOutputLine: (stackName: string) => string | undefined;
   diffPreviewEnabled: boolean;
+  // Active node advertises the update-guard capability, so manual updates show
+  // the pre-update readiness dialog. Defaults to false: without the
+  // capability, updates run directly with no dialog.
+  hasUpdateGuard?: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -176,6 +180,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     runWithLog,
     getLastDeployOutputLine,
     diffPreviewEnabled,
+    hasUpdateGuard = false,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -969,11 +974,33 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  // Single entry point for every manual update trigger (toolbar, sidebar
+  // context menu, recovery retry). With the update-guard capability it opens
+  // the readiness dialog first; the dialog's proceed runs the same
+  // runWithLog-backed executor either way, so there is exactly one update path.
+  const requestStackUpdate = async (stackFile: string): Promise<void> => {
+    if (stackListState.isStackBusy(stackFile)) return;
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const run = () => runStackAction(stackFile, 'update', 'update', 'running', 'Stack updated successfully!');
+    if (hasUpdateGuard) {
+      overlayState.setUpdateReadiness({
+        stackName,
+        stackFile,
+        proceed: () => {
+          overlayState.setUpdateReadiness(null);
+          void run();
+        },
+      });
+      return;
+    }
+    await run();
+  };
+
   const updateStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
     if (!stackListState.selectedFile) return;
-    await runStackAction(stackListState.selectedFile, 'update', 'update', 'running', 'Stack updated successfully!');
+    await requestStackUpdate(stackListState.selectedFile);
   };
 
   const deleteStack = async (pruneVolumes: boolean) => {
@@ -1062,13 +1089,20 @@ export function useStackActions(options: UseStackActionsOptions) {
     endpoint: string,
   ) => {
     if (stackListState.isStackBusy(stackFile)) return;
+    // Updates route through the shared update path so the sidebar gets the
+    // readiness dialog, the deploy-feedback modal, and the same failure
+    // handling as the toolbar.
+    if (action === 'update') {
+      await requestStackUpdate(stackFile);
+      return;
+    }
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const startedAt = Date.now();
     stackListState.setStackAction(stackFile, action);
 
     if (action === 'stop') {
       stackListState.setOptimisticStatus(stackFile, 'exited');
-    } else if (action === 'deploy' || action === 'restart' || action === 'update') {
+    } else if (action === 'deploy' || action === 'restart') {
       stackListState.setOptimisticStatus(stackFile, 'running');
     }
 
@@ -1082,10 +1116,10 @@ export function useStackActions(options: UseStackActionsOptions) {
             toast.error(stackOpInProgressMessage(stackName, inProgress));
             return;
           }
-          if (action === 'deploy' || action === 'update') {
+          if (action === 'deploy') {
             const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, action);
             if (blockedBy) {
-              toast.error(`${action === 'update' ? 'Update' : 'Deploy'} blocked by policy "${blockedBy}"`);
+              toast.error(`Deploy blocked by policy "${blockedBy}"`);
               return;
             }
           }
@@ -1094,7 +1128,6 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
       toast.success(`Stack ${action}ed successfully!`);
       await refreshSelectedContainers(stackName, stackFile);
-      if (action === 'update') stackListState.fetchImageUpdates();
       if (action === 'deploy') {
         try {
           const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
@@ -1200,6 +1233,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     restartStack,
     serviceAction,
     updateStack,
+    requestStackUpdate,
     deleteStack,
     attemptLeaveEditor,
     cancelPendingUnsavedLoad,

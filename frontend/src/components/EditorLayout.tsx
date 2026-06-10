@@ -118,7 +118,7 @@ export default function EditorLayout() {
     dismissActionResult,
   } = stackListState;
 
-  const { nodes, activeNode, setActiveNode } = useNodes();
+  const { nodes, activeNode, setActiveNode, hasCapability } = useNodes();
 
   // Mirror activeNode.id in a ref so async handlers (e.g. CreateStackDialog's
   // post-create handoff) can detect a node switch that happened mid-flight.
@@ -193,6 +193,7 @@ export default function EditorLayout() {
     runWithLog,
     getLastDeployOutputLine,
     diffPreviewEnabled,
+    hasUpdateGuard: hasCapability('update-guard'),
   });
 
   // Wire the ref now that stackActions is available

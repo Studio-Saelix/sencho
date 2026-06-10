@@ -16,6 +16,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
+import { UpdateGuardService } from '../services/UpdateGuardService';
 import { classifyFailure } from '../services/updateGuard/failureClassifier';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
@@ -1118,6 +1119,38 @@ stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Respons
     console.error('[Stacks] Failed to run preflight for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to run preflight' });
+  }
+});
+
+// Update guard: readiness reports computed on demand from existing stores
+// (preflight runs, drift findings, backup slot, update preview, live Docker
+// state). Node-scoped like preflight: a remote stack is evaluated on the node
+// that owns it. Read-only, so stack:read is the correct gate.
+stacksRouter.get('/:stackName/update-readiness', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(req.nodeId, stackName);
+    res.json(report);
+  } catch (error) {
+    console.error('[Stacks] Failed to compute update readiness for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to compute update readiness' });
+  }
+});
+
+stacksRouter.get('/:stackName/rollback-readiness', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const report = await UpdateGuardService.getInstance().computeRollbackReadiness(req.nodeId, stackName);
+    res.json(report);
+  } catch (error) {
+    console.error('[Stacks] Failed to compute rollback readiness for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to compute rollback readiness' });
   }
 });
 
