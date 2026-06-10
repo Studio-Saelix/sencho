@@ -43,6 +43,12 @@ Below the generated facts is a form for the details Sencho cannot derive. Every 
 
 Notes are saved per stack and per node, so the same stack name on two different nodes keeps its own dossier. Anyone can read a dossier; saving changes requires stack edit permission, so read-only users see the notes but not a Save button.
 
+## Documentation drift
+
+Documentation should describe reality, so Sencho watches the one place it most often slips: a port you wrote into **Access URLs** that the stack no longer publishes. When Compose moves a service from `:32400` to `:32401`, or an access URL points at a port nothing serves, a warning appears in the Dossier tab naming the port to review.
+
+The check is deterministic and advisory. It reads the ports in your Access URLs and compares them against the published ports in the generated facts above, the same ports the Anatomy tab shows. It never edits your notes or your Compose file, and it never guesses: a URL with no explicit port, or on the scheme default (`:80` for `http`, `:443` for `https`), is left alone, since those usually reach the stack through a reverse proxy rather than a published port. When a stack publishes a port through a variable (such as `${PLEX_PORT}:32400`), the real value is unknown, so the check stays quiet rather than risk a false warning. Fix either side, the access URL or the stack's ports, and the warning clears on its own.
+
 ## Markdown export
 
 Two actions in the tab header produce a single Markdown document combining the generated facts and your notes:
@@ -74,5 +80,8 @@ To export every stack across every node at once, use the [Fleet Dossier](/featur
   </Accordion>
   <Accordion title="An access URL spilled onto one line in the export">
     The Access URLs field treats each line as a separate URL. Put one URL per line in the form and they are preserved as separate lines in the exported Markdown.
+  </Accordion>
+  <Accordion title="A documentation drift warning flags a port my reverse proxy fronts">
+    The warning means an access URL names a port no service in the stack publishes. That is expected when a reverse proxy serves the stack on a port the stack itself does not publish. The warning is advisory and changes nothing: either record the reverse-proxied URL without the internal port, or publish the port in Compose if the URL should reach it directly.
   </Accordion>
 </AccordionGroup>

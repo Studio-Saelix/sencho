@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Copy, Download, Save } from 'lucide-react';
+import { Copy, Download, Save, TriangleAlert } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
@@ -12,6 +12,7 @@ import {
   type StackDossierFields,
 } from '@/lib/dossierMarkdown';
 import type { AnatomyMarkdownInput } from '@/lib/anatomyMarkdown';
+import { computeDocDrift, type DocDriftFinding } from '@/lib/docDrift';
 import { useNodes } from '@/context/NodeContext';
 
 interface StackDossierPanelProps {
@@ -124,9 +125,37 @@ function GeneratedFacts({ anatomy }: { anatomy: AnatomyMarkdownInput }) {
   );
 }
 
+// Documentation drift: ports the operator documented in access_urls that the
+// stack does not publish. Read-only and advisory; it never edits notes or
+// compose. Visual language matches the Drift tab's warning findings.
+function DocDriftWarnings({ findings }: { findings: DocDriftFinding[] }) {
+  return (
+    <section data-testid="dossier-doc-drift">
+      <div className={cn(LABEL_CLASS, 'mb-1.5')}>documentation drift</div>
+      <div className="rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-1">
+        {findings.map(f => (
+          <div key={f.port} className="border-t border-warning/20 py-2 first:border-t-0">
+            <div className="flex items-center gap-2">
+              <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-warning" strokeWidth={1.5} />
+              <span className="rounded-md bg-warning/15 px-1.5 py-0.5 font-mono text-[11px] text-warning">:{f.port}</span>
+              <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">not published</span>
+            </div>
+            <div className="mt-1 text-[12px] text-foreground/90">{f.detail}</div>
+            <div className="mt-1 truncate font-mono text-[11px] text-stat-subtitle" title={f.source}>{f.source}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export default function StackDossierPanel({ stackName, anatomy, canEdit }: StackDossierPanelProps) {
   const { activeNode } = useNodes();
   const nodeId = activeNode?.id;
+  // Identifies the dossier currently in view. Doc-drift renders only once the
+  // load for *this* key has succeeded (see loadedKey), so a switch-in-flight or
+  // a failed load never diffs new anatomy against the prior stack's fields.
+  const currentKey = `${nodeId ?? ''}::${stackName}`;
   const [fields, setFields] = useState<StackDossierFields>(EMPTY_DOSSIER_FIELDS);
   // The last-saved values, kept in state so dirty-tracking compares against them
   // without reading a ref during render.
@@ -134,6 +163,10 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  // The (node, stack) whose dossier has successfully loaded. Set only on a
+  // successful fetch, so it lags during a switch and stays behind on a failed
+  // load, which is exactly when doc-drift must stay hidden.
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
 
   // Reload when the stack OR the active node changes: the same stack name can
   // exist on two nodes with independent dossiers, and apiFetch scopes by the
@@ -151,10 +184,11 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
           toast.error('Failed to load the stack dossier.');
           return;
         }
-        const loaded = pickFields(await res.json());
-        setServerFields(loaded);
-        setFields(loaded);
+        const next = pickFields(await res.json());
+        setServerFields(next);
+        setFields(next);
         setLoadError(false);
+        setLoadedKey(`${nodeId ?? ''}::${stackName}`);
       } catch {
         if (!cancelled) {
           setLoadError(true);
@@ -169,6 +203,13 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
   const dirty = useMemo(
     () => FIELD_KEYS.some(k => fields[k] !== serverFields[k]),
     [fields, serverFields],
+  );
+
+  // Recomputes live as the operator edits access_urls; depends on that single
+  // field so unrelated edits do not re-run the comparison.
+  const docDrift = useMemo(
+    () => computeDocDrift(anatomy, fields.access_urls),
+    [anatomy, fields.access_urls],
   );
 
   const setField = (key: keyof StackDossierFields, value: string) =>
@@ -248,6 +289,8 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
           </div>
         )}
       </section>
+
+      {loadedKey === currentKey && docDrift.length > 0 && <DocDriftWarnings findings={docDrift} />}
 
       <section>
         <div className={cn(LABEL_CLASS, 'mb-1.5')}>operator notes</div>
