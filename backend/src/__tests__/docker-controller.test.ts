@@ -1179,3 +1179,125 @@ describe('DockerController - getDependencySnapshot', () => {
     expect(snap.containers[0].composeProject).toBeNull();
   });
 });
+
+// --- getBulkStackStatuses uptime (runningSince from StartedAt) -----------------
+
+describe('DockerController - getBulkStackStatuses uptime', () => {
+  beforeEach(() => {
+    // resolveProjectNameMap caches under a single key; flush so each test's
+    // stack names map cleanly to themselves (compose files do not exist here).
+    CacheService.getInstance().flush();
+  });
+
+  const runningContainer = (id: string, project: string, created: number) => ({
+    Id: id,
+    Names: [`/${id}`],
+    State: 'running',
+    Status: 'Up',
+    Image: 'nginx',
+    Created: created,
+    Labels: { 'com.docker.compose.project': project },
+  });
+
+  it('uses StartedAt (not Created) for runningSince', async () => {
+    const created = 1000; // ancient creation time
+    const startedIso = '2026-06-09T12:00:00.000Z';
+    const startedUnix = Math.floor(Date.parse(startedIso) / 1000);
+
+    mockDocker.listContainers.mockResolvedValue([runningContainer('sa-c1', 'sa-stack', created)]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ State: { StartedAt: startedIso } }),
+    });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getBulkStackStatuses(['sa-stack']);
+
+    expect(result['sa-stack'].status).toBe('running');
+    expect(result['sa-stack'].runningSince).toBe(startedUnix);
+    expect(result['sa-stack'].runningSince).not.toBe(created);
+  });
+
+  it('picks the oldest StartedAt across running containers in a stack', async () => {
+    const olderIso = '2026-06-09T10:00:00.000Z';
+    const newerIso = '2026-06-09T11:30:00.000Z';
+    const olderUnix = Math.floor(Date.parse(olderIso) / 1000);
+
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('ow-c1', 'ow-stack', 5000),
+      runningContainer('ow-c2', 'ow-stack', 6000),
+    ]);
+    const byId: Record<string, string> = { 'ow-c1': newerIso, 'ow-c2': olderIso };
+    mockDocker.getContainer.mockImplementation((id: string) => ({
+      inspect: vi.fn().mockResolvedValue({ State: { StartedAt: byId[id] } }),
+    }));
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getBulkStackStatuses(['ow-stack']);
+
+    expect(result['ow-stack'].runningSince).toBe(olderUnix);
+  });
+
+  it('falls back to Created when inspect fails', async () => {
+    const created = 1234;
+    mockDocker.listContainers.mockResolvedValue([runningContainer('fb-c1', 'fb-stack', created)]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockRejectedValue(new Error('inspect boom')),
+    });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getBulkStackStatuses(['fb-stack']);
+
+    expect(result['fb-stack'].status).toBe('running');
+    expect(result['fb-stack'].runningSince).toBe(created);
+  });
+
+  it('falls back to Created when StartedAt is the Docker zero-time', async () => {
+    const created = 4321;
+    mockDocker.listContainers.mockResolvedValue([runningContainer('zt-c1', 'zt-stack', created)]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '0001-01-01T00:00:00Z' } }),
+    });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getBulkStackStatuses(['zt-stack']);
+
+    expect(result['zt-stack'].runningSince).toBe(created);
+  });
+
+  it('derives uptime only from running containers, ignoring exited ones in the stack', async () => {
+    const startedIso = '2026-06-09T08:00:00.000Z';
+    const startedUnix = Math.floor(Date.parse(startedIso) / 1000);
+    mockDocker.listContainers.mockResolvedValue([
+      { ...runningContainer('me-run', 'me-stack', 7000) },
+      { Id: 'me-exit', Names: ['/me-exit'], State: 'exited', Status: 'Exited (0)', Image: 'nginx', Created: 100, Labels: { 'com.docker.compose.project': 'me-stack' } },
+    ]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ State: { StartedAt: startedIso } }),
+    });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getBulkStackStatuses(['me-stack']);
+
+    expect(result['me-stack'].status).toBe('running');
+    // The exited container's ancient Created (100) must not drag uptime down.
+    expect(result['me-stack'].runningSince).toBe(startedUnix);
+  });
+
+  it('caches StartedAt so repeated calls do not re-inspect within the TTL', async () => {
+    const startedIso = '2026-06-09T09:00:00.000Z';
+    mockDocker.listContainers.mockResolvedValue([runningContainer('ca-c1', 'ca-stack', 1000)]);
+    const inspect = vi.fn().mockResolvedValue({ State: { StartedAt: startedIso } });
+    mockDocker.getContainer.mockReturnValue({ inspect });
+
+    // getInstance() hands out fresh instances per request, so a shared (static)
+    // cache is what must dedupe the inspect across separate calls.
+    const startedUnix = Math.floor(Date.parse(startedIso) / 1000);
+    await DockerController.getInstance(1).getBulkStackStatuses(['ca-stack']);
+    const second = await DockerController.getInstance(1).getBulkStackStatuses(['ca-stack']);
+
+    expect(inspect).toHaveBeenCalledTimes(1);
+    // The cache must be read, not merely populated: the second call still
+    // resolves the real StartedAt rather than falling back to Created.
+    expect(second['ca-stack'].runningSince).toBe(startedUnix);
+  });
+});

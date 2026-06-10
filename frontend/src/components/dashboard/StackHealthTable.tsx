@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Sparkline } from '@/components/ui/sparkline';
 import { ChevronLeft, ChevronRight, Layers } from 'lucide-react';
 import type { StackStatusEntry, MetricPoint, StackCpuSeries } from './types';
+import { aggregateCurrentUsage } from './aggregateCurrentUsage';
 
 interface StackHealthTableProps {
   stackStatuses: Record<string, StackStatusEntry>;
@@ -80,28 +81,7 @@ export function StackHealthTable({
     return () => clearInterval(id);
   }, []);
 
-  const stackAggregates = useMemo(() => {
-    const latestPerContainer: Record<string, Record<string, MetricPoint>> = {};
-    for (const m of metrics) {
-      if (!m.stack_name) continue;
-      if (!latestPerContainer[m.stack_name]) latestPerContainer[m.stack_name] = {};
-      const existing = latestPerContainer[m.stack_name][m.container_id];
-      if (!existing || m.timestamp > existing.timestamp) {
-        latestPerContainer[m.stack_name][m.container_id] = m;
-      }
-    }
-    const result: Record<string, { mem: number; cpu: number }> = {};
-    for (const [stack, containers] of Object.entries(latestPerContainer)) {
-      let mem = 0;
-      let cpu = 0;
-      for (const m of Object.values(containers)) {
-        mem += m.memory_mb;
-        cpu += m.cpu_percent;
-      }
-      result[stack] = { mem, cpu };
-    }
-    return result;
-  }, [metrics]);
+  const stackAggregates = useMemo(() => aggregateCurrentUsage(metrics), [metrics]);
 
   const rows = useMemo(() => {
     const list = Object.entries(stackStatuses).map(([file, entry]) => {
