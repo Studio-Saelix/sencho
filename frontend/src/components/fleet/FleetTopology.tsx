@@ -349,7 +349,7 @@ export function FleetTopology({
         }
     }, []);
 
-    const handleNodeDragStop = useCallback((_event: React.MouseEvent, _node: Node, allDragged: Node[]) => {
+    const handleNodeDragStop = useCallback((_event: MouseEvent | TouchEvent, _node: Node, allDragged: Node[]) => {
         if (effectiveMode !== 'free') return;
         setFlowNodes(current => {
             const dragged = new Map(allDragged.map(n => [n.id, n.position]));
