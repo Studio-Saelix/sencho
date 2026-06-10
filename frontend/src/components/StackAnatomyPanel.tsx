@@ -9,6 +9,8 @@ import { parseAnatomy, parseEnvKeys, formatGitSource, type GitSourceInfo } from 
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
+import PreflightPanel from './stack/PreflightPanel';
+import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from '@/components/dashboard/types';
 
 interface StackAnatomyPanelProps {
@@ -75,13 +77,40 @@ export default function StackAnatomyPanel({
 
   const envVarCount = envKeys.size;
 
+  const { hasCapability, activeNode } = useNodes();
+  const doctorEnabled = hasCapability('compose-doctor');
+
   const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo } | null>(null);
   const [updatePreview, setUpdatePreview] = useState<UpdatePreview | null>(null);
+  // Last preflight severity, used only to dot the Doctor tab. Radix mounts the
+  // active tab content lazily, so the badge cannot come from PreflightPanel; the
+  // parent reads the stored run once per stack/node change.
+  const [preflightSeverity, setPreflightSeverity] = useState<string | null>(null);
   const [scanStatus, setScanStatus] = useState<{
     status: 'ok' | 'partial' | 'failed' | 'skipped' | null;
     attemptedAt?: number;
     errorMessage?: string | null;
   } | null>(null);
+
+  // Best-effort badge: read the last stored preflight severity to dot the tab.
+  // Skipped when the active node does not advertise the capability.
+  useEffect(() => {
+    // The dot and tab are gated on doctorEnabled, so a stale severity is never
+    // shown; no synchronous reset needed when the capability is absent.
+    if (!doctorEnabled) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch(`/stacks/${stackName}/preflight`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setPreflightSeverity(typeof data?.highestSeverity === 'string' ? data.highestSeverity : null);
+      } catch {
+        if (!cancelled) setPreflightSeverity(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [stackName, activeNode?.id, doctorEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -253,6 +282,19 @@ export default function StackAnatomyPanel({
           <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
           <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
           <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
+          {doctorEnabled && (
+            <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">
+              <span className="inline-flex items-center gap-1">
+                Doctor
+                {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && (
+                  <span
+                    data-testid="doctor-tab-dot"
+                    className={cn('h-1.5 w-1.5 rounded-full', preflightSeverity === 'blocker' ? 'bg-destructive' : 'bg-warning')}
+                  />
+                )}
+              </span>
+            </TabsTrigger>
+          )}
         </TabsList>
         <div className="flex items-center gap-3">
           {onOpenFiles && (
@@ -463,6 +505,11 @@ export default function StackAnatomyPanel({
       <TabsContent value="drift" className="flex flex-col flex-1 min-h-0 mt-0">
         <DriftPanel stackName={stackName} />
       </TabsContent>
+      {doctorEnabled && (
+        <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
+          <PreflightPanel stackName={stackName} />
+        </TabsContent>
+      )}
       </Tabs>
     </div>
   );

@@ -11,6 +11,9 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('./stack/StackActivityTimeline', () => ({
   StackActivityTimeline: () => <div data-testid="activity-timeline" />,
 }));
+// This suite covers the update banner, not the Doctor tab; keep the capability
+// off so the panel surface stays exactly what these tests assert against.
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 1 }, hasCapability: () => false }) }));
 
 import { apiFetch } from '@/lib/api';
 import StackAnatomyPanel from './StackAnatomyPanel';

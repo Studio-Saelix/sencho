@@ -1,0 +1,66 @@
+---
+title: Compose Doctor
+description: Run a preflight check on a stack before you deploy. Compose Doctor renders the effective Compose model and reports common failure modes, grouped by severity, with a clear fix for each.
+---
+
+The **Doctor** tab in the right-hand **Anatomy** panel answers one question before you apply a change: *what will Docker actually run, and is it safe on this node?* Compose Doctor renders the effective Compose model, the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied, and then runs a set of deterministic checks against it and the node it would deploy to.
+
+The check is advisory. It never blocks a deploy and never changes a stack; it tells you what it found so you can decide. It runs on demand: press **run preflight** and Sencho renders the model, runs the checks, and stores the result so the tab still shows it the next time you open the stack.
+
+Compose Doctor never shows a secret value. It reads the structure of the effective model, service names, images, ports, volumes, and the *names* of environment variables, but never their values, so nothing sensitive appears in the report, the stored run, or the logs.
+
+## Severity
+
+Every finding is graded so you can triage at a glance. The tab groups findings under four headings and the summary line reflects the most severe one:
+
+| Severity | Meaning |
+|----------|---------|
+| **Blocker** | The deploy will fail or the model cannot be rendered. Fix these before applying. |
+| **High risk** | The deploy will likely succeed but does something dangerous or surprising, such as exposing a port to every network or mounting the Docker socket. |
+| **Warning** | A reliability or reproducibility concern, such as a moving `latest` tag or a missing restart policy. |
+| **Info** | Something to be aware of, such as a network or volume that will be created on first deploy. |
+
+A stack with unresolved blocker or high-risk findings also shows a small coloured dot on the **Doctor** tab, so you can see there is something to look at without opening it.
+
+## What it checks
+
+Compose Doctor renders the model first. If `docker compose config` cannot produce a model, the report says so and stops, since nothing else can be trusted. When the model renders, the checks cover:
+
+- **Environment.** Variables referenced by the model but not set in any consulted env file, which Compose silently turns into empty strings.
+- **Ports.** Host ports already in use by another stack on the node, two services in the same stack claiming the same port, and ports published on all interfaces (`0.0.0.0`).
+- **Host paths.** Bind-mount directories that do not exist yet, and paths that look likely to have ownership problems for a container running as a non-root user.
+- **Privilege and exposure.** A mounted Docker socket, `privileged: true`, and `network_mode: host`.
+- **Reliability.** Images pinned to a moving `latest` tag, services with no restart policy, and services with no healthcheck.
+- **Compose semantics.** `deploy` fields that standalone Compose ignores, and required external networks or volumes that do not exist on the node.
+- **Surprises.** Duplicate or already-taken `container_name`s, and services that the effective model pulls in via `include` or `extends` that are not in the file you are looking at.
+
+Each finding states what was detected, why it matters, where in the model it came from, and how to fix it.
+
+## Running preflight
+
+1. Click any stack in the left sidebar to open it.
+2. Switch to the **Doctor** tab in the Anatomy panel header.
+3. Press **run preflight**. The summary updates with the result and findings grouped by severity.
+4. Fix anything that matters, then run it again to confirm it clears.
+
+Preflight runs against the **active node**, so selecting a remote node checks the stack on the machine that actually owns it. On a phone, the same report appears under the **Compose** section of the stack detail.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The report says it cannot render the model">
+    Compose Doctor runs `docker compose config` to resolve the effective model, and that command failed. The usual causes are a YAML syntax error, an unresolved `include` or `merge`, or a required variable with no value. Fix the Compose or env file and run preflight again. Sencho deliberately does not echo the raw error, since it can contain values from your files.
+  </Accordion>
+  <Accordion title="A bind mount I use every day is flagged as missing">
+    Compose Doctor can only check paths that live inside the node's Compose directory, such as a relative `./data` mount. An absolute host path like `/mnt/media` is outside what Sencho can see from inside its container, so it is never reported as missing. A missing relative path is real: Docker would create it as a root-owned directory on deploy.
+  </Accordion>
+  <Accordion title="Every service is flagged for no healthcheck">
+    Compose Doctor reports a healthcheck only when the Compose file does not declare one. Many images define their own healthcheck internally, which Sencho cannot see from the model alone, so treat these as a prompt to confirm rather than a hard problem.
+  </Accordion>
+  <Accordion title="A port conflict is flagged for a port my own stack uses">
+    Preflight ignores ports already held by the stack you are checking, so redeploying a running stack does not flag its own bindings. A conflict means a *different* stack, or an unmanaged container, holds that host port on this node.
+  </Accordion>
+  <Accordion title="The Doctor tab is not there on a remote node">
+    The tab appears when the active node reports that it supports Compose Doctor. A node running an older version of Sencho does not advertise it, so the tab is hidden for that node until it is updated.
+  </Accordion>
+</AccordionGroup>
