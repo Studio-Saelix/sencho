@@ -230,11 +230,15 @@ export function GitSourcePanel({
   const applyPull = async (commitSha: string, deploy: boolean) => {
     setApplying(true);
     const loadingId = toast.loading(deploy ? 'Applying and deploying...' : 'Applying changes...');
+    // Snapshot the node once so the apply (and any deploy it triggers) stays
+    // bound to it even if the active node changes while the operation runs.
+    const opNodeId = activeNode?.id ?? null;
     try {
       const runApply = async (started: Promise<void>) => {
         if (deploy) await started;
         const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/apply`, {
           method: 'POST',
+          nodeId: opNodeId,
           body: JSON.stringify({ commitSha, deploy }),
         });
         if (res.ok) {
@@ -260,7 +264,7 @@ export function GitSourcePanel({
       };
 
       if (deploy) {
-        await runWithLog({ stackName, action: 'deploy', nodeId: activeNode?.id ?? null }, runApply);
+        await runWithLog({ stackName, action: 'deploy', nodeId: opNodeId }, runApply);
       } else {
         await runApply(Promise.resolve());
       }

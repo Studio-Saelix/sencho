@@ -90,8 +90,11 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
   } as unknown as OverlayState;
 }
 
-const runWithLog: Parameters<typeof useStackActions>[0]['runWithLog'] = async (_p, run) =>
-  run(Promise.resolve(), 'test-session');
+let lastRunWithLogParams: Parameters<Parameters<typeof useStackActions>[0]['runWithLog']>[0] | null = null;
+const runWithLog: Parameters<typeof useStackActions>[0]['runWithLog'] = async (params, run) => {
+  lastRunWithLogParams = params;
+  return run(Promise.resolve(), 'test-session');
+};
 
 function setup(over: {
   editorState?: Partial<EditorState>;
@@ -194,6 +197,44 @@ describe('useStackActions.handleSaveAndDeploy', () => {
     await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
     const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
     expect(calls.some(c => String(c).includes('/deploy'))).toBe(true);
+  });
+});
+
+describe('useStackActions node binding', () => {
+  const mouseEvent = { preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent;
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    lastRunWithLogParams = null;
+  });
+
+  function postCallFor(fragment: string): RequestInit | undefined {
+    const call = vi.mocked(apiFetch).mock.calls.find(
+      c => String(c[0]).includes(fragment) && (c[1] as RequestInit | undefined)?.method === 'POST',
+    );
+    return call?.[1] as RequestInit | undefined;
+  }
+
+  it('binds the deploy POST and the runWithLog session to the captured node', async () => {
+    const { result } = setup(); // activeNode.id = 1
+    await result.current.deployStack(mouseEvent);
+    expect(postCallFor('/deploy')).toEqual(expect.objectContaining({ nodeId: 1 }));
+    expect(lastRunWithLogParams).toEqual(expect.objectContaining({ nodeId: 1 }));
+  });
+
+  it('binds the update POST and the runWithLog session to the captured node', async () => {
+    const { result } = setup();
+    await result.current.updateStack(mouseEvent);
+    expect(postCallFor('/update')).toEqual(expect.objectContaining({ nodeId: 1 }));
+    expect(lastRunWithLogParams).toEqual(expect.objectContaining({ nodeId: 1 }));
+  });
+
+  it('binds a non-update action (restart) POST and session to the captured node', async () => {
+    const { result } = setup();
+    await result.current.restartStack(mouseEvent);
+    expect(postCallFor('/restart')).toEqual(expect.objectContaining({ nodeId: 1 }));
+    expect(lastRunWithLogParams).toEqual(expect.objectContaining({ nodeId: 1 }));
   });
 });
 

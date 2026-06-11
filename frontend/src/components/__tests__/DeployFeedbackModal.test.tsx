@@ -9,12 +9,14 @@ import { apiFetch } from '@/lib/api';
 
 // Lets a test simulate a mid-stream drop (onReady then onError) so the panel
 // reaches 'streaming' with progressUnavailable set.
-const ctl = vi.hoisted(() => ({ drop: false }));
+const ctl = vi.hoisted(() => ({ drop: false, lastNodeId: undefined as number | null | undefined }));
 
 // The real Terminal mounts xterm + a WebSocket; mock it to a no-op that signals
-// the stream connected on mount so the panel reaches the 'streaming' state.
+// the stream connected on mount so the panel reaches the 'streaming' state, and
+// records the captured nodeId it was mounted with.
 vi.mock('@/components/Terminal', () => {
-  const MockTerminal = ({ onReady, onError }: { onReady?: () => void; onError?: () => void }) => {
+  const MockTerminal = ({ onReady, onError, nodeId }: { onReady?: () => void; onError?: () => void; nodeId?: number | null }) => {
+    ctl.lastNodeId = nodeId;
     React.useEffect(() => {
       onReady?.();
       if (ctl.drop) onError?.();
@@ -29,11 +31,13 @@ vi.mock('@/components/Terminal', () => {
 let resolveRun: ((r: { ok: boolean; errorMessage?: string; healthGateId?: string | null }) => void) | null = null;
 // The runWithLog promise itself, so a test can await full result propagation.
 let runOuter: Promise<unknown> | null = null;
+// Node the driver captures for the operation; default local, overridden per test.
+let driverNodeId: number | null = null;
 
 function Driver() {
   const { runWithLog } = useDeployFeedback();
   React.useEffect(() => {
-    runOuter = runWithLog({ stackName: 'web', action: 'update', nodeId: null }, async (started) => {
+    runOuter = runWithLog({ stackName: 'web', action: 'update', nodeId: driverNodeId }, async (started) => {
       await started;
       return new Promise<{ ok: boolean; errorMessage?: string; healthGateId?: string | null }>((res) => { resolveRun = res; });
     });
@@ -77,6 +81,8 @@ describe('DeployFeedbackModal health gate', () => {
     localStorage.clear();
     resolveRun = null;
     ctl.drop = false;
+    ctl.lastNodeId = undefined;
+    driverNodeId = null;
     vi.mocked(apiFetch).mockReset();
     vi.mocked(apiFetch).mockResolvedValue(new Response('{}', { status: 200 }));
   });
@@ -96,6 +102,12 @@ describe('DeployFeedbackModal health gate', () => {
       await runOuter;
     });
   }
+
+  it('binds the modal progress terminal to the captured panel node', async () => {
+    driverNodeId = 5;
+    await renderStreaming();
+    expect(ctl.lastNodeId).toBe(5);
+  });
 
   it('shows the observing banner and suspends auto-close while the gate observes', async () => {
     routeGateApi([{ id: 'gate-1', status: 'observing' }]);

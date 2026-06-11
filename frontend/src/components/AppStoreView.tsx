@@ -197,11 +197,15 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
             if (ce.key.trim()) finalEnvVars[ce.key.trim()] = ce.value;
         });
 
+        // Snapshot the node once so the install stays bound to it even if the
+        // active node changes while images are pulling.
+        const opNodeId = activeNode?.id ?? null;
         try {
-            const result = await runWithLog({ stackName: stackName.trim(), action: 'install', nodeId: activeNode?.id ?? null }, async (started, ds) => {
+            const result = await runWithLog({ stackName: stackName.trim(), action: 'install', nodeId: opNodeId }, async (started, ds) => {
                 await started;
                 const res = await apiFetch('/templates/deploy', withDeploySession(ds, {
                     method: 'POST',
+                    nodeId: opNodeId,
                     body: JSON.stringify({
                         stackName: stackName.trim(),
                         template: modifiedTemplate,

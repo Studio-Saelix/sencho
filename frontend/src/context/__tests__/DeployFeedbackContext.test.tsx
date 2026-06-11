@@ -5,6 +5,14 @@ import { DeployFeedbackProvider, useDeployFeedback } from '../DeployFeedbackCont
 import { DEPLOY_FEEDBACK_KEY } from '@/hooks/use-deploy-feedback-enabled';
 import { DEPLOY_FEEDBACK_STYLE_KEY } from '@/hooks/use-deploy-feedback-style';
 
+// Only the health-gate poll touches the network; mock apiFetch so a poll can be
+// asserted to target the captured node. Other exports stay real.
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>();
+  return { ...actual, apiFetch: vi.fn() };
+});
+import { apiFetch } from '@/lib/api';
+
 function wrapper({ children }: { children: ReactNode }) {
   return <DeployFeedbackProvider>{children}</DeployFeedbackProvider>;
 }
@@ -12,6 +20,7 @@ function wrapper({ children }: { children: ReactNode }) {
 describe('DeployFeedbackContext', () => {
   beforeEach(() => {
     localStorage.setItem(DEPLOY_FEEDBACK_KEY, 'true');
+    vi.mocked(apiFetch).mockReset();
   });
   afterEach(() => {
     localStorage.clear();
@@ -166,6 +175,38 @@ describe('DeployFeedbackContext', () => {
     expect(result.current.panelState.nodeId).toBe(7);
 
     await act(async () => { result.current.onTerminalReady(); await outer; });
+  });
+
+  it('polls the health gate on the captured node and stamps it on the gate state', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ id: 'g1', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now() }),
+      { status: 200 },
+    ));
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+    let outer: Promise<unknown> | undefined;
+    await act(async () => {
+      outer = result.current.runWithLog({ stackName: 'web', action: 'update', nodeId: 7 }, async (started) => {
+        await started;
+        return { ok: true, healthGateId: 'g1' };
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      result.current.onTerminalReady();
+      await outer;
+      // Let the immediate gate tick's apiFetch resolve and its setHealthGate land.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const gateCall = vi.mocked(apiFetch).mock.calls.find((c) => String(c[0]).includes('/health-gate'));
+    expect(gateCall).toBeDefined();
+    expect(gateCall?.[1]).toEqual(expect.objectContaining({ nodeId: 7 }));
+    expect(result.current.healthGate?.nodeId).toBe(7);
+
+    act(() => { result.current.onPanelClose(); });
   });
 
   it('minimized is false before any session', () => {

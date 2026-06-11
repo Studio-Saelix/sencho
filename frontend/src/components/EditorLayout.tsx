@@ -8,6 +8,7 @@ import { ViewRouter } from './EditorLayout/ViewRouter';
 import { CreateStackDialog, type CreateMode } from './EditorLayout/CreateStackDialog';
 import { EditorView } from './EditorLayout/EditorView';
 import { ShellOverlays } from './EditorLayout/ShellOverlays';
+import { classifyFailedGate } from './EditorLayout/failed-gate-recovery';
 import { useEditorViewState } from './EditorLayout/hooks/useEditorViewState';
 import { useStackListState } from './EditorLayout/hooks/useStackListState';
 import { useViewNavigationState } from './EditorLayout/hooks/useViewNavigationState';
@@ -205,18 +206,23 @@ export default function EditorLayout() {
   // id so one verdict records exactly once.
   const handledGateRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!healthGate || healthGate.status !== 'failed' || handledGateRef.current === healthGate.gateId) return;
-    const stackFile = stackListState.files.find(
-      f => f.replace(/\.(yml|yaml)$/, '') === healthGate.stackName,
+    if (!healthGate || handledGateRef.current === healthGate.gateId) return;
+    // Record only on the node the gate ran on. A wrong node or a not-yet-loaded
+    // stack file leaves it unhandled (not marked), so the effect retries when the
+    // active node returns or the files refresh, recording exactly once.
+    const outcome = classifyFailedGate(
+      healthGate,
+      activeNodeIdRef.current,
+      stackListState.filesNodeId,
+      stackListState.files,
     );
-    if (!stackFile) {
-      // Do not mark handled: the files list may be mid-refresh, and the
-      // effect's files dependency retries once it lands.
+    if (outcome.kind === 'no-file') {
       console.warn('[HealthGate] no stack file matches failed gate for', healthGate.stackName);
       return;
     }
+    if (outcome.kind === 'skip') return;
     handledGateRef.current = healthGate.gateId;
-    stackListState.recordActionFailure(stackFile, {
+    stackListState.recordActionFailure(outcome.stackFile, {
       action: healthGate.trigger,
       rolledBack: false,
       errorMessage: `Health gate failed: ${healthGate.reason ?? 'containers did not stay healthy after the update'}`,
@@ -228,7 +234,7 @@ export default function EditorLayout() {
         suggestion: 'Check the container logs; roll back if the previous version was healthy.',
       },
     });
-  }, [healthGate, stackListState.files, stackListState.recordActionFailure]);
+  }, [healthGate, stackListState.files, stackListState.filesNodeId, stackListState.recordActionFailure]);
 
   const buildMenuCtx = useSidebarContextMenu({
     stackListState,
