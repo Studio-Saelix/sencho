@@ -186,6 +186,16 @@ The header answers three questions at a glance:
 
 The action row to the right of the header keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, and Delete; the next sections cover both surfaces.
 
+### Image source links
+
+Next to the image line is a links button that turns the image reference into somewhere useful to go. It opens a small menu with:
+
+- **Open on the registry.** Docker Hub images link to their Docker Hub page; GitHub Container Registry (`ghcr.io`) images link to the owner on GitHub. Images from a private or unrecognized registry show the registry host instead of a link, so you never land on a broken guessed URL.
+- **Copy image reference.** Grabs the full reference for use elsewhere.
+- **Source, homepage, documentation, and revision links** when the image declares them. These come from the image's own [OCI labels](https://github.com/opencontainers/image-spec/blob/main/annotations.md) (`org.opencontainers.image.source`, `.url`, `.documentation`, `.revision`, `.version`) and are read locally from the image, so they need no internet access and appear only when the image ships them. A revision links to its commit when the source is a GitHub repository; the version is shown as plain text.
+
+The same links button appears on each container row and on the update cards in [Auto-Update Policies](/features/auto-update-policies), so you can review what an image ships and where it comes from before approving an update.
+
 ## Container health strip
 
 Below the header, each container in the stack gets a single row that answers "is this piece working, and how do I reach it?" without expanding anything.
@@ -201,7 +211,7 @@ Each row includes:
 - **Meta line.** Uptime (`up 12 hours`) and the primary port mapping (`8989 → 8989/tcp`).
 - **Open link.** When the container publishes a port, an `open ↗` link launches the app in a new tab using the active node's hostname.
 - **Live stat tiles.** Three tiles show CPU, memory, and network I/O with a rolling sparkline. The sparkline uses the cyan data color and refreshes roughly every 1.5 seconds.
-- **Action icons.** Shortcuts to **View logs**, open a bash shell, and the per-service kebab.
+- **Action icons.** The image source links button (see above), plus shortcuts to **View logs**, open a bash shell, and the per-service kebab.
 
 ## Logs viewer
 

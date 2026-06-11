@@ -27,6 +27,7 @@ import {
     DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { Sparkline } from '../ui/sparkline';
+import { ImageSourceMenu } from '../ImageSourceMenu';
 import { cn } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
 import ErrorBoundary from '../ErrorBoundary';
@@ -212,6 +213,7 @@ export function StackIdentityHeader({
                                     </button>
                                 </>
                             )}
+                            <ImageSourceMenu imageRef={first.Image} imageId={first.ImageID} />
                         </div>
                     );
                 })()}
@@ -409,6 +411,11 @@ export function ContainersHealth({
                                         </div>
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
+                                        <ImageSourceMenu
+                                            imageRef={container.Image}
+                                            imageId={container.ImageID}
+                                            className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                                        />
                                         <Button
                                             size="icon"
                                             variant="ghost"
