@@ -159,12 +159,16 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
     }
   }, [canAutoClose, startCountdown]);
 
-  // Closing the modal in Inline style only hides it (the banner stays the live
-  // surface and owns the session lifecycle); in Modal style it ends the session.
+  // In Inline style, closing only hides the modal while the banner is still the
+  // surface (running or cleanly done). When the op or its gate failed the banner
+  // steps aside for the recovery surface, so there is nothing to return to:
+  // closing ends the session (and clears the fallback pill), as Modal style
+  // always does.
+  const inlineFailed = status === 'failed' || healthGate?.status === 'failed';
   const closeSurface = useCallback(() => {
-    if (style === 'inline') onMinimize();
+    if (style === 'inline' && !inlineFailed) onMinimize();
     else onPanelClose();
-  }, [style, onMinimize, onPanelClose]);
+  }, [style, inlineFailed, onMinimize, onPanelClose]);
 
   const handleOpenChange = useCallback(
     (open: boolean) => {

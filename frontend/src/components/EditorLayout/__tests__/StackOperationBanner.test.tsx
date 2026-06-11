@@ -22,10 +22,12 @@ vi.mock('@/context/DeployFeedbackContext', async (importOriginal) => {
             healthGate: mockHealthGate,
             logRows: mockLogRows,
             setMinimized,
+            setBannerActive: vi.fn(),
             onPanelClose,
             // Unused by the banner but part of the context shape.
             runWithLog: vi.fn(),
             minimized: mockMinimized,
+            bannerActive: false,
             lastOutputAt: 0,
             onTerminalReady: vi.fn(),
             onTerminalError: vi.fn(),

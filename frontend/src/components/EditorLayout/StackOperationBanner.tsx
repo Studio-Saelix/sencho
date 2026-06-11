@@ -28,7 +28,7 @@ interface StackOperationBannerProps {
 // latest output line, the post-update health gate, and a "View output" button
 // that opens the full log modal. A dismiss button clears it without the modal.
 export function StackOperationBanner({ stackName, activeNode, panelStartedAt, variant, className }: StackOperationBannerProps) {
-    const { panelState, healthGate, logRows, minimized, setMinimized, onPanelClose } = useDeployFeedback();
+    const { panelState, healthGate, logRows, minimized, setMinimized, setBannerActive, onPanelClose } = useDeployFeedback();
     const [style] = useDeployFeedbackStyle();
 
     const { action, status, nodeId, progressUnavailable } = panelState;
@@ -49,6 +49,14 @@ export function StackOperationBanner({ stackName, activeNode, panelStartedAt, va
     const done = succeeded && !gateObserving;
     // Fully done with a clean result (no gate, or a passed gate): auto-dismiss.
     const fullyDone = done && (healthGate == null || healthGate.status === 'passed');
+
+    // Tell the portal this session is covered by the banner so its fallback pill
+    // stays hidden here; when the banner is not active (off the stack detail, or
+    // a failed op it steps aside for) the pill takes over as the surface.
+    useEffect(() => {
+        setBannerActive(active);
+        return () => setBannerActive(false);
+    }, [active, setBannerActive]);
 
     // Freeze the elapsed at completion so the timer stops at the final duration.
     const [frozenElapsed, setFrozenElapsed] = useState<string | null>(null);

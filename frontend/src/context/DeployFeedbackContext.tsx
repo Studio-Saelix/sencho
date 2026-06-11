@@ -95,6 +95,16 @@ interface DeployFeedbackContextValue {
    */
   minimized: boolean;
   setMinimized: (next: boolean) => void;
+  /**
+   * Whether the in-page banner is currently showing this session (Inline style,
+   * on the operation's own stack detail). The portal reads it to decide whether
+   * the minimized pill is needed as the fallback surface: in Inline style the
+   * pill shows only when the banner is not covering the session (App Store,
+   * after navigating away, or a failed op the banner steps aside for), so the
+   * two never overlap. The banner owns this flag.
+   */
+  bannerActive: boolean;
+  setBannerActive: (next: boolean) => void;
   /** Gate state for the current session, or null when no gate was started. */
   healthGate: HealthGateUiState | null;
   logRows: ParsedLogRow[];
@@ -188,6 +198,11 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   // at session start (see runWithLog); the banner toggles it via setMinimized.
   const [minimized, setMinimized] = useState(false);
 
+  // Whether the in-page banner is currently the visible surface (Inline style,
+  // on the operation's stack detail). Owned by the banner; the portal reads it
+  // to gate the fallback pill so the two never overlap.
+  const [bannerActive, setBannerActive] = useState(false);
+
   const onTerminalReady = useCallback(() => {
     streamReadyRef.current = true;
     setLastOutputAt(Date.now());
@@ -233,6 +248,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     setHealthGate(null);
     setPanelState(DEFAULT_PANEL_STATE);
     setMinimized(false);
+    setBannerActive(false);
     setLogRows([]);
   }, [stopGatePolling]);
 
@@ -326,8 +342,12 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         return run(Promise.resolve(), deploySessionId);
       }
 
-      // Read the persisted style synchronously so a just-changed setting always
-      // takes effect on this deploy, independent of any reactive snapshot.
+      // Read the persisted style synchronously so this deploy uses the style in
+      // effect when it starts. The surfaces read the style reactively as they
+      // render, so flipping the Modal/Inline setting during an in-flight
+      // operation is unsupported: it would hand the single progress socket
+      // between the modal and the portal mid-stream and lose the gap. Change
+      // the style between operations.
       const inlineStyle = readDeployFeedbackStyle() === 'inline';
 
       // Cancel any existing session before starting a new one.
@@ -405,7 +425,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
   return (
     <DeployFeedbackContext.Provider
-      value={{ runWithLog, panelState, minimized, setMinimized, healthGate, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose }}
+      value={{ runWithLog, panelState, minimized, setMinimized, bannerActive, setBannerActive, healthGate, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose }}
     >
       {children}
     </DeployFeedbackContext.Provider>

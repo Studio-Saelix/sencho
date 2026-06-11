@@ -61,6 +61,15 @@ describe('DeployFeedbackModal Inline vs Modal style', () => {
         expect(onPanelClose).not.toHaveBeenCalled();
     });
 
+    it('inline style: closing a failed op ends the session (the banner has stepped aside)', () => {
+        mockStyle = 'inline';
+        mockPanelState = panel({ status: 'failed' });
+        render(<DeployFeedbackModal isMinimized={false} onMinimize={onMinimize} />);
+        clickClose();
+        expect(onPanelClose).toHaveBeenCalledTimes(1);
+        expect(onMinimize).not.toHaveBeenCalled();
+    });
+
     it('modal style: closing ends the session', () => {
         mockStyle = 'modal';
         render(<DeployFeedbackModal isMinimized={false} onMinimize={onMinimize} />);

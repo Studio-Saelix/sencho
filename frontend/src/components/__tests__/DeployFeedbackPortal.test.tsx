@@ -5,6 +5,7 @@ import type { DeployPanelState } from '@/context/DeployFeedbackContext';
 
 let mockPanelState: DeployPanelState;
 let mockStyle: 'modal' | 'inline';
+let mockBannerActive: boolean;
 
 vi.mock('@/context/DeployFeedbackContext', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/context/DeployFeedbackContext')>();
@@ -14,6 +15,8 @@ vi.mock('@/context/DeployFeedbackContext', async (importOriginal) => {
             panelState: mockPanelState,
             minimized: true,
             setMinimized: vi.fn(),
+            bannerActive: mockBannerActive,
+            setBannerActive: vi.fn(),
             onTerminalReady: vi.fn(),
             onTerminalError: vi.fn(),
             onMessage: vi.fn(),
@@ -43,6 +46,7 @@ function panel(over: Partial<DeployPanelState> = {}): DeployPanelState {
 
 beforeEach(() => {
     mockStyle = 'inline';
+    mockBannerActive = false;
     mockPanelState = panel();
 });
 
@@ -71,17 +75,26 @@ describe('DeployFeedbackPortal', () => {
         expect(screen.queryByTestId('portal-terminal')).toBeNull();
     });
 
-    it('shows the minimize pill only in modal style when open and minimized', () => {
+    it('shows the minimize pill in modal style when open and minimized', () => {
         mockStyle = 'modal';
         mockPanelState = panel({ isOpen: true });
         render(<DeployFeedbackPortal />);
         expect(screen.getByTestId('pill-marker')).toBeInTheDocument();
     });
 
-    it('hides the pill in inline style (the banner is the surface)', () => {
+    it('hides the pill in inline style while the banner is covering the session', () => {
         mockStyle = 'inline';
+        mockBannerActive = true;
         mockPanelState = panel({ isOpen: true });
         render(<DeployFeedbackPortal />);
         expect(screen.queryByTestId('pill-marker')).toBeNull();
+    });
+
+    it('shows the fallback pill in inline style when the banner is not active', () => {
+        mockStyle = 'inline';
+        mockBannerActive = false; // App Store, off-detail, or a failed op
+        mockPanelState = panel({ isOpen: true });
+        render(<DeployFeedbackPortal />);
+        expect(screen.getByTestId('pill-marker')).toBeInTheDocument();
     });
 });

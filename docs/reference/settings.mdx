@@ -99,7 +99,7 @@ See [Two-Factor Authentication](/features/two-factor-authentication) for the enr
 Control how dense and how interactive the workspace feels. Each browser remembers its own choices so a compact laptop setup does not force the same rhythm on a larger desktop.
 
 <Frame>
-  <img src="/images/settings/appearance-density.png" alt="Appearance settings showing the Density selector, Deploy progress modal, and Diff preview toggles" />
+  <img src="/images/settings/appearance-density.png" alt="Appearance settings showing the Density selector, the Deploy progress toggle, and the Diff preview toggle" />
 </Frame>
 
 ### Density
@@ -111,14 +111,14 @@ Control how dense and how interactive the workspace feels. Each browser remember
 
 Density affects the dashboard stack table, the resource gauge strip, the Settings Hub sidebar, the Schedules and Audit Log tables, and every other data table in Sencho. Typography, color, and layout structure stay the same; only vertical padding compresses.
 
-### Deploy progress modal
+### Deploy progress
 
-Sencho streams live output in a modal whenever you deploy, restart, update, install, or run a Git operation. The modal closes automatically on success or stays open on failure so you can read the error output, and it warns when an operation goes quiet. It is on by default; turn it off to run operations without the panel.
+Sencho streams live output whenever you deploy, restart, update, install, or run a Git operation. It is on by default; turn it off to run operations without it. When it is on, **Progress style** chooses how it appears: **Modal** (a centered overlay that closes automatically on success or stays open on failure) or **Inline** (a quiet status band on the stack detail). See [Deploy Progress](/features/deploy-progress) for the full reference.
 
 | Value | Behavior |
 |-------|----------|
-| **Enabled** (default) | A progress modal opens for every long-running operation |
-| **Disabled** | Operations run without the panel; results surface via toast notifications, and a failed operation still shows recovery actions on the stack page |
+| **Enabled** (default) | A progress surface (the Modal overlay or the Inline band, per Progress style) shows for every long-running operation |
+| **Disabled** | Operations run without it; results surface via toast notifications, and a failed operation still shows recovery actions on the stack page |
 
 ### Diff preview before save
 

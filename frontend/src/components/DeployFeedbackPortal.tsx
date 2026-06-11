@@ -5,7 +5,7 @@ import { DeployFeedbackModal } from './DeployFeedbackModal';
 import { DeployFeedbackPill } from './DeployFeedbackPill';
 
 export function DeployFeedbackPortal() {
-  const { panelState, minimized, setMinimized, onTerminalReady, onTerminalError, onMessage } = useDeployFeedback();
+  const { panelState, minimized, setMinimized, bannerActive, onTerminalReady, onTerminalError, onMessage } = useDeployFeedback();
   const [style] = useDeployFeedbackStyle();
 
   return (
@@ -14,10 +14,14 @@ export function DeployFeedbackPortal() {
         isMinimized={minimized}
         onMinimize={() => setMinimized(true)}
       />
-      {/* The minimize pill belongs to Modal style only; in Inline style the
-          in-page banner is the persistent surface and owns "View output". */}
+      {/* The pill is the minimized surface. In Modal style it shows whenever the
+          modal is minimized. In Inline style the in-page banner is the surface,
+          so the pill only fills in when the banner is not covering the session:
+          an App Store install, after navigating away from the stack, or a failed
+          op the banner steps aside for. This keeps a click-through to the log in
+          every case without ever overlapping the banner. */}
       <DeployFeedbackPill
-        isVisible={style === 'modal' && panelState.isOpen && minimized}
+        isVisible={panelState.isOpen && minimized && (style === 'modal' || !bannerActive)}
         onExpand={() => setMinimized(false)}
       />
       {/* Inline style streams without the modal: the modal owns the terminal in
