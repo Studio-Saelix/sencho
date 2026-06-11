@@ -13,7 +13,7 @@ import type { Node } from '@/context/NodeContext';
 
 const LOCAL_NODE = { id: 1, type: 'local' } as Node;
 
-function container(ports: { PrivatePort: number; PublicPort: number }[]): ContainerInfo {
+function container(ports: { PrivatePort: number; PublicPort: number; Type?: string }[]): ContainerInfo {
   return {
     Id: 'abc123def456',
     Names: ['/web'],
@@ -66,6 +66,12 @@ describe('ContainersHealth published port link', () => {
     renderHealth(container([{ PrivatePort: 80, PublicPort: 8080 }]));
     fireEvent.click(screen.getByRole('button', { name: 'Copy service URL' }));
     await waitFor(() => expect(copyToClipboard).toHaveBeenCalledWith('http://localhost:8080'));
+  });
+
+  it('does not render a link for a UDP-only published port', () => {
+    renderHealth(container([{ PrivatePort: 53, PublicPort: 5353, Type: 'udp' }]));
+    expect(screen.queryByRole('link', { name: /5353/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy service URL' })).toBeNull();
   });
 
   it('shows the port as plain text (no link) for a remote node with no reachable host', () => {

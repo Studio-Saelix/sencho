@@ -8,8 +8,7 @@
  */
 
 // Some multi-port apps serve their UI at a sub-path, so a bare host:port does
-// not land on the working page. Keyed by the app's container (private) port;
-// the lookup also falls back to the published port (see buildServiceUrl).
+// not land on the working page. Keyed by the app's container (private) port.
 const KNOWN_SERVICE_PATHS: Record<number, string> = {
   32400: '/web', // Plex
 };
@@ -62,10 +61,13 @@ export function buildServiceUrl(opts: ServiceUrlOptions): string | null {
   if (!host) return null;
 
   const scheme = protocol ?? (publicPort === 443 || privatePort === 443 ? 'https' : 'http');
+  // When the container port is known, only it decides the app path. The
+  // published-port lookup is a fallback for callers that do not know it (the
+  // "Open App" menu and anatomy footer), where the host port is the best signal.
   const path =
-    (privatePort !== undefined ? KNOWN_SERVICE_PATHS[privatePort] : undefined) ??
-    KNOWN_SERVICE_PATHS[publicPort] ??
-    '';
+    privatePort !== undefined
+      ? (KNOWN_SERVICE_PATHS[privatePort] ?? '')
+      : (KNOWN_SERVICE_PATHS[publicPort] ?? '');
   return `${scheme}://${host}:${publicPort}${path}`;
 }
 

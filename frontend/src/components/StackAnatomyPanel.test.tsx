@@ -12,8 +12,10 @@ vi.mock('./stack/StackActivityTimeline', () => ({
   StackActivityTimeline: () => <div data-testid="activity-timeline" />,
 }));
 // This suite covers the update banner, not the Doctor tab; keep the capability
-// off so the panel surface stays exactly what these tests assert against.
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 1 }, hasCapability: () => false }) }));
+// off so the panel surface stays exactly what these tests assert against. The
+// active node is mutable so the footer-link tests can simulate a remote node.
+const { nodeState } = vi.hoisted(() => ({ nodeState: { activeNode: { id: 1 } as unknown } }));
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: nodeState.activeNode, hasCapability: () => false }) }));
 
 import { apiFetch } from '@/lib/api';
 import StackAnatomyPanel from './StackAnatomyPanel';
@@ -46,6 +48,7 @@ const updatePreviewCalls = () =>
 
 beforeEach(() => {
   hasUpdate = true;
+  nodeState.activeNode = { id: 1 };
   vi.mocked(apiFetch).mockReset();
   vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -325,5 +328,12 @@ describe('StackAnatomyPanel exposed footer', () => {
     renderWithPorts('services:\n  web:\n    image: x\n    ports:\n      - "80"\n');
     await screen.findByText('exposed');
     expect(screen.queryByRole('link', { name: /:\d+/ })).toBeNull();
+  });
+
+  it('shows the port as plain text (no link) on a remote node with no reachable host', async () => {
+    nodeState.activeNode = { id: 9, type: 'remote', api_url: '' };
+    renderWithPorts('services:\n  web:\n    image: x\n    ports:\n      - "8989:8989"\n');
+    expect(await screen.findByText(/:8989/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /:8989/ })).toBeNull();
   });
 });

@@ -94,6 +94,15 @@ describe('buildServiceUrl', () => {
       'http://host:8080',
     );
   });
+
+  it('does not borrow a path from the published port when the container port is known', () => {
+    // 32400 is registered as Plex's container port; a non-Plex service whose
+    // container port (80) happens to be published on host port 32400 must not
+    // inherit /web.
+    expect(buildServiceUrl({ publicPort: 32400, privatePort: 80, browserHost: 'host' })).toBe(
+      'http://host:32400',
+    );
+  });
 });
 
 describe('openServiceUrl', () => {

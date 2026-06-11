@@ -43,7 +43,7 @@ vi.mock('util', () => ({
   promisify: () => vi.fn(),
 }));
 
-import DockerController from '../services/DockerController';
+import DockerController, { selectMainWebPort } from '../services/DockerController';
 import { CacheService } from '../services/CacheService';
 
 beforeEach(() => {
@@ -1299,5 +1299,68 @@ describe('DockerController - getBulkStackStatuses uptime', () => {
     // The cache must be read, not merely populated: the second call still
     // resolves the real StartedAt rather than falling back to Created.
     expect(second['ca-stack'].runningSince).toBe(startedUnix);
+  });
+});
+
+describe('DockerController - getBulkStackStatuses mainPort', () => {
+  beforeEach(() => {
+    CacheService.getInstance().flush();
+  });
+
+  const withPorts = (project: string, ports: { PrivatePort: number; PublicPort: number; Type?: string }[]) => ({
+    Id: `${project}-c1`, Names: [`/${project}-c1`], State: 'running', Status: 'Up',
+    Image: 'nginx', Created: 1000, Labels: { 'com.docker.compose.project': project }, Ports: ports,
+  });
+
+  it('does not set mainPort for a UDP-only published port', async () => {
+    mockDocker.listContainers.mockResolvedValue([withPorts('udp-stack', [{ PrivatePort: 53, PublicPort: 5353, Type: 'udp' }])]);
+    mockDocker.getContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '2026-06-09T12:00:00.000Z' } }) });
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['udp-stack']);
+    expect(result['udp-stack'].status).toBe('running');
+    expect(result['udp-stack'].mainPort).toBeUndefined();
+  });
+
+  it('selects a TCP web port as mainPort', async () => {
+    mockDocker.listContainers.mockResolvedValue([withPorts('tcp-stack', [
+      { PrivatePort: 53, PublicPort: 5353, Type: 'udp' },
+      { PrivatePort: 80, PublicPort: 8080, Type: 'tcp' },
+    ])]);
+    mockDocker.getContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '2026-06-09T12:00:00.000Z' } }) });
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['tcp-stack']);
+    expect(result['tcp-stack'].mainPort).toBe(8080);
+  });
+});
+
+describe('selectMainWebPort', () => {
+  it('prefers a known web-UI container port', () => {
+    expect(selectMainWebPort([
+      { PrivatePort: 5432, PublicPort: 5432, Type: 'tcp' },
+      { PrivatePort: 8080, PublicPort: 18080, Type: 'tcp' },
+    ])).toBe(18080);
+  });
+
+  it('skips UDP ports and picks the TCP one', () => {
+    expect(selectMainWebPort([
+      { PrivatePort: 53, PublicPort: 5353, Type: 'udp' },
+      { PrivatePort: 80, PublicPort: 8080, Type: 'tcp' },
+    ])).toBe(8080);
+  });
+
+  it('returns undefined for a UDP-only published port', () => {
+    expect(selectMainWebPort([{ PrivatePort: 53, PublicPort: 5353, Type: 'udp' }])).toBeUndefined();
+  });
+
+  it('treats a missing protocol as TCP', () => {
+    expect(selectMainWebPort([{ PrivatePort: 80, PublicPort: 8080 }])).toBe(8080);
+  });
+
+  it('falls back to the first TCP port when none match the web-UI list', () => {
+    expect(selectMainWebPort([{ PrivatePort: 12000, PublicPort: 12000, Type: 'tcp' }])).toBe(12000);
+  });
+
+  it('returns undefined when there are no ports', () => {
+    expect(selectMainWebPort([])).toBeUndefined();
   });
 });

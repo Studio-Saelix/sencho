@@ -367,13 +367,15 @@ export function ContainersHealth({
                         let mainPort: number | undefined;
                         let mainPortPrivate: number | undefined;
                         let mainPortProto: string | undefined;
-                        if (container.Ports && container.Ports.length > 0) {
+                        // UDP ports are not browser-openable, so they never back a link.
+                        const tcpPorts = (container.Ports ?? []).filter(p => p.Type !== 'udp');
+                        if (tcpPorts.length > 0) {
                             const WEB_UI_PORTS = [32400, 8989, 7878, 9696, 5055, 8080, 80, 443, 3000, 9000];
                             const IGNORE_PORTS = [1900, 53, 22];
-                            let match = container.Ports.find(p => WEB_UI_PORTS.includes(p.PrivatePort));
-                            if (!match) match = container.Ports.find(p => WEB_UI_PORTS.includes(p.PublicPort));
-                            if (!match) match = container.Ports.find(p => !IGNORE_PORTS.includes(p.PrivatePort) && !IGNORE_PORTS.includes(p.PublicPort));
-                            const chosen = match || container.Ports[0];
+                            let match = tcpPorts.find(p => WEB_UI_PORTS.includes(p.PrivatePort));
+                            if (!match) match = tcpPorts.find(p => WEB_UI_PORTS.includes(p.PublicPort));
+                            if (!match) match = tcpPorts.find(p => !IGNORE_PORTS.includes(p.PrivatePort) && !IGNORE_PORTS.includes(p.PublicPort));
+                            const chosen = match || tcpPorts[0];
                             mainPort = chosen.PublicPort;
                             mainPortPrivate = chosen.PrivatePort;
                             mainPortProto = 'tcp';

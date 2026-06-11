@@ -51,7 +51,7 @@ export interface ContainerInfo {
     Service?: string;
     State: string;
     Status?: string;
-    Ports?: { PrivatePort: number; PublicPort: number }[];
+    Ports?: { PrivatePort: number; PublicPort: number; Type?: string }[];
     healthStatus?: 'healthy' | 'unhealthy' | 'starting' | 'none';
     Image?: string;
     ImageID?: string;

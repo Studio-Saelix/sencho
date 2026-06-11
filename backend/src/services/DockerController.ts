@@ -33,6 +33,26 @@ const WEB_UI_PORTS = [32400, 8989, 7878, 9696, 5055, 8080, 80, 443, 3000, 9000];
 /** Ports that should never be treated as the main app port. */
 const IGNORE_PORTS = [1900, 53, 22];
 
+/**
+ * Pick the published host port most likely to be a web UI, in priority order,
+ * skipping UDP (not browser-openable) and deprioritizing system ports, falling
+ * back to the first TCP port when nothing better matches. Returns the chosen
+ * PublicPort, or undefined when no TCP port qualifies.
+ */
+export function selectMainWebPort(
+  ports: { PrivatePort?: number; PublicPort?: number; Type?: string }[],
+): number | undefined {
+  const tcp = ports.filter(p => p.Type !== 'udp');
+  let match = tcp.find(p => p.PrivatePort && WEB_UI_PORTS.includes(p.PrivatePort));
+  if (!match) match = tcp.find(p => p.PublicPort && WEB_UI_PORTS.includes(p.PublicPort));
+  if (!match) match = tcp.find(p =>
+    (!p.PrivatePort || !IGNORE_PORTS.includes(p.PrivatePort)) &&
+    (!p.PublicPort || !IGNORE_PORTS.includes(p.PublicPort)),
+  );
+  const chosen = match || tcp[0];
+  return chosen?.PublicPort;
+}
+
 export interface BulkStackInfo {
   status: 'running' | 'exited' | 'unknown';
   mainPort?: number;
@@ -1142,17 +1162,10 @@ class DockerController {
 
         // Detect main web port (first running container with a matchable port wins)
         if (result[stackDir].mainPort === undefined && Array.isArray(container.Ports) && container.Ports.length > 0) {
-          const ports = container.Ports as { PrivatePort?: number; PublicPort?: number }[];
-          let match = ports.find(p => p.PrivatePort && WEB_UI_PORTS.includes(p.PrivatePort));
-          if (!match) match = ports.find(p => p.PublicPort && WEB_UI_PORTS.includes(p.PublicPort));
-          if (!match) match = ports.find(p =>
-            (!p.PrivatePort || !IGNORE_PORTS.includes(p.PrivatePort)) &&
-            (!p.PublicPort || !IGNORE_PORTS.includes(p.PublicPort))
+          const mainPort = selectMainWebPort(
+            container.Ports as { PrivatePort?: number; PublicPort?: number; Type?: string }[],
           );
-          const chosen = match || ports[0];
-          if (chosen?.PublicPort) {
-            result[stackDir].mainPort = chosen.PublicPort;
-          }
+          if (mainPort) result[stackDir].mainPort = mainPort;
         }
       } else if (result[stackDir].status !== 'running') {
         result[stackDir].status = 'exited';
@@ -1283,7 +1296,7 @@ class DockerController {
         Service?: string;
         State?: string;
         Status?: string;
-        Publishers?: { URL?: string, TargetPort?: number, PublishedPort?: number }[];
+        Publishers?: { URL?: string, TargetPort?: number, PublishedPort?: number, Protocol?: string }[];
       }
 
       let containers: ComposeContainer[] = [];
@@ -1313,11 +1326,11 @@ class DockerController {
         // Note: docker compose ps returns Name (singular), but frontend expects Names (array)
         // Dockerode returns Names with leading slash, so we add it for compatibility
         const mapped = containers.map((c) => {
-          let Ports: { PrivatePort: number, PublicPort: number }[] = [];
+          let Ports: { PrivatePort: number, PublicPort: number, Type?: string }[] = [];
           if (c.Publishers && Array.isArray(c.Publishers)) {
             Ports = c.Publishers
               .filter(p => typeof p.PublishedPort === 'number' && p.PublishedPort > 0)
-              .map(p => ({ PrivatePort: (p.TargetPort || 0) as number, PublicPort: p.PublishedPort as number }));
+              .map(p => ({ PrivatePort: (p.TargetPort || 0) as number, PublicPort: p.PublishedPort as number, Type: p.Protocol?.toLowerCase() }));
           }
           return {
             Id: c.ID || '',
@@ -1430,11 +1443,11 @@ class DockerController {
 
       // 5. Map to the frontend interface
       return fallbackContainers.map(c => {
-        let Ports: { PrivatePort: number, PublicPort: number }[] = [];
+        let Ports: { PrivatePort: number, PublicPort: number, Type?: string }[] = [];
         if (c.Ports && Array.isArray(c.Ports)) {
           Ports = c.Ports
             .filter((p: any) => typeof p.PublicPort === 'number' && p.PublicPort > 0)
-            .map((p: any) => ({ PrivatePort: (p.PrivatePort || 0) as number, PublicPort: p.PublicPort as number }));
+            .map((p: any) => ({ PrivatePort: (p.PrivatePort || 0) as number, PublicPort: p.PublicPort as number, Type: typeof p.Type === 'string' ? p.Type.toLowerCase() : undefined }));
         }
         return {
           Id: c.Id,
