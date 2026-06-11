@@ -9,7 +9,7 @@ import type { EffectiveModel, EffService } from '../services/preflight/effective
 import type { DeclaredCompose } from '../helpers/composeDependencyParse';
 import type { DependencySnapshot, DependencyContainer, DependencyNetwork } from '../services/DockerController';
 import {
-  fromEffectiveModel, fromDeclaredCompose, compareStackNetworks, runtimeResourceName,
+  fromEffectiveModel, fromDeclaredCompose, compareStackNetworks, runtimeResourceName, parseAccessUrlPorts,
 } from '../services/network/normalize';
 import { assembleStackNetworkFacts } from '../services/network/composeNetworkInspector';
 
@@ -125,6 +125,19 @@ describe('runtimeResourceName', () => {
     expect(runtimeResourceName('myapp', 'backend', undefined)).toBe('myapp_backend');
     expect(runtimeResourceName('myapp', 'backend', 'backend')).toBe('myapp_backend'); // name == key is not an override
     expect(runtimeResourceName('myapp', 'shared', 'shared_net')).toBe('shared_net');
+  });
+});
+
+describe('parseAccessUrlPorts', () => {
+  it('extracts host ports from access-URL text', () => {
+    expect([...parseAccessUrlPorts('http://host:8080/path and https://host:443')].sort((a, b) => a - b)).toEqual([443, 8080]);
+  });
+  it('finds no port when the URL has none (implicit scheme port)', () => {
+    expect([...parseAccessUrlPorts('https://app.example.com/dashboard')]).toEqual([]);
+  });
+  it('rejects out-of-range numbers and returns an empty set for empty input', () => {
+    expect([...parseAccessUrlPorts('http://host:99999')]).toEqual([]);
+    expect([...parseAccessUrlPorts('')]).toEqual([]);
   });
 });
 

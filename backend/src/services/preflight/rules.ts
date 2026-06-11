@@ -1,5 +1,7 @@
 import type { PreflightContext, PreflightFinding, PreflightSeverity, NodePortBinding } from './types';
 import type { EffService, EffPortSpec } from './effectiveModel';
+import type { ExposureIntent } from '../network/types';
+import { isLoopback } from '../network/normalize';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
@@ -521,6 +523,142 @@ const effectiveModelExpanded: PreflightRule = {
   },
 };
 
+// ----- exposure-intent rules ------------------------------------------------
+// These read the user's stored exposure classification (resolved per service)
+// and the dossier's documented access URLs from the context, plus a sensitivity
+// heuristic on the image name for the broad-exposure rule.
+
+/** Image-name hints for a database or admin service that should rarely be broadly exposed. */
+const SENSITIVE_IMAGE_HINTS = [
+  'postgres', 'mysql', 'mariadb', 'mongo', 'redis', 'memcached', 'elasticsearch',
+  'adminer', 'phpmyadmin', 'portainer', 'docker-socket-proxy',
+];
+/** Reverse-proxy label-key base names; matched as the key itself or a `base.` prefix (case-insensitive). */
+const REVERSE_PROXY_LABEL_HINTS = ['traefik', 'caddy', 'virtual.host'];
+
+/** A service's effective intent: its own override, else the stack-level intent. */
+function effectiveIntent(ctx: PreflightContext, service: string): ExposureIntent | null {
+  return ctx.serviceIntents[service] ?? ctx.stackIntent;
+}
+
+const exposureInternalPublished: PreflightRule = {
+  id: 'exposure-internal-published',
+  run(ctx) {
+    if (!ctx.model) return [];
+    const findings: PreflightFinding[] = [];
+    for (const svc of ctx.model.services) {
+      const intent = effectiveIntent(ctx, svc.name);
+      if (intent !== 'internal' && intent !== 'same-node') continue;
+      // same-node tolerates a loopback binding; internal tolerates no host port.
+      const offending = svc.ports.filter(p => intent === 'internal' || !isLoopback(p.hostIp));
+      if (offending.length === 0) continue;
+      findings.push({
+        ruleId: 'exposure-internal-published',
+        severity: 'high',
+        title: `"${svc.name}" is classified ${intent} but publishes a host port`,
+        message: `Service "${svc.name}" is classified as ${intent} exposure, but it publishes ${offending.map(specLabel).join(', ')} to the host, which contradicts that intent.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: intent === 'same-node'
+          ? 'Bind the port to loopback (127.0.0.1), remove it, or reclassify the exposure intent.'
+          : 'Remove the published port or reclassify the exposure intent.',
+      });
+    }
+    return findings;
+  },
+};
+
+const exposureUnclassified: PreflightRule = {
+  id: 'exposure-unclassified',
+  run(ctx) {
+    if (!ctx.model) return [];
+    if (!ctx.model.services.some(s => s.ports.length > 0)) return [];
+    if (ctx.stackIntent !== null && ctx.stackIntent !== 'unknown') return [];
+    return [{
+      ruleId: 'exposure-unclassified',
+      severity: 'warning',
+      title: 'Stack publishes ports without an exposure intent',
+      message: 'This stack publishes one or more host ports but has no exposure intent set. Classifying it (internal, LAN, reverse proxy, public) lets Sencho flag mismatches later.',
+      remediation: 'Set the stack exposure intent in the Networking tab.',
+    }];
+  },
+};
+
+const exposurePortVsDossier: PreflightRule = {
+  id: 'exposure-port-vs-dossier',
+  run(ctx) {
+    if (!ctx.model || !ctx.hasAccessUrls) return [];
+    const findings: PreflightFinding[] = [];
+    for (const svc of ctx.model.services) {
+      const undocumented = [...new Set(svc.ports.flatMap(portsOf).filter(p => !ctx.accessUrlPorts.has(p)))];
+      if (undocumented.length === 0) continue;
+      findings.push({
+        ruleId: 'exposure-port-vs-dossier',
+        severity: 'warning',
+        title: 'Published port is not in the documented access URLs',
+        message: `Service "${svc.name}" publishes ${undocumented.join(', ')}, which ${undocumented.length > 1 ? 'are' : 'is'} not referenced by the dossier's documented access URLs. The documentation may be stale.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Update the access URLs in the Stack Dossier, or change the published port.',
+      });
+    }
+    return findings;
+  },
+};
+
+const reverseProxyUndocumented: PreflightRule = {
+  id: 'reverse-proxy-undocumented',
+  run(ctx) {
+    if (!ctx.model) return [];
+    // Already documented or intentionally reverse-proxied at the stack level.
+    if (ctx.hasAccessUrls || ctx.stackIntent === 'reverse-proxy') return [];
+    const findings: PreflightFinding[] = [];
+    for (const svc of ctx.model.services) {
+      if (effectiveIntent(ctx, svc.name) === 'reverse-proxy') continue;
+      const hasRpLabel = svc.labelKeys.some(k => {
+        const lk = k.toLowerCase();
+        return REVERSE_PROXY_LABEL_HINTS.some(h => lk === h || lk.startsWith(`${h}.`));
+      });
+      if (!hasRpLabel) continue;
+      findings.push({
+        ruleId: 'reverse-proxy-undocumented',
+        severity: 'warning',
+        title: `"${svc.name}" has reverse-proxy labels but no documented URL`,
+        message: `Service "${svc.name}" carries reverse-proxy labels, but the stack has no documented access URL or reverse-proxy intent, so how it is reached is unclear.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Document the access URL in the Stack Dossier or set the exposure intent to reverse proxy.',
+      });
+    }
+    return findings;
+  },
+};
+
+const sensitiveServiceBroadExposure: PreflightRule = {
+  id: 'sensitive-service-broad-exposure',
+  run(ctx) {
+    if (!ctx.model) return [];
+    const findings: PreflightFinding[] = [];
+    for (const svc of ctx.model.services) {
+      if (svc.image === undefined) continue;
+      const image = svc.image.toLowerCase();
+      if (!SENSITIVE_IMAGE_HINTS.some(h => image.includes(h))) continue;
+      const broad = svc.ports.filter(p => isAllInterfaces(p.hostIp));
+      if (broad.length === 0) continue;
+      findings.push({
+        ruleId: 'sensitive-service-broad-exposure',
+        severity: 'high',
+        title: `Sensitive service "${svc.name}" is exposed on all interfaces`,
+        message: `Service "${svc.name}" looks like a database or admin service (${svc.image}) and publishes ${broad.map(specLabel).join(', ')} on all interfaces. Broadly exposing it is a common source of compromise.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Bind it to a specific interface such as 127.0.0.1, or keep it on an internal network only.',
+      });
+    }
+    return findings;
+  },
+};
+
 /** The ordered registry. Order is the display order within a severity group. */
 export const PREFLIGHT_RULES: PreflightRule[] = [
   renderFailed,
@@ -544,6 +682,11 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   newVolume,
   containerNameInternalDup,
   containerNameCollision,
+  exposureInternalPublished,
+  sensitiveServiceBroadExposure,
+  exposureUnclassified,
+  exposurePortVsDossier,
+  reverseProxyUndocumented,
   effectiveModelExpanded,
 ];
 
