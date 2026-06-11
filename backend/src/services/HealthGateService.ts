@@ -173,8 +173,8 @@ export class HealthGateService {
     } catch (error) {
       // The gate is an observer; its failure must never fail the operation.
       console.error(
-        `[HealthGate] begin (${trigger}) failed for ${sanitizeForLog(stackName)} on node ${nodeId}:`,
-        error,
+        '[HealthGate] begin (%s) failed for %s on node %d:',
+        trigger, sanitizeForLog(stackName), nodeId, error,
       );
       return null;
     }
@@ -386,7 +386,8 @@ export class HealthGateService {
       // The verdict is lost from the DB (the startup sweep will later rewrite
       // the row as unknown), so log everything needed to reconstruct it.
       console.error(
-        `[HealthGate] Failed to persist verdict ${status} (${sanitizeForLog(reason ?? 'no reason')}) for run ${gate.runId}, stack ${sanitizeForLog(gate.stackName)}:`,
+        '[HealthGate] Failed to persist verdict %s (%s) for run %s, stack %s:',
+        status, sanitizeForLog(reason ?? 'no reason'), gate.runId, sanitizeForLog(gate.stackName),
         getErrorMessage(error, 'unknown'),
       );
     }

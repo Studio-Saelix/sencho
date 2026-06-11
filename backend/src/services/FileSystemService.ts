@@ -361,8 +361,17 @@ export class FileSystemService {
 
   async envExists(stackName: string): Promise<boolean> {
     const stackDir = this.resolveStackDir(stackName);
+    // Canonical js/path-injection barrier inline with the access sink, the
+    // same pattern backupStackFiles/restoreStackFiles use: stackName is
+    // already validated by resolveStackDir above, but static analysis only
+    // credits the containment check when it sits at the sink itself.
+    const baseResolved = path.resolve(this.baseDir);
+    const target = path.resolve(stackDir, '.env');
+    if (!target.startsWith(baseResolved + path.sep)) {
+      return false;
+    }
     try {
-      await fsPromises.access(path.join(stackDir, '.env'));
+      await fsPromises.access(target);
       return true;
     } catch {
       return false;

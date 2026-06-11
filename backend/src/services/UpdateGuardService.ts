@@ -165,7 +165,8 @@ export class UpdateGuardService {
       return await fn();
     } catch (error) {
       console.warn(
-        `[UpdateGuard] ${label} unavailable for ${sanitizeForLog(stackName)}:`,
+        '[UpdateGuard] %s unavailable for %s:',
+        label, sanitizeForLog(stackName),
         sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
       return 'error';
