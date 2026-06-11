@@ -4,6 +4,13 @@ export interface ApiFetchOptions extends RequestInit {
   /** When true, omits the x-node-id header so the request always targets
    *  the local node regardless of which node is currently active in the UI. */
   localOnly?: boolean;
+  /** Explicit node target, overriding the active-node read. A number targets
+   *  that node; null omits x-node-id so the request hits the local node. Leave
+   *  undefined for the default (read the active node from localStorage). Lets an
+   *  operation stay bound to the node captured when it started, even if the
+   *  active node changes mid-flight. Takes precedence over localOnly when both
+   *  are set. */
+  nodeId?: number | null;
 }
 
 /** Header carrying a deploy's progress-stream correlation id. Mirrors the
@@ -31,17 +38,35 @@ export async function apiFetch(
   endpoint: string,
   options: ApiFetchOptions = {}
 ): Promise<Response> {
-  const { localOnly, ...fetchOptions } = options;
+  const { localOnly, nodeId: nodeIdOverride, ...fetchOptions } = options;
   const url = `${API_BASE}${endpoint}`;
-  const activeNodeId = localOnly ? null : localStorage.getItem('sencho-active-node');
+  // An explicit nodeId (including null) wins over the active-node read so a
+  // captured operation node stays authoritative; null means target the local
+  // node, not the stored active node.
+  let activeNodeId: string | null;
+  if (nodeIdOverride !== undefined) {
+    activeNodeId = nodeIdOverride === null ? null : String(nodeIdOverride);
+  } else if (localOnly) {
+    activeNodeId = null;
+  } else {
+    activeNodeId = localStorage.getItem('sencho-active-node');
+  }
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(activeNodeId ? { 'x-node-id': activeNodeId } : {}),
+    ...(fetchOptions.headers as Record<string, string> | undefined),
+  };
+  // An explicit nodeId is authoritative: a caller-supplied x-node-id header must
+  // not silently override the captured operation node (it would for the default
+  // active-node read, which is the pre-existing behavior left unchanged).
+  if (nodeIdOverride !== undefined) {
+    if (activeNodeId) headers['x-node-id'] = activeNodeId;
+    else delete headers['x-node-id'];
+  }
   const defaultOptions: RequestInit = {
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(activeNodeId ? { 'x-node-id': activeNodeId } : {}),
-      ...fetchOptions.headers,
-    },
+    headers,
   };
 
   // Drop headers from fetchOptions before the outer spread so the merged

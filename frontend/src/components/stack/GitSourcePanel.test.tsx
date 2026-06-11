@@ -5,14 +5,36 @@
  * treating the sentinel as a configured source.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+
+// Mutable controls so a deploy-mode test can set the active node and capture the
+// runWithLog params, while the load tests keep the default (no active node).
+const nodeCtl = vi.hoisted(() => ({ activeNode: null as { id: number; type?: string } | null }));
+const dfCtl = vi.hoisted(() => ({ params: null as null | { stackName: string; action: string; nodeId: number | null } }));
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/context/DeployFeedbackContext', () => ({
-  useDeployFeedback: () => ({ runWithLog: vi.fn() }),
+  useDeployFeedback: () => ({
+    runWithLog: vi.fn(
+      async (
+        params: { stackName: string; action: string; nodeId: number | null },
+        run: (started: Promise<void>) => Promise<{ ok: boolean }>,
+      ) => {
+        dfCtl.params = params;
+        return run(Promise.resolve());
+      },
+    ),
+  }),
 }));
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ activeNode: null }),
+  useNodes: () => ({ activeNode: nodeCtl.activeNode }),
+}));
+// Drive applyPull(commitSha, deploy=true) directly without standing up the real
+// diff UI; the panel passes applyPull as onApply.
+vi.mock('./GitSourceDiffDialog', () => ({
+  GitSourceDiffDialog: ({ onApply }: { onApply: (sha: string, deploy: boolean) => void }) => (
+    <button data-testid="apply-deploy" onClick={() => onApply('sha-123', true)}>apply</button>
+  ),
 }));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: {
@@ -64,6 +86,8 @@ function panel() {
 
 beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
+  nodeCtl.activeNode = null;
+  dfCtl.params = null;
 });
 
 describe('GitSourcePanel load', () => {
@@ -93,5 +117,23 @@ describe('GitSourcePanel load', () => {
     await waitFor(() =>
       expect(screen.getByLabelText(/repository url/i)).toHaveValue('https://github.com/org/repo.git'),
     );
+  });
+});
+
+describe('GitSourcePanel deploy-mode apply node binding', () => {
+  beforeEach(() => {
+    nodeCtl.activeNode = { id: 4, type: 'local' };
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ applied: true, deployed: true }));
+  });
+
+  it('binds both runWithLog and the apply POST to the captured node when deploying', async () => {
+    render(panel());
+    fireEvent.click(await screen.findByTestId('apply-deploy'));
+
+    await waitFor(() => {
+      const applyCall = vi.mocked(apiFetch).mock.calls.find(c => String(c[0]).includes('/git-source/apply'));
+      expect(applyCall?.[1]).toEqual(expect.objectContaining({ nodeId: 4 }));
+    });
+    expect(dfCtl.params).toEqual(expect.objectContaining({ action: 'deploy', nodeId: 4 }));
   });
 });

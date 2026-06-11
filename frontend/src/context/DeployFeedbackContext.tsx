@@ -63,6 +63,10 @@ interface RunResult {
 /** Post-update health gate state for the current deploy session. */
 export interface HealthGateUiState {
   stackName: string;
+  /** Node the gate runs on (null = local), captured from the operation. Polled
+   *  on this node and matched against the active node before its failure routes
+   *  into recovery, so a same-named stack on another node never inherits it. */
+  nodeId: number | null;
   gateId: string;
   trigger: 'update' | 'deploy';
   status: 'observing' | 'passed' | 'failed' | 'unknown';
@@ -257,9 +261,9 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   // instead of this session showing a newer run's result. Mirrors the backend
   // gate's own degradation: repeated failures (or an absurdly long poll)
   // resolve to an honest client-side unknown rather than observing forever.
-  const startGatePolling = useCallback((stackName: string, gateId: string, trigger: 'update' | 'deploy', mySession: number) => {
+  const startGatePolling = useCallback((stackName: string, nodeId: number | null, gateId: string, trigger: 'update' | 'deploy', mySession: number) => {
     stopGatePolling();
-    setHealthGate({ stackName, gateId, trigger, status: 'observing', reason: null, windowSeconds: null, startedAt: null });
+    setHealthGate({ stackName, nodeId, gateId, trigger, status: 'observing', reason: null, windowSeconds: null, startedAt: null });
     let strikes = 0;
     // Single-flight: skip a tick while one request is outstanding so two
     // overlapping responses cannot land out of order.
@@ -286,7 +290,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       }
       inFlight = true;
       try {
-        const res = await apiFetch(`/stacks/${stackName}/health-gate?gateId=${encodeURIComponent(gateId)}`);
+        const res = await apiFetch(`/stacks/${stackName}/health-gate?gateId=${encodeURIComponent(gateId)}`, { nodeId });
         const report = res.ok
           ? await res.json() as {
               id: string | null;
@@ -306,7 +310,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           return;
         }
         strikes = 0;
-        setHealthGate({ stackName, gateId, trigger, status: report.status, reason: report.reason, windowSeconds: report.windowSeconds, startedAt: report.startedAt });
+        setHealthGate({ stackName, nodeId, gateId, trigger, status: report.status, reason: report.reason, windowSeconds: report.windowSeconds, startedAt: report.startedAt });
         if (report.status !== 'observing') {
           settled = true;
           stopGatePolling();
@@ -414,7 +418,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           errorMessage: result.ok ? undefined : result.errorMessage,
         }));
         if (result.ok && result.healthGateId && (params.action === 'update' || params.action === 'deploy')) {
-          startGatePolling(params.stackName, result.healthGateId, params.action, mySession);
+          startGatePolling(params.stackName, params.nodeId, result.healthGateId, params.action, mySession);
         }
       }
 

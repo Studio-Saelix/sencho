@@ -75,6 +75,50 @@ describe('apiFetch header merge', () => {
   });
 });
 
+describe('apiFetch nodeId override', () => {
+  it('targets the explicit node, overriding a different active node', async () => {
+    localStorage.setItem('sencho-active-node', '7');
+    await apiFetch('/stacks/foo/deploy', { method: 'POST', nodeId: 3 });
+    const init = lastFetchInit();
+    expect((init.headers as Record<string, string>)['x-node-id']).toBe('3');
+    localStorage.removeItem('sencho-active-node');
+  });
+
+  it('targets the local node (omits x-node-id) when nodeId is null, even with an active node set', async () => {
+    localStorage.setItem('sencho-active-node', '7');
+    await apiFetch('/stacks/foo/deploy', { method: 'POST', nodeId: null });
+    const init = lastFetchInit();
+    expect((init.headers as Record<string, string>)['x-node-id']).toBeUndefined();
+    localStorage.removeItem('sencho-active-node');
+  });
+
+  it('falls back to the active node when nodeId is undefined', async () => {
+    localStorage.setItem('sencho-active-node', '7');
+    await apiFetch('/stacks/foo/deploy', { method: 'POST' });
+    const init = lastFetchInit();
+    expect((init.headers as Record<string, string>)['x-node-id']).toBe('7');
+    localStorage.removeItem('sencho-active-node');
+  });
+
+  it('does not leak the nodeId option onto the outgoing fetch init', async () => {
+    await apiFetch('/stacks/foo/deploy', { method: 'POST', nodeId: 3 });
+    const init = lastFetchInit() as RequestInit & { nodeId?: unknown };
+    expect(init.nodeId).toBeUndefined();
+  });
+
+  it('keeps an explicit nodeId authoritative over a caller-supplied x-node-id header', async () => {
+    await apiFetch('/stacks/foo/deploy', { method: 'POST', nodeId: 3, headers: { 'x-node-id': '99' } });
+    const init = lastFetchInit();
+    expect((init.headers as Record<string, string>)['x-node-id']).toBe('3');
+  });
+
+  it('drops a caller-supplied x-node-id when the explicit nodeId is null (local)', async () => {
+    await apiFetch('/stacks/foo/deploy', { method: 'POST', nodeId: null, headers: { 'x-node-id': '99' } });
+    const init = lastFetchInit();
+    expect((init.headers as Record<string, string>)['x-node-id']).toBeUndefined();
+  });
+});
+
 describe('withDeploySession', () => {
   it('uses the canonical header name (kept in sync with the backend)', () => {
     expect(DEPLOY_SESSION_HEADER).toBe('x-deploy-session-id');

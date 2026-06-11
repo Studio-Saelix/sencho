@@ -7,6 +7,11 @@ import { buildXtermTheme } from '@/lib/terminalTheme';
 
 interface TerminalComponentProps {
   stackName?: string;
+  /** Node the socket connects to (a number, or null for local), captured when
+   *  the operation started. Binds the progress stream to that node so an
+   *  active-node switch mid-stream cannot split it from the deploy request.
+   *  Leave undefined to track the active node (the standalone stack-logs view). */
+  nodeId?: number | null;
   /** Correlation id sent on the generic `connectTerminal` handshake so the
    *  backend streams the matching deploy's output to this socket. */
   deploySessionId?: string;
@@ -17,7 +22,7 @@ interface TerminalComponentProps {
   onMessage?: (text: string) => void;
 }
 
-export default function TerminalComponent({ stackName, deploySessionId, onReady, onError, onMessage }: TerminalComponentProps) {
+export default function TerminalComponent({ stackName, nodeId, deploySessionId, onReady, onError, onMessage }: TerminalComponentProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -116,13 +121,20 @@ export default function TerminalComponent({ stackName, deploySessionId, onReady,
 
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const cleanStackName = stackName?.replace(/\.(yml|yaml)$/, '');
-        const activeNodeId = localStorage.getItem('sencho-active-node') || '';
+        // A captured nodeId (number, or null for local) wins over the active
+        // node; undefined falls back to the active node for standalone views.
+        let resolvedNodeId: string;
+        if (nodeId !== undefined) {
+          resolvedNodeId = nodeId === null ? '' : String(nodeId);
+        } else {
+          resolvedNodeId = localStorage.getItem('sencho-active-node') || '';
+        }
 
         // If a stackName is provided, connect to the dedicated logs WebSocket
         // Otherwise, fall back to the generic terminal WebSocket
         const wsUrl = cleanStackName
-          ? `${wsProtocol}//${window.location.host}/api/stacks/${cleanStackName}/logs${activeNodeId ? `?nodeId=${activeNodeId}` : ''}`
-          : `${wsProtocol}//${window.location.host}/ws${activeNodeId ? `?nodeId=${activeNodeId}` : ''}`;
+          ? `${wsProtocol}//${window.location.host}/api/stacks/${cleanStackName}/logs${resolvedNodeId ? `?nodeId=${resolvedNodeId}` : ''}`
+          : `${wsProtocol}//${window.location.host}/ws${resolvedNodeId ? `?nodeId=${resolvedNodeId}` : ''}`;
 
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
@@ -213,7 +225,7 @@ export default function TerminalComponent({ stackName, deploySessionId, onReady,
       searchAddonRef.current = null;
       serializeAddonRef.current = null;
     };
-  }, [stackName, deploySessionId, onReady, onError, onMessage]);
+  }, [stackName, nodeId, deploySessionId, onReady, onError, onMessage]);
 
   const handleDownload = () => {
     if (!serializeAddonRef.current) return;

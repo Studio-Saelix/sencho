@@ -31,6 +31,7 @@ export function DeployFeedbackPortal() {
       {style === 'inline' && panelState.isOpen && (
         <div aria-hidden className="h-0 overflow-hidden">
           <TerminalComponent
+            nodeId={panelState.nodeId}
             deploySessionId={panelState.deploySessionId}
             onReady={onTerminalReady}
             onError={onTerminalError}
