@@ -17,6 +17,7 @@ import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } f
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
+import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
 import { UpdateGuardService } from '../services/UpdateGuardService';
 import { HealthGateService } from '../services/HealthGateService';
 import { classifyFailure } from '../services/updateGuard/failureClassifier';
@@ -951,6 +952,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().deleteGitSource(stackName);
     DatabaseService.getInstance().deleteStackDossier(req.nodeId, stackName);
     DatabaseService.getInstance().deleteStackDriftFindings(req.nodeId, stackName);
+    DatabaseService.getInstance().deleteStackExposureIntents(req.nodeId, stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
   } catch (dbErr) {
     console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);
@@ -1143,6 +1145,64 @@ stacksRouter.get('/:stackName/networking', async (req: Request, res: Response) =
     console.error('[Stacks] Failed to build networking facts for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build networking facts' });
+  }
+});
+
+// Exposure intent: the user's per-stack (service '') and per-service exposure
+// classification, stored separately from generated facts so mismatches stay
+// detectable. Rows are stored independently; precedence (a service row taking
+// priority over the stack row, an absent service row inheriting the stack
+// intent) is applied by the consumers that read these rows, not enforced here.
+// Clearing a row (intent null) deletes it, returning that scope to unset.
+const ExposurePutSchema = z.object({
+  service: z.string().max(255).optional().default(''),
+  intent: z.enum(EXPOSURE_INTENTS).nullable(),
+});
+
+function exposurePayload(nodeId: number, stackName: string): {
+  intents: { service: string; intent: ExposureIntent; updatedAt: number; updatedBy: string | null }[];
+} {
+  return {
+    intents: DatabaseService.getInstance().getStackExposureIntents(nodeId, stackName).map(r => ({
+      service: r.service, intent: r.intent, updatedAt: r.updated_at, updatedBy: r.updated_by,
+    })),
+  };
+}
+
+stacksRouter.get('/:stackName/exposure', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(exposurePayload(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to read exposure intent for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to read exposure intent' });
+  }
+});
+
+stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  const parsed = ExposurePutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid exposure intent' });
+    return;
+  }
+  const { service, intent } = parsed.data;
+  try {
+    if (intent === null) {
+      DatabaseService.getInstance().deleteStackExposureIntent(req.nodeId, stackName, service);
+    } else {
+      DatabaseService.getInstance().setStackExposureIntent(req.nodeId, stackName, service, intent, req.user?.username ?? null);
+    }
+    res.json(exposurePayload(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to save exposure intent' });
   }
 });
 
