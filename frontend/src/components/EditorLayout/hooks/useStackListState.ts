@@ -33,10 +33,20 @@ export function useStackListState() {
   const { nodes, activeNode } = useNodes();
 
   const [files, setFiles] = useState<string[]>([]);
+  // Node the current `files` list belongs to (null = local). Stamped together
+  // with `files` from the node active when the fetch started, so a consumer can
+  // tell whether the list it is reading is the one it expects, even during the
+  // async gap right after a node switch when `files` still holds the old node's
+  // entries. Filenames repeat across nodes, so a name lookup against the wrong
+  // list would resolve to the wrong file.
+  const [filesNodeId, setFilesNodeId] = useState<number | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [stackActions, setStackActions] = useState<Record<string, StackAction>>({});
   const stackActionsRef = useRef<Record<string, StackAction>>({});
+  // Monotonic token per refreshStacks call; lets a superseded fetch skip its
+  // state writes so a rapid node switch cannot leave a stale files/filesNodeId.
+  const fetchSeqRef = useRef(0);
 
   // Per-stack terminal failure records driving the in-detail recovery panel.
   // In-memory only. Node scoping is enforced by the caller, which clears these
@@ -133,18 +143,28 @@ export function useStackListState() {
 
   const refreshStacks = async (background = false): Promise<string[]> => {
     if (!background) setIsLoading(true);
+    // Snapshot the node this fetch targets and a sequence token so a superseded
+    // or out-of-order resolution (from a rapid node switch) cannot overwrite a
+    // newer node's list, keeping `files` and `filesNodeId` consistent.
+    const fetchNodeId = activeNode?.id ?? null;
+    const mySeq = ++fetchSeqRef.current;
+    const stale = () => fetchSeqRef.current !== mySeq;
     try {
       const res = await apiFetch('/stacks');
+      if (stale()) return [];
       if (!res.ok) {
         setFiles([]);
+        setFilesNodeId(fetchNodeId);
         return [];
       }
       const data = await res.json();
       const fileList: string[] = Array.isArray(data) ? data : [];
       setFiles(fileList);
+      setFilesNodeId(fetchNodeId);
 
       // Fetch all stack statuses in a single bulk call (falls back to per-stack queries for older remote nodes)
       const statusRes = await apiFetch('/stacks/statuses');
+      if (stale()) return fileList;
       let bulkStatuses: Record<string, 'running' | 'exited' | 'unknown'> | null = null;
       const bulkPorts: Record<string, number | undefined> = {};
       if (statusRes.ok) {
@@ -194,8 +214,10 @@ export function useStackListState() {
       refreshLabels();
       return fileList;
     } catch (error) {
+      if (stale()) return [];
       console.error('Failed to refresh stacks:', error);
       setFiles([]);
+      setFilesNodeId(fetchNodeId);
       return [];
     } finally {
       setIsLoading(false);
@@ -341,7 +363,7 @@ export function useStackListState() {
   }, [remoteStackResults, nodes]);
 
   return {
-    files, setFiles,
+    files, setFiles, filesNodeId,
     selectedFile, setSelectedFile,
     isLoading, setIsLoading,
     stackActions, stackActionsRef,

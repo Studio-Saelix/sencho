@@ -88,4 +88,15 @@ describe('TerminalComponent WebSocket URL', () => {
     const url = await urlFor({ nodeId: 7, stackName: 'web' });
     expect(url).toContain('/api/stacks/web/logs?nodeId=7');
   });
+
+  it('omits the nodeId query on the stack-logs stream when nodeId is null', async () => {
+    const url = await urlFor({ nodeId: null, stackName: 'web' });
+    expect(url).toMatch(/\/api\/stacks\/web\/logs$/);
+    expect(url).not.toContain('nodeId=');
+  });
+
+  it('falls back to the active node on the stack-logs stream when no nodeId prop is given', async () => {
+    const url = await urlFor({ stackName: 'web' });
+    expect(url).toContain('/api/stacks/web/logs?nodeId=9');
+  });
 });

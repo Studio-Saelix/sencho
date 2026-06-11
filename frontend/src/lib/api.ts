@@ -52,13 +52,21 @@ export async function apiFetch(
     activeNodeId = localStorage.getItem('sencho-active-node');
   }
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(activeNodeId ? { 'x-node-id': activeNodeId } : {}),
+    ...(fetchOptions.headers as Record<string, string> | undefined),
+  };
+  // An explicit nodeId is authoritative: a caller-supplied x-node-id header must
+  // not silently override the captured operation node (it would for the default
+  // active-node read, which is the pre-existing behavior left unchanged).
+  if (nodeIdOverride !== undefined) {
+    if (activeNodeId) headers['x-node-id'] = activeNodeId;
+    else delete headers['x-node-id'];
+  }
   const defaultOptions: RequestInit = {
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(activeNodeId ? { 'x-node-id': activeNodeId } : {}),
-      ...fetchOptions.headers,
-    },
+    headers,
   };
 
   // Drop headers from fetchOptions before the outer spread so the merged

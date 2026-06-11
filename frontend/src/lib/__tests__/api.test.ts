@@ -105,6 +105,18 @@ describe('apiFetch nodeId override', () => {
     const init = lastFetchInit() as RequestInit & { nodeId?: unknown };
     expect(init.nodeId).toBeUndefined();
   });
+
+  it('keeps an explicit nodeId authoritative over a caller-supplied x-node-id header', async () => {
+    await apiFetch('/stacks/foo/deploy', { method: 'POST', nodeId: 3, headers: { 'x-node-id': '99' } });
+    const init = lastFetchInit();
+    expect((init.headers as Record<string, string>)['x-node-id']).toBe('3');
+  });
+
+  it('drops a caller-supplied x-node-id when the explicit nodeId is null (local)', async () => {
+    await apiFetch('/stacks/foo/deploy', { method: 'POST', nodeId: null, headers: { 'x-node-id': '99' } });
+    const init = lastFetchInit();
+    expect((init.headers as Record<string, string>)['x-node-id']).toBeUndefined();
+  });
 });
 
 describe('withDeploySession', () => {

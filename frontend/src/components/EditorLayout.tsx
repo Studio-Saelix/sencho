@@ -210,7 +210,12 @@ export default function EditorLayout() {
     // Record only on the node the gate ran on. A wrong node or a not-yet-loaded
     // stack file leaves it unhandled (not marked), so the effect retries when the
     // active node returns or the files refresh, recording exactly once.
-    const outcome = classifyFailedGate(healthGate, activeNodeIdRef.current, stackListState.files);
+    const outcome = classifyFailedGate(
+      healthGate,
+      activeNodeIdRef.current,
+      stackListState.filesNodeId,
+      stackListState.files,
+    );
     if (outcome.kind === 'no-file') {
       console.warn('[HealthGate] no stack file matches failed gate for', healthGate.stackName);
       return;
@@ -229,7 +234,7 @@ export default function EditorLayout() {
         suggestion: 'Check the container logs; roll back if the previous version was healthy.',
       },
     });
-  }, [healthGate, stackListState.files, stackListState.recordActionFailure]);
+  }, [healthGate, stackListState.files, stackListState.filesNodeId, stackListState.recordActionFailure]);
 
   const buildMenuCtx = useSidebarContextMenu({
     stackListState,
