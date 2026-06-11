@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useRef, useCallback, useEff
 import { apiFetch } from '../lib/api';
 import { type ParsedLogRow, parseLogChunk } from '../components/log-rendering/composeLogParser';
 import { useDeployFeedbackEnabled } from '../hooks/use-deploy-feedback-enabled';
+import { readDeployFeedbackStyle } from '../hooks/use-deploy-feedback-style';
 
 export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install';
 
@@ -18,6 +19,12 @@ export const VERB_LABELS: Record<ActionVerb, { present: string; past: string }> 
 export interface DeployPanelState {
   isOpen: boolean;
   stackName: string;
+  /**
+   * Node the operation runs on (null = local), captured at runWithLog start.
+   * The inline banner filters on it so an operation never bleeds onto a
+   * same-named stack after an active-node switch.
+   */
+  nodeId: number | null;
   action: ActionVerb;
   status: 'preparing' | 'streaming' | 'succeeded' | 'failed';
   errorMessage?: string;
@@ -66,12 +73,38 @@ export interface HealthGateUiState {
 
 const GATE_POLL_INTERVAL_MS = 4_000;
 
+/** Parameters identifying the operation a runWithLog call drives. */
+export interface RunWithLogParams {
+  stackName: string;
+  action: ActionVerb;
+  /** Node the operation runs on (null = local), for node-scoped surfaces. */
+  nodeId: number | null;
+}
+
 interface DeployFeedbackContextValue {
   runWithLog: (
-    params: { stackName: string; action: ActionVerb },
+    params: RunWithLogParams,
     run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>
   ) => Promise<RunResult>;
   panelState: DeployPanelState;
+  /**
+   * Whether the modal surface is hidden for the current session. In Modal style
+   * a session starts visible; in Inline style it starts hidden (the banner is
+   * the surface) and the banner's "View output" sets this false to summon the
+   * modal. Lifted here so the in-page banner and the portal share one source.
+   */
+  minimized: boolean;
+  setMinimized: (next: boolean) => void;
+  /**
+   * Whether the in-page banner is currently showing this session (Inline style,
+   * on the operation's own stack detail). The portal reads it to decide whether
+   * the minimized pill is needed as the fallback surface: in Inline style the
+   * pill shows only when the banner is not covering the session (App Store,
+   * after navigating away, or a failed op the banner steps aside for), so the
+   * two never overlap. The banner owns this flag.
+   */
+  bannerActive: boolean;
+  setBannerActive: (next: boolean) => void;
   /** Gate state for the current session, or null when no gate was started. */
   healthGate: HealthGateUiState | null;
   logRows: ParsedLogRow[];
@@ -92,6 +125,7 @@ interface DeployFeedbackContextValue {
 const DEFAULT_PANEL_STATE: DeployPanelState = {
   isOpen: false,
   stackName: '',
+  nodeId: null,
   action: 'deploy',
   status: 'preparing',
   progressUnavailable: false,
@@ -160,6 +194,15 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
   const [isEnabled] = useDeployFeedbackEnabled();
 
+  // Whether the modal surface is hidden for the current session. Set per style
+  // at session start (see runWithLog); the banner toggles it via setMinimized.
+  const [minimized, setMinimized] = useState(false);
+
+  // Whether the in-page banner is currently the visible surface (Inline style,
+  // on the operation's stack detail). Owned by the banner; the portal reads it
+  // to gate the fallback pill so the two never overlap.
+  const [bannerActive, setBannerActive] = useState(false);
+
   const onTerminalReady = useCallback(() => {
     streamReadyRef.current = true;
     setLastOutputAt(Date.now());
@@ -204,6 +247,8 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     stopGatePolling();
     setHealthGate(null);
     setPanelState(DEFAULT_PANEL_STATE);
+    setMinimized(false);
+    setBannerActive(false);
     setLogRows([]);
   }, [stopGatePolling]);
 
@@ -280,7 +325,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
   const runWithLog = useCallback(
     async (
-      params: { stackName: string; action: ActionVerb },
+      params: RunWithLogParams,
       run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>
     ): Promise<RunResult> => {
       // Unique, unguessable per-deploy id correlating the progress socket with
@@ -297,12 +342,23 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         return run(Promise.resolve(), deploySessionId);
       }
 
+      // Read the persisted style synchronously so this deploy uses the style in
+      // effect when it starts. The surfaces read the style reactively as they
+      // render, so flipping the Modal/Inline setting during an in-flight
+      // operation is unsupported: it would hand the single progress socket
+      // between the modal and the portal mid-stream and lose the gap. Change
+      // the style between operations.
+      const inlineStyle = readDeployFeedbackStyle() === 'inline';
+
       // Cancel any existing session before starting a new one.
       sessionIdRef.current += 1;
       const mySession = sessionIdRef.current;
       streamReadyRef.current = false;
       stopGatePolling();
       setHealthGate(null);
+      // Inline style starts with the modal hidden (the banner is the surface);
+      // modal style starts visible.
+      setMinimized(inlineStyle);
 
       // idCounterRef is intentionally not reset; keys must remain globally unique across sessions.
       setLogRows([]);
@@ -311,6 +367,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       setPanelState({
         isOpen: true,
         stackName: params.stackName,
+        nodeId: params.nodeId,
         action: params.action,
         status: 'preparing',
         progressUnavailable: false,
@@ -318,6 +375,10 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         sessionId: mySession,
       });
 
+      // Gate the deploy on the progress stream connecting (the modal owns it in
+      // Modal style, the portal's hidden stream in Inline style), so the first
+      // output lines are not missed. The timer is the last-resort release if it
+      // neither connects nor errors.
       const deployStarted = new Promise<void>((resolve) => {
         let done = false;
         const settle = () => {
@@ -330,7 +391,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         // by which point `timer` is assigned, so the forward reference is safe.
         const timer = setTimeout(() => {
           // The stream neither connected nor errored within the window. Mark live
-          // output unavailable (so the modal stops showing "Connecting...") and
+          // output unavailable (so the surface stops showing "Connecting...") and
           // release the deploy so a silent stall never blocks it.
           setPanelState((prev) => (prev.isOpen ? { ...prev, progressUnavailable: true } : prev));
           settle();
@@ -364,7 +425,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
   return (
     <DeployFeedbackContext.Provider
-      value={{ runWithLog, panelState, healthGate, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose }}
+      value={{ runWithLog, panelState, minimized, setMinimized, bannerActive, setBannerActive, healthGate, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose }}
     >
       {children}
     </DeployFeedbackContext.Provider>

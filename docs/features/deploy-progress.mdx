@@ -5,12 +5,17 @@ description: Stream live output from stack deploy, install, update, restart, and
 
 When you trigger a stack action that runs through `docker compose` (Deploy, Update, Install from the App Store, Apply with deploy from a Git Source), a progress modal opens and streams the output in real time. Each line is parsed into a timestamped row with a stage badge so you can track the deployment lifecycle as it runs. The modal can be minimized to a small pill that follows you across navigation, so you can leave the App Store mid-install and still see the status from any screen. If an operation goes quiet or fails, Sencho keeps the state observable: the modal warns when output has stopped, and the stack page surfaces recovery actions you can take without leaving Sencho.
 
-## Showing or hiding deploy progress
+## Showing, hiding, and styling deploy progress
 
-The modal is **on by default**. To run operations without it, open **Settings > Appearance > Display** and turn off **Deploy progress modal**. The choice is saved to the current browser only and synced across tabs in the same browser without a reload.
+Deploy progress is **on by default**. To run operations without it, open **Settings > Appearance > Display** and turn off **Deploy progress**. While it is on, **Progress style** chooses how it appears:
+
+- **Modal** (the default): a centered overlay that opens automatically and streams the full structured log.
+- **Inline**: a quiet status band on the stack detail itself, with the full log a click away under **View output**.
+
+The choices are saved to the current browser only and synced across tabs in the same browser without a reload.
 
 <Frame>
-  <img src="/images/deploy-progress/setting-toggle.png" alt="Settings · Personal · Appearance panel with the Deploy progress modal field and its helper text describing live output streaming for deploy, restart, update, install, and Git operations." />
+  <img src="/images/deploy-progress/setting-toggle.png" alt="Settings Appearance Display panel with the deploy progress toggle." />
 </Frame>
 
 ## Using the modal
@@ -88,6 +93,17 @@ Minimizing, closing, or navigating away never cancels the operation. The progres
   <img src="/images/deploy-progress/pill.png" alt="Minimized deploy progress pill anchored at the bottom center of a stack editor view, showing the brand-colored pulsing dot and the text 'Updating docs-demo'" />
 </Frame>
 
+## Inline style
+
+With **Progress style** set to **Inline**, the modal does not open on its own. Instead, the stack detail shows a compact status band for the running operation, between the action buttons and the container list (a status card on a phone). The band shows:
+
+- the operation and its elapsed time,
+- the current phase while images pull and containers recreate,
+- the latest output line,
+- the post-update [health gate](/features/health-gated-updates) result once the operation succeeds.
+
+A **View output** button opens the full log modal on demand, and a dismiss control clears the band. When the operation finishes cleanly, the elapsed time freezes at its final duration and the band clears itself a few seconds later. Closing the opened log modal in this style only hides it again; the band stays until the operation is done or you dismiss it. If the live stream cannot attach or drops, the band shows the same **Live progress unavailable** state and the operation keeps running in the background.
+
 ## Recovery actions
 
 When a deploy or update fails, times out, or its outcome is ambiguous, the stack page offers safe next steps so you can fix the stack in place. On desktop a small **Update failed** chip appears in the stack card; click it to open a menu of recovery actions. On a phone the same actions show as an inline card on the stack detail. Either way it shows the failed action, the error, and how long the operation ran, and it works whether or not the progress modal is enabled.
@@ -135,7 +151,7 @@ The HTTP API also exposes a `down` action (compose-level teardown) that streams 
   <Accordion title="An update stalled or appears stuck">
     If a pull or recreate produces no output for a while, the modal shows a stalled-output warning so you know the operation has gone quiet. The operation keeps running. If a step is genuinely hung, Sencho stops it after a longer idle window (10 minutes by default) and the stack page offers recovery actions where you can retry, restart, roll back when a backup exists, refresh the container state, or copy troubleshooting details. To change how long Sencho waits before treating a silent step as stalled, set `SENCHO_COMPOSE_STALL_TIMEOUT_MS`; raise it on slow links or for heavy local image builds.
   </Accordion>
-  <Accordion title="I turned the setting off but the modal still appears">
-    The setting is stored in `localStorage` under `sencho.deploy-feedback.enabled` and applies to the current tab without a reload. The modal is on by default, so only an explicit off choice hides it. Other tabs in the same browser pick up the change through a `storage` event. If a tab still does not honour the setting, refresh that tab. The setting does not sync across browsers or devices; each one carries its own choice.
+  <Accordion title="I changed the deploy progress setting but it did not take effect">
+    The settings live in `localStorage`: the on/off toggle under `sencho.deploy-feedback.enabled` and the Modal/Inline choice under `sencho.deploy-feedback.style`. Both apply to the current tab without a reload, and other tabs in the same browser pick up the change through a `storage` event. Deploy progress defaults to on in Modal style, so only an explicit choice changes it. If a tab still does not honour the setting, refresh that tab. The settings do not sync across browsers or devices; each one carries its own choice.
   </Accordion>
 </AccordionGroup>

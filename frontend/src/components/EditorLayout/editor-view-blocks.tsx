@@ -328,18 +328,17 @@ export function ContainersHealth({
     serviceAction,
 }: ContainersHealthProps) {
     return (
-        <div className="mt-4">
-            <div className="flex items-center justify-between mb-3">
-                <h4 className="text-sm font-medium text-muted-foreground">CONTAINERS</h4>
-                {containerStatsError && safeContainers.length > 0 && (
+        <div>
+            {containerStatsError && safeContainers.length > 0 && (
+                <div className="mb-3 flex items-center justify-end">
                     <span
                         className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground bg-warning/10 border border-warning/30 rounded-md px-2 py-0.5"
                         title={containerStatsError}
                     >
                         Stats unavailable
                     </span>
-                )}
-            </div>
+                </div>
+            )}
             {safeContainers.length === 0 ? (
                 <div className="text-muted-foreground text-sm">No containers running for this stack.</div>
             ) : (

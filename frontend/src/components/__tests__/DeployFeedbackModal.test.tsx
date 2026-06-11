@@ -33,7 +33,7 @@ let runOuter: Promise<unknown> | null = null;
 function Driver() {
   const { runWithLog } = useDeployFeedback();
   React.useEffect(() => {
-    runOuter = runWithLog({ stackName: 'web', action: 'update' }, async (started) => {
+    runOuter = runWithLog({ stackName: 'web', action: 'update', nodeId: null }, async (started) => {
       await started;
       return new Promise<{ ok: boolean; errorMessage?: string; healthGateId?: string | null }>((res) => { resolveRun = res; });
     });

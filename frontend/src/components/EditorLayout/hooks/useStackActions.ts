@@ -6,7 +6,7 @@ import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
 import type { OverlayState } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
-import type { ActionVerb } from '@/context/DeployFeedbackContext';
+import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
 import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
@@ -101,7 +101,7 @@ interface UseStackActionsOptions {
   setActiveNode: (node: Node) => void;
   nodes: Node[];
   runWithLog: (
-    params: { stackName: string; action: ActionVerb },
+    params: RunWithLogParams,
     run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>,
   ) => Promise<RunResult>;
   // Last live output line for a stack, but only while a deploy-feedback session
@@ -730,7 +730,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     stackListState.setStackAction(stackFile, 'deploy');
     try {
-      await runWithLog({ stackName, action: 'deploy' }, (started, ds) =>
+      await runWithLog({ stackName, action: 'deploy', nodeId: activeNode?.id ?? null }, (started, ds) =>
         runDeploy(stackName, stackFile, false, started, ds),
       );
     } finally {
@@ -765,7 +765,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       } else {
         stackListState.setStackAction(existingFile, 'deploy');
         try {
-          await runWithLog({ stackName, action: 'deploy' }, (started, ds) =>
+          await runWithLog({ stackName, action: 'deploy', nodeId: activeNode?.id ?? null }, (started, ds) =>
             runDeploy(stackName, existingFile, true, started, ds),
           );
         } finally {
@@ -896,7 +896,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackListState.setStackAction(stackFile, action);
     stackListState.setOptimisticStatus(stackFile, optimisticStatus);
     try {
-      await runWithLog({ stackName, action }, async (started, ds) => {
+      await runWithLog({ stackName, action, nodeId: activeNode?.id ?? null }, async (started, ds) => {
         await started;
         try {
           const url = ignorePolicy

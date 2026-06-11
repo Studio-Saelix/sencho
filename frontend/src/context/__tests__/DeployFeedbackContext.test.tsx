@@ -3,6 +3,7 @@ import { renderHook, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { DeployFeedbackProvider, useDeployFeedback } from '../DeployFeedbackContext';
 import { DEPLOY_FEEDBACK_KEY } from '@/hooks/use-deploy-feedback-enabled';
+import { DEPLOY_FEEDBACK_STYLE_KEY } from '@/hooks/use-deploy-feedback-style';
 
 function wrapper({ children }: { children: ReactNode }) {
   return <DeployFeedbackProvider>{children}</DeployFeedbackProvider>;
@@ -22,7 +23,7 @@ describe('DeployFeedbackContext', () => {
     let deployRan = false;
     let outer: Promise<unknown> | undefined;
     await act(async () => {
-      outer = result.current.runWithLog({ stackName: 'web', action: 'deploy' }, async (started) => {
+      outer = result.current.runWithLog({ stackName: 'web', action: 'deploy', nodeId: null }, async (started) => {
         await started;
         deployRan = true;
         return { ok: true };
@@ -52,7 +53,7 @@ describe('DeployFeedbackContext', () => {
     let runCount = 0;
     let outer: Promise<unknown> | undefined;
     await act(async () => {
-      outer = result.current.runWithLog({ stackName: 'web', action: 'deploy' }, async (started) => {
+      outer = result.current.runWithLog({ stackName: 'web', action: 'deploy', nodeId: null }, async (started) => {
         await started;
         runCount += 1;
         return { ok: true };
@@ -84,7 +85,7 @@ describe('DeployFeedbackContext', () => {
       let runCount = 0;
       let outer: Promise<unknown> | undefined;
       await act(async () => {
-        outer = result.current.runWithLog({ stackName: 'web', action: 'deploy' }, async (started) => {
+        outer = result.current.runWithLog({ stackName: 'web', action: 'deploy', nodeId: null }, async (started) => {
           await started;
           runCount += 1;
           return { ok: true };
@@ -128,7 +129,7 @@ describe('DeployFeedbackContext', () => {
 
     let deployRan = false;
     await act(async () => {
-      await result.current.runWithLog({ stackName: 'web', action: 'deploy' }, async (started) => {
+      await result.current.runWithLog({ stackName: 'web', action: 'deploy', nodeId: null }, async (started) => {
         await started;
         deployRan = true;
         return { ok: true };
@@ -150,5 +151,89 @@ describe('DeployFeedbackContext', () => {
     expect(result.current.logRows.length).toBe(5001);
     expect(result.current.logRows[0].id).toBe('row-truncated');
     expect(result.current.logRows[result.current.logRows.length - 1].message).toContain('line 5999');
+  });
+
+  it('stores the operation node id on the panel state', async () => {
+    localStorage.setItem(DEPLOY_FEEDBACK_STYLE_KEY, 'inline');
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+    let outer: Promise<unknown> | undefined;
+    await act(async () => {
+      outer = result.current.runWithLog({ stackName: 'web', action: 'update', nodeId: 7 }, async (s) => { await s; return { ok: true }; });
+      await Promise.resolve();
+    });
+    // nodeId is stamped synchronously when the panel opens, before the gate.
+    expect(result.current.panelState.nodeId).toBe(7);
+
+    await act(async () => { result.current.onTerminalReady(); await outer; });
+  });
+
+  it('minimized is false before any session', () => {
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+    expect(result.current.minimized).toBe(false);
+  });
+
+  it('inline style starts the session minimized (banner is the surface)', async () => {
+    localStorage.setItem(DEPLOY_FEEDBACK_STYLE_KEY, 'inline');
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+    let outer: Promise<unknown> | undefined;
+    await act(async () => {
+      outer = result.current.runWithLog({ stackName: 'web', action: 'update', nodeId: null }, async (started) => {
+        await started;
+        return { ok: true };
+      });
+      await Promise.resolve();
+    });
+    expect(result.current.minimized).toBe(true);
+    expect(result.current.panelState.isOpen).toBe(true);
+
+    await act(async () => { result.current.onTerminalReady(); await outer; });
+  });
+
+  it('modal style starts not minimized and gates the deploy on the stream', async () => {
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+    let deployRan = false;
+    let outer: Promise<unknown> | undefined;
+    await act(async () => {
+      outer = result.current.runWithLog({ stackName: 'web', action: 'deploy', nodeId: 3 }, async (started) => {
+        await started;
+        deployRan = true;
+        return { ok: true };
+      });
+      await Promise.resolve();
+    });
+
+    expect(result.current.minimized).toBe(false);
+    expect(result.current.panelState.nodeId).toBe(3);
+    expect(deployRan).toBe(false);
+
+    await act(async () => {
+      result.current.onTerminalReady();
+      await outer;
+    });
+    expect(deployRan).toBe(true);
+  });
+
+  it('setMinimized toggles, and onPanelClose resets it', async () => {
+    localStorage.setItem(DEPLOY_FEEDBACK_STYLE_KEY, 'inline');
+    const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+    let outer: Promise<unknown> | undefined;
+    await act(async () => {
+      outer = result.current.runWithLog({ stackName: 'web', action: 'update', nodeId: null }, async (s) => { await s; return { ok: true }; });
+      await Promise.resolve();
+    });
+    expect(result.current.minimized).toBe(true);
+
+    act(() => result.current.setMinimized(false));
+    expect(result.current.minimized).toBe(false);
+
+    await act(async () => { result.current.onTerminalReady(); await outer; });
+
+    act(() => result.current.onPanelClose());
+    expect(result.current.minimized).toBe(false);
+    expect(result.current.panelState.isOpen).toBe(false);
   });
 });

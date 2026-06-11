@@ -6,6 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { apiFetch } from '@/lib/api';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
+import { useNodes } from '@/context/NodeContext';
 import { toast } from '@/components/ui/toast-store';
 import { GitSourceDiffDialog, type PullResult } from './GitSourceDiffDialog';
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
@@ -74,6 +75,7 @@ export function GitSourcePanel({
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
 
   const { runWithLog } = useDeployFeedback();
+  const { activeNode } = useNodes();
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
   const resetToUnlinked = useCallback(() => {
@@ -258,7 +260,7 @@ export function GitSourcePanel({
       };
 
       if (deploy) {
-        await runWithLog({ stackName, action: 'deploy' }, runApply);
+        await runWithLog({ stackName, action: 'deploy', nodeId: activeNode?.id ?? null }, runApply);
       } else {
         await runApply(Promise.resolve());
       }

@@ -7,6 +7,7 @@ function panel(over: Partial<DeployPanelState> = {}): DeployPanelState {
   return {
     isOpen: false,
     stackName: '',
+    nodeId: null,
     action: 'deploy',
     status: 'preparing',
     progressUnavailable: false,
