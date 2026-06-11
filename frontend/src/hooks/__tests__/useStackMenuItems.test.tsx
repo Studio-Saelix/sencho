@@ -7,7 +7,7 @@ import type { StackMenuCtx } from '@/components/sidebar/sidebar-types';
 function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
   return {
     stackStatus: 'running',
-    hasPort: true,
+    canOpenApp: true,
     isBusy: false,
     isAdmin: true,
     canDelete: true,
@@ -54,8 +54,20 @@ describe('useStackMenuItems', () => {
     expect(inspect.items.find(i => i.id === 'auto-heal')).toBeDefined();
   });
 
-  it('hides Open App unless running + hasPort', () => {
+  it('shows Open App when running and canOpenApp', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx()));
+    const inspect = result.current.find(g => g.id === 'inspect')!;
+    expect(inspect.items.find(i => i.id === 'open-app')).toBeDefined();
+  });
+
+  it('hides Open App when the stack is not running', () => {
     const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ stackStatus: 'exited' })));
+    const inspect = result.current.find(g => g.id === 'inspect')!;
+    expect(inspect.items.find(i => i.id === 'open-app')).toBeUndefined();
+  });
+
+  it('hides Open App when no reachable URL can be built (canOpenApp false)', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canOpenApp: false })));
     const inspect = result.current.find(g => g.id === 'inspect')!;
     expect(inspect.items.find(i => i.id === 'open-app')).toBeUndefined();
   });

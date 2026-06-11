@@ -38,16 +38,16 @@ function parsePortMapping(raw: unknown): PortRow | null {
     const proto = protoMatch ? protoMatch[1].toLowerCase() : 'tcp';
     const body = proto ? s.replace(/\/(tcp|udp)$/i, '') : s;
     const parts = body.split(':');
-    if (parts.length === 2) return { host: parts[0], container: parts[1], proto };
-    if (parts.length === 3) return { host: parts[1], container: parts[2], proto };
-    return { host: body, container: body, proto };
+    if (parts.length === 2) return { host: parts[0], container: parts[1], proto, published: true };
+    if (parts.length === 3) return { host: parts[1], container: parts[2], proto, published: true };
+    return { host: body, container: body, proto, published: false };
   }
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>;
     const host = obj.published !== undefined ? String(obj.published) : '';
     const container = obj.target !== undefined ? String(obj.target) : '';
     const proto = obj.protocol ? String(obj.protocol) : 'tcp';
-    if (host && container) return { host, container, proto };
+    if (host && container) return { host, container, proto, published: true };
   }
   return null;
 }
@@ -152,6 +152,24 @@ export function parseAnatomy(yamlText: string): Anatomy | null {
     networks: Array.from(networksSet),
     referencedVars: extractInterpolations(yamlText),
   };
+}
+
+/**
+ * The first genuinely host-published TCP port across all services, as a number,
+ * or null when none qualifies. Used to turn the anatomy footer into a real link.
+ * Skips container-only short syntax, UDP, ranges, `${VAR}`, and out-of-range
+ * values: none of those yield a browser-openable host:port.
+ */
+export function primaryPublishedHostPort(ports: Record<string, PortRow[]>): number | null {
+  for (const rows of Object.values(ports)) {
+    for (const r of rows) {
+      if (!r.published || r.proto !== 'tcp') continue;
+      if (!/^\d+$/.test(r.host)) continue;
+      const port = Number(r.host);
+      if (Number.isInteger(port) && port >= 1 && port <= 65535) return port;
+    }
+  }
+  return null;
 }
 
 export function parseEnvKeys(envText: string): Set<string> {

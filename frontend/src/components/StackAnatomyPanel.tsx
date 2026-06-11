@@ -5,7 +5,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput } from '@/lib/anatomyMarkdown';
-import { parseAnatomy, parseEnvKeys, formatGitSource, type GitSourceInfo } from '@/lib/anatomy';
+import { parseAnatomy, parseEnvKeys, formatGitSource, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
+import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
@@ -249,14 +250,14 @@ export default function StackAnatomyPanel({
   // Only treat the fetched source as current when it belongs to the selected stack, so a
   // slow /git-source response for a previously selected stack cannot render or be exported here.
   const activeGitSource = gitSource?.stack === stackName ? gitSource.info : null;
-  const primaryHostPort = useMemo(() => {
-    if (!anatomy) return null;
-    for (const svc of anatomy.services) {
-      const rows = anatomy.ports[svc];
-      if (rows && rows.length > 0) return rows[0].host;
-    }
-    return null;
-  }, [anatomy]);
+  const primaryHostPort = useMemo(
+    () => (anatomy ? primaryPublishedHostPort(anatomy.ports) : null),
+    [anatomy],
+  );
+  const primaryServiceUrl = useMemo(
+    () => (primaryHostPort !== null ? buildServiceUrl({ node: activeNode, publicPort: primaryHostPort }) : null),
+    [primaryHostPort, activeNode],
+  );
 
   // Assembled facts for this stack, passed to the Dossier tab for its read-only
   // summary and Markdown export. Null until compose parses.
@@ -551,11 +552,23 @@ export default function StackAnatomyPanel({
           <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">
             {Object.keys(anatomy.ports).length > 0 ? 'exposed' : 'no ports'}
           </span>
-          {primaryHostPort && (
-            <span className="inline-flex items-center gap-1 font-mono text-[10px] text-stat-subtitle">
-              <ExternalLink className="h-3 w-3" strokeWidth={1.5} />
-              :{primaryHostPort}
-            </span>
+          {primaryHostPort !== null && (
+            primaryServiceUrl ? (
+              <a
+                href={primaryServiceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 font-mono text-[10px] text-stat-subtitle hover:text-foreground"
+              >
+                <ExternalLink className="h-3 w-3" strokeWidth={1.5} />
+                :{primaryHostPort}
+              </a>
+            ) : (
+              <span className="inline-flex items-center gap-1 font-mono text-[10px] text-stat-subtitle">
+                <ExternalLink className="h-3 w-3" strokeWidth={1.5} />
+                :{primaryHostPort}
+              </span>
+            )
           )}
         </div>
       )}

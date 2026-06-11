@@ -294,3 +294,36 @@ describe('StackAnatomyPanel update banner', () => {
     expect(screen.queryByTestId('update-available-banner')).not.toBeInTheDocument();
   });
 });
+
+describe('StackAnatomyPanel exposed footer', () => {
+  function renderWithPorts(content: string) {
+    return render(
+      <StackAnatomyPanel
+        stackName="web"
+        content={content}
+        envContent=""
+        selectedEnvFile=".env"
+        gitSourcePending={false}
+        onEditCompose={vi.fn()}
+        onOpenGitSource={vi.fn()}
+        onApplyUpdate={vi.fn()}
+        canEdit
+        applying={false}
+      />,
+    );
+  }
+
+  it('renders the exposed port as a real link for a published port', async () => {
+    renderWithPorts('services:\n  web:\n    image: x\n    ports:\n      - "8989:8989"\n');
+    const link = await screen.findByRole('link', { name: /:8989/ });
+    expect(link).toHaveAttribute('href', 'http://localhost:8989');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  it('does not render a link for a container-only port', async () => {
+    renderWithPorts('services:\n  web:\n    image: x\n    ports:\n      - "80"\n');
+    await screen.findByText('exposed');
+    expect(screen.queryByRole('link', { name: /:\d+/ })).toBeNull();
+  });
+});

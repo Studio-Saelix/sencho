@@ -1,6 +1,7 @@
 import { useRef, useCallback, useEffect } from 'react';
 import { apiFetch, withDeploySession } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
+import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
@@ -236,11 +237,8 @@ export function useStackActions(options: UseStackActionsOptions) {
   const openStackApp = (file: string) => {
     const port = stackListState.stackPorts[file];
     if (!port) return;
-    const host =
-      activeNode?.type === 'remote' && activeNode?.api_url
-        ? new URL(activeNode.api_url).hostname
-        : window.location.hostname;
-    window.open(`http://${host}:${port}`, '_blank');
+    const url = buildServiceUrl({ node: activeNode, publicPort: port });
+    if (url) openServiceUrl(url);
   };
 
   const resetEditorState = () => {
