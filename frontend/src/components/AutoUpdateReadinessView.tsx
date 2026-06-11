@@ -6,6 +6,7 @@ import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
+import { ImageSourceMenu } from './ImageSourceMenu';
 import type { ScheduledTask } from '@/types/scheduling';
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
@@ -208,6 +209,7 @@ function StackReadinessCard({
                     · {updatingImageCount} services
                   </span>
                 )}
+                <ImageSourceMenu imageRef={p.summary.primary_image} />
               </div>
 
               <div className="border-t border-dashed border-card-border pt-3 text-xs text-stat-subtitle/90 leading-relaxed">
