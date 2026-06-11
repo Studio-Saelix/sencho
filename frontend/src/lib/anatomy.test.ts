@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { assembleAnatomyInput, parseAnatomy, parseEnvKeys, formatGitSource } from './anatomy';
+import { assembleAnatomyInput, parseAnatomy, parseEnvKeys, formatGitSource, primaryPublishedHostPort } from './anatomy';
 
 const COMPOSE = `services:
   plex:
@@ -22,8 +22,8 @@ describe('parseAnatomy', () => {
     const a = parseAnatomy(COMPOSE)!;
     expect(a.services).toEqual(['plex']);
     expect(a.ports.plex).toEqual([
-      { host: '32400', container: '32400', proto: 'tcp' },
-      { host: '1900', container: '1900', proto: 'udp' },
+      { host: '32400', container: '32400', proto: 'tcp', published: true },
+      { host: '1900', container: '1900', proto: 'udp', published: true },
     ]);
     expect(a.volumes.plex).toEqual([{ host: './config', container: '/config' }]);
     expect(a.restart).toBe('unless-stopped');
@@ -39,14 +39,14 @@ describe('parseAnatomy', () => {
 
   it('parses the 3-part bind-IP port form, picking host and container', () => {
     const a = parseAnatomy('services:\n  web:\n    image: x\n    ports:\n      - "127.0.0.1:8080:80"\n')!;
-    expect(a.ports.web).toEqual([{ host: '8080', container: '80', proto: 'tcp' }]);
+    expect(a.ports.web).toEqual([{ host: '8080', container: '80', proto: 'tcp', published: true }]);
   });
 
   it('parses long-syntax object ports and volumes', () => {
     const a = parseAnatomy(
       'services:\n  app:\n    image: x\n    ports:\n      - target: 80\n        published: 8080\n        protocol: udp\n    volumes:\n      - type: bind\n        source: ./data\n        target: /data\n',
     )!;
-    expect(a.ports.app).toEqual([{ host: '8080', container: '80', proto: 'udp' }]);
+    expect(a.ports.app).toEqual([{ host: '8080', container: '80', proto: 'udp', published: true }]);
     expect(a.volumes.app).toEqual([{ host: './data', container: '/data' }]);
   });
 
@@ -54,6 +54,56 @@ describe('parseAnatomy', () => {
     const a = parseAnatomy('services:\n  app:\n    image: x\n    environment:\n      - A=${NEEDED}\n      - B=${HAS:-fallback}\n')!;
     expect(a.referencedVars).toContain('NEEDED');
     expect(a.referencedVars).not.toContain('HAS');
+  });
+
+  it('marks container-only short-form ports as not published', () => {
+    const a = parseAnatomy('services:\n  web:\n    image: x\n    ports:\n      - "80"\n')!;
+    expect(a.ports.web).toEqual([{ host: '80', container: '80', proto: 'tcp', published: false }]);
+  });
+});
+
+describe('primaryPublishedHostPort', () => {
+  const portsFrom = (ports: string) =>
+    parseAnatomy(`services:\n  web:\n    image: x\n    ports:\n${ports}`)!.ports;
+
+  it('returns the first published TCP host port as a number', () => {
+    expect(primaryPublishedHostPort(portsFrom('      - "8443:443"\n'))).toBe(8443);
+  });
+
+  it('picks the host port from the 3-part bind-IP form', () => {
+    expect(primaryPublishedHostPort(portsFrom('      - "127.0.0.1:8080:80"\n'))).toBe(8080);
+  });
+
+  it('returns null for a container-only short-form port', () => {
+    expect(primaryPublishedHostPort(portsFrom('      - "80"\n'))).toBeNull();
+  });
+
+  it('returns null for an unresolved variable port', () => {
+    expect(primaryPublishedHostPort(portsFrom('      - "${PORT}:80"\n'))).toBeNull();
+  });
+
+  it('returns null for a port range', () => {
+    expect(primaryPublishedHostPort(portsFrom('      - "8000-8002:8000-8002"\n'))).toBeNull();
+  });
+
+  it('returns null for an out-of-range host port', () => {
+    expect(primaryPublishedHostPort(portsFrom('      - "70000:80"\n'))).toBeNull();
+  });
+
+  it('returns null for a UDP published port (short and long form)', () => {
+    expect(primaryPublishedHostPort(portsFrom('      - "5353:53/udp"\n'))).toBeNull();
+    const longUdp = parseAnatomy(
+      'services:\n  web:\n    image: x\n    ports:\n      - target: 53\n        published: 5353\n        protocol: udp\n',
+    )!.ports;
+    expect(primaryPublishedHostPort(longUdp)).toBeNull();
+  });
+
+  it('skips a non-published row and returns the next published TCP port', () => {
+    expect(primaryPublishedHostPort(portsFrom('      - "80"\n      - "8443:443"\n'))).toBe(8443);
+  });
+
+  it('returns null when there are no ports', () => {
+    expect(primaryPublishedHostPort({})).toBeNull();
   });
 });
 

@@ -55,7 +55,7 @@ Below the action bar, the **CONTAINERS** section lists every container the stack
 | **Name** | The Docker container name; falls back to the first 12 characters of the container ID. |
 | **Uptime / state** | `up 2h 15m` for running containers, the raw state for everything else. |
 | **Healthcheck label** | `healthcheck passing`, `healthcheck failing`, or `healthcheck starting`, only when a healthcheck is defined. |
-| **Port mapping** | The first detected web-UI port, formatted `host → container/proto`, with an inline **open** link that launches `http://<node-host>:<host-port>` in a new tab. |
+| **Port mapping** | The first detected web-UI port, formatted `host → container/proto`. The mapping itself is a link that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. |
 | **Action buttons** | **View logs**, **Open bash shell** (admin only), **Service actions**. |
 | **Live stats** | CPU, memory, and net I/O with rolling sparklines. Only rendered while the container is running. Stats refresh on the same 1500 ms cadence as the dashboard. |
 

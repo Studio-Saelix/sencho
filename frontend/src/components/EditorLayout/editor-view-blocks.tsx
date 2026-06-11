@@ -17,6 +17,7 @@ import {
     Copy,
     CloudDownload,
 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/button';
 import { CardTitle } from '../ui/card';
 import {
@@ -30,6 +31,7 @@ import { Sparkline } from '../ui/sparkline';
 import { ImageSourceMenu } from '../ImageSourceMenu';
 import { cn } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
+import { buildServiceUrl } from '@/lib/serviceUrl';
 import ErrorBoundary from '../ErrorBoundary';
 import TerminalComponent from '../Terminal';
 import StructuredLogViewer from '../StructuredLogViewer';
@@ -329,6 +331,22 @@ export function ContainersHealth({
     openBashModal,
     serviceAction,
 }: ContainersHealthProps) {
+    const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
+    const copiedUrlTimerRef = useRef<number | null>(null);
+    useEffect(() => () => {
+        if (copiedUrlTimerRef.current !== null) window.clearTimeout(copiedUrlTimerRef.current);
+    }, []);
+    const copyServiceUrl = useCallback((id: string | undefined, url: string) => {
+        void copyToClipboard(url).then(() => {
+            if (!id) return;
+            setCopiedUrlId(id);
+            if (copiedUrlTimerRef.current !== null) window.clearTimeout(copiedUrlTimerRef.current);
+            copiedUrlTimerRef.current = window.setTimeout(() => {
+                setCopiedUrlId(prev => (prev === id ? null : prev));
+                copiedUrlTimerRef.current = null;
+            }, 1500);
+        }).catch(() => { /* clipboard unavailable */ });
+    }, []);
     return (
         <div>
             {containerStatsError && safeContainers.length > 0 && (
@@ -349,17 +367,26 @@ export function ContainersHealth({
                         let mainPort: number | undefined;
                         let mainPortPrivate: number | undefined;
                         let mainPortProto: string | undefined;
-                        if (container.Ports && container.Ports.length > 0) {
+                        // UDP ports are not browser-openable, so they never back a link.
+                        const tcpPorts = (container.Ports ?? []).filter(p => p.Type !== 'udp');
+                        if (tcpPorts.length > 0) {
                             const WEB_UI_PORTS = [32400, 8989, 7878, 9696, 5055, 8080, 80, 443, 3000, 9000];
                             const IGNORE_PORTS = [1900, 53, 22];
-                            let match = container.Ports.find(p => WEB_UI_PORTS.includes(p.PrivatePort));
-                            if (!match) match = container.Ports.find(p => WEB_UI_PORTS.includes(p.PublicPort));
-                            if (!match) match = container.Ports.find(p => !IGNORE_PORTS.includes(p.PrivatePort) && !IGNORE_PORTS.includes(p.PublicPort));
-                            const chosen = match || container.Ports[0];
+                            let match = tcpPorts.find(p => WEB_UI_PORTS.includes(p.PrivatePort));
+                            if (!match) match = tcpPorts.find(p => WEB_UI_PORTS.includes(p.PublicPort));
+                            if (!match) match = tcpPorts.find(p => !IGNORE_PORTS.includes(p.PrivatePort) && !IGNORE_PORTS.includes(p.PublicPort));
+                            const chosen = match || tcpPorts[0];
                             mainPort = chosen.PublicPort;
                             mainPortPrivate = chosen.PrivatePort;
                             mainPortProto = 'tcp';
                         }
+
+                        const serviceUrl = mainPort && mainPortPrivate
+                            ? buildServiceUrl({ node: activeNode, publicPort: mainPort, privatePort: mainPortPrivate })
+                            : null;
+                        const portLabel = mainPort && mainPortPrivate
+                            ? `${mainPort} → ${mainPortPrivate}/${mainPortProto}`
+                            : '';
 
                         const containerName = container?.Names?.[0]?.replace(/^\//, '') || container?.Id?.slice(0, 12) || 'container';
                         const isActive = container.State === 'running' || container.State === 'paused';
@@ -392,19 +419,33 @@ export function ContainersHealth({
                                                 {mainPort && mainPortPrivate ? (
                                                     <>
                                                         <span>·</span>
-                                                        <span>{mainPort} → {mainPortPrivate}/{mainPortProto}</span>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => {
-                                                                const host = activeNode?.type === 'remote' && activeNode?.api_url
-                                                                    ? new URL(activeNode.api_url).hostname
-                                                                    : window.location.hostname;
-                                                                window.open(`http://${host}:${mainPort}`, '_blank');
-                                                            }}
-                                                            className="inline-flex items-center gap-1 text-brand hover:underline"
-                                                        >
-                                                            open <ArrowUpRight className="h-3 w-3" strokeWidth={1.5} />
-                                                        </button>
+                                                        {serviceUrl ? (
+                                                            <>
+                                                                <a
+                                                                    href={serviceUrl}
+                                                                    target="_blank"
+                                                                    rel="noopener noreferrer"
+                                                                    className="inline-flex items-center gap-1 text-brand hover:underline"
+                                                                >
+                                                                    {portLabel} <ArrowUpRight className="h-3 w-3" strokeWidth={1.5} />
+                                                                </a>
+                                                                <button
+                                                                    type="button"
+                                                                    aria-label={copiedUrlId === container?.Id ? 'Copied' : 'Copy service URL'}
+                                                                    title="Copy service URL"
+                                                                    onClick={() => copyServiceUrl(container?.Id, serviceUrl)}
+                                                                    className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
+                                                                >
+                                                                    {copiedUrlId === container?.Id ? (
+                                                                        <Check className="h-3 w-3" strokeWidth={2} />
+                                                                    ) : (
+                                                                        <Copy className="h-3 w-3" strokeWidth={1.5} />
+                                                                    )}
+                                                                </button>
+                                                            </>
+                                                        ) : (
+                                                            <span>{portLabel}</span>
+                                                        )}
                                                     </>
                                                 ) : null}
                                             </div>

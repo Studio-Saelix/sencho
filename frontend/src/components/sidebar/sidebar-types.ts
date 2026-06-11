@@ -23,7 +23,7 @@ export type StackLifecycleStatus = 'running' | 'exited' | 'unknown';
 
 export interface StackMenuCtx {
   stackStatus: StackLifecycleStatus;
-  hasPort: boolean;
+  canOpenApp: boolean;
   isBusy: boolean;
   isAdmin: boolean;
   canDelete: boolean;

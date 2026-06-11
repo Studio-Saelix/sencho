@@ -18,7 +18,7 @@ import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sid
 
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
-    stackStatus, hasPort, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
+    stackStatus, canOpenApp, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
@@ -33,7 +33,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
       { id: 'auto-heal', label: 'Auto-Heal', icon: Activity, shortcut: 'H', onSelect: openAutoHeal },
     ];
     inspect.push({ id: 'check-updates', label: 'Check updates', icon: RefreshCw, shortcut: 'U', onSelect: checkUpdates });
-    if (stackStatus === 'running' && hasPort) {
+    if (stackStatus === 'running' && canOpenApp) {
       inspect.push({ id: 'open-app', label: 'Open App', icon: ArrowUpRight, shortcut: '↗', onSelect: openStackApp });
     }
     groups.push({ id: 'inspect', items: inspect });
@@ -78,7 +78,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
 
     return groups;
   }, [
-    stackStatus, hasPort, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
+    stackStatus, canOpenApp, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
     showDeploy, showStop, showRestart, showUpdate,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel, openScheduleTask,

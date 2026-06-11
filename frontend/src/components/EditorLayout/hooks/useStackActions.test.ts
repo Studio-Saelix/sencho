@@ -55,6 +55,7 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     selectedFile: 'web.yml',
     files: ['web.yml'],
     stackStatuses: { 'web.yml': 'running' },
+    stackPorts: {},
     setSelectedFile: vi.fn(),
     setOptimisticStatus: vi.fn(),
     setStackAction: vi.fn(),
@@ -102,6 +103,7 @@ function setup(over: {
   stackList?: Partial<StackListState>;
   getLastDeployOutputLine?: (stackName: string) => string | undefined;
   hasUpdateGuard?: boolean;
+  activeNode?: Parameters<typeof useStackActions>[0]['activeNode'];
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -114,7 +116,7 @@ function setup(over: {
       stackListState,
       navState,
       overlayState,
-      activeNode: { id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
+      activeNode: over.activeNode ?? ({ id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode']),
       setActiveNode: vi.fn(),
       nodes: [],
       runWithLog,
@@ -687,5 +689,62 @@ describe('useStackActions recovery records', () => {
     await act(async () => { await result.current.rollbackStack(); });
     expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
     expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
+});
+
+describe('useStackActions.openStackApp', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  function openAndCaptureHref(over: Parameters<typeof setup>[0]): {
+    href: string | undefined;
+    clickCount: number;
+  } {
+    let href: string | undefined;
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        href = this.href;
+      });
+    try {
+      const { result } = setup(over);
+      result.current.openStackApp('web.yml');
+      return { href, clickCount: click.mock.calls.length };
+    } finally {
+      click.mockRestore();
+    }
+  }
+
+  it('opens the published port on the browser host for a local node', () => {
+    const { href } = openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 8989 } } });
+    expect(href).toBe('http://localhost:8989/');
+  });
+
+  it('opens on the remote node host derived from its api_url', () => {
+    const { href } = openAndCaptureHref({
+      stackList: { stackPorts: { 'web.yml': 8989 } },
+      activeNode: { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as Parameters<typeof useStackActions>[0]['activeNode'],
+    });
+    expect(href).toBe('http://10.0.0.5:8989/');
+  });
+
+  it('does nothing for a remote node with no api_url (pilot) and does not throw', () => {
+    const { href, clickCount } = openAndCaptureHref({
+      stackList: { stackPorts: { 'web.yml': 8989 } },
+      activeNode: { id: 3, type: 'remote', api_url: '' } as Parameters<typeof useStackActions>[0]['activeNode'],
+    });
+    expect(clickCount).toBe(0);
+    expect(href).toBeUndefined();
+  });
+
+  it('appends a known service path via the published port', () => {
+    const { href } = openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 32400 } } });
+    expect(href).toBe('http://localhost:32400/web');
+  });
+
+  it('does nothing when the stack has no published port', () => {
+    const { clickCount } = openAndCaptureHref({});
+    expect(clickCount).toBe(0);
   });
 });

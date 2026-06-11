@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
+import { buildServiceUrl } from '@/lib/serviceUrl';
 import type { StackMenuCtx } from '@/components/sidebar/sidebar-types';
 import type { Label as StackLabel, LabelColor } from '../../label-types';
 import type { OverlayState } from './useOverlayState';
@@ -34,9 +35,12 @@ export function useSidebarContextMenu({
 }: UseSidebarContextMenuOptions) {
   const buildMenuCtx = useCallback((file: string): StackMenuCtx => {
     const sName = file.replace(/\.(yml|yaml)$/, '');
+    const mainPort = stackListState.stackPorts[file];
     return {
       stackStatus: (stackListState.stackStatuses[file] ?? 'unknown') as 'running' | 'exited' | 'unknown',
-      hasPort: Boolean(stackListState.stackPorts[file]),
+      // Only offer "Open App" when a browser-reachable URL can actually be built
+      // (a remote node with no API host, e.g. a pilot agent, yields none).
+      canOpenApp: mainPort !== undefined && buildServiceUrl({ node: activeNode, publicPort: mainPort }) !== null,
       isBusy: stackListState.isStackBusy(file),
       isAdmin,
       canDelete: can('stack:delete', 'stack', sName),
@@ -126,7 +130,7 @@ export function useSidebarContextMenu({
   }, [
     stackListState.stackStatuses, stackListState.stackPorts, isAdmin,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
-    stackListState.pin, stackListState.unpin,
+    stackListState.pin, stackListState.unpin, activeNode?.type, activeNode?.api_url,
   ]);
 
   return buildMenuCtx;

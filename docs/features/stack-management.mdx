@@ -209,7 +209,7 @@ Each row includes:
 - **Health badge.** A colored glyph reports the Docker healthcheck state: `✓` green for passing, `✗` red for failing, `…` amber while the healthcheck start period is in flight. Containers without a `healthcheck:` block show a neutral `✓`.
 - **Container name** in mono.
 - **Meta line.** Uptime (`up 12 hours`) and the primary port mapping (`8989 → 8989/tcp`).
-- **Open link.** When the container publishes a port, an `open ↗` link launches the app in a new tab using the active node's hostname.
+- **Open link.** When the container publishes a port, the mapping itself is a link (`8989 → 8989/tcp ↗`) that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. Recognised multi-port apps open their web path automatically (for example, Plex opens `/web`).
 - **Live stat tiles.** Three tiles show CPU, memory, and network I/O with a rolling sparkline. The sparkline uses the cyan data color and refreshes roughly every 1.5 seconds.
 - **Action icons.** The image source links button (see above), plus shortcuts to **View logs**, open a bash shell, and the per-service kebab.
 
@@ -398,3 +398,7 @@ Click the **Scan stacks folder** icon button to the right of **Create Stack**. S
 ### Service action returns a "service not found" error
 
 The service name used in the action must match the `services:` key in the stack's `compose.yaml`. This error occurs when no running containers match that service name, either because the service was never deployed or because the compose file defines a different name. Verify the service key in your compose file and ensure the stack has been deployed at least once so containers exist for that service.
+
+### A published port link opens but the service does not load
+
+The link targets the active node's host and the published host port. It cannot reach a service bound only to `127.0.0.1` on the node, or one published on a port your browser cannot route to. For a remote node, the link uses that node's host; if the service lives at a different address, open it there directly. A port that is not published to a host port has no link.

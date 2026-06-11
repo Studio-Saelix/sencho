@@ -14,6 +14,12 @@ export interface PortRow {
   host: string;
   container: string;
   proto: string;
+  /**
+   * True when the mapping publishes a host port (short `host:container` form or
+   * long syntax with `published:`/`target:`), false for container-only short
+   * syntax (a single value with no host port).
+   */
+  published?: boolean;
 }
 
 export interface VolumeRow {
