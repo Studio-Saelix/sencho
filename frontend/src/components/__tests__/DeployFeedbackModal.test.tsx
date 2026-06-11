@@ -166,6 +166,67 @@ describe('DeployFeedbackModal health gate', () => {
     expect(screen.getByTestId('health-gate-banner')).toHaveAttribute('data-status', 'observing');
   });
 
+  it('polls single-flight and latches the terminal verdict against a late response', async () => {
+    // Hold each health-gate response open so we can release it deliberately and
+    // count how many requests overlap.
+    const release: Array<(body: object) => void> = [];
+    let healthGateCalls = 0;
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (!String(url).includes('/health-gate')) {
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+      healthGateCalls += 1;
+      return new Promise<Response>((resolve) => {
+        release.push((body) => resolve(new Response(JSON.stringify(body), { status: 200 })));
+      });
+    });
+
+    await succeedWithGate('gate-1');
+    // The first poll is still pending; advancing several intervals must not
+    // start a second one (single-flight), so no two responses can race.
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+    expect(healthGateCalls).toBe(1);
+
+    // Release the first poll as a terminal passed; the latch stops the interval.
+    await act(async () => {
+      release[0]({
+        stack: 'web', id: 'gate-1', status: 'passed', trigger: 'update',
+        reason: null, windowSeconds: 90, startedAt: Date.now(), endedAt: null, containers: [],
+      });
+    });
+    expect(screen.getByTestId('health-gate-banner')).toHaveAttribute('data-status', 'passed');
+
+    // No further polls after a terminal verdict: a stale observing response can
+    // never arrive to roll the UI back.
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+    expect(healthGateCalls).toBe(1);
+  });
+
+  it('does not poll the gate or show the panel when deploy feedback is disabled', async () => {
+    // Turning off the deploy progress panel opts out of the live gate UI: there
+    // is no surface to render it on. The backend gate still runs and records
+    // timeline events; only the in-browser verifying/recovery view is skipped.
+    localStorage.setItem('sencho.deploy-feedback.enabled', 'false');
+    await act(async () => {
+      render(
+        <DeployFeedbackProvider>
+          <Driver />
+          <DeployFeedbackModal isMinimized={false} onMinimize={() => {}} />
+        </DeployFeedbackProvider>,
+      );
+    });
+    await act(async () => {
+      expect(resolveRun).not.toBeNull();
+      resolveRun?.({ ok: true, healthGateId: 'gate-1' });
+      await runOuter;
+    });
+    expect(screen.queryByTestId('deploy-feedback-modal')).toBeNull();
+    expect(screen.queryByTestId('health-gate-banner')).toBeNull();
+    // No poll is ever issued for the gate even though the backend returned an id.
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
   it('renders no gate banner and auto-closes normally without a healthGateId', async () => {
     await succeedWithGate(null);
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });

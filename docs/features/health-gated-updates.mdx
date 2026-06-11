@@ -51,6 +51,8 @@ A clear failure ends the observation immediately. Passing requires the full wind
 
 The deploy progress modal treats the gate verdict as the real result: while the gate observes, the status reads **Verifying health** rather than claiming success, and the auto-close waits. A passed gate shows the success state; a failed or unknown gate becomes the headline result with its reason. Closing the modal never stops the observation; the gate runs server-side and its result appears on the stack timeline either way, as **health gate passed** or **health gate failed** events alongside the **update started** marker.
 
+The live verifying and recovery view is part of the deploy progress panel. If you have turned that panel off, the in-browser gate view does not appear, but the gate still runs on the node and records its verdict on the stack timeline.
+
 <Frame>
   <img src="/images/health-gated-updates/modal-verifying.png" alt="Deploy progress modal after an update finished, with the status indicator showing Verifying health and the health gate banner reading observing containers" />
 </Frame>

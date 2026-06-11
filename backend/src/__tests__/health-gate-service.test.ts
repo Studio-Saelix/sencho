@@ -230,6 +230,47 @@ describe('HealthGateService verdicts', () => {
     expect(latest().reason).toContain('unreachable');
   });
 
+  it('resolves unknown when every docker observe hangs', async () => {
+    svc().begin(0, 'web', 'update', 'tester');
+    // A wedged socket never settles. The per-observe timeout turns each poll
+    // into an error, and three in a row finalize the gate unknown instead of
+    // observing forever on a pending promise.
+    state.listContainers.mockImplementation(() => new Promise<never>(() => {}));
+    // Each cycle is the 5s interval plus the 8s observe timeout; 45s covers
+    // three of them.
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(latest().status).toBe('unknown');
+    expect(latest().reason).toContain('unreachable');
+  });
+
+  it('recovers from a transient observe timeout instead of finalizing', async () => {
+    svc().begin(0, 'web', 'update', 'tester');
+    // One observe wedges and times out (a single strike), then the socket
+    // recovers; the gate must keep observing, not give up at one error.
+    state.listContainers.mockImplementationOnce(() => new Promise<never>(() => {}));
+    // 14s covers the first cycle's 5s wait plus 8s timeout.
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(latest().status).toBe('observing');
+    // Later polls succeed and carry the gate to a pass at the window end.
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(latest().status).toBe('passed');
+  });
+
+  it('runs polls single-flight: no second observe until the first settles', async () => {
+    svc().begin(0, 'web', 'update', 'tester');
+    let release: (value: Array<{ Id: string; Names: string[]; State: string }>) => void = () => {};
+    state.listContainers.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    // Advance past a second poll interval while the first observe is still
+    // pending. Self-scheduling means the next poll is armed only after the
+    // current cycle settles, so listContainers is entered exactly once.
+    await vi.advanceTimersByTimeAsync(7_000);
+    expect(state.listContainers).toHaveBeenCalledTimes(1);
+    // Let the first cycle finish; the next poll then runs and observes again.
+    release([{ Id: 'aaa', Names: ['/web-app-1'], State: 'running' }]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(state.listContainers.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('ends unknown when a healthcheck is still starting at the window end', async () => {
     svc().begin(0, 'web', 'update', 'tester');
     setContainers([{ id: 'aaa', name: 'web-app-1', health: 'starting' }]);

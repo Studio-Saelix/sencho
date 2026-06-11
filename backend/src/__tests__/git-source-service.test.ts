@@ -1052,6 +1052,29 @@ describe('GitSourceService.apply', () => {
             .rejects.toMatchObject({ code: 'GIT_ERROR', message: expect.stringMatching(/pending commit has changed/i) });
     });
 
+    it('begins a deploy health gate after a successful apply-and-deploy', async () => {
+        const sha = 'eeee555eeee555eeee555eeee555eeee555eeee5';
+        const svc = await seedPending('apply-deploy-gate', 'services:\n  x:\n    image: alpine\n', sha);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        const { HealthGateService } = await import('../services/HealthGateService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-git');
+        const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+
+        const result = await svc.apply('apply-deploy-gate', sha, { deploy: true });
+        expect(result.deployed).toBe(true);
+        expect(deploySpy).toHaveBeenCalledWith('apply-deploy-gate');
+        expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source');
+
+        validateSpy.mockRestore();
+        saveSpy.mockRestore();
+        deploySpy.mockRestore();
+        beginSpy.mockRestore();
+    });
+
     it('returns deployError when the deploy step fails after writing to disk', async () => {
         const sha = 'cccc333cccc333cccc333cccc333cccc333cccc3';
         const svc = await seedPending('apply-deploy-fail', 'services:\n  x:\n    image: alpine\n', sha);

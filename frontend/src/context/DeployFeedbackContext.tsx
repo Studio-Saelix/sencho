@@ -216,8 +216,15 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     stopGatePolling();
     setHealthGate({ stackName, gateId, trigger, status: 'observing', reason: null, windowSeconds: null, startedAt: null });
     let strikes = 0;
+    // Single-flight: skip a tick while one request is outstanding so two
+    // overlapping responses cannot land out of order.
+    let inFlight = false;
+    // Latched once a terminal verdict is applied, so a slow earlier response
+    // returning 'observing' can never roll the UI back from passed/failed.
+    let settled = false;
     const pollStartedAt = Date.now();
     const giveUp = (reason: string) => {
+      settled = true;
       stopGatePolling();
       setHealthGate(prev => (prev && prev.gateId === gateId ? { ...prev, status: 'unknown', reason } : prev));
     };
@@ -226,11 +233,13 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         stopGatePolling();
         return;
       }
+      if (inFlight || settled) return;
       // Backstop far beyond the largest configurable window (600s).
       if (Date.now() - pollStartedAt > 660_000) {
         giveUp('the observation did not report a result in time');
         return;
       }
+      inFlight = true;
       try {
         const res = await apiFetch(`/stacks/${stackName}/health-gate?gateId=${encodeURIComponent(gateId)}`);
         const report = res.ok
@@ -242,7 +251,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
               startedAt: number | null;
             }
           : null;
-        if (sessionIdRef.current !== mySession) return;
+        if (sessionIdRef.current !== mySession || settled) return;
         // A non-ok response or a missing run (node switched, stack removed, or
         // an older node answering) is a strike, not a retry-forever condition.
         if (!report || report.id !== gateId || report.status === 'never-run') {
@@ -253,11 +262,16 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         }
         strikes = 0;
         setHealthGate({ stackName, gateId, trigger, status: report.status, reason: report.reason, windowSeconds: report.windowSeconds, startedAt: report.startedAt });
-        if (report.status !== 'observing') stopGatePolling();
+        if (report.status !== 'observing') {
+          settled = true;
+          stopGatePolling();
+        }
       } catch (e) {
         strikes += 1;
         console.warn('[DeployFeedback] health gate poll failed:', e);
         if (sessionIdRef.current === mySession && strikes >= 4) giveUp('the gate result could not be retrieved');
+      } finally {
+        inFlight = false;
       }
     };
     void tick();

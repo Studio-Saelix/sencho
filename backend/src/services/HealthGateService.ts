@@ -3,9 +3,14 @@ import DockerController from './DockerController';
 import { DatabaseService, type HealthGateRunRow } from './DatabaseService';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
+import { withTimeout } from '../utils/withTimeout';
 import type { HealthGateContainer, HealthGateReport } from './updateGuard/types';
 
 const POLL_INTERVAL_MS = 5_000;
+// Per-observe ceiling so a hung Docker socket cannot leave a poll pending
+// forever. Above POLL_INTERVAL_MS so a slow-but-live probe is not cut short; a
+// timeout counts as a poll error and three in a row resolve the gate unknown.
+const OBSERVE_TIMEOUT_MS = 8_000;
 // A stack whose containers never appear gives up after this long.
 const EMPTY_GRACE_MS = 15_000;
 const DEFAULT_WINDOW_SECONDS = 90;
@@ -34,7 +39,8 @@ interface ActiveGate {
   stackName: string;
   windowSeconds: number;
   startedAt: number;
-  timer: ReturnType<typeof setInterval>;
+  /** Self-scheduling poll timer, armed only between settled poll cycles. */
+  timer: ReturnType<typeof setTimeout> | null;
   /** Expected container set, keyed by name; null until the first non-empty poll. */
   expected: Map<string, ObservedContainer> | null;
   consecutivePollErrors: number;
@@ -161,7 +167,7 @@ export class HealthGateService {
         stackName,
         windowSeconds: settings.windowSeconds,
         startedAt,
-        timer: setInterval(() => { void this.poll(gate); }, POLL_INTERVAL_MS),
+        timer: null,
         expected: null,
         consecutivePollErrors: 0,
         missingLastPoll: new Set(),
@@ -169,6 +175,7 @@ export class HealthGateService {
         finalized: false,
       };
       this.active.set(key, gate);
+      this.scheduleNextPoll(gate);
       return runId;
     } catch (error) {
       // The gate is an observer; its failure must never fail the operation.
@@ -213,13 +220,37 @@ export class HealthGateService {
     };
   }
 
+  /**
+   * Orchestrate one poll cycle and arm the next. Polls are single-flight: the
+   * next timer is scheduled only after this cycle fully settles (the finally
+   * below), so a slow or timed-out observe can never overlap the following poll
+   * or corrupt the restart/missing accounting that assumes one poll at a time.
+   */
   private async poll(gate: ActiveGate): Promise<void> {
     const key = `${gate.nodeId}:${gate.stackName}`;
-    if (this.active.get(key) !== gate) return; // superseded or stopped mid-flight
+    // A late timer fire after supersede, stop, or finalize must do nothing.
+    if (gate.finalized || this.active.get(key) !== gate) return;
+    try {
+      await this.runPollCycle(gate, key);
+    } finally {
+      if (!gate.finalized && this.active.get(key) === gate) {
+        this.scheduleNextPoll(gate);
+      }
+    }
+  }
 
+  /** Arm the next poll. No-op once the gate is finalized. */
+  private scheduleNextPoll(gate: ActiveGate): void {
+    if (gate.finalized) return;
+    gate.timer = setTimeout(() => { void this.poll(gate); }, POLL_INTERVAL_MS);
+  }
+
+  private async runPollCycle(gate: ActiveGate, key: string): Promise<void> {
     let observed: ObservedContainer[];
     try {
-      observed = await this.observeContainers(gate);
+      observed = await withTimeout(
+        this.observeContainers(gate), OBSERVE_TIMEOUT_MS, 'health gate observe',
+      );
     } catch (error) {
       gate.consecutivePollErrors += 1;
       console.warn(
@@ -374,7 +405,7 @@ export class HealthGateService {
   ): void {
     if (gate.finalized) return;
     gate.finalized = true;
-    clearInterval(gate.timer);
+    if (gate.timer) clearTimeout(gate.timer);
     const key = `${gate.nodeId}:${gate.stackName}`;
     if (this.active.get(key) === gate) this.active.delete(key);
 

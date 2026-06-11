@@ -209,6 +209,12 @@ describe('GET /api/fleet/snapshots/coverage', () => {
       .set('Cookie', authCookie);
     expect(badNode.status).toBe(400);
 
+    // A trailing-garbage nodeId must be rejected, not coerced by parseInt.
+    const garbageNode = await request(app)
+      .get('/api/fleet/snapshots/coverage?nodeId=1abc&stackName=web')
+      .set('Cookie', authCookie);
+    expect(garbageNode.status).toBe(400);
+
     const badStack = await request(app)
       .get('/api/fleet/snapshots/coverage?nodeId=0&stackName=..%2Fetc')
       .set('Cookie', authCookie);

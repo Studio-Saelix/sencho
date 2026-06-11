@@ -1761,12 +1761,14 @@ fleetRouter.get('/snapshots/coverage', authMiddleware, async (req: Request, res:
   if (!requireAdmin(req, res)) return;
 
   try {
-    const nodeId = parseInt(req.query.nodeId as string, 10);
+    // Strict digits only: parseInt would accept '1abc' as 1.
+    const nodeIdRaw = typeof req.query.nodeId === 'string' ? req.query.nodeId : '';
     const stackName = req.query.stackName as string;
-    if (!Number.isInteger(nodeId) || nodeId < 0) {
+    if (!/^\d+$/.test(nodeIdRaw)) {
       res.status(400).json({ error: 'nodeId must be a non-negative integer' });
       return;
     }
+    const nodeId = parseInt(nodeIdRaw, 10);
     if (typeof stackName !== 'string' || !isValidStackName(stackName)) {
       res.status(400).json({ error: 'Invalid stack name' });
       return;
