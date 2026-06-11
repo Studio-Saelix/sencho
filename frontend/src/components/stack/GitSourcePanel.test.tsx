@@ -11,6 +11,9 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/context/DeployFeedbackContext', () => ({
   useDeployFeedback: () => ({ runWithLog: vi.fn() }),
 }));
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({ activeNode: null }),
+}));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: {
     success: vi.fn(),

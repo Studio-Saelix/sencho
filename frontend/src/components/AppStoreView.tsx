@@ -198,7 +198,7 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
         });
 
         try {
-            const result = await runWithLog({ stackName: stackName.trim(), action: 'install' }, async (started, ds) => {
+            const result = await runWithLog({ stackName: stackName.trim(), action: 'install', nodeId: activeNode?.id ?? null }, async (started, ds) => {
                 await started;
                 const res = await apiFetch('/templates/deploy', withDeploySession(ds, {
                     method: 'POST',

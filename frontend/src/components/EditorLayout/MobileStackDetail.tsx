@@ -5,6 +5,7 @@ import ErrorBoundary from '../ErrorBoundary';
 import StackAnatomyPanel from '../StackAnatomyPanel';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
 import { RecoveryPanel } from './RecoveryPanel';
+import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
 import type { EditorViewProps } from './EditorView';
 
@@ -60,6 +61,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         recoveryResult,
         onRefreshState,
         onDismissRecovery,
+        panelStartedAt,
     } = props;
 
     const [segment, setSegment] = useState<Segment>('logs');
@@ -108,6 +110,14 @@ export function MobileStackDetail(props: EditorViewProps) {
                         requestDeleteStack={requestDeleteStack}
                     />
                 </div>
+
+                <StackOperationBanner
+                    stackName={stackName}
+                    activeNode={activeNode}
+                    panelStartedAt={panelStartedAt}
+                    variant="card"
+                    className="mx-4 mt-3 shrink-0"
+                />
 
                 {recoveryResult && loadingAction == null && (
                     <div className="shrink-0 px-4 pt-3">

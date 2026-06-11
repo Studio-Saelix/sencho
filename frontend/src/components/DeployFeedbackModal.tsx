@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { StructuredLogRow } from '@/components/log-rendering/StructuredLogRow';
 import TerminalComponent from '@/components/Terminal';
 import { useDeployFeedback, VERB_LABELS, type HealthGateUiState } from '@/context/DeployFeedbackContext';
+import { useDeployFeedbackStyle } from '@/hooks/use-deploy-feedback-style';
 
 const AUTO_CLOSE_SECONDS = 4;
 
@@ -40,6 +41,7 @@ function formatElapsed(seconds: number): string {
 
 export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackModalProps) {
   const { panelState, healthGate, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose } = useDeployFeedback();
+  const [style] = useDeployFeedbackStyle();
 
   const [showRaw, setShowRaw] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -116,8 +118,11 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
   // or success whose gate passed. An observing gate suspends the countdown; a
   // failed/unknown gate keeps the modal open until the user closes it.
   const gateHoldsOpen = healthGate !== null && healthGate.status !== 'passed';
+  // Inline style never auto-closes the modal: the banner owns the lifecycle and
+  // a manually opened log should not be yanked mid-read.
+  const canAutoClose = status === 'succeeded' && isOpen && !gateHoldsOpen && style === 'modal';
   useEffect(() => {
-    if (status === 'succeeded' && isOpen && !gateHoldsOpen) {
+    if (canAutoClose) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       startCountdown();
     } else {
@@ -127,7 +132,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
     return () => {
       clearCountdownInterval();
     };
-  }, [status, isOpen, gateHoldsOpen, startCountdown, clearCountdownInterval]);
+  }, [canAutoClose, startCountdown, clearCountdownInterval]);
 
   useEffect(() => {
     if (!userScrolledUp && scrollRef.current) {
@@ -149,16 +154,23 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
 
   const handleMouseLeave = useCallback(() => {
     autoCloseHoveredRef.current = false;
-    if (status === 'succeeded' && isOpen && !gateHoldsOpen) {
+    if (canAutoClose) {
       startCountdown();
     }
-  }, [status, isOpen, gateHoldsOpen, startCountdown]);
+  }, [canAutoClose, startCountdown]);
+
+  // Closing the modal in Inline style only hides it (the banner stays the live
+  // surface and owns the session lifecycle); in Modal style it ends the session.
+  const closeSurface = useCallback(() => {
+    if (style === 'inline') onMinimize();
+    else onPanelClose();
+  }, [style, onMinimize, onPanelClose]);
 
   const handleOpenChange = useCallback(
     (open: boolean) => {
-      if (!open) onPanelClose();
+      if (!open) closeSurface();
     },
-    [onPanelClose]
+    [closeSurface]
   );
 
   const isDialogOpen = isOpen && !isMinimized;
@@ -229,7 +241,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
               variant="ghost"
               size="icon"
               className="h-7 w-7 hover:bg-destructive/10 hover:text-destructive"
-              onClick={onPanelClose}
+              onClick={closeSurface}
               title="Close"
             >
               <X className="h-3.5 w-3.5" />
@@ -281,18 +293,30 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
           )}
         </div>
 
-        {/* always mounted so onMessage feeds structured rows even before user toggles raw view */}
-        <div
-          className="border-t border-glass-border shrink-0"
-          style={{ height: showRaw ? '200px' : 0, overflow: 'hidden' }}
-        >
-          <TerminalComponent
-            deploySessionId={panelState.deploySessionId}
-            onReady={onTerminalReady}
-            onError={onTerminalError}
-            onMessage={onMessage}
-          />
-        </div>
+        {/* Modal style owns the live terminal here, always mounted so onMessage
+            feeds structured rows even before the user toggles raw view. In Inline
+            style the portal owns the single socket, so this modal (opened on
+            demand) renders a text view of the captured lines instead, avoiding a
+            second socket for the same session. */}
+        {style === 'modal' ? (
+          <div
+            className="border-t border-glass-border shrink-0"
+            style={{ height: showRaw ? '200px' : 0, overflow: 'hidden' }}
+          >
+            <TerminalComponent
+              deploySessionId={panelState.deploySessionId}
+              onReady={onTerminalReady}
+              onError={onTerminalError}
+              onMessage={onMessage}
+            />
+          </div>
+        ) : showRaw ? (
+          <div className="border-t border-glass-border shrink-0 h-[200px] overflow-auto bg-well">
+            <pre className="px-3 py-2 font-mono text-[11px] leading-[1.4] text-foreground/80 whitespace-pre-wrap break-words">
+              {logRows.map((r) => r.raw).join('\n')}
+            </pre>
+          </div>
+        ) : null}
 
         {/* Footer */}
         <div className="flex items-center justify-between px-4 py-2 border-t border-glass-border shrink-0">
@@ -320,7 +344,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
               variant="ghost"
               size="sm"
               className="h-7 gap-1.5 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-              onClick={onPanelClose}
+              onClick={closeSurface}
             >
               <X className="h-3.5 w-3.5" />
               Close

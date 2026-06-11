@@ -426,6 +426,7 @@ export default function EditorLayout() {
         else toast.error('Could not refresh container state.');
       }}
       onDismissRecovery={() => { if (selectedFile) dismissActionResult(selectedFile); }}
+      panelStartedAt={panelStartedAt}
       onMobileBack={goToMobileList}
     />
   );

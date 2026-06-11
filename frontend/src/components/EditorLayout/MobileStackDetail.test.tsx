@@ -14,6 +14,10 @@ vi.mock('./editor-view-blocks', () => ({
 }));
 vi.mock('../StackAnatomyPanel', () => ({ default: () => <div>compose-pane</div> }));
 vi.mock('../ErrorBoundary', () => ({ default: ({ children }: { children: ReactNode }) => <>{children}</> }));
+// The inline operation banner pulls in the deploy-feedback context; this suite
+// covers the segmented-control behavior, so stub it (it renders nothing in the
+// default Modal style anyway).
+vi.mock('./StackOperationBanner', () => ({ StackOperationBanner: () => null }));
 
 function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
     return {

@@ -39,6 +39,7 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
 import { MobileStackDetail } from './MobileStackDetail';
 import { RecoveryChip } from './RecoveryChip';
+import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
 import type { NotificationItem } from '../dashboard/types';
 import type { Node } from '@/context/NodeContext';
@@ -192,6 +193,10 @@ export interface EditorViewProps {
     onRefreshState: () => void;
     onDismissRecovery: () => void;
 
+    // Session start (ms) of the active deploy-feedback op, or null when none, for
+    // the inline progress banner's elapsed readout.
+    panelStartedAt: number | null;
+
     // Mobile-only: back affordance in the detail header returns to the stack list.
     onMobileBack?: () => void;
     // Mobile-only: notifications + more-menu cluster for the detail header right
@@ -252,6 +257,7 @@ export function EditorView(props: EditorViewProps) {
         recoveryResult,
         onRefreshState,
         onDismissRecovery,
+        panelStartedAt,
     } = props;
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
 
@@ -357,6 +363,12 @@ export function EditorView(props: EditorViewProps) {
                                 )}
                             </div>
                         </CardHeader>
+                        <StackOperationBanner
+                            stackName={stackName}
+                            activeNode={activeNode}
+                            panelStartedAt={panelStartedAt}
+                            variant="band"
+                        />
                         <CardContent className="p-4 pt-2">
                             <ContainersHealth
                                 safeContainers={safeContainers}

@@ -14,6 +14,7 @@ import { loginAs, waitForStacksLoaded } from './helpers';
 const HAPPY_STACK = 'e2e-deploy-log-test';
 const FAIL_STACK = 'e2e-deploy-log-fail-test';
 const DEPLOY_FEEDBACK_KEY = 'sencho.deploy-feedback.enabled';
+const DEPLOY_FEEDBACK_STYLE_KEY = 'sencho.deploy-feedback.style';
 
 const HAPPY_COMPOSE = `services:
   web:
@@ -75,6 +76,21 @@ async function enableDeployFeedback(page: Page): Promise<void> {
     window.localStorage.setItem(key, 'true');
     window.dispatchEvent(new CustomEvent('SENCHO_SETTINGS_CHANGED'));
   }, DEPLOY_FEEDBACK_KEY);
+}
+
+/**
+ * Select the progress presentation style (Modal or Inline). addInitScript keeps
+ * it set across the reload setupDeployStack performs; the evaluate updates any
+ * already-mounted tree.
+ */
+async function setDeployStyle(page: Page, style: 'modal' | 'inline'): Promise<void> {
+  await page.addInitScript(([key, value]) => {
+    window.localStorage.setItem(key, value);
+  }, [DEPLOY_FEEDBACK_STYLE_KEY, style] as const);
+  await page.evaluate(([key, value]) => {
+    window.localStorage.setItem(key, value);
+    window.dispatchEvent(new CustomEvent('sencho-settings-changed'));
+  }, [DEPLOY_FEEDBACK_STYLE_KEY, style] as const);
 }
 
 /**
@@ -382,5 +398,74 @@ test.describe('Deploy feedback modal', () => {
     // not leak into later suites or manual sessions against the same instance.
     // Best-effort: a failed test may have already lost the page session.
     await setHealthGateWindow(page, 90).catch(() => {});
+  });
+});
+
+test.describe('Inline deploy progress', () => {
+  test.beforeEach(async ({ page }) => {
+    await loginAs(page);
+    await waitForStacksLoaded(page);
+  });
+
+  test.afterEach(async ({ page }) => {
+    await deleteStackViaApi(page, HAPPY_STACK);
+    await disableDeployFeedback(page);
+    await page.evaluate((key) => window.localStorage.removeItem(key), DEPLOY_FEEDBACK_STYLE_KEY).catch(() => {});
+    await setHealthGateWindow(page, 90).catch(() => {});
+  });
+
+  test('inline style shows the in-page banner instead of the modal, and View output opens it', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await enableDeployFeedback(page);
+    await setDeployStyle(page, 'inline');
+    await setHealthGateWindow(page, 15);
+    await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
+    await syncDeployFeedbackState(page);
+
+    await page.getByTestId('stack-deploy-button').click();
+
+    const banner = page.getByTestId('stack-operation-banner');
+    await expect(banner).toBeVisible({ timeout: 10_000 });
+
+    // The modal must not auto-open in Inline style.
+    await expect(page.locator('[data-testid="deploy-feedback-modal"]')).toBeHidden();
+
+    // View output summons the full modal on demand.
+    await banner.getByRole('button', { name: /view output/i }).click();
+    await expect(page.locator('[data-testid="deploy-feedback-modal"]')).toBeVisible({ timeout: 5_000 });
+  });
+
+  test('inline banner is visible on the mobile detail', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await enableDeployFeedback(page);
+    await setDeployStyle(page, 'inline');
+    await setHealthGateWindow(page, 15);
+    await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
+    await syncDeployFeedbackState(page);
+
+    // Resize below md so the detail re-renders as the mobile segmented layout
+    // with the same selected stack.
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    await page.getByTestId('stack-deploy-button').click();
+    await expect(page.getByTestId('stack-operation-banner')).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('modal style shows no inline banner', async ({ page }) => {
+    test.setTimeout(120_000);
+
+    await enableDeployFeedback(page);
+    await setDeployStyle(page, 'modal');
+    await setHealthGateWindow(page, 15);
+    await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
+    await syncDeployFeedbackState(page);
+
+    await page.getByTestId('stack-deploy-button').click();
+    await page.mouse.move(0, 0);
+
+    await expect(page.locator('[data-testid="deploy-feedback-modal"]')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('stack-operation-banner')).toHaveCount(0);
   });
 });
