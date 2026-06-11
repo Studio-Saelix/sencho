@@ -1,8 +1,9 @@
 import DockerController from './DockerController';
-import type { DependencyContainer } from './DockerController';
+import type { DependencyContainer, DependencyNetwork } from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
 import type { DeclaredCompose, DeclaredService } from '../helpers/composeDependencyParse';
+import { compareStackNetworks, fromDeclaredCompose } from './network/normalize';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 
@@ -25,7 +26,9 @@ export type DriftFindingKind =
   | 'service-missing'
   | 'service-undeclared'
   | 'image-mismatch'
-  | 'ports-mismatch';
+  | 'ports-mismatch'
+  | 'network-undeclared'
+  | 'network-missing';
 
 export interface StackDriftFinding {
   kind: DriftFindingKind;
@@ -101,8 +104,67 @@ export interface AssembleStackDriftInput {
   declared: DeclaredCompose;
   /** All runtime containers belonging to this stack (any state). */
   containers: DependencyContainer[];
+  /** Every network on the node (for resolving foreign vs stack-owned attachments). */
+  networks?: DependencyNetwork[];
   /** Set when the compose file could not be parsed. */
   parseError?: string;
+}
+
+/** Add a network to a service's accumulated undeclared-attachment set. */
+function addNetwork(map: Map<string, Set<string>>, service: string, network: string): void {
+  let set = map.get(service);
+  if (!set) { set = new Set(); map.set(service, set); }
+  set.add(network);
+}
+
+/**
+ * Network-level drift: a service attached to a network not declared in compose
+ * (stack-owned-undeclared or owned by another stack) is one finding per service;
+ * declared networks that no running service uses or that are absent from the
+ * runtime are one stack-level finding. Reuses the same comparison the Network
+ * Inspector uses, so the two surfaces never disagree.
+ */
+function networkDriftFindings(
+  stack: string,
+  declared: DeclaredCompose,
+  containers: DependencyContainer[],
+  networks: DependencyNetwork[],
+): StackDriftFinding[] {
+  const normalized = fromDeclaredCompose(declared, stack);
+  const facts = compareStackNetworks(normalized, { containers, networks, volumes: [] }, stack);
+  const findings: StackDriftFinding[] = [];
+
+  const serviceByContainer = new Map(containers.map(c => [c.name, c.service ?? c.name]));
+  const undeclaredByService = new Map<string, Set<string>>();
+  for (const a of facts.runtimeOnlyAttachments) addNetwork(undeclaredByService, a.service ?? a.container, a.network);
+  for (const a of facts.foreignNetworkAttachments) addNetwork(undeclaredByService, serviceByContainer.get(a.container) ?? a.container, a.network);
+
+  for (const [service, nets] of undeclaredByService) {
+    const list = [...nets].sort();
+    const joined = list.join(', ');
+    findings.push({
+      kind: 'network-undeclared',
+      service,
+      detail: `Service "${service}" is attached to ${list.length > 1 ? 'networks' : 'a network'} not declared in compose: ${joined}.`,
+      actual: joined,
+    });
+  }
+
+  // declaredButUnused holds compose keys; resolve them to runtime names so the
+  // finding lists every missing network in one consistent namespace.
+  const unusedNames = facts.declaredButUnused.map(key => normalized.networks[key]?.runtimeName ?? key);
+  const missing = [...new Set([...unusedNames, ...facts.missingFromRuntime])].sort();
+  if (missing.length > 0) {
+    const joined = missing.join(', ');
+    findings.push({
+      kind: 'network-missing',
+      service: '',
+      detail: `Declared ${missing.length > 1 ? 'networks are' : 'network is'} unused by running services or absent from the runtime: ${joined}.`,
+      expected: joined,
+    });
+  }
+
+  return findings;
 }
 
 /**
@@ -115,6 +177,7 @@ export interface AssembleStackDriftInput {
  */
 export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftReport {
   const { stack, declared, containers, parseError } = input;
+  const networks = input.networks ?? [];
   const hasContainers = containers.some((c) => RUNNING_STATES.has(c.state));
 
   // A parse failure means the declared model is untrustworthy: report drift
@@ -204,6 +267,8 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     }
   }
 
+  findings.push(...networkDriftFindings(stack, declared, containers, networks));
+
   const status: StackDriftStatus = findings.length > 0 ? 'drifted' : 'in-sync';
   return { stack, status, hasComposeFile: true, hasContainers, findings };
 }
@@ -235,6 +300,7 @@ export async function buildStackDriftReport(nodeId: number, stackName: string): 
   const declared = parseComposeDependencies(content);
 
   let containers: DependencyContainer[];
+  let networks: DependencyNetwork[] = [];
   try {
     // The snapshot needs the full known-stacks set to resolve each container to
     // its stack; we then filter to this one. Do not narrow to [stackName] or
@@ -242,6 +308,7 @@ export async function buildStackDriftReport(nodeId: number, stackName: string): 
     const stacks = await fs.getStacks();
     const snapshot = await DockerController.getInstance(nodeId).getDependencySnapshot(stacks);
     containers = snapshot.containers.filter((c) => c.stack === stackName);
+    networks = snapshot.networks;
   } catch (error) {
     // Docker is unreachable, so runtime drift cannot be assessed. The headline
     // failure is reachability; a separate parse error (if any) surfaces as
@@ -256,5 +323,5 @@ export async function buildStackDriftReport(nodeId: number, stackName: string): 
     };
   }
 
-  return assembleStackDrift({ stack: stackName, declared, containers, parseError: declared.parseError });
+  return assembleStackDrift({ stack: stackName, declared, containers, networks, parseError: declared.parseError });
 }

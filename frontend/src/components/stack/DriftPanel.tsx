@@ -11,7 +11,9 @@ import { useNodes } from '@/context/NodeContext';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
 type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
-type DriftFindingKind = 'service-missing' | 'service-undeclared' | 'image-mismatch' | 'ports-mismatch';
+type DriftFindingKind =
+  | 'service-missing' | 'service-undeclared' | 'image-mismatch' | 'ports-mismatch'
+  | 'network-undeclared' | 'network-missing';
 
 interface StackDriftFinding {
   kind: DriftFindingKind;
@@ -84,6 +86,8 @@ const FINDING_LABEL: Record<DriftFindingKind, string> = {
   'service-undeclared': 'undeclared',
   'image-mismatch': 'image',
   'ports-mismatch': 'ports',
+  'network-undeclared': 'network',
+  'network-missing': 'network missing',
 };
 
 /** The temporal overlay: how the on-disk compose compares to the last deploy baseline. */
