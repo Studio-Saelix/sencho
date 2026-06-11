@@ -78,6 +78,25 @@ async function enableDeployFeedback(page: Page): Promise<void> {
 }
 
 /**
+ * Shrink the post-deploy health gate observation window so success-path tests
+ * can watch the full deploy, verify, succeed sequence without waiting out the
+ * 90s default. 15 seconds is the smallest value the settings API accepts.
+ */
+async function setHealthGateWindow(page: Page, seconds: number): Promise<void> {
+  await page.evaluate(async (windowSeconds: number) => {
+    const res = await fetch('/api/settings', {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ health_gate_window_seconds: windowSeconds }),
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to set health gate window: ${res.status}`);
+    }
+  }, seconds);
+}
+
+/**
  * Force the React hook to re-read localStorage and update its state. Used
  * right before a deploy click to defeat any stale-state edge cases after
  * navigation.
@@ -185,9 +204,12 @@ test.describe('Deploy feedback modal', () => {
   });
 
   test('modal opens, streams output, and auto-closes on success', async ({ page }) => {
-    test.setTimeout(120_000);
+    // Worst-case assertion budget: 90s compose run + 45s gate verdict + 15s
+    // auto-close, so the per-assertion timeout fires before the test timeout.
+    test.setTimeout(160_000);
 
     await enableDeployFeedback(page);
+    await setHealthGateWindow(page, 15);
     await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
     await syncDeployFeedbackState(page);
 
@@ -209,8 +231,13 @@ test.describe('Deploy feedback modal', () => {
       streamingIndicator.waitFor({ state: 'visible', timeout: 10_000 }),
     ]);
 
-    // Wait for the operation to succeed
-    await expect(page.getByText('Succeeded')).toBeVisible({ timeout: 90_000 });
+    // The compose run finishes first (up to 90s for a cold image pull), then
+    // the post-deploy health gate observes the containers before the modal
+    // commits to a verdict.
+    await expect(modal.getByText('Verifying health')).toBeVisible({ timeout: 90_000 });
+
+    // Gate window is 15s; allow the 4s status polling cadence plus slack.
+    await expect(modal.getByText('Succeeded')).toBeVisible({ timeout: 45_000 });
 
     // Modal auto-closes AUTO_CLOSE_SECONDS (4s) after success; allow up to 15s total
     await expect(modal).toBeHidden({ timeout: 15_000 });
@@ -275,6 +302,7 @@ test.describe('Deploy feedback modal', () => {
     test.setTimeout(120_000);
 
     await enableDeployFeedback(page);
+    await setHealthGateWindow(page, 15);
     await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
     await syncDeployFeedbackState(page);
 
@@ -350,5 +378,9 @@ test.describe('Deploy feedback modal', () => {
     await deleteStackViaApi(page, HAPPY_STACK);
     await deleteStackViaApi(page, FAIL_STACK);
     await disableDeployFeedback(page);
+    // Restore the default observation window so the shortened test value does
+    // not leak into later suites or manual sessions against the same instance.
+    // Best-effort: a failed test may have already lost the page session.
+    await setHealthGateWindow(page, 90).catch(() => {});
   });
 });
