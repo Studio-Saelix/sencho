@@ -16,6 +16,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
+import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
 import { UpdateGuardService } from '../services/UpdateGuardService';
 import { HealthGateService } from '../services/HealthGateService';
 import { classifyFailure } from '../services/updateGuard/failureClassifier';
@@ -1124,6 +1125,24 @@ stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Respons
     console.error('[Stacks] Failed to run preflight for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to run preflight' });
+  }
+});
+
+// Compose Network Inspector: per-stack networking facts (network map, service
+// membership, published ports/bindings, network_mode, extra_hosts, runtime
+// drift) derived from the authored effective model + live snapshot. Read-only
+// and advisory; auto-proxies to the active node. Never returns raw render
+// stderr, env values, or label values.
+stacksRouter.get('/:stackName/networking', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildStackNetworkFacts(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to build networking facts for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to build networking facts' });
   }
 });
 

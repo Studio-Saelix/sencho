@@ -21,6 +21,14 @@ export interface EffBind {
   target: string;
 }
 
+/** A service's membership in one top-level network, keyed by the network KEY
+ *  (not the resolved docker name) so it lines up with the `networks` map and
+ *  with the authored `DeclaredService.networks`. */
+export interface EffServiceNetwork {
+  key: string;
+  aliases: string[];
+}
+
 export interface EffService {
   name: string;
   image?: string;
@@ -37,12 +45,20 @@ export interface EffService {
   user?: string;
   /** Environment KEY names only. Values are never extracted. */
   envKeys: string[];
+  /** Network membership by network key, with any aliases. */
+  networks: EffServiceNetwork[];
+  /** `extra_hosts` entries as `host:value` strings (host names / static IPs, never secrets). */
+  extraHosts: string[];
+  /** Label KEY names only. Values are never extracted (a label value can carry a secret). */
+  labelKeys: string[];
 }
 
 export interface EffResource {
   /** Resolved docker name (compose config fills this in). */
   name: string;
   external: boolean;
+  /** Top-level `internal: true` (no outbound/host connectivity for the network). */
+  internal: boolean;
 }
 
 export interface EffectiveModel {
@@ -132,12 +148,56 @@ function envKeysOf(env: unknown): string[] {
   return [];
 }
 
+/** Label KEY names only. A label VALUE can carry a secret, so it is never read. */
+function labelKeysOf(labels: unknown): string[] {
+  if (Array.isArray(labels)) {
+    return labels
+      .map(e => str(e))
+      .filter((s): s is string => s !== undefined)
+      .map(s => s.split('=')[0])
+      .filter(Boolean);
+  }
+  if (labels && typeof labels === 'object') return Object.keys(labels as Record<string, unknown>);
+  return [];
+}
+
+/** Service network membership (list or map form), keyed by network key, with aliases. */
+function parseServiceNetworks(networks: unknown): EffServiceNetwork[] {
+  if (Array.isArray(networks)) {
+    return networks
+      .map(n => str(n))
+      .filter((s): s is string => s !== undefined)
+      .map(key => ({ key, aliases: [] as string[] }));
+  }
+  if (networks && typeof networks === 'object') {
+    return Object.entries(networks as Record<string, unknown>).map(([key, cfg]) => {
+      const aliasesRaw = (cfg && typeof cfg === 'object') ? (cfg as Record<string, unknown>).aliases : undefined;
+      const aliases = Array.isArray(aliasesRaw)
+        ? aliasesRaw.map(a => str(a)).filter((a): a is string => a !== undefined)
+        : [];
+      return { key, aliases };
+    });
+  }
+  return [];
+}
+
+/** `extra_hosts` (list `host:ip` or map `{host: ip}`) → `host:value` strings. Infra facts, not secrets. */
+function parseExtraHosts(extraHosts: unknown): string[] {
+  if (Array.isArray(extraHosts)) {
+    return extraHosts.map(e => str(e)).filter((s): s is string => s !== undefined);
+  }
+  if (extraHosts && typeof extraHosts === 'object') {
+    return Object.entries(extraHosts as Record<string, unknown>).map(([host, ip]) => `${host}:${str(ip) ?? ''}`);
+  }
+  return [];
+}
+
 function parseResources(value: unknown): Record<string, EffResource> {
   const out: Record<string, EffResource> = {};
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       const o = (entry ?? {}) as Record<string, unknown>;
-      out[key] = { name: str(o.name) ?? key, external: o.external === true };
+      out[key] = { name: str(o.name) ?? key, external: o.external === true, internal: o.internal === true };
     }
   }
   return out;
@@ -177,6 +237,9 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       containerName: str(svc.container_name),
       user: str(svc.user),
       envKeys: envKeysOf(svc.environment),
+      networks: parseServiceNetworks(svc.networks),
+      extraHosts: parseExtraHosts(svc.extra_hosts),
+      labelKeys: labelKeysOf(svc.labels),
     });
   }
 

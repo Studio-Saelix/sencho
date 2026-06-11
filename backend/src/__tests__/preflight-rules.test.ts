@@ -13,7 +13,8 @@ import type { PreflightContext, PreflightFinding } from '../services/preflight/t
 function svc(over: Partial<EffService> = {}): EffService {
   return {
     name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [],
-    privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [], ...over,
+    privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [],
+    networks: [], extraHosts: [], labelKeys: [], ...over,
   };
 }
 
@@ -178,18 +179,18 @@ describe('hygiene rules', () => {
 
 describe('network / volume rules', () => {
   it('blocks a missing external network and volume', () => {
-    const m = model([svc()], { networks: { ext: { name: 'shared', external: true } }, volumes: { v: { name: 'data', external: true } } });
+    const m = model([svc()], { networks: { ext: { name: 'shared', external: true, internal: false } }, volumes: { v: { name: 'data', external: true, internal: false } } });
     const f = runRules(ctx({ model: m }));
     expect(ids(f, 'external-network-missing')).toHaveLength(1);
     expect(ids(f, 'external-volume-missing')).toHaveLength(1);
   });
   it('does not block an external resource that exists', () => {
-    const m = model([svc()], { networks: { ext: { name: 'shared', external: true } } });
+    const m = model([svc()], { networks: { ext: { name: 'shared', external: true, internal: false } } });
     const f = runRules(ctx({ model: m, existingNetworkNames: new Set(['shared']) }));
     expect(ids(f, 'external-network-missing')).toHaveLength(0);
   });
   it('reports a new network/volume as info when absent on the node', () => {
-    const m = model([svc()], { networks: { backend: { name: 'backend', external: false } }, volumes: { data: { name: 'data', external: false } } });
+    const m = model([svc()], { networks: { backend: { name: 'backend', external: false, internal: false } }, volumes: { data: { name: 'data', external: false, internal: false } } });
     const f = runRules(ctx({ model: m }));
     expect(ids(f, 'new-network')[0].severity).toBe('info');
     expect(ids(f, 'new-volume')[0].message).toContain('proj_data');
