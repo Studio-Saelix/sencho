@@ -654,6 +654,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     ignorePolicy: boolean,
     started?: Promise<void>,
     deploySessionId?: string,
+    opNodeId?: number | null,
   ): Promise<RunResult> => {
     const previousStatus = stackListState.stackStatuses[stackFile];
     const startedAt = Date.now();
@@ -663,7 +664,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         ? `/stacks/${stackName}/deploy?ignorePolicy=true`
         : `/stacks/${stackName}/deploy`;
       if (started) await started;
-      const response = await apiFetch(path, withDeploySession(deploySessionId ?? '', { method: 'POST' }));
+      const response = await apiFetch(path, withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId: opNodeId }));
       if (!response.ok) {
         const rawBody = await response.text();
         if (response.status === 409) {
@@ -729,9 +730,12 @@ export function useStackActions(options: UseStackActionsOptions) {
     const stackFile = stackListState.selectedFile;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     stackListState.setStackAction(stackFile, 'deploy');
+    // Snapshot the node once so the request stays bound to it even if the active
+    // node changes while the operation is in flight.
+    const opNodeId = activeNode?.id ?? null;
     try {
-      await runWithLog({ stackName, action: 'deploy', nodeId: activeNode?.id ?? null }, (started, ds) =>
-        runDeploy(stackName, stackFile, false, started, ds),
+      await runWithLog({ stackName, action: 'deploy', nodeId: opNodeId }, (started, ds) =>
+        runDeploy(stackName, stackFile, false, started, ds, opNodeId),
       );
     } finally {
       stackListState.clearStackAction(stackFile);
@@ -764,9 +768,10 @@ export function useStackActions(options: UseStackActionsOptions) {
         await rollbackStack(true);
       } else {
         stackListState.setStackAction(existingFile, 'deploy');
+        const opNodeId = activeNode?.id ?? null;
         try {
-          await runWithLog({ stackName, action: 'deploy', nodeId: activeNode?.id ?? null }, (started, ds) =>
-            runDeploy(stackName, existingFile, true, started, ds),
+          await runWithLog({ stackName, action: 'deploy', nodeId: opNodeId }, (started, ds) =>
+            runDeploy(stackName, existingFile, true, started, ds, opNodeId),
           );
         } finally {
           stackListState.clearStackAction(existingFile);
@@ -895,14 +900,17 @@ export function useStackActions(options: UseStackActionsOptions) {
     const startedAt = Date.now();
     stackListState.setStackAction(stackFile, action);
     stackListState.setOptimisticStatus(stackFile, optimisticStatus);
+    // Snapshot the node once so stop/restart/update stays bound to it even if
+    // the active node changes while the operation is in flight.
+    const opNodeId = activeNode?.id ?? null;
     try {
-      await runWithLog({ stackName, action, nodeId: activeNode?.id ?? null }, async (started, ds) => {
+      await runWithLog({ stackName, action, nodeId: opNodeId }, async (started, ds) => {
         await started;
         try {
           const url = ignorePolicy
             ? `/stacks/${stackName}/${endpoint}?ignorePolicy=true`
             : `/stacks/${stackName}/${endpoint}`;
-          const response = await apiFetch(url, withDeploySession(ds, { method: 'POST' }));
+          const response = await apiFetch(url, withDeploySession(ds, { method: 'POST', nodeId: opNodeId }));
           if (!response.ok) {
             const errText = await response.text();
             if (response.status === 409) {

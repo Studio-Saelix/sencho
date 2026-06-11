@@ -308,6 +308,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
             style={{ height: showRaw ? '200px' : 0, overflow: 'hidden' }}
           >
             <TerminalComponent
+              nodeId={panelState.nodeId}
               deploySessionId={panelState.deploySessionId}
               onReady={onTerminalReady}
               onError={onTerminalError}

@@ -4,6 +4,13 @@ export interface ApiFetchOptions extends RequestInit {
   /** When true, omits the x-node-id header so the request always targets
    *  the local node regardless of which node is currently active in the UI. */
   localOnly?: boolean;
+  /** Explicit node target, overriding the active-node read. A number targets
+   *  that node; null omits x-node-id so the request hits the local node. Leave
+   *  undefined for the default (read the active node from localStorage). Lets an
+   *  operation stay bound to the node captured when it started, even if the
+   *  active node changes mid-flight. Takes precedence over localOnly when both
+   *  are set. */
+  nodeId?: number | null;
 }
 
 /** Header carrying a deploy's progress-stream correlation id. Mirrors the
@@ -31,9 +38,19 @@ export async function apiFetch(
   endpoint: string,
   options: ApiFetchOptions = {}
 ): Promise<Response> {
-  const { localOnly, ...fetchOptions } = options;
+  const { localOnly, nodeId: nodeIdOverride, ...fetchOptions } = options;
   const url = `${API_BASE}${endpoint}`;
-  const activeNodeId = localOnly ? null : localStorage.getItem('sencho-active-node');
+  // An explicit nodeId (including null) wins over the active-node read so a
+  // captured operation node stays authoritative; null means target the local
+  // node, not the stored active node.
+  let activeNodeId: string | null;
+  if (nodeIdOverride !== undefined) {
+    activeNodeId = nodeIdOverride === null ? null : String(nodeIdOverride);
+  } else if (localOnly) {
+    activeNodeId = null;
+  } else {
+    activeNodeId = localStorage.getItem('sencho-active-node');
+  }
 
   const defaultOptions: RequestInit = {
     credentials: 'include',

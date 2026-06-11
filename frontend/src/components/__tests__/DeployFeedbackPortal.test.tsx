@@ -35,7 +35,13 @@ vi.mock('../DeployFeedbackModal', () => ({ DeployFeedbackModal: () => <div data-
 vi.mock('../DeployFeedbackPill', () => ({
     DeployFeedbackPill: ({ isVisible }: { isVisible: boolean }) => (isVisible ? <div data-testid="pill-marker" /> : null),
 }));
-vi.mock('../Terminal', () => ({ default: () => <div data-testid="portal-terminal" /> }));
+const termSpy = vi.hoisted(() => ({ nodeId: undefined as number | null | undefined }));
+vi.mock('../Terminal', () => ({
+    default: (props: { nodeId?: number | null }) => {
+        termSpy.nodeId = props.nodeId;
+        return <div data-testid="portal-terminal" />;
+    },
+}));
 
 function panel(over: Partial<DeployPanelState> = {}): DeployPanelState {
     return {
@@ -59,6 +65,13 @@ describe('DeployFeedbackPortal', () => {
         mockPanelState = panel({ isOpen: true });
         render(<DeployFeedbackPortal />);
         expect(screen.getByTestId('portal-terminal')).toBeInTheDocument();
+    });
+
+    it('binds the inline progress terminal to the captured panel node', () => {
+        mockStyle = 'inline';
+        mockPanelState = panel({ isOpen: true, nodeId: 7 });
+        render(<DeployFeedbackPortal />);
+        expect(termSpy.nodeId).toBe(7);
     });
 
     it('does not mount the portal terminal in modal style (the modal owns it)', () => {

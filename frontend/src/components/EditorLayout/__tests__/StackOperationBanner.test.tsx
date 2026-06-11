@@ -71,7 +71,7 @@ beforeEach(() => {
 });
 
 const passedGate = (): HealthGateUiState => ({
-    stackName: 'web', gateId: 'g', trigger: 'update', status: 'passed', reason: null, windowSeconds: 90, startedAt: Date.now() - 90_000,
+    stackName: 'web', nodeId: null, gateId: 'g', trigger: 'update', status: 'passed', reason: null, windowSeconds: 90, startedAt: Date.now() - 90_000,
 });
 
 function renderBanner(activeNode: Node | null = null, panelStartedAt: number | null = Date.now() - 12_000) {
@@ -117,7 +117,7 @@ describe('StackOperationBanner', () => {
         unmount();
 
         mockPanelState = panel({ status: 'succeeded' });
-        mockHealthGate = { stackName: 'web', gateId: 'g', trigger: 'update', status: 'failed', reason: 'exited', windowSeconds: 90, startedAt: Date.now() };
+        mockHealthGate = { stackName: 'web', nodeId: null, gateId: 'g', trigger: 'update', status: 'failed', reason: 'exited', windowSeconds: 90, startedAt: Date.now() };
         renderBanner();
         expect(screen.queryByTestId('stack-operation-banner')).toBeNull();
     });
@@ -137,7 +137,7 @@ describe('StackOperationBanner', () => {
 
     it('shows the observing health gate and keeps present tense', () => {
         mockPanelState = panel({ status: 'succeeded' });
-        mockHealthGate = { stackName: 'web', gateId: 'g', trigger: 'update', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now() - 12_000 };
+        mockHealthGate = { stackName: 'web', nodeId: null, gateId: 'g', trigger: 'update', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now() - 12_000 };
         renderBanner();
         expect(screen.getByText('Updating')).toBeInTheDocument();
         expect(screen.getByText('Verifying health')).toBeInTheDocument();
@@ -146,7 +146,7 @@ describe('StackOperationBanner', () => {
 
     it('shows the passed health gate', () => {
         mockPanelState = panel({ status: 'succeeded' });
-        mockHealthGate = { stackName: 'web', gateId: 'g', trigger: 'update', status: 'passed', reason: null, windowSeconds: 90, startedAt: Date.now() - 90_000 };
+        mockHealthGate = { stackName: 'web', nodeId: null, gateId: 'g', trigger: 'update', status: 'passed', reason: null, windowSeconds: 90, startedAt: Date.now() - 90_000 };
         renderBanner();
         expect(screen.getByText('Health gate passed')).toBeInTheDocument();
         expect(screen.getByText('Updated')).toBeInTheDocument();
@@ -154,7 +154,7 @@ describe('StackOperationBanner', () => {
 
     it('shows the unknown health gate state with its reason', () => {
         mockPanelState = panel({ status: 'succeeded' });
-        mockHealthGate = { stackName: 'web', gateId: 'g', trigger: 'update', status: 'unknown', reason: 'no healthcheck defined', windowSeconds: 90, startedAt: Date.now() };
+        mockHealthGate = { stackName: 'web', nodeId: null, gateId: 'g', trigger: 'update', status: 'unknown', reason: 'no healthcheck defined', windowSeconds: 90, startedAt: Date.now() };
         renderBanner();
         expect(screen.getByText('Health check unknown')).toBeInTheDocument();
         expect(screen.getByText('no healthcheck defined')).toBeInTheDocument();
@@ -253,7 +253,7 @@ describe('StackOperationBanner', () => {
         vi.useFakeTimers();
         try {
             mockPanelState = panel({ status: 'succeeded' });
-            mockHealthGate = { stackName: 'web', gateId: 'g', trigger: 'update', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now() };
+            mockHealthGate = { stackName: 'web', nodeId: null, gateId: 'g', trigger: 'update', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now() };
             renderBanner();
             act(() => { vi.advanceTimersByTime(8000); });
             expect(onPanelClose).not.toHaveBeenCalled();
