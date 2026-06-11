@@ -1,0 +1,119 @@
+---
+title: Health-Gated Updates
+description: Check update readiness before applying, watch container health after the update lands, and know exactly what a rollback can restore.
+---
+
+Updating a stack is the highest-anxiety operation in a homelab: a pull-and-recreate can break containers, networking, env configuration, or storage assumptions, and `docker compose` alone gives you no answer to "is it safe to update this right now?". Sencho makes updates deliberate and reversible in three layers: a readiness check before the update, a health gate after it, and an always-honest rollback readiness report on the stack.
+
+None of these layers blocks you. Readiness is advisory, the health gate is purely observational, and rollback is always an explicit action you confirm. The only thing that hard-blocks an update is a [deploy enforcement policy](/features/deploy-enforcement).
+
+## Update readiness
+
+When you trigger **Update** from the stack editor toolbar or the sidebar menu, Sencho first opens a readiness dialog with a single verdict and the signals behind it:
+
+| Verdict | Meaning |
+|---------|---------|
+| Ready | Nothing stands out; the update can proceed. |
+| Ready with warnings | Proceed, but read the warnings first. |
+| Review required | Something needs a look: a high-risk preflight finding, an already-unhealthy container, a pending major version bump, or low disk. |
+| Blocked | A blocker was found, such as a Compose Doctor blocker or a scan policy that will stop the update. |
+| Unknown | Readiness could not be verified, for example when the node or Docker is unreachable. |
+
+The verdict is computed from signals Sencho already tracks, so the check is fast and never re-runs anything heavy:
+
+- **Compose Doctor**: the stored result of the last [preflight run](/features/compose-doctor). A blocker finding makes the verdict Blocked; high-risk findings ask for review. If Compose Doctor has never run, the dialog says so without dragging the verdict down.
+- **Drift**: open [drift findings](/features/stack-drift) warn you that the running state has diverged, so the rollback target may not match what is running.
+- **Current containers**: a container that is already unhealthy, restarting, or crashed before the update makes the result hard to evaluate; the dialog asks you to look first.
+- **Pending image change**: the [update preview](/features/auto-update-policies) classifies the pending change. A major version bump asks for review; patch updates and same-tag refreshes pass quietly.
+- **Rollback backup**: whether a backup slot exists and how old it is. A missing backup is only a note, because the update itself creates a fresh one when it starts.
+- **Node disk**: disk usage near or above the node's alert threshold warns you before a large pull fills the disk.
+- **Healthcheck coverage**: how many services define healthchecks, which determines how thoroughly the post-update health gate can verify the result.
+
+Admins also see whether a [fleet snapshot](/features/fleet-backups) covers this stack and can tick **Create a fleet snapshot before updating** to capture one as part of proceeding. If the snapshot fails, the update does not start.
+
+Every verdict keeps the **Update now** button enabled. The dialog informs the decision; it does not make it for you.
+
+<Frame>
+  <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog for a stack, showing the verdict chip, the signal rows for Compose Doctor, drift, containers, pending update, rollback backup and node disk, the fleet snapshot row with the create-snapshot checkbox, and the Cancel and Update now buttons" />
+</Frame>
+
+## The post-update health gate
+
+The 3-second crash probe from [atomic deployments](/features/atomic-deployments) catches instant failures. The health gate is the longer observational layer behind it: after a deploy or update succeeds, Sencho watches the stack's containers for an observation window (90 seconds by default) and records a verdict.
+
+During the window, the gate checks every container that came up with the stack:
+
+- all expected containers stay **running**,
+- Docker healthchecks report **healthy** wherever a service defines one,
+- no container **exits**, **disappears**, or enters a **restart loop**.
+
+A clear failure ends the observation immediately. Passing requires the full window, and a healthcheck still in its start period when the window ends records the verdict as unknown rather than claiming success.
+
+The deploy progress modal treats the gate verdict as the real result: while the gate observes, the status reads **Verifying health** rather than claiming success, and the auto-close waits. A passed gate shows the success state; a failed or unknown gate becomes the headline result with its reason. Closing the modal never stops the observation; the gate runs server-side and its result appears on the stack timeline either way, as **health gate passed** or **health gate failed** events alongside the **update started** marker.
+
+The live verifying and recovery view is part of the deploy progress panel. If you have turned that panel off, the in-browser gate view does not appear, but the gate still runs on the node and records its verdict on the stack timeline.
+
+<Frame>
+  <img src="/images/health-gated-updates/modal-verifying.png" alt="Deploy progress modal after an update finished, with the status indicator showing Verifying health and the health gate banner reading observing containers" />
+</Frame>
+
+<Frame>
+  <img src="/images/health-gated-updates/modal-gate-failed.png" alt="Deploy progress modal with the headline status Health gate failed and the banner naming the unhealthy container, with the hint that rollback options are available on the stack" />
+</Frame>
+
+When the gate fails, the stack page surfaces the same [recovery actions](/features/deploy-progress#recovery-actions) as a failed update: retry, restart, roll back when a backup exists, refresh the container state, or copy diagnostics. Rolling back is always your call; the gate never rolls anything back on its own.
+
+The gate also runs for updates you did not click: scheduled image updates, webhook-triggered deploys and pulls, bulk updates, and Git source applies all record gate verdicts on the stack timeline. Rollbacks, App Store installs, and Sencho's own automation loops are deliberately not gated.
+
+### Tuning or disabling the gate
+
+Open **Settings > Host Alerts > Update health gate** on the node you want to configure:
+
+- **Observe health after updates** turns the gate on or off for that node. On by default; turning it off only stops the observation and its timeline events, never the update itself.
+- **Observation window** sets how long containers are watched, from 15 to 600 seconds. The default is 90 seconds; raise it for stacks that take a while to settle, since a healthcheck still starting at the end of the window records an unknown verdict instead of a pass.
+
+<Frame>
+  <img src="/images/health-gated-updates/settings.png" alt="Host Alerts settings page with the Update health gate group, showing the Observe health after updates toggle and the Observation window field" />
+</Frame>
+
+## Rollback readiness
+
+The Stack Dossier carries a **Rollback readiness** section that answers one question honestly: if this update goes wrong, what can a rollback actually restore? It reports an overall state of Ready, Partial, or Not ready, built from:
+
+- **Previous compose file**: whether a backup slot exists and how old it is.
+- **Previous env file**: whether the backup contains the stack's env file. Sencho lists how many variable names are covered; the values themselves are restored with the file and never displayed.
+- **Previous image tag**: the known rollback target from the update preview. When the compose file uses a moving tag, restoring files alone does not revert the image, so the report names the exact tag you would pin to be precise.
+- **Last successful deploy**: whether the backup reflects a configuration that actually deployed successfully.
+- **Healthchecks**: whether a rollback can be verified beyond run state.
+- **Application data**: always reported as not covered. Named volumes and bind-mounted data are not included in file backups; a rollback restores compose and env files only, and your application data keeps its current state. This row exists so the limit is stated where you decide, not discovered during an incident.
+
+<Frame>
+  <img src="/images/health-gated-updates/dossier-rollback-readiness.png" alt="Rollback readiness section in the Stack Dossier with the overall Ready chip and the six rows: previous compose file, previous env file with variable names only, previous image tag, last successful deploy, healthchecks, and the application data non-coverage disclosure" />
+</Frame>
+
+## Classified failures
+
+When a deploy or update fails, Sencho classifies the failure from the compose output and shows the cause with a suggested next step in the recovery panel: an image pull failure, a missing environment variable, a host port conflict, a missing bind-mount path, a permission problem, a crashed container, a failed healthcheck, an unavailable dependency, an unreachable node or Docker daemon, or an invalid compose file. The classification also lands in **Copy details**, so a bug report carries the cause, not just the raw output.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The readiness dialog shows Unknown">
+    Unknown means one of the verdict-affecting signals could not be verified, most often because Docker or the node did not answer in time. The update path is never blocked by an unknown verdict; check the node's connection if it persists, and proceed when you are confident in the stack's state.
+  </Accordion>
+  <Accordion title="The health gate failed but my app seems fine">
+    The gate fails on the first clear problem it observes: a container exit, an unhealthy healthcheck, a restart loop, or a container disappearing mid-window. Check the named container's logs from the stack page. If the container legitimately restarts during startup (a migration step, for example), raise the observation window under **Settings > Host Alerts > Update health gate** so the gate watches past the settle period.
+  </Accordion>
+  <Accordion title="The health gate result is unknown">
+    Unknown means the observation could not finish: Sencho restarted mid-window, a newer update superseded the observation, Docker became unreachable, a healthcheck was still starting when the window ended, or no containers appeared to observe. The stack timeline records the reason. Check the containers directly; an unknown verdict makes no claim either way.
+  </Accordion>
+  <Accordion title="The modal stays open saying the gate is observing">
+    The modal holds its auto-close while the gate observes so the verdict is not lost. You can close it at any time; the observation continues server-side and the verdict lands on the stack timeline. If the gate result repeatedly cannot be retrieved, the modal gives up with an unknown verdict instead of waiting forever.
+  </Accordion>
+  <Accordion title="Rollback readiness says my data is not covered">
+    That is by design and true for every stack: file backups cover compose and env files, never named volumes or bind-mounted data. For point-in-time copies of stack files across the fleet, use [fleet snapshots](/features/fleet-backups); for application data, use a backup tool appropriate to the workload (database dumps, volume backups) before risky updates.
+  </Accordion>
+  <Accordion title="Updates from the sidebar menu now show a dialog first">
+    The sidebar's per-stack **Update** action runs the same path as the editor toolbar, so it shows the same readiness dialog and deploy progress. One click on **Update now** proceeds. On nodes that do not advertise the capability, updates run directly without the dialog.
+  </Accordion>
+</AccordionGroup>

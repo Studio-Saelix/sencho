@@ -27,6 +27,11 @@ export type NotificationCategory =
     // from ALL_NOTIFICATION_CATEGORIES (the routable-category whitelist) below.
     | 'drift_detected'
     | 'drift_resolved'
+    // Update lifecycle markers from the post-update health gate. History-only
+    // for the same reason as the drift pair above.
+    | 'update_started'
+    | 'health_gate_passed'
+    | 'health_gate_failed'
     | 'system';
 
 export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [

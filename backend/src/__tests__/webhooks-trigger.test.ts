@@ -443,3 +443,49 @@ describe('webhook_executions.error redaction (M6)', () => {
         expect(history[0].error).toContain('/home/<user>');
     });
 });
+
+describe('WebhookService.execute: health gate begin call sites', () => {
+    // FileSystemService and ComposeService return a fresh instance per nodeId,
+    // so those spies attach to the prototypes (matching the redaction tests
+    // above); HealthGateService is a singleton spied directly. The policy gate
+    // is stubbed to allow so the test isolates the begin wiring, not policy.
+    it('begins a deploy gate after a webhook deploy succeeds', async () => {
+        const stack = 'hook-deploy-gate';
+        const { id } = createWebhook({ action: 'deploy', stack });
+        const webhook = DatabaseService.getInstance().getWebhook(id)!;
+        const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+
+        const fs = await import('../services/FileSystemService');
+        const compose = await import('../services/ComposeService');
+        const policyGate = await import('../helpers/policyGate');
+        const { HealthGateService } = await import('../services/HealthGateService');
+        vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
+        vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
+        vi.spyOn(compose.ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-hook');
+
+        const result = await WebhookService.getInstance().execute(webhook, 'deploy', 'test', true);
+        expect(result.success).toBe(true);
+        expect(beginSpy).toHaveBeenCalledWith(nodeId, stack, 'deploy', 'system:webhook');
+    });
+
+    it('begins an update gate after a webhook pull succeeds', async () => {
+        const stack = 'hook-pull-gate';
+        const { id } = createWebhook({ action: 'pull', stack });
+        const webhook = DatabaseService.getInstance().getWebhook(id)!;
+        const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+
+        const fs = await import('../services/FileSystemService');
+        const compose = await import('../services/ComposeService');
+        const policyGate = await import('../helpers/policyGate');
+        const { HealthGateService } = await import('../services/HealthGateService');
+        vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
+        vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
+        vi.spyOn(compose.ComposeService.prototype, 'updateStack').mockResolvedValue(undefined);
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-hook');
+
+        const result = await WebhookService.getInstance().execute(webhook, 'pull', 'test', true);
+        expect(result.success).toBe(true);
+        expect(beginSpy).toHaveBeenCalledWith(nodeId, stack, 'update', 'system:webhook');
+    });
+});

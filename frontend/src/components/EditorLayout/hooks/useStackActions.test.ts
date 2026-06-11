@@ -83,6 +83,8 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     policyBlock: null,
     setPolicyBlock: vi.fn(),
     setPolicyBypassing: vi.fn(),
+    updateReadiness: null,
+    setUpdateReadiness: vi.fn(),
     setDiffPreview: vi.fn(),
     ...over,
   } as unknown as OverlayState;
@@ -96,6 +98,7 @@ function setup(over: {
   overlay?: Partial<OverlayState>;
   stackList?: Partial<StackListState>;
   getLastDeployOutputLine?: (stackName: string) => string | undefined;
+  hasUpdateGuard?: boolean;
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -114,6 +117,7 @@ function setup(over: {
       runWithLog,
       getLastDeployOutputLine: over.getLastDeployOutputLine ?? (() => undefined),
       diffPreviewEnabled: false,
+      hasUpdateGuard: over.hasUpdateGuard ?? false,
     }),
   );
   return { result, editorState, stackListState, overlayState };
@@ -365,6 +369,75 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
   });
 });
 
+describe('useStackActions update readiness routing', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  function routeUpdateOk() {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/update')) return Promise.resolve(new Response('', { status: 200 }));
+      return Promise.resolve(new Response('[]', { status: 200 }));
+    });
+  }
+
+  it('opens the readiness dialog instead of posting when the node has update-guard', async () => {
+    routeUpdateOk();
+    const { result, overlayState } = setup({ hasUpdateGuard: true });
+    await act(async () => { await result.current.updateStack(); });
+    expect(overlayState.setUpdateReadiness).toHaveBeenCalledWith(
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml' }),
+    );
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('routes a sidebar/context-menu update through the readiness dialog too', async () => {
+    routeUpdateOk();
+    const { result, overlayState } = setup({ hasUpdateGuard: true });
+    await act(async () => { await result.current.executeStackActionByFile('web.yml', 'update', 'update'); });
+    expect(overlayState.setUpdateReadiness).toHaveBeenCalledWith(
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml' }),
+    );
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('runs the shared update executor when the dialog proceeds', async () => {
+    routeUpdateOk();
+    const { result, overlayState, stackListState } = setup({ hasUpdateGuard: true });
+    await act(async () => { await result.current.updateStack(); });
+    const pending = vi.mocked(overlayState.setUpdateReadiness).mock.calls[0][0] as
+      { stackName: string; stackFile: string; proceed: () => void };
+    expect(pending).not.toBeNull();
+    await act(async () => { pending.proceed(); });
+    expect(overlayState.setUpdateReadiness).toHaveBeenLastCalledWith(null);
+    const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
+    expect(urls).toContain('/stacks/web/update');
+    expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
+  });
+
+  it('does nothing while the stack is busy, with or without the dialog', async () => {
+    routeUpdateOk();
+    const { result, overlayState } = setup({
+      hasUpdateGuard: true,
+      stackList: { isStackBusy: vi.fn().mockReturnValue(true) as never },
+    });
+    await act(async () => { await result.current.updateStack(); });
+    expect(overlayState.setUpdateReadiness).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('updates directly without the capability, from both entry points', async () => {
+    routeUpdateOk();
+    const { result, overlayState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    await act(async () => { await result.current.executeStackActionByFile('web.yml', 'update', 'update'); });
+    expect(overlayState.setUpdateReadiness).not.toHaveBeenCalled();
+    const updatePosts = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]) === '/stacks/web/update');
+    expect(updatePosts).toHaveLength(2);
+  });
+});
+
 describe('useStackActions recovery records', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
@@ -450,6 +523,67 @@ describe('useStackActions recovery records', () => {
     expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
       'web.yml',
       expect.objectContaining({ action: 'deploy', rolledBack: true, errorMessage: 'crash' }),
+    );
+  });
+
+  it('carries the server failure classification into the recovery record', async () => {
+    const body = JSON.stringify({
+      error: 'port is already allocated',
+      rolledBack: false,
+      failure: { reason: 'port_conflict', label: 'Host port conflict', suggestion: 'Free the port, then retry.' },
+    });
+    routeApi(500, body);
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({
+        failure: { reason: 'port_conflict', label: 'Host port conflict', suggestion: 'Free the port, then retry.' },
+      }),
+    );
+  });
+
+  it('ignores a malformed failure field in the response body', async () => {
+    routeApi(500, JSON.stringify({ error: 'boom', failure: { reason: 42 } }));
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({ failure: undefined }),
+    );
+  });
+
+  it('synthesizes a node_unreachable classification for a gateway 502 with no body', async () => {
+    routeApi(502, 'Bad Gateway');
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({
+        failure: expect.objectContaining({ reason: 'node_unreachable' }),
+      }),
+    );
+  });
+
+  it('does not mislabel an unrelated JSON 503 as node_unreachable', async () => {
+    routeApi(503, JSON.stringify({ error: 'maintenance window' }));
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({ failure: undefined }),
+    );
+  });
+
+  it('synthesizes node_unreachable for a docker_unavailable 503 without a classified body', async () => {
+    routeApi(503, JSON.stringify({ error: 'daemon gone', code: 'docker_unavailable' }));
+    const { result, stackListState } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(stackListState.recordActionFailure).toHaveBeenCalledWith(
+      'web.yml',
+      expect.objectContaining({
+        failure: expect.objectContaining({ reason: 'node_unreachable' }),
+      }),
     );
   });
 

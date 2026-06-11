@@ -34,23 +34,37 @@ function setup(over: Partial<Parameters<typeof RecoveryPanel>[0]> = {}) {
   return props;
 }
 
+// The actions live behind the Take action menu so the mobile card stays small.
+function openActions() {
+  fireEvent.click(screen.getByText('Take action'));
+}
+
 describe('RecoveryPanel', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('shows the failed action title and error message', () => {
+  it('shows the failed action title and error message on the card', () => {
     setup();
     expect(screen.getByText(/Update failed/)).toBeInTheDocument();
     expect(screen.getByText(/pull failed: connection reset/)).toBeInTheDocument();
   });
 
-  it('calls onRetry from the retry button', () => {
+  it('keeps the actions collapsed behind the Take action menu', () => {
+    setup();
+    expect(screen.queryByText('Retry update')).not.toBeInTheDocument();
+    openActions();
+    expect(screen.getByText('Retry update')).toBeInTheDocument();
+  });
+
+  it('calls onRetry from the retry action', () => {
     const props = setup();
+    openActions();
     fireEvent.click(screen.getByText('Retry update'));
     expect(props.onRetry).toHaveBeenCalledTimes(1);
   });
 
   it('hides retry/restart/rollback without the deploy permission', () => {
     setup({ canDeploy: false, backupInfo: { exists: true, timestamp: 1 } });
+    openActions();
     expect(screen.queryByText('Retry update')).not.toBeInTheDocument();
     expect(screen.queryByText('Restart')).not.toBeInTheDocument();
     expect(screen.queryByText('Roll back')).not.toBeInTheDocument();
@@ -61,19 +75,23 @@ describe('RecoveryPanel', () => {
 
   it('offers rollback only when a backup exists', () => {
     setup({ backupInfo: { exists: false, timestamp: null } });
+    openActions();
     expect(screen.queryByText('Roll back')).not.toBeInTheDocument();
     setup({ backupInfo: { exists: true, timestamp: 123 } });
+    fireEvent.click(screen.getAllByText('Take action')[1]);
     expect(screen.getByText('Roll back')).toBeInTheDocument();
   });
 
   it('does not show a redundant restart button when the failed action was a restart', () => {
     setup({ result: { ...baseResult, action: 'restart' } });
+    openActions();
     expect(screen.getByText('Retry restart')).toBeInTheDocument();
-    expect(screen.queryByText('Restart')).not.toBeInTheDocument();
+    expect(screen.queryByText('Restart', { exact: true })).not.toBeInTheDocument();
   });
 
   it('copies session-safe diagnostics including stack and error', () => {
     setup({ result: { ...baseResult, lastOutputLine: 'pulling app ...' } });
+    openActions();
     fireEvent.click(screen.getByText('Copy details'));
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
     const blob = vi.mocked(copyToClipboard).mock.calls[0][0];
@@ -82,8 +100,47 @@ describe('RecoveryPanel', () => {
     expect(blob).toContain('Last output: pulling app ...');
   });
 
+  it('renders the failure classification on the card without opening the menu', () => {
+    setup({
+      result: {
+        ...baseResult,
+        failure: {
+          reason: 'port_conflict',
+          label: 'Host port conflict',
+          suggestion: 'Free the conflicting host port, then retry.',
+        },
+      },
+    });
+    expect(screen.getByText('Host port conflict')).toBeInTheDocument();
+    expect(screen.getByText('Free the conflicting host port, then retry.')).toBeInTheDocument();
+  });
+
+  it('renders no classification block without a failure field', () => {
+    setup();
+    expect(screen.queryByTestId('recovery-classification')).not.toBeInTheDocument();
+  });
+
+  it('includes the classification in copied diagnostics', () => {
+    setup({
+      result: {
+        ...baseResult,
+        failure: {
+          reason: 'env_missing',
+          label: 'Missing environment variable',
+          suggestion: 'Define the missing variable, then retry.',
+        },
+      },
+    });
+    openActions();
+    fireEvent.click(screen.getByText('Copy details'));
+    const blob = vi.mocked(copyToClipboard).mock.calls[0][0];
+    expect(blob).toContain('Classified: Missing environment variable');
+    expect(blob).toContain('Suggestion: Define the missing variable, then retry.');
+  });
+
   it('wires refresh and dismiss callbacks', () => {
     const props = setup();
+    openActions();
     fireEvent.click(screen.getByText('Refresh'));
     fireEvent.click(screen.getByLabelText('Dismiss recovery panel'));
     expect(props.onRefreshState).toHaveBeenCalledTimes(1);

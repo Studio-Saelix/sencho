@@ -116,6 +116,7 @@
                 "pages": [
                   "features/deploy-progress",
                   "features/atomic-deployments",
+                  "features/health-gated-updates",
                   "features/deploy-enforcement",
                   "features/git-sources",
                   "features/app-store",

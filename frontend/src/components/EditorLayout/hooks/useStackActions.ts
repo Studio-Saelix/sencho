@@ -7,7 +7,7 @@ import type { useViewNavigationState } from './useViewNavigationState';
 import type { OverlayState } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
 import type { ActionVerb } from '@/context/DeployFeedbackContext';
-import type { StackAction, RecoverableAction } from '../EditorView';
+import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
 
@@ -15,7 +15,22 @@ interface RunResult {
   ok: boolean;
   errorMessage?: string;
   rolledBack?: boolean;
+  /** Health gate run id from the success body, when the backend started one. */
+  healthGateId?: string | null;
 }
+
+/** healthGateId from a success body, or null when absent or unreadable. */
+const parseHealthGateId = async (response: Response): Promise<string | null> => {
+  try {
+    const body: unknown = await response.json();
+    if (isRecord(body) && typeof body.healthGateId === 'string') return body.healthGateId;
+  } catch (e) {
+    // A success body should always parse; the warn surfaces a future
+    // double-read bug instead of silently disabling the gate UI.
+    console.warn('[HealthGate] could not read the success body:', e);
+  }
+  return null;
+};
 
 // Sentinel stored in overlayState.pendingUnsavedLoad to mark that the pending
 // confirmation is a node switch (not a stack load). When the user confirms the
@@ -23,7 +38,34 @@ interface RunResult {
 // stack-load branch.
 export const NODE_SWITCH_PENDING_TOKEN = '__node-switch-pending__';
 
-type StackActionError = Error & { rolledBack?: boolean };
+type StackActionError = Error & { rolledBack?: boolean; failure?: FailureClassification };
+
+// Fallback classification when the response never reached a Sencho backend
+// (proxy 502/504 for a dead remote, or a 503 with no classified body).
+const NODE_UNREACHABLE_FAILURE: FailureClassification = {
+  reason: 'node_unreachable',
+  label: 'Node or Docker unreachable',
+  suggestion: 'Check that the node is online and Docker is running, then retry.',
+};
+
+const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
+
+const parseFailureClassification = (value: unknown): FailureClassification | undefined => {
+  if (
+    isRecord(value) &&
+    typeof value.reason === 'string' &&
+    typeof value.label === 'string' && value.label.trim() &&
+    typeof value.suggestion === 'string' && value.suggestion.trim()
+  ) {
+    return { reason: value.reason, label: value.label, suggestion: value.suggestion };
+  }
+  if (value !== undefined) {
+    // Likely hub/node version skew or a mangled proxy body; the raw error
+    // message still renders, only the classification panel is degraded.
+    console.warn('Unrecognized failure classification shape in error response:', value);
+  }
+  return undefined;
+};
 
 type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update';
 
@@ -66,6 +108,10 @@ interface UseStackActionsOptions {
   // is streaming that exact stack; used to enrich failure diagnostics safely.
   getLastDeployOutputLine: (stackName: string) => string | undefined;
   diffPreviewEnabled: boolean;
+  // Active node advertises the update-guard capability, so manual updates show
+  // the pre-update readiness dialog. Defaults to false: without the
+  // capability, updates run directly with no dialog.
+  hasUpdateGuard?: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -100,24 +146,40 @@ const stackOpInProgressMessage = (stackName: string, info: StackOpInProgressInfo
   return `${stackName} is already ${verb}${actor}.`;
 };
 
-const parseStackActionError = (rawBody: string, fallback: string): StackActionError => {
+const parseStackActionError = (rawBody: string, fallback: string, status?: number): StackActionError => {
   let message = rawBody || fallback;
   let rolledBack = false;
+  let failure: FailureClassification | undefined;
+  let parsedCode: string | undefined;
+  let bodyWasJson = false;
 
   try {
     const parsed: unknown = JSON.parse(rawBody);
+    bodyWasJson = true;
     if (isRecord(parsed)) {
       if (typeof parsed.error === 'string' && parsed.error.trim()) {
         message = parsed.error;
       }
       rolledBack = parsed.rolledBack === true;
+      failure = parseFailureClassification(parsed.failure);
+      if (typeof parsed.code === 'string') parsedCode = parsed.code;
     }
   } catch {
     /* not JSON */
   }
 
+  // A gateway-style status with no classified body means the request likely
+  // never reached the owning node's backend; surface that as the cause. A 503
+  // qualifies only when it is body-less (proxy generated) or the backend's own
+  // docker_unavailable shape, so an unrelated future 503 is not mislabeled.
+  if (!failure && status !== undefined && UNREACHABLE_STATUSES.has(status)) {
+    const qualifies = status !== 503 || !bodyWasJson || parsedCode === 'docker_unavailable';
+    if (qualifies) failure = { ...NODE_UNREACHABLE_FAILURE };
+  }
+
   const error = new Error(message) as StackActionError;
   error.rolledBack = rolledBack;
+  error.failure = failure;
   return error;
 };
 
@@ -133,6 +195,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     runWithLog,
     getLastDeployOutputLine,
     diffPreviewEnabled,
+    hasUpdateGuard = false,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -235,6 +298,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     startedAt: number,
     errorMessage: string | undefined,
     rolledBack: boolean,
+    failure?: FailureClassification,
   ) => {
     if (!isRecoverableAction(action)) return;
     stackListState.recordActionFailure(stackFile, {
@@ -244,6 +308,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       startedAt,
       endedAt: Date.now(),
       lastOutputLine: getLastDeployOutputLine(stackName),
+      failure,
     });
   };
 
@@ -619,12 +684,17 @@ export function useStackActions(options: UseStackActionsOptions) {
             return { ok: false, errorMessage: message };
           }
         }
-        throw parseStackActionError(rawBody, 'Deploy failed');
+        throw parseStackActionError(rawBody, 'Deploy failed', response.status);
       }
       overlayState.setPolicyBlock(null);
-      toast.success(
-        ignorePolicy ? 'Stack deployed (policy bypassed).' : 'Stack deployed successfully!',
-      );
+      const healthGateId = await parseHealthGateId(response);
+      // With a health gate observing, the operation finishing is not the
+      // final verdict yet; soften the toast so success is not claimed twice.
+      if (healthGateId) {
+        toast.info(ignorePolicy ? 'Stack deployed (policy bypassed). Verifying health...' : 'Stack deployed. Verifying health...');
+      } else {
+        toast.success(ignorePolicy ? 'Stack deployed (policy bypassed).' : 'Stack deployed successfully!');
+      }
       await refreshSelectedContainers(stackName, stackFile);
       try {
         const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
@@ -633,7 +703,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         /* ignore */
       }
       stackListState.recordActionSuccess(stackFile);
-      return { ok: true };
+      return { ok: true, healthGateId };
     } catch (error) {
       console.error('Failed to deploy:', error);
       if (previousStatus !== undefined)
@@ -645,7 +715,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           ? `${errorMessage} - automatically rolled back to previous version.`
           : errorMessage,
       );
-      recordActionFailureFor(stackFile, stackName, 'deploy', startedAt, errorMessage, deployError.rolledBack === true);
+      recordActionFailureFor(stackFile, stackName, 'deploy', startedAt, errorMessage, deployError.rolledBack === true, deployError.failure);
       await refreshSelectedContainers(stackName, stackFile);
       return { ok: false, errorMessage, rolledBack: deployError.rolledBack };
     }
@@ -736,7 +806,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             return;
           }
         }
-        throw parseStackActionError(rawBody, 'Rollback failed');
+        throw parseStackActionError(rawBody, 'Rollback failed', res.status);
       }
       overlayState.setPolicyBlock(null);
       toast.success('Stack rolled back successfully.');
@@ -758,7 +828,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Rollback failed';
       toast.error(msg);
-      recordActionFailureFor(stackFile, stackName, 'rollback', startedAt, msg, false);
+      recordActionFailureFor(stackFile, stackName, 'rollback', startedAt, msg, false,
+        error instanceof Error ? (error as StackActionError).failure : undefined);
       await refreshSelectedContainers(stackName, stackFile);
     } finally {
       stackListState.clearStackAction(stackFile);
@@ -850,8 +921,8 @@ export function useStackActions(options: UseStackActionsOptions) {
                 }
               }
             }
-            const actionError = parseStackActionError(errText, `${action} failed`);
-            recordActionFailureFor(stackFile, stackName, action, startedAt, actionError.message, actionError.rolledBack === true);
+            const actionError = parseStackActionError(errText, `${action} failed`, response.status);
+            recordActionFailureFor(stackFile, stackName, action, startedAt, actionError.message, actionError.rolledBack === true, actionError.failure);
             await refreshSelectedContainers(stackName, stackFile);
             return {
               ok: false as const,
@@ -860,11 +931,18 @@ export function useStackActions(options: UseStackActionsOptions) {
             };
           }
           overlayState.setPolicyBlock(null);
-          toast.success(successMessage);
+          const healthGateId = await parseHealthGateId(response);
+          // With a health gate observing, the operation finishing is not the
+          // final verdict yet; soften the toast so success is not claimed twice.
+          if (healthGateId && action === 'update') {
+            toast.info('Stack updated. Verifying health...');
+          } else {
+            toast.success(successMessage);
+          }
           if (action === 'update') stackListState.fetchImageUpdates();
           await refreshSelectedContainers(stackName, stackFile);
           stackListState.recordActionSuccess(stackFile);
-          return { ok: true as const };
+          return { ok: true as const, healthGateId };
         } catch (err) {
           const message = (err as Error).message || `${action} failed`;
           recordActionFailureFor(stackFile, stackName, action, startedAt, message, false);
@@ -923,11 +1001,33 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  // Single entry point for every manual update trigger (toolbar, sidebar
+  // context menu, recovery retry). With the update-guard capability it opens
+  // the readiness dialog first; the dialog's proceed runs the same
+  // runWithLog-backed executor either way, so there is exactly one update path.
+  const requestStackUpdate = async (stackFile: string): Promise<void> => {
+    if (stackListState.isStackBusy(stackFile)) return;
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const run = () => runStackAction(stackFile, 'update', 'update', 'running', 'Stack updated successfully!');
+    if (hasUpdateGuard) {
+      overlayState.setUpdateReadiness({
+        stackName,
+        stackFile,
+        proceed: () => {
+          overlayState.setUpdateReadiness(null);
+          void run();
+        },
+      });
+      return;
+    }
+    await run();
+  };
+
   const updateStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
     if (!stackListState.selectedFile) return;
-    await runStackAction(stackListState.selectedFile, 'update', 'update', 'running', 'Stack updated successfully!');
+    await requestStackUpdate(stackListState.selectedFile);
   };
 
   const deleteStack = async (pruneVolumes: boolean) => {
@@ -1016,13 +1116,20 @@ export function useStackActions(options: UseStackActionsOptions) {
     endpoint: string,
   ) => {
     if (stackListState.isStackBusy(stackFile)) return;
+    // Updates route through the shared update path so the sidebar gets the
+    // readiness dialog, the deploy-feedback modal, and the same failure
+    // handling as the toolbar.
+    if (action === 'update') {
+      await requestStackUpdate(stackFile);
+      return;
+    }
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const startedAt = Date.now();
     stackListState.setStackAction(stackFile, action);
 
     if (action === 'stop') {
       stackListState.setOptimisticStatus(stackFile, 'exited');
-    } else if (action === 'deploy' || action === 'restart' || action === 'update') {
+    } else if (action === 'deploy' || action === 'restart') {
       stackListState.setOptimisticStatus(stackFile, 'running');
     }
 
@@ -1036,19 +1143,18 @@ export function useStackActions(options: UseStackActionsOptions) {
             toast.error(stackOpInProgressMessage(stackName, inProgress));
             return;
           }
-          if (action === 'deploy' || action === 'update') {
+          if (action === 'deploy') {
             const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, action);
             if (blockedBy) {
-              toast.error(`${action === 'update' ? 'Update' : 'Deploy'} blocked by policy "${blockedBy}"`);
+              toast.error(`Deploy blocked by policy "${blockedBy}"`);
               return;
             }
           }
         }
-        throw parseStackActionError(errText, `${action} failed`);
+        throw parseStackActionError(errText, `${action} failed`, response.status);
       }
       toast.success(`Stack ${action}ed successfully!`);
       await refreshSelectedContainers(stackName, stackFile);
-      if (action === 'update') stackListState.fetchImageUpdates();
       if (action === 'deploy') {
         try {
           const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
@@ -1067,7 +1173,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           ? `${msg} - automatically rolled back to previous version.`
           : msg,
       );
-      recordActionFailureFor(stackFile, stackName, action, startedAt, msg, actionError.rolledBack === true);
+      recordActionFailureFor(stackFile, stackName, action, startedAt, msg, actionError.rolledBack === true, actionError.failure);
       await refreshSelectedContainers(stackName, stackFile);
     } finally {
       stackListState.clearStackAction(stackFile);
@@ -1154,6 +1260,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     restartStack,
     serviceAction,
     updateStack,
+    requestStackUpdate,
     deleteStack,
     attemptLeaveEditor,
     cancelPendingUnsavedLoad,

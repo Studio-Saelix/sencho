@@ -207,4 +207,37 @@ describe('POST /api/auto-update/execute', () => {
     expect(res.status).toBe(200);
     expect(typeof res.body.result).toBe('string');
   });
+
+  it('begins an update health gate after an auto-update applies', async () => {
+    // Target a single stack; the route works off the running containers, so
+    // stub the container probe, the update check, and the compose update, then
+    // assert the gate begins for the applied stack.
+    const { TEST_USERNAME } = await import('./helpers/setupTestDb');
+    const DockerController = (await import('../services/DockerController')).default;
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const { ComposeService } = await import('../services/ComposeService');
+    const { HealthGateService } = await import('../services/HealthGateService');
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
+      .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
+    const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
+      .mockResolvedValue({ hasUpdate: true } as never);
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue();
+    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-au');
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'auto-upd-gate' });
+      expect(res.status).toBe(200);
+      expect(updateSpy).toHaveBeenCalledWith('auto-upd-gate', undefined, true);
+      expect(beginSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate', 'update', `auto-update:${TEST_USERNAME}`);
+    } finally {
+      containersSpy.mockRestore();
+      checkSpy.mockRestore();
+      updateSpy.mockRestore();
+      beginSpy.mockRestore();
+    }
+  });
 });

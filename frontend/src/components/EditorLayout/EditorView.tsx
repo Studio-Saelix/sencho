@@ -73,6 +73,17 @@ export type StackAction =
 export type RecoverableAction = Extract<StackAction, 'deploy' | 'update' | 'restart' | 'rollback'>;
 
 /**
+ * Server-side classification of a failed deploy/update: a cause headline and a
+ * suggested next step. `reason` stays a plain string here; the backend owns the
+ * category vocabulary and the UI only displays it.
+ */
+export interface FailureClassification {
+    reason: string;
+    label: string;
+    suggestion: string;
+}
+
+/**
  * Terminal record of a failed stack operation, kept in memory per stack so the
  * recovery panel can offer safe next steps after an update/deploy fails or
  * stalls. Cleared when the same stack's next operation succeeds or is dismissed,
@@ -88,6 +99,9 @@ export interface StackActionResult {
     // session was streaming this stack at failure time; omitted otherwise so a
     // line from another stack/session never leaks into diagnostics.
     lastOutputLine?: string;
+    // Classified cause + suggested next action from the failed response body,
+    // when the backend (or the unreachable-node fallback) provided one.
+    failure?: FailureClassification;
 }
 
 export interface ContainerStatsEntry {

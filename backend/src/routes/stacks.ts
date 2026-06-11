@@ -16,6 +16,9 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
+import { UpdateGuardService } from '../services/UpdateGuardService';
+import { HealthGateService } from '../services/HealthGateService';
+import { classifyFailure } from '../services/updateGuard/failureClassifier';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
@@ -351,6 +354,8 @@ interface BulkResultItem {
   ok: boolean;
   error?: string;
   code?: string;
+  /** Health gate run started for a successful update, when gating is enabled. */
+  healthGateId?: string | null;
 }
 
 async function runStackBulkOp(
@@ -413,6 +418,8 @@ async function runStackBulkOp(
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
       );
+      const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', req.user?.username ?? null);
+      return { stackName, ok: true, healthGateId };
     } else {
       const outcome = await containerActionForStack(req.nodeId, stackName, action);
       if (outcome.kind === 'no-containers') {
@@ -1120,6 +1127,55 @@ stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Respons
   }
 });
 
+// Update guard: readiness reports computed on demand from existing stores
+// (preflight runs, drift findings, backup slot, update preview, live Docker
+// state). Node-scoped like preflight: a remote stack is evaluated on the node
+// that owns it. Read-only, so stack:read is the correct gate.
+stacksRouter.get('/:stackName/update-readiness', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(req.nodeId, stackName);
+    res.json(report);
+  } catch (error) {
+    console.error('[Stacks] Failed to compute update readiness for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to compute update readiness' });
+  }
+});
+
+stacksRouter.get('/:stackName/rollback-readiness', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const report = await UpdateGuardService.getInstance().computeRollbackReadiness(req.nodeId, stackName);
+    res.json(report);
+  } catch (error) {
+    console.error('[Stacks] Failed to compute rollback readiness for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to compute rollback readiness' });
+  }
+});
+
+// Post-update health gate result. `gateId` returns that specific run so a
+// superseded gate still resolves to its terminal state; without it, the
+// latest run (or a never-run sentinel).
+stacksRouter.get('/:stackName/health-gate', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const gateId = typeof req.query.gateId === 'string' && req.query.gateId.trim() ? req.query.gateId : undefined;
+    res.json(HealthGateService.getInstance().getReport(req.nodeId, stackName, gateId));
+  } catch (error) {
+    console.error('[Stacks] Failed to load health gate for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to load health gate' });
+  }
+});
+
 stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
@@ -1139,7 +1195,8 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
     ok = true;
-    res.json({ message: 'Deployed successfully' });
+    const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'deploy', req.user?.username ?? null);
+    res.json({ message: 'Deployed successfully', healthGateId });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
@@ -1156,12 +1213,14 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
       console.warn('[Stacks] Deploy failed, rollback did not complete: %s', sanitizeForLog(stackName));
     }
     const message = getErrorMessage(error, 'Failed to deploy stack');
+    // ComposeRollbackError already carries the cause's message; see classifyFailure.
+    const failure = classifyFailure(message, { dockerUnavailable: isDockerUnavailableError(error) });
     notifyActionFailure('deploy', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
-        res.status(503).json({ error: message, code: 'docker_unavailable', rolledBack });
+        res.status(503).json({ error: message, code: 'docker_unavailable', rolledBack, failure });
       } else {
-        res.status(500).json({ error: message, rolledBack });
+        res.status(500).json({ error: message, rolledBack, failure });
       }
     }
   } finally {
@@ -1408,7 +1467,8 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     dlog(`[Stacks] Update completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
     ok = true;
-    res.json({ status: 'Update completed' });
+    const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', req.user?.username ?? null);
+    res.json({ status: 'Update completed', healthGateId });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
@@ -1426,10 +1486,13 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     }
     notifyActionFailure('update', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
+      const message = getErrorMessage(error, 'Failed to update');
+      // ComposeRollbackError already carries the cause's message; see classifyFailure.
+      const failure = classifyFailure(message, { dockerUnavailable: isDockerUnavailableError(error) });
       if (isDockerUnavailableError(error)) {
-        res.status(503).json({ error: getErrorMessage(error, 'Docker daemon is unreachable'), code: 'docker_unavailable', rolledBack });
+        res.status(503).json({ error: message, code: 'docker_unavailable', rolledBack, failure });
       } else {
-        res.status(500).json({ error: getErrorMessage(error, 'Failed to update'), rolledBack });
+        res.status(500).json({ error: message, rolledBack, failure });
       }
     }
   } finally {

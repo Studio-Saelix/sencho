@@ -13,6 +13,7 @@ import {
 } from '@/lib/dossierMarkdown';
 import type { AnatomyMarkdownInput } from '@/lib/anatomyMarkdown';
 import { computeDocDrift, type DocDriftFinding } from '@/lib/docDrift';
+import { RollbackReadinessSection } from './RollbackReadinessSection';
 import { useNodes } from '@/context/NodeContext';
 
 interface StackDossierPanelProps {
@@ -357,6 +358,8 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
         </div>
         )}
       </section>
+
+      <RollbackReadinessSection stackName={stackName} />
     </div>
   );
 }

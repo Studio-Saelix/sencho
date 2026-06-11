@@ -60,14 +60,16 @@ beforeEach(() => {
 });
 
 describe('split section save payloads', () => {
-    it('HostAlertsSection patches only host alert keys', async () => {
+    it('HostAlertsSection patches only host alert and health gate keys', async () => {
         render(<HostAlertsSection />);
         const save = await screen.findByRole('button', { name: /save alerts/i });
-        fireEvent.click(screen.getByRole('switch')); // global_crash
+        fireEvent.click(screen.getAllByRole('switch')[0]); // global_crash
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
         expect(patchedKeys()).toEqual([
             'global_crash',
+            'health_gate_enabled',
+            'health_gate_window_seconds',
             'host_alert_suppression_mins',
             'host_cpu_limit',
             'host_disk_limit',

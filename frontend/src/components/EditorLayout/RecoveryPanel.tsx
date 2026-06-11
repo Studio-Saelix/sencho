@@ -1,6 +1,8 @@
-import { AlertTriangle, X } from 'lucide-react';
+import { useState } from 'react';
+import { AlertTriangle, ChevronDown, X } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '../ui/button';
-import { RecoveryActions } from './RecoveryActions';
+import { RecoveryActions, RecoveryClassification } from './RecoveryActions';
 import { capitalize, formatElapsed } from './recovery-format';
 import type { Node } from '@/context/NodeContext';
 import type { StackActionResult } from './EditorView';
@@ -23,7 +25,9 @@ interface RecoveryPanelProps {
 // update/deploy/restart/rollback fails or stalls. Styled as a quiet card with a
 // thin destructive rail (the toast accent language) so it blends with the
 // surrounding detail rather than shouting; the desktop surface uses RecoveryChip
-// instead. The full failure output stays in the deploy modal.
+// instead. The error and the classified cause stay visible on the card; the
+// actions collapse behind one Take action menu so the card stays small on a
+// phone. The full failure output stays in the deploy modal.
 export function RecoveryPanel({
     stackName,
     result,
@@ -36,6 +40,7 @@ export function RecoveryPanel({
     onRefreshState,
     onDismiss,
 }: RecoveryPanelProps) {
+    const [actionsOpen, setActionsOpen] = useState(false);
     const elapsed = formatElapsed(result.endedAt - result.startedAt);
 
     return (
@@ -60,6 +65,9 @@ export function RecoveryPanel({
                             {result.errorMessage ?? 'The operation did not complete.'}
                             {result.rolledBack && ' · rolled back to previous version'}
                         </p>
+                        <div className="mt-1.5">
+                            <RecoveryClassification result={result} />
+                        </div>
                     </div>
                 </div>
                 <Button
@@ -74,18 +82,29 @@ export function RecoveryPanel({
                 </Button>
             </div>
 
-            <div className="mt-2.5 pl-2">
-                <RecoveryActions
-                    stackName={stackName}
-                    result={result}
-                    activeNode={activeNode}
-                    backupInfo={backupInfo}
-                    canDeploy={canDeploy}
-                    onRetry={onRetry}
-                    onRestart={onRestart}
-                    onRollback={onRollback}
-                    onRefreshState={onRefreshState}
-                />
+            <div className="mt-2.5 flex justify-end pl-2">
+                <Popover open={actionsOpen} onOpenChange={setActionsOpen}>
+                    <PopoverTrigger asChild>
+                        <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
+                            Take action
+                            <ChevronDown className="h-3 w-3 opacity-70" />
+                        </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="end" className="w-60 p-1" data-testid="recovery-actions-menu">
+                        <RecoveryActions
+                            variant="list"
+                            stackName={stackName}
+                            result={result}
+                            activeNode={activeNode}
+                            backupInfo={backupInfo}
+                            canDeploy={canDeploy}
+                            onRetry={onRetry}
+                            onRestart={onRestart}
+                            onRollback={onRollback}
+                            onRefreshState={onRefreshState}
+                        />
+                    </PopoverContent>
+                </Popover>
             </div>
         </div>
     );

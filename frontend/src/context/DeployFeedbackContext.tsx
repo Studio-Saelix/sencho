@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useState, useRef, useCallback, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { type ParsedLogRow, parseLogChunk } from '../components/log-rendering/composeLogParser';
 import { useDeployFeedbackEnabled } from '../hooks/use-deploy-feedback-enabled';
 
@@ -44,7 +45,26 @@ export interface DeployPanelState {
 interface RunResult {
   ok: boolean;
   errorMessage?: string;
+  /**
+   * Health gate run id from the success response, when the backend started a
+   * post-update observation. Its presence is the feature signal: an older
+   * node never returns one, so no gate UI appears.
+   */
+  healthGateId?: string | null;
 }
+
+/** Post-update health gate state for the current deploy session. */
+export interface HealthGateUiState {
+  stackName: string;
+  gateId: string;
+  trigger: 'update' | 'deploy';
+  status: 'observing' | 'passed' | 'failed' | 'unknown';
+  reason: string | null;
+  windowSeconds: number | null;
+  startedAt: number | null;
+}
+
+const GATE_POLL_INTERVAL_MS = 4_000;
 
 interface DeployFeedbackContextValue {
   runWithLog: (
@@ -52,6 +72,8 @@ interface DeployFeedbackContextValue {
     run: (deployStarted: Promise<void>, deploySessionId: string) => Promise<RunResult>
   ) => Promise<RunResult>;
   panelState: DeployPanelState;
+  /** Gate state for the current session, or null when no gate was started. */
+  healthGate: HealthGateUiState | null;
   logRows: ParsedLogRow[];
   /**
    * Epoch ms of the most recent activity for the current session: stamped when
@@ -99,8 +121,23 @@ const DeployFeedbackContext = createContext<DeployFeedbackContextValue | undefin
 
 export function DeployFeedbackProvider({ children }: { children: React.ReactNode }): React.ReactElement {
   const [panelState, setPanelState] = useState<DeployPanelState>(DEFAULT_PANEL_STATE);
+  const [healthGate, setHealthGate] = useState<HealthGateUiState | null>(null);
   const [logRows, setLogRows] = useState<ParsedLogRow[]>([]);
   const [lastOutputAt, setLastOutputAt] = useState<number>(0);
+
+  // Poll timer for the current session's health gate; cleared on panel close
+  // and whenever a new session starts.
+  const gatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopGatePolling = useCallback(() => {
+    if (gatePollRef.current !== null) {
+      clearInterval(gatePollRef.current);
+      gatePollRef.current = null;
+    }
+  }, []);
+
+  // The provider is app-root today, but do not let the interval depend on it.
+  useEffect(() => stopGatePolling, [stopGatePolling]);
 
   // Idempotent resolver for the current session's deployStarted gate. Set at the
   // start of each runWithLog call; called by onTerminalReady (stream connected),
@@ -163,9 +200,83 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     sessionIdRef.current += 1;
     settleStartRef.current = null;
     streamReadyRef.current = false;
+    // The gate keeps observing server-side; only this session's poll stops.
+    stopGatePolling();
+    setHealthGate(null);
     setPanelState(DEFAULT_PANEL_STATE);
     setLogRows([]);
-  }, []);
+  }, [stopGatePolling]);
+
+  // Poll the by-id gate endpoint until a terminal status. The id-scoped read
+  // means a superseded gate still resolves to its terminal unknown state
+  // instead of this session showing a newer run's result. Mirrors the backend
+  // gate's own degradation: repeated failures (or an absurdly long poll)
+  // resolve to an honest client-side unknown rather than observing forever.
+  const startGatePolling = useCallback((stackName: string, gateId: string, trigger: 'update' | 'deploy', mySession: number) => {
+    stopGatePolling();
+    setHealthGate({ stackName, gateId, trigger, status: 'observing', reason: null, windowSeconds: null, startedAt: null });
+    let strikes = 0;
+    // Single-flight: skip a tick while one request is outstanding so two
+    // overlapping responses cannot land out of order.
+    let inFlight = false;
+    // Latched once a terminal verdict is applied, so a slow earlier response
+    // returning 'observing' can never roll the UI back from passed/failed.
+    let settled = false;
+    const pollStartedAt = Date.now();
+    const giveUp = (reason: string) => {
+      settled = true;
+      stopGatePolling();
+      setHealthGate(prev => (prev && prev.gateId === gateId ? { ...prev, status: 'unknown', reason } : prev));
+    };
+    const tick = async () => {
+      if (sessionIdRef.current !== mySession) {
+        stopGatePolling();
+        return;
+      }
+      if (inFlight || settled) return;
+      // Backstop far beyond the largest configurable window (600s).
+      if (Date.now() - pollStartedAt > 660_000) {
+        giveUp('the observation did not report a result in time');
+        return;
+      }
+      inFlight = true;
+      try {
+        const res = await apiFetch(`/stacks/${stackName}/health-gate?gateId=${encodeURIComponent(gateId)}`);
+        const report = res.ok
+          ? await res.json() as {
+              id: string | null;
+              status: 'observing' | 'passed' | 'failed' | 'unknown' | 'never-run';
+              reason: string | null;
+              windowSeconds: number | null;
+              startedAt: number | null;
+            }
+          : null;
+        if (sessionIdRef.current !== mySession || settled) return;
+        // A non-ok response or a missing run (node switched, stack removed, or
+        // an older node answering) is a strike, not a retry-forever condition.
+        if (!report || report.id !== gateId || report.status === 'never-run') {
+          strikes += 1;
+          if (!res.ok) console.warn('[DeployFeedback] health gate poll returned', res.status);
+          if (strikes >= 4) giveUp('the gate result could not be retrieved');
+          return;
+        }
+        strikes = 0;
+        setHealthGate({ stackName, gateId, trigger, status: report.status, reason: report.reason, windowSeconds: report.windowSeconds, startedAt: report.startedAt });
+        if (report.status !== 'observing') {
+          settled = true;
+          stopGatePolling();
+        }
+      } catch (e) {
+        strikes += 1;
+        console.warn('[DeployFeedback] health gate poll failed:', e);
+        if (sessionIdRef.current === mySession && strikes >= 4) giveUp('the gate result could not be retrieved');
+      } finally {
+        inFlight = false;
+      }
+    };
+    void tick();
+    gatePollRef.current = setInterval(() => { void tick(); }, GATE_POLL_INTERVAL_MS);
+  }, [stopGatePolling]);
 
   const runWithLog = useCallback(
     async (
@@ -190,6 +301,8 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       sessionIdRef.current += 1;
       const mySession = sessionIdRef.current;
       streamReadyRef.current = false;
+      stopGatePolling();
+      setHealthGate(null);
 
       // idCounterRef is intentionally not reset; keys must remain globally unique across sessions.
       setLogRows([]);
@@ -239,16 +352,19 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           status: result.ok ? 'succeeded' : 'failed',
           errorMessage: result.ok ? undefined : result.errorMessage,
         }));
+        if (result.ok && result.healthGateId && (params.action === 'update' || params.action === 'deploy')) {
+          startGatePolling(params.stackName, result.healthGateId, params.action, mySession);
+        }
       }
 
       return result;
     },
-    [isEnabled]
+    [isEnabled, startGatePolling, stopGatePolling]
   );
 
   return (
     <DeployFeedbackContext.Provider
-      value={{ runWithLog, panelState, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose }}
+      value={{ runWithLog, panelState, healthGate, logRows, lastOutputAt, onTerminalReady, onTerminalError, onMessage, onPanelClose }}
     >
       {children}
     </DeployFeedbackContext.Provider>

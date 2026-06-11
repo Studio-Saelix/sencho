@@ -149,6 +149,32 @@ components:
           type: boolean
           example: true
 
+    FailureClassification:
+      type: object
+      description: Classified cause of a failed deploy or update, with a suggested next step.
+      required: [reason, label, suggestion]
+      properties:
+        reason:
+          type: string
+          enum:
+            - image_pull_failed
+            - compose_render_failed
+            - env_missing
+            - port_conflict
+            - bind_path_missing
+            - permission_denied
+            - container_exited
+            - healthcheck_failed
+            - dependency_unavailable
+            - node_unreachable
+            - unknown
+        label:
+          type: string
+          description: Short display headline for the cause.
+        suggestion:
+          type: string
+          description: Suggested next action, one sentence.
+
     Container:
       type: object
       properties:
@@ -945,9 +971,19 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessMessage"
-              example:
-                message: Deployed successfully
+                type: object
+                required: [message]
+                properties:
+                  message:
+                    type: string
+                    example: Deployed successfully
+                  healthGateId:
+                    type: string
+                    nullable: true
+                    description: |
+                      Id of the post-deploy health gate observation started for
+                      this deploy, for use with the health-gate endpoint. Null
+                      when the health gate is disabled on the node.
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -963,6 +999,8 @@ paths:
                   rolledBack:
                     type: boolean
                     description: Whether the stack was automatically rolled back.
+                  failure:
+                    $ref: "#/components/schemas/FailureClassification"
 
   /api/stacks/{stackName}/down:
     post:
@@ -1095,6 +1133,13 @@ paths:
                   status:
                     type: string
                     example: Update completed
+                  healthGateId:
+                    type: string
+                    nullable: true
+                    description: |
+                      Id of the post-update health gate observation started for
+                      this update, for use with the health-gate endpoint. Null
+                      when the health gate is disabled on the node.
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
@@ -1109,6 +1154,8 @@ paths:
                     type: string
                   rolledBack:
                     type: boolean
+                  failure:
+                    $ref: "#/components/schemas/FailureClassification"
 
   /api/stacks/{stackName}/rollback:
     post:
@@ -1166,6 +1213,188 @@ paths:
                     description: Unix timestamp of the backup, or null if no backup exists.
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/update-readiness:
+    get:
+      operationId: getStackUpdateReadiness
+      tags: [Stacks]
+      summary: Check update readiness
+      description: |
+        Computes an advisory readiness verdict for updating the stack right
+        now, from the stored preflight result, open drift findings, live
+        container health, the pending image change, the rollback backup slot,
+        and node disk headroom. Advisory only: no verdict blocks an update.
+        Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Readiness report.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stack, computedAt, verdict, signals]
+                properties:
+                  stack:
+                    type: string
+                  computedAt:
+                    type: integer
+                    description: Unix timestamp (ms) the report was computed.
+                  verdict:
+                    type: string
+                    enum: [ready, ready_with_warnings, review_required, blocked, unknown]
+                  signals:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, status, title, detail, affectsVerdict]
+                      properties:
+                        id:
+                          type: string
+                        status:
+                          type: string
+                          enum: [ok, warning, attention, blocked, unknown]
+                        title:
+                          type: string
+                        detail:
+                          type: string
+                        affectsVerdict:
+                          type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/rollback-readiness:
+    get:
+      operationId: getStackRollbackReadiness
+      tags: [Stacks]
+      summary: Check rollback readiness
+      description: |
+        Reports what a rollback of this stack can actually restore: the backed
+        up compose file, env coverage (variable names only, never values), the
+        known previous image tag, and an explicit disclosure that volume and
+        bind-mounted data are not covered by file backups.
+        Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Rollback readiness report.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stack, computedAt, overall, items]
+                properties:
+                  stack:
+                    type: string
+                  computedAt:
+                    type: integer
+                  overall:
+                    type: string
+                    enum: [ready, partial, not_ready]
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, state, label, detail]
+                      properties:
+                        id:
+                          type: string
+                        state:
+                          type: string
+                          enum: [ready, missing, unknown, not_covered]
+                        label:
+                          type: string
+                        detail:
+                          type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/health-gate:
+    get:
+      operationId: getStackHealthGate
+      tags: [Stacks]
+      summary: Get post-update health gate result
+      description: |
+        Returns a post-deploy health gate observation for the stack: the run
+        named by `gateId` (as returned in a deploy or update response), or the
+        most recent run when omitted. Status `never-run` means no observation
+        exists. Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+        - name: gateId
+          in: query
+          required: false
+          schema:
+            type: string
+          description: A specific gate run id to read instead of the latest.
+      responses:
+        "200":
+          description: Health gate report.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stack, status]
+                properties:
+                  stack:
+                    type: string
+                  id:
+                    type: string
+                    nullable: true
+                  status:
+                    type: string
+                    enum: [observing, passed, failed, unknown, never-run]
+                  trigger:
+                    type: string
+                    nullable: true
+                    enum: [update, deploy, null]
+                  reason:
+                    type: string
+                    nullable: true
+                  windowSeconds:
+                    type: integer
+                    nullable: true
+                  startedAt:
+                    type: integer
+                    nullable: true
+                  endedAt:
+                    type: integer
+                    nullable: true
+                  containers:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, state, restarts]
+                      properties:
+                        name:
+                          type: string
+                        state:
+                          type: string
+                          description: Docker container state, or `missing` when it vanished mid-observation.
+                        health:
+                          type: string
+                          nullable: true
+                        restarts:
+                          type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 

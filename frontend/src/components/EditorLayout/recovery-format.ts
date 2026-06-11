@@ -34,6 +34,10 @@ export function buildDiagnostics(
             ? `available${backupInfo.timestamp ? ` (${new Date(backupInfo.timestamp).toISOString()})` : ''}`
             : 'none'}`,
     ];
+    if (result.failure) {
+        lines.push(`Classified: ${result.failure.label}`);
+        lines.push(`Suggestion: ${result.failure.suggestion}`);
+    }
     if (result.lastOutputLine) lines.push(`Last output: ${result.lastOutputLine}`);
     return lines.join('\n');
 }

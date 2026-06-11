@@ -5,7 +5,7 @@ description: Wrap every deploy and update in a backup, a 3-second health probe, 
 
 Sencho wraps every protected deploy in a four-step safety net: it copies the current `compose.yaml` and `.env` to a writable backup directory, runs the requested compose action, waits 3 seconds for the new containers to settle, then checks them for a non-zero exit code. If any container has crashed, Sencho restores the backed-up files and re-deploys automatically.
 
-The same backup also powers the **Rollback** action in the stack editor, so you can roll a stack back to its last good configuration on demand.
+The same backup also powers the **Rollback** action in the stack editor, so you can roll a stack back to its last good configuration on demand. To see in advance whether that rollback would actually help, and to watch container health for longer than the 3-second probe, see [Health-Gated Updates](/features/health-gated-updates).
 
 ## How it works
 
@@ -54,7 +54,7 @@ A restore is a faithful revert, not an overlay. Sencho replaces the compose file
     A user without the `stack:deploy` permission will still see the menu entry; the rejection comes from the backend with a permission error after they click. Ask an admin to grant `stack:deploy` through **Settings · Roles & Access** if that happens.
   </Accordion>
   <Accordion title="The deploy succeeded but a service crashed seconds later">
-    The health probe is a 3-second window after `docker compose up -d` returns. Crashes that happen after that window are out of scope for atomic rollback by design, because Sencho cannot tell whether a late exit is a real failure or a normal restart. For ongoing health, use **Auto-Heal Policies** to restart unhealthy containers automatically and **Alert Rules** to page you when a container exits unexpectedly.
+    The health probe is a 3-second window after `docker compose up -d` returns. Crashes that happen after that window are out of scope for atomic rollback by design, because Sencho cannot tell whether a late exit is a real failure or a normal restart. The [health gate](/features/health-gated-updates) covers exactly this period: it observes the stack for a configurable window after the update, records a verdict on the stack timeline, and offers a manual rollback when containers do not stay healthy. For ongoing health beyond that, use **Auto-Heal Policies** to restart unhealthy containers automatically and **Alert Rules** to page you when a container exits unexpectedly.
   </Accordion>
   <Accordion title="The deploy progress modal showed 'Rollback failed - manual intervention may be required'">
     This message means the auto-rollback attempted to restore the backup and re-deploy, but the restore step or the re-deploy itself errored out. The backup files are still at `<DATA_DIR>/backups/<stack>/`. To recover:

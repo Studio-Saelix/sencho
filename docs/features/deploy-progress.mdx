@@ -58,6 +58,8 @@ Click **Raw output** in the footer to expand a 200 px raw terminal panel beneath
 
 When an action completes successfully, the status indicator switches to `Succeeded · closes in <n>s` and a 4-second countdown begins. Hover anywhere over the modal to pause the countdown; moving the cursor away restarts a fresh 4 seconds. Clicking **Close** dismisses the modal immediately.
 
+When the [health gate](/features/health-gated-updates) is observing the stack after a deploy or update, the modal withholds the success verdict: the status indicator shows **Verifying health** instead of **Succeeded**, and the auto-close waits for the gate. A passed gate shows the success state and resumes the countdown; a failed or unknown verdict becomes the headline result and keeps the modal open with the reason. Closing the modal never stops the observation.
+
 <Frame>
   <img src="/images/deploy-progress/modal-succeeded.png" alt="Deploy progress modal in the succeeded state with a green checkmark, the text 'Succeeded' and 'closes in 2s' in the header, and the full structured log body visible beneath" />
 </Frame>

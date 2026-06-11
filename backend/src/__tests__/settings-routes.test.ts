@@ -236,6 +236,63 @@ describe('prune_on_update (auto-prune after updates)', () => {
   });
 });
 
+describe('health gate settings', () => {
+  it('seeds enabled with a 90 second window in a fresh database', () => {
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    expect(settings.health_gate_enabled).toBe('1');
+    expect(settings.health_gate_window_seconds).toBe('90');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.health_gate_enabled).toBeDefined();
+    expect(res.body.health_gate_window_seconds).toBeDefined();
+  });
+
+  it('accepts a single-key toggle write and persists it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'health_gate_enabled', value: '0' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().health_gate_enabled).toBe('0');
+    DatabaseService.getInstance().updateGlobalSetting('health_gate_enabled', '1');
+  });
+
+  it('accepts an in-range window via bulk PATCH alongside another key', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ health_gate_window_seconds: 120, health_gate_enabled: '1' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().health_gate_window_seconds).toBe('120');
+    DatabaseService.getInstance().updateGlobalSetting('health_gate_window_seconds', '90');
+  });
+
+  it('rejects out-of-range windows and non-enum toggles', async () => {
+    const tooShort = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'health_gate_window_seconds', value: '5' });
+    expect(tooShort.status).toBe(400);
+
+    const tooLong = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'health_gate_window_seconds', value: '9000' });
+    expect(tooLong.status).toBe(400);
+
+    const badToggle = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'health_gate_enabled', value: 'yes' });
+    expect(badToggle.status).toBe(400);
+
+    expect(DatabaseService.getInstance().getGlobalSettings().health_gate_window_seconds).toBe('90');
+  });
+});
+
 describe('PATCH /api/settings (bulk update)', () => {
   it('rejects unauthenticated requests with 401', async () => {
     const res = await request(app).patch('/api/settings').send({ host_cpu_limit: 50 });
