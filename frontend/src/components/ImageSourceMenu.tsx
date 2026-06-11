@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Link2, ExternalLink, Copy, Check } from 'lucide-react';
 import {
   DropdownMenu,
@@ -49,8 +49,11 @@ export function ImageSourceMenu({ imageRef, imageId, className = 'h-4 w-4' }: Im
   }
 
   // Invalidate any in-flight fetch when the image id changes or the menu unmounts,
-  // so a late response from a superseded image cannot write stale labels.
-  useEffect(() => () => { requestRef.current += 1; }, [imageId]);
+  // so a late response from a superseded image cannot write stale labels. This runs
+  // in a layout effect (not a passive one) so the token is bumped synchronously
+  // during commit, before a network response could resolve in the gap after the
+  // image-id change re-render.
+  useLayoutEffect(() => () => { requestRef.current += 1; }, [imageId]);
 
   const loadLabels = (id: string) => {
     const reqId = (requestRef.current += 1);

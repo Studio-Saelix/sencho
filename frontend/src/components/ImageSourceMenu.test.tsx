@@ -5,7 +5,7 @@
  * private-registry / absent-ref fallbacks.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -92,6 +92,29 @@ describe('ImageSourceMenu', () => {
       'href', 'https://github.com/owner/new',
     );
     expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a late inspect response from a superseded image after the id changes', async () => {
+    // First open: an inspect that stays in flight until we resolve it by hand.
+    let resolveOld!: (v: Response) => void;
+    vi.mocked(apiFetch).mockReturnValueOnce(new Promise<Response>((res) => { resolveOld = res; }));
+
+    const { rerender } = render(<ImageSourceMenu imageRef="ghcr.io/owner/app:1" imageId="sha256:aaa" />);
+    await userEvent.click(trigger());
+    await screen.findByRole('menuitem', { name: /Loading source/ });
+
+    // The image id changes while the old inspect is still pending (e.g. node switch).
+    rerender(<ImageSourceMenu imageRef="ghcr.io/owner/app:2" imageId="sha256:bbb" />);
+
+    // The stale response now resolves; the request-token guard must discard it.
+    // Drain the full response chain (.then -> res.json() -> .then) inside act so a
+    // missing guard would have written the OLD label before we assert.
+    await act(async () => {
+      resolveOld(inspectRes({ 'org.opencontainers.image.source': 'https://github.com/owner/OLD' }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.queryByRole('menuitem', { name: 'Source repository' })).toBeNull();
   });
 
   it('surfaces a toast when the copy fails', async () => {
