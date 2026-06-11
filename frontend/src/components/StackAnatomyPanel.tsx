@@ -11,6 +11,7 @@ import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
 import PreflightPanel from './stack/PreflightPanel';
+import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from '@/components/dashboard/types';
 
@@ -80,6 +81,7 @@ export default function StackAnatomyPanel({
 
   const { hasCapability, activeNode } = useNodes();
   const doctorEnabled = hasCapability('compose-doctor');
+  const networkingEnabled = hasCapability('compose-networking');
 
   const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo } | null>(null);
   const [updatePreview, setUpdatePreview] = useState<UpdatePreview | null>(null);
@@ -319,6 +321,9 @@ export default function StackAnatomyPanel({
               <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
               <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
               <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
+              {networkingEnabled && (
+                <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
+              )}
               {doctorEnabled && (
                 <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">
                   <span className="inline-flex items-center gap-1">
@@ -579,6 +584,11 @@ export default function StackAnatomyPanel({
       <TabsContent value="drift" className="flex flex-col flex-1 min-h-0 mt-0">
         <DriftPanel stackName={stackName} />
       </TabsContent>
+      {networkingEnabled && (
+        <TabsContent value="networking" className="flex flex-col flex-1 min-h-0 mt-0">
+          <StackNetworkingPanel stackName={stackName} canEdit={canEdit} doctorEnabled={doctorEnabled} />
+        </TabsContent>
+      )}
       {doctorEnabled && (
         <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
           <PreflightPanel stackName={stackName} />

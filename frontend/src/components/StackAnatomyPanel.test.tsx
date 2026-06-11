@@ -337,3 +337,13 @@ describe('StackAnatomyPanel exposed footer', () => {
     expect(screen.queryByRole('link', { name: /:8989/ })).toBeNull();
   });
 });
+
+describe('StackAnatomyPanel capability gating (capability off)', () => {
+  it('hides the Networking and Doctor tabs when the capabilities are absent', async () => {
+    render(panel(false));
+    // The always-on Anatomy tab confirms the panel mounted.
+    expect(await screen.findByRole('tab', { name: 'Anatomy' })).toBeInTheDocument();
+    expect(screen.queryByTestId('networking-tab')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('doctor-tab')).not.toBeInTheDocument();
+  });
+});
