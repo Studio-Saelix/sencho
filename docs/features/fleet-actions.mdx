@@ -41,30 +41,30 @@ The two fan-out cards (Stop and Prune) iterate every node in **Settings → Node
 
 ## Stop fleet by label
 
-Stop every stack that carries a given label name on every node where that label exists. Labels are matched **by name** across the fleet, so a label called `production` on one node and an independently-authored `production` label on another node both match. See [Stack Labels](/features/stack-labels) for how to author the selector taxonomy.
+Stop every stack assigned a given **stack label** on every node where that stack label exists. Stack labels are matched **by name** across the fleet, so a stack label called `production` on one node and an independently-authored `production` label on another node both match. This action targets stack labels only; node labels (used for node grouping) are never used here. See [Stack Labels](/features/stack-labels) for how to author the selector taxonomy.
 
 ### Step by step
 
 1. Open **Fleet → Actions**.
-2. Type a label name in the **Label name** field. The input autocompletes against label names that already exist on any **online** node; an offline node with an unseen label still receives the request, it just won't show up in the suggestions.
+2. Type a name in the **Stack label** field. The picker suggests stack labels from across the fleet, each with its stack and node counts, so the scope is unmistakable. Suggestions are read from the control instance, so stack labels on offline nodes appear too. You can also type a name by hand.
 3. Click **Stop matching stacks**.
-4. A confirmation appears with the kicker **Fleet stop** and the title `Stop all stacks labeled "<name>"?`. Click **Stop fleet** to commit.
+4. A confirmation appears with the kicker **Fleet stop** and the title `Stop all stacks with the stack label "<name>"?`. Click **Stop fleet** to commit.
 
 <Frame>
-  <img src="/images/fleet-actions/fleet-actions-stop-confirm.png" alt="Fleet stop confirmation dialog. Kicker 'Fleet stop' in red mono, italic title 'Stop all stacks labeled &quot;docs-preview&quot;?', Cancel and Stop fleet buttons in the footer." />
+  <img src="/images/fleet-actions/fleet-actions-stop-confirm.png" alt="Fleet stop confirmation dialog. Kicker 'Fleet stop' in red mono, italic title 'Stop all stacks with the stack label &quot;docs-preview&quot;?', Cancel and Stop fleet buttons in the footer." />
 </Frame>
 
 ### Reading the per-node breakdown
 
-When the request finishes, the results render below the form, grouped by node. Each node row carries a colored icon and either a stack count or a `(no matching label)` annotation; the indented children below each row are the per-stack results.
+When the request finishes, the results render below the form, grouped by node. Each node row carries a colored icon and either a stack count or a `(no matching stack label)` annotation; the indented children below each row are the per-stack results.
 
 <Frame>
-  <img src="/images/fleet-actions/fleet-actions-stop-results.png" alt="Per-node breakdown after running fleet stop against a label that no node has. The header reads PER-NODE BREAKDOWN with two badges, '0 ok' and '7 failed'. Seven rows follow, one per node (Local, Opsix, Pitt-Moba, SLX-Mars, sencho-pilot-test, sencho-test-01, sencho-test-02), each annotated '(no matching label) · Label not present'." />
+  <img src="/images/fleet-actions/fleet-actions-stop-results.png" alt="Per-node breakdown after running fleet stop against a label that no node has. The header reads PER-NODE BREAKDOWN with two badges, '0 ok' and '7 failed'. Seven rows follow, one per node (Local, Opsix, Pitt-Moba, SLX-Mars, sencho-pilot-test, sencho-test-01, sencho-test-02), each annotated '(no matching stack label) · Stack label not present'." />
 </Frame>
 
 A few quirks worth knowing:
 
-- A node that has no label by that name appears as `<node> (no matching label)` and is counted in the **failed** badge. This is not a transport failure, it just means the label was not present on that node.
+- A node that has no stack label by that name appears as `<node> (no matching stack label)` and is counted in the **failed** badge. This is not a transport failure, it just means the stack label was not present on that node.
 - A node where the label exists but no stacks are assigned to it appears with a matched count of zero stacks. No per-stack rows render.
 - When the control instance reaches a remote node, the per-stack result you see comes from the remote node's own response. If the remote returns a non-2xx for the whole label, every stack on that node renders with the same error message.
 
@@ -169,11 +169,11 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="A node shows '(no matching label)' but I created the label there">
-    The fleet-stop match is by **label name**, not label ID. Confirm the label name on the affected node under **Settings → Labels**; a typo, a case mismatch, or a trailing space will leave the node out. Labels are scoped per node, so renaming the label on one node does not propagate to the others.
+  <Accordion title="A node shows '(no matching stack label)' but I created the label there">
+    The fleet-stop match is by **stack label name**, not label ID. Confirm the stack label name on the affected node under **Settings → Labels**; a typo, a case mismatch, or a trailing space will leave the node out. Stack labels are scoped per node, so renaming the label on one node does not propagate to the others.
   </Accordion>
-  <Accordion title="The autocomplete didn't suggest a label I know exists">
-    The autocomplete fans out to **online** nodes only and aggregates label names from their label list response. A label that exists only on an offline node won't appear in the suggestions. The fleet-stop request still iterates every configured node, so typing the name by hand and submitting will reach the offline node when it returns.
+  <Accordion title="The autocomplete didn't suggest a stack label I know exists">
+    The picker reads stack labels from the control instance across every configured node, including offline ones, so a name is missing only when no node has a **stack label** by that name. Node labels never appear here, because this action targets stack labels only. You can always type a name by hand; the fleet-stop request still iterates every configured node.
   </Accordion>
   <Accordion title="Bulk label assign reports 'Invalid stack name' for one row">
     Stack names must match the standard validator: alphanumeric plus dash and underscore, no spaces, no path separators. The endpoint validates each assignment independently, so a single bad name does not block the rest of the batch. Fix the offending entry and re-run; the rows that already succeeded won't be re-applied.

@@ -24,7 +24,7 @@ export function FleetActionsTab({ nodes }: Props) {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-[18px] auto-rows-fr">
       <FleetPruneCard nodes={nodes} />
       <BulkLabelAssignCard nodes={nodes} />
-      <LabelFleetStopCard nodes={nodes} />
+      <LabelFleetStopCard />
     </div>
   );
 }
