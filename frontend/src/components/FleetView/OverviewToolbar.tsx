@@ -1,7 +1,7 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search, ArrowUpDown, AlertTriangle, Play, Square,
-    LayoutGrid, Network, SlidersHorizontal,
+    LayoutGrid, Network, SlidersHorizontal, Plus,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -49,6 +49,7 @@ interface OverviewToolbarProps {
     labelFilters: Set<string>;
     onLabelFiltersChange: (filters: Set<string>) => void;
     onClearFilters: () => void;
+    onAddNode?: () => void;
 }
 
 export function OverviewToolbar({
@@ -62,6 +63,7 @@ export function OverviewToolbar({
     labelFilters,
     onLabelFiltersChange,
     onClearFilters,
+    onAddNode,
 }: OverviewToolbarProps) {
     const showGridControls = viewMode === 'grid';
     const activeFilterCount =
@@ -75,29 +77,56 @@ export function OverviewToolbar({
         [fleetPalette],
     );
 
+    // Collapsed by default to a single icon button; expands to the full input on
+    // click and collapses again on blur once the query is cleared. An active
+    // query keeps it open so the filter stays visible and editable.
+    const [searchExpanded, setSearchExpanded] = useState(false);
+    const searchInputRef = useRef<HTMLInputElement>(null);
+    const searchOpen = searchExpanded || searchQuery !== '';
+
+    useEffect(() => {
+        if (searchExpanded) searchInputRef.current?.focus();
+    }, [searchExpanded]);
+
     return (
         <div className="flex flex-wrap items-center gap-2 mb-4">
             {showGridControls && (
                 <>
-                    <div className="relative flex-1 min-w-[200px] max-w-sm">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                        <Input
-                            placeholder="Search nodes or stacks..."
-                            value={searchQuery}
-                            onChange={(e) => onSearchQueryChange(e.target.value)}
-                            className="pl-9 h-9"
-                        />
-                    </div>
+                    {searchOpen ? (
+                        <div className="relative flex-1 min-w-[200px] max-w-sm">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                            <Input
+                                ref={searchInputRef}
+                                placeholder="Search nodes or stacks..."
+                                value={searchQuery}
+                                onChange={(e) => onSearchQueryChange(e.target.value)}
+                                onBlur={() => { if (searchQuery === '') setSearchExpanded(false); }}
+                                className="pl-9 h-9"
+                            />
+                        </div>
+                    ) : (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-9 w-9 p-0 shrink-0"
+                            onClick={() => setSearchExpanded(true)}
+                            title="Search nodes or stacks"
+                            aria-label="Search nodes or stacks"
+                        >
+                            <Search className="w-4 h-4" />
+                        </Button>
+                    )}
                     <div className="w-40">
                         <Combobox
                             options={SORT_OPTIONS}
                             value={prefs.sortBy}
                             onValueChange={(v) => onPrefsChange({ sortBy: v as SortField })}
                             placeholder="Sort by..."
+                            className="[&>button]:!bg-background"
                         />
                     </div>
                     <Button
-                        variant="ghost"
+                        variant="outline"
                         size="sm"
                         className="h-9 w-9 p-0 shrink-0"
                         onClick={() => onPrefsChange({ sortDir: prefs.sortDir === 'asc' ? 'desc' : 'asc' })}
@@ -204,6 +233,13 @@ export function OverviewToolbar({
                 options={VIEW_MODE_OPTIONS}
                 className="ml-auto shrink-0 shadow-card-bevel"
             />
+
+            {onAddNode && (
+                <Button size="sm" className="gap-1.5 shrink-0 h-9" onClick={onAddNode}>
+                    <Plus className="w-4 h-4" strokeWidth={1.5} />
+                    Add node
+                </Button>
+            )}
         </div>
     );
 }
