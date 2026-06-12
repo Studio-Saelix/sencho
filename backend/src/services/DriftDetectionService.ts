@@ -130,7 +130,10 @@ function networkDriftFindings(
   containers: DependencyContainer[],
   networks: DependencyNetwork[],
 ): StackDriftFinding[] {
-  const normalized = fromDeclaredCompose(declared, stack);
+  // Runtime resource names use the Compose project (top-level `name:` when set),
+  // not the stack directory, so a stack with `name:` resolves its networks the
+  // same way Docker does. Containers are still attributed to the stack directory.
+  const normalized = fromDeclaredCompose(declared, declared.projectName ?? stack);
   const facts = compareStackNetworks(normalized, { containers, networks, volumes: [] }, stack);
   const findings: StackDriftFinding[] = [];
 

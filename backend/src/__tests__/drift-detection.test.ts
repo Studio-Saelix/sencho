@@ -336,6 +336,19 @@ describe('assembleStackDrift - network drift', () => {
     expect(report.status).toBe('missing-runtime');
     expect(report.findings).toEqual([]);
   });
+
+  it('resolves runtime network names via the compose top-level name (no false drift)', () => {
+    // Stack dir is "app" but the compose declares `name: acme`, so Docker names
+    // the network acme_backend. With the project name carried through, that
+    // matches and produces no network-undeclared / network-missing.
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: { services: [service({ name: 'web', networks: ['backend'] })], networks: { backend: { external: false } }, volumes: {}, projectName: 'acme' },
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'acme_default', id: 'd', ip: '' }, { name: 'acme_backend', id: 'b', ip: '' }] })],
+      networks: [depNet('acme_default'), depNet('acme_backend')],
+    });
+    expect(report.findings.filter(f => f.kind.startsWith('network-'))).toEqual([]);
+  });
 });
 
 // ── normalizeImageRef ─────────────────────────────────────────────────────
