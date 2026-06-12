@@ -25,8 +25,8 @@ import {
     GlobalCommandPaletteProvider,
     GlobalCommandPaletteTrigger,
 } from './GlobalCommandPalette';
-import { SENCHO_OPEN_LOGS_EVENT } from '@/lib/events';
-import type { SenchoOpenLogsDetail } from '@/lib/events';
+import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
+import type { SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
@@ -336,6 +336,21 @@ export default function EditorLayout() {
       setActiveNode(node);
     }
   };
+
+  // Open a stack from another surface (e.g. a Resources network card). Reuses
+  // the Fleet navigation, which loads the stack on its node (switching nodes if
+  // needed) and flips to the editor view. A latest-ref keeps the window handler
+  // current without re-subscribing every render.
+  const openStackFromEventRef = useRef(handleFleetNavigateToNode);
+  useEffect(() => { openStackFromEventRef.current = handleFleetNavigateToNode; });
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<SenchoOpenStackDetail>).detail;
+      if (detail) openStackFromEventRef.current(detail.nodeId, detail.stackName);
+    };
+    window.addEventListener(SENCHO_OPEN_STACK_EVENT, handler);
+    return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
+  }, []);
 
   // "Inspect" a node from the mobile Fleet screen: switch to it and land on its
   // stack list.

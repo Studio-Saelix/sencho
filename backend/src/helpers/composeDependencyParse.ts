@@ -37,6 +37,9 @@ export interface DeclaredCompose {
   services: DeclaredService[];
   networks: Record<string, DeclaredResource>;
   volumes: Record<string, DeclaredResource>;
+  /** Top-level `name:` (the Compose project name), when set; it determines the
+   *  `<project>_<resource>` runtime names, overriding the stack directory name. */
+  projectName?: string;
   /** Set when the file could not be parsed; the other fields are then empty. */
   parseError?: string;
 }
@@ -198,5 +201,6 @@ export function parseComposeDependencies(content: string): DeclaredCompose {
     services,
     networks: collectResources(root.networks),
     volumes: collectResources(root.volumes),
+    projectName: asString(root.name),
   };
 }

@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { parseEffectiveModel } from '../services/preflight/effectiveModel';
 
 const SECRET = 'topsecret-9f3a-value';
+const LABEL_SECRET = 'label-secret-7b21-value';
 
 function render() {
   return {
@@ -31,10 +32,14 @@ function render() {
         container_name: 'web1',
         user: '1000:1000',
         environment: { DB_PASSWORD: SECRET, PUID: '1000' },
+        networks: { backend: { aliases: ['www', 'web'] }, shared: null },
+        extra_hosts: ['host.docker.internal:host-gateway'],
+        labels: { 'traefik.enable': 'true', 'secret.label': LABEL_SECRET },
       },
     },
     networks: {
       default: { name: 'myapp_default' },
+      backend: { name: 'myapp_backend', internal: true },
       shared: { name: 'shared_net', external: true },
     },
     volumes: {
@@ -71,12 +76,49 @@ describe('parseEffectiveModel', () => {
     ]);
   });
 
-  it('resolves top-level networks and volumes with external flags', () => {
+  it('resolves top-level networks and volumes with external and internal flags', () => {
     const m = parseEffectiveModel(render(), 'fallback');
-    expect(m.networks.shared).toEqual({ name: 'shared_net', external: true });
-    expect(m.networks.default).toEqual({ name: 'myapp_default', external: false });
-    expect(m.volumes.ext).toEqual({ name: 'shared_vol', external: true });
-    expect(m.volumes.cache).toEqual({ name: 'myapp_cache', external: false });
+    expect(m.networks.shared).toEqual({ name: 'shared_net', external: true, internal: false });
+    expect(m.networks.default).toEqual({ name: 'myapp_default', external: false, internal: false });
+    expect(m.networks.backend).toEqual({ name: 'myapp_backend', external: false, internal: true });
+    expect(m.volumes.ext).toEqual({ name: 'shared_vol', external: true, internal: false });
+    expect(m.volumes.cache).toEqual({ name: 'myapp_cache', external: false, internal: false });
+  });
+
+  it('parses service network membership (key-space) with aliases', () => {
+    const web = parseEffectiveModel(render(), 'fallback').services[0];
+    expect(web.networks).toEqual([
+      { key: 'backend', aliases: ['www', 'web'] },
+      { key: 'shared', aliases: [] },
+    ]);
+  });
+
+  it('parses service network membership from the list form', () => {
+    const m = parseEffectiveModel({ services: { s: { networks: ['frontend', 'backend'] } } }, 'p');
+    expect(m.services[0].networks).toEqual([
+      { key: 'frontend', aliases: [] },
+      { key: 'backend', aliases: [] },
+    ]);
+  });
+
+  it('parses extra_hosts in list and map form', () => {
+    const web = parseEffectiveModel(render(), 'fallback').services[0];
+    expect(web.extraHosts).toEqual(['host.docker.internal:host-gateway']);
+    const mapForm = parseEffectiveModel({ services: { s: { extra_hosts: { 'db.local': '10.0.0.5' } } } }, 'p');
+    expect(mapForm.services[0].extraHosts).toEqual(['db.local:10.0.0.5']);
+  });
+
+  it('reads label KEY names only, never label values', () => {
+    const web = parseEffectiveModel(render(), 'fallback').services[0];
+    expect(web.labelKeys).toEqual(['traefik.enable', 'secret.label']);
+    // A label value can carry a secret; it must not survive into the model.
+    expect(JSON.stringify(parseEffectiveModel(render(), 'fallback'))).not.toContain(LABEL_SECRET);
+  });
+
+  it('reads label key names from the list form without keeping the value', () => {
+    const m = parseEffectiveModel({ services: { s: { labels: [`secret.label=${LABEL_SECRET}`, 'plain'] } } }, 'p');
+    expect(m.services[0].labelKeys).toEqual(['secret.label', 'plain']);
+    expect(JSON.stringify(m)).not.toContain(LABEL_SECRET);
   });
 
   it('reads environment KEY names only, never values', () => {

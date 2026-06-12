@@ -14,3 +14,11 @@ export interface SenchoSettingsChangedDetail {
 }
 
 export const SENCHO_LABELS_CHANGED = 'sencho-labels-changed';
+
+/** Open a stack on a given node from elsewhere in the app (e.g. a Resources network card). */
+export const SENCHO_OPEN_STACK_EVENT = 'sencho-open-stack';
+
+export interface SenchoOpenStackDetail {
+  nodeId: number;
+  stackName: string;
+}

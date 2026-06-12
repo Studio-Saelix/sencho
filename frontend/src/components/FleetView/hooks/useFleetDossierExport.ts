@@ -8,6 +8,12 @@ import {
   type FleetDossierStack,
 } from '@/lib/fleetDossier';
 import { EMPTY_DOSSIER_FIELDS, type StackDossierFields } from '@/lib/dossierMarkdown';
+import {
+  buildNetworkExposureSummary,
+  type NetworkExposureSummary,
+  type NetworkFactsInput,
+  type ExposureIntentInput,
+} from '@/lib/networkExposureSummary';
 import { downloadBlob } from '@/lib/download';
 import { toast } from '@/components/ui/toast-store';
 
@@ -86,8 +92,23 @@ async function loadDossier(stackName: string, nodeId: number): Promise<StackDoss
   }
 }
 
+async function loadNetworking(stackName: string, nodeId: number): Promise<NetworkExposureSummary | null> {
+  try {
+    const [facts, exposure] = await Promise.all([
+      getJson<NetworkFactsInput>(`/stacks/${encodeURIComponent(stackName)}/networking`, nodeId),
+      getJson<{ intents?: ExposureIntentInput[] }>(`/stacks/${encodeURIComponent(stackName)}/exposure`, nodeId),
+    ]);
+    return buildNetworkExposureSummary(facts, exposure.intents ?? []);
+  } catch (err) {
+    if (isUnauthorized(err)) throw err;
+    console.warn(`[FleetDossier] networking load failed for "${stackName}" on node ${nodeId}:`, err);
+    return null;
+  }
+}
+
 async function collectStack(stackName: string, nodeId: number): Promise<FleetDossierStack> {
   const dossier = await loadDossier(stackName, nodeId);
+  const networking = await loadNetworking(stackName, nodeId);
   let content: string;
   try {
     content = await getText(`/stacks/${encodeURIComponent(stackName)}`, nodeId);
@@ -95,7 +116,7 @@ async function collectStack(stackName: string, nodeId: number): Promise<FleetDos
     if (isUnauthorized(err)) throw err;
     // Compose unreadable: emit a stub page from the operator notes alone.
     console.warn(`[FleetDossier] compose read failed for "${stackName}" on node ${nodeId}:`, err);
-    return { stackName, anatomy: null, dossier };
+    return { stackName, anatomy: null, dossier, networking };
   }
 
   let envContent = '';
@@ -114,7 +135,7 @@ async function collectStack(stackName: string, nodeId: number): Promise<FleetDos
 
   const gitSource = await loadGitSource(stackName, nodeId);
   const anatomy = assembleAnatomyInput({ stackName, content, envContent, selectedEnvFile: firstEnvFile, gitSource });
-  return { stackName, anatomy, dossier };
+  return { stackName, anatomy, dossier, networking };
 }
 
 async function collectNode(node: OverviewNode): Promise<FleetDossierNode> {

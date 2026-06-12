@@ -221,3 +221,32 @@ describe('node deletion cleanup', () => {
     expect(db().getPreflightFindings('run-x')).toEqual([]);
   });
 });
+
+describe('exposure state feeds the exposure rules end to end', () => {
+  const ruleIds = (stack: string) => doctor().getLatest(nodeId, stack).findings.map(f => f.ruleId);
+
+  afterEach(() => {
+    db().deleteStackExposureIntents(nodeId, 'expe2e');
+    db().deleteStackDossier(nodeId, 'expe2e');
+    fs.rmSync(path.join(process.env.COMPOSE_DIR as string, 'expe2e'), { recursive: true, force: true });
+  });
+
+  it('fires exposure-internal-published from a stored stack intent', async () => {
+    writeStack('expe2e');
+    db().setStackExposureIntent(nodeId, 'expe2e', '', 'internal', 'tester');
+    stubDocker({ name: 'expe2e', services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} });
+    await doctor().runPreflight(nodeId, 'expe2e', 'tester');
+    expect(ruleIds('expe2e')).toContain('exposure-internal-published');
+  });
+
+  it('fires exposure-port-vs-dossier from the dossier access URLs', async () => {
+    writeStack('expe2e');
+    db().upsertStackDossier(nodeId, 'expe2e', {
+      purpose: '', owner: '', access_urls: 'https://app.example.com:443', static_ip: '', vlan: '',
+      firewall_notes: '', reverse_proxy_notes: '', backup_notes: '', upgrade_notes: '', recovery_notes: '', custom_notes: '',
+    });
+    stubDocker({ name: 'expe2e', services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} });
+    await doctor().runPreflight(nodeId, 'expe2e', 'tester');
+    expect(ruleIds('expe2e')).toContain('exposure-port-vs-dossier');
+  });
+});

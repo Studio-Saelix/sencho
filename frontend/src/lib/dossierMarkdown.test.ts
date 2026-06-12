@@ -23,6 +23,18 @@ describe('buildStackDossierMarkdown', () => {
     expect(md).toContain('# plex');
     expect(md).toContain('## Services');
     expect(md).not.toContain('## Operator notes');
+    expect(md).not.toContain('## Network exposure');
+  });
+
+  it('appends the network exposure section when a summary is provided', () => {
+    const md = buildStackDossierMarkdown(anatomy, fields(), {
+      stackIntent: 'internal',
+      networks: [{ name: 'plex_default', external: false, internal: false }],
+      services: [{ name: 'plex', intent: null, ports: ['32400/tcp (all interfaces)'] }],
+    });
+    expect(md).toContain('## Network exposure');
+    expect(md).toContain('**Stack intent:** internal');
+    expect(md).toContain('32400/tcp (all interfaces)');
   });
 
   it('appends an Operator notes section with the filled fields', () => {

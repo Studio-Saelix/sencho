@@ -1,0 +1,76 @@
+---
+title: Compose Networking
+description: Inspect how a stack is networked and exposed, classify what its exposure should be, and see where the running containers disagree with the Compose file, all without opening a terminal.
+---
+
+The **Networking** tab in the right-hand **Anatomy** panel answers a Compose-first question: *is this stack networked and exposed the way the Compose file says it is, and are the dangerous or confusing parts visible before I deploy?* It renders the effective Compose model, the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied, pairs it with the live Docker state when that node is reachable, and shows the result as plain facts.
+
+The view is read-only with respect to the stack: it never changes a deployment. The one thing you can edit here is the stack's *exposure intent*, which is stored separately so Sencho can flag mismatches over time.
+
+Compose Networking never shows a secret value. It reads the structure of the model, network names, service-to-network membership, published ports, and the *names* of environment variables and labels, but never their values, so nothing sensitive appears in the view or the logs.
+
+## Networks
+
+The top of the tab lists the stack's networks with the facts that matter:
+
+- The resolved Docker network name, and the Compose key it came from.
+- **external** when the network is one the stack expects to already exist on the node.
+- **internal** when the network has no outbound or host connectivity.
+- **created by stack** when deploying the stack will create the network.
+
+## Published ports and bindings
+
+Each service lists its published ports with the interface they bind to:
+
+- **all interfaces** marks a port published on `0.0.0.0`, reachable from every network the host is attached to.
+- **loopback** marks a port bound only to `127.0.0.1`, reachable only from the host itself.
+- A specific address is shown as-is.
+
+The tab also surfaces each service's network membership and aliases, `network_mode` (`host`, `none`, `service:`, and `container:` modes are called out), and `extra_hosts` entries.
+
+## Exposure intent
+
+Exposure intent is how you tell Sencho what a stack *should* be reachable from, so it can warn you when the Compose file says otherwise. Set it for the whole stack, or override it per service:
+
+| Intent | Meaning |
+|--------|---------|
+| **internal** | Not published to the host at all. |
+| **same-node** | Reachable only from the host (loopback bindings). |
+| **LAN** | Published for the local network. |
+| **reverse proxy** | Reached through a reverse proxy, not a direct host port. |
+| **public** | Intentionally reachable from the internet. |
+| **temporary** | A short-lived exposure (a classification label only). |
+| **unknown** | Not yet classified. |
+
+A service with no intent of its own inherits the stack's. Clearing a service returns it to **inherit**; clearing the stack returns it to unclassified. Sencho stores the intent apart from the generated facts, so when the two drift apart the **Doctor** tab can point it out.
+
+## Findings
+
+Risk findings live in the **Doctor** tab, which reads the same model. On top of its existing deploy and security checks (host-port conflicts, missing external networks, host networking, broad exposure, and a mounted Docker socket), it adds exposure-aware findings:
+
+- A service classified **internal** or **same-node** that publishes a host port.
+- A database or admin image published on every interface.
+- A stack that publishes ports but has no exposure intent set.
+- A published port that the Stack Dossier's documented access URLs do not mention.
+- Reverse-proxy labels with no documented URL or reverse-proxy intent.
+
+## Runtime drift
+
+When the node is reachable, the tab compares the running containers to the Compose file and reports where they disagree: a container on a network the file does not declare, a container on a network owned by another stack, and a declared network that no running service uses or that is missing from the runtime. These also appear on the **Drift** tab, where their history is tracked over time. When the node is not reachable, the tab shows the declared model only and says so.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The Networking tab is not there">
+    The tab appears once the node advertises support for it. A node running an older Sencho version hides the tab until it is updated.
+  </Accordion>
+  <Accordion title="The view says the runtime is unavailable">
+    Sencho could not reach Docker on that node, so it shows the declared Compose model only and skips runtime drift. The networks, ports, and exposure facts are still accurate; the live comparison resumes once the node is reachable.
+  </Accordion>
+  <Accordion title="It says the model cannot render">
+    `docker compose config` could not produce an effective model, usually a YAML error, an unresolved include or merge, or a required variable with no value. Fix the reported problem and reopen the tab.
+  </Accordion>
+  <Accordion title="I cannot change the exposure intent">
+    Editing the intent needs stack edit access. With read access you can see the current classification but not change it.
+  </Accordion>
+</AccordionGroup>

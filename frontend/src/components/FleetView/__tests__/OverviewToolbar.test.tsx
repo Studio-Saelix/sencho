@@ -4,7 +4,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { OverviewToolbar } from '../OverviewToolbar';
 import type { FleetPaletteEntry, FleetPreferences } from '../types';
 
-const PREFS: FleetPreferences = { sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false };
+const PREFS: FleetPreferences = { sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all' };
 
 function props(overrides: Partial<React.ComponentProps<typeof OverviewToolbar>> = {}) {
   return {

@@ -8,6 +8,7 @@ import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } fr
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPDATE_TIMEOUT_MS, UPDATE_TIMEOUT_MSG, TERMINAL_TTL_MS } from '../services/FleetUpdateTrackerService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
@@ -699,6 +700,75 @@ fleetRouter.get('/dependency-map', authMiddleware, async (_req: Request, res: Re
   } catch (error) {
     console.error('[Fleet] Dependency map error:', error);
     res.status(500).json({ error: 'Failed to build fleet dependency map' });
+  }
+});
+
+interface FleetNetworkingSummaryNode {
+  nodeId: number;
+  nodeName: string;
+  status: 'ok' | 'error';
+  summary: NodeNetworkingSummary | null;
+  error: string | null;
+}
+
+function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (['exposed', 'unknownExposure', 'networkDrift'] as const).every(k => {
+    const b = o[k] as { count?: unknown; stacks?: unknown } | undefined;
+    return !!b && typeof b.count === 'number' && Array.isArray(b.stacks);
+  });
+}
+
+/**
+ * Fleet-wide networking summary for the overview filter. Auth-only (read-only,
+ * Community). Hub-exempt under /api/fleet, so it is never proxied: it builds the
+ * hub's summary in-process and reaches each remote through its node-local
+ * /api/networking/summary route. A remote on an older version (no route) returns
+ * 404 and degrades to a skip, so one unreachable or unsupported node never fails
+ * the filter for the rest.
+ */
+fleetRouter.get('/networking-summary', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+
+    const results = await Promise.allSettled(
+      nodes.map(async (node: Node): Promise<FleetNetworkingSummaryNode> => {
+        if (node.type === 'local') {
+          const summary = await computeNodeNetworkingSummary(node.id);
+          return { nodeId: node.id, nodeName: node.name, status: 'ok', summary, error: null };
+        }
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) {
+          return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: formatNoTargetError(node) };
+        }
+        const resp = await fetch(
+          `${target.apiUrl.replace(/\/$/, '')}/api/networking/summary`,
+          { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: AbortSignal.timeout(15000) },
+        );
+        if (!resp.ok) {
+          return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: `Remote returned ${resp.status}` };
+        }
+        const summary = await resp.json().catch(() => null);
+        if (!isNodeNetworkingSummary(summary)) {
+          console.error(`[Fleet] Networking summary: node ${sanitizeForLog(node.name)} returned an unexpected payload (status ${resp.status})`);
+          return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: 'Remote returned an unexpected summary payload' };
+        }
+        return { nodeId: node.id, nodeName: node.name, status: 'ok', summary, error: null };
+      }),
+    );
+
+    const perNode: FleetNetworkingSummaryNode[] = results.map((result, i) => {
+      if (result.status === 'fulfilled') return result.value;
+      console.error(`[Fleet] Networking summary fetch failed for node ${nodes[i].name}:`, result.reason);
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', summary: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+    });
+
+    res.json({ nodes: perNode });
+  } catch (error) {
+    console.error('[Fleet] Networking summary error:', error);
+    res.status(500).json({ error: 'Failed to build fleet networking summary' });
   }
 });
 

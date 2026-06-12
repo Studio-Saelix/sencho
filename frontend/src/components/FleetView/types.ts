@@ -47,6 +47,7 @@ export type SortField = 'name' | 'cpu' | 'memory' | 'containers' | 'status';
 export type SortDir = 'asc' | 'desc';
 export type FilterStatus = 'all' | 'online' | 'offline';
 export type FilterType = 'all' | 'local' | 'remote';
+export type FilterNetworking = 'all' | 'exposed' | 'unknown' | 'drift';
 
 export interface FleetPreferences {
     sortBy: SortField;
@@ -54,6 +55,8 @@ export interface FleetPreferences {
     filterStatus: FilterStatus;
     filterType: FilterType;
     filterCritical: boolean;
+    /** Narrow to nodes that have an exposed / unknown-exposure / network-drift stack. */
+    filterNetworking: FilterNetworking;
 }
 
 export interface FleetPaletteEntry {

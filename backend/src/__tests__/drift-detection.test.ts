@@ -11,7 +11,7 @@ import {
   buildStackDriftReport,
 } from '../services/DriftDetectionService';
 import DockerController from '../services/DockerController';
-import type { DependencyContainer, DependencySnapshot } from '../services/DockerController';
+import type { DependencyContainer, DependencyNetwork, DependencySnapshot } from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import type { DeclaredCompose, DeclaredService, DeclaredPort } from '../helpers/composeDependencyParse';
 
@@ -250,6 +250,107 @@ describe('assembleStackDrift - findings', () => {
   });
 });
 
+// ── assembleStackDrift: network drift ─────────────────────────────────────
+
+function depNet(name: string, p: Partial<DependencyNetwork> = {}): DependencyNetwork {
+  return { id: name, name, driver: 'bridge', scope: 'local', isSystem: false, composeProject: 'app', stack: 'app', ...p };
+}
+
+describe('assembleStackDrift - network drift', () => {
+  it('flags a runtime-only attachment to a stack-owned undeclared network', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web' })]),
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'app_default', id: 'd', ip: '' }, { name: 'app_extra', id: 'e', ip: '' }] })],
+      networks: [depNet('app_default'), depNet('app_extra')],
+    });
+    const f = report.findings.find(x => x.kind === 'network-undeclared');
+    expect(f).toMatchObject({ service: 'web', actual: 'app_extra' });
+    expect(f?.detail).not.toContain('app_default'); // the implicit default is declared
+  });
+
+  it('maps a foreign network attachment back to its service (not the container name)', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web' })]),
+      // Distinct container name vs service proves the service-map lookup ran, not the name fallback.
+      containers: [container({ id: 'c1', name: 'app-web-1', service: 'web', networks: [{ name: 'other_net', id: 'o', ip: '' }] })],
+      networks: [depNet('other_net', { stack: 'other', composeProject: 'other' })],
+    });
+    expect(report.findings.find(x => x.kind === 'network-undeclared')).toMatchObject({ service: 'web', actual: 'other_net' });
+  });
+
+  it('aggregates multiple undeclared networks on one service into a single finding', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web' })]),
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'app_extra1', id: '1', ip: '' }, { name: 'app_extra2', id: '2', ip: '' }] })],
+      networks: [depNet('app_extra1'), depNet('app_extra2')],
+    });
+    const f = report.findings.filter(x => x.kind === 'network-undeclared');
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ service: 'web', actual: 'app_extra1, app_extra2' });
+    expect(f[0].detail).toContain('networks not declared'); // plural wording
+  });
+
+  it('flags a declared network that no running service uses, by its runtime name', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: { services: [service({ name: 'web', networks: ['frontend'] })], networks: { frontend: { external: false }, backend: { external: false } }, volumes: {} },
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'app_frontend', id: 'f', ip: '' }] })],
+      networks: [depNet('app_frontend'), depNet('app_backend')],
+    });
+    expect(report.findings.find(x => x.kind === 'network-missing')).toMatchObject({ service: '', expected: 'app_backend' });
+  });
+
+  it('reports unused and absent declared networks together in one consistent namespace', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: { services: [service({ name: 'web', networks: ['frontend'] })], networks: { frontend: { external: false }, backend: { external: false }, gamma: { external: false } }, volumes: {} },
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'app_frontend', id: 'f', ip: '' }] })],
+      // app_backend exists but is unused; app_gamma is absent from the runtime.
+      networks: [depNet('app_frontend'), depNet('app_backend')],
+    });
+    const f = report.findings.filter(x => x.kind === 'network-missing');
+    expect(f).toHaveLength(1);
+    expect(f[0].expected).toBe('app_backend, app_gamma'); // both as runtime names, not mixed keys
+  });
+
+  it('ignores system and default networks', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web' })]),
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'bridge', id: 'b', ip: '' }, { name: 'app_default', id: 'd', ip: '' }] })],
+      networks: [depNet('bridge', { isSystem: true, stack: null }), depNet('app_default')],
+    });
+    expect(report.findings.filter(x => x.kind.startsWith('network-'))).toEqual([]);
+  });
+
+  it('reports no network drift for a stopped stack', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web' })]),
+      containers: [container({ id: 'c1', service: 'web', state: 'exited', networks: [{ name: 'app_extra', id: 'e', ip: '' }] })],
+      networks: [depNet('app_extra')],
+    });
+    expect(report.status).toBe('missing-runtime');
+    expect(report.findings).toEqual([]);
+  });
+
+  it('resolves runtime network names via the compose top-level name (no false drift)', () => {
+    // Stack dir is "app" but the compose declares `name: acme`, so Docker names
+    // the network acme_backend. With the project name carried through, that
+    // matches and produces no network-undeclared / network-missing.
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: { services: [service({ name: 'web', networks: ['backend'] })], networks: { backend: { external: false } }, volumes: {}, projectName: 'acme' },
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'acme_default', id: 'd', ip: '' }, { name: 'acme_backend', id: 'b', ip: '' }] })],
+      networks: [depNet('acme_default'), depNet('acme_backend')],
+    });
+    expect(report.findings.filter(f => f.kind.startsWith('network-'))).toEqual([]);
+  });
+});
+
 // ── normalizeImageRef ─────────────────────────────────────────────────────
 
 describe('normalizeImageRef', () => {
@@ -319,6 +420,25 @@ describe('buildStackDriftReport - boundaries', () => {
     const report = await buildStackDriftReport(0, 'app');
     expect(report.status).toBe('drifted');
     expect(findingKinds(report)).toEqual(['image-mismatch']);
+    vi.restoreAllMocks();
+  });
+
+  it('threads the snapshot networks through into a network-undeclared finding', async () => {
+    const snapshot: DependencySnapshot = {
+      containers: [container({ id: 'c1', service: 'web', stack: 'app', image: 'nginx:1.25', networks: [{ name: 'app_rogue', id: 'r', ip: '' }] })],
+      networks: [depNet('app_rogue')],
+      volumes: [],
+    };
+    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
+      getStackContent: vi.fn().mockResolvedValue('services:\n  web:\n    image: nginx:1.25\n'),
+      getStacks: vi.fn().mockResolvedValue(['app']),
+    } as unknown as FileSystemService);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue(snapshot),
+    } as unknown as DockerController);
+
+    const report = await buildStackDriftReport(0, 'app');
+    expect(findingKinds(report)).toContain('network-undeclared');
     vi.restoreAllMocks();
   });
 });
