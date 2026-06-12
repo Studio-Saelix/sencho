@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   LayoutDashboard, Boxes, FileWarning, KeyRound, BookCheck, EyeOff, History as HistoryIcon, Wrench, Info,
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { PageMasthead } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
@@ -13,10 +12,10 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
+import { useImageScan } from '@/hooks/useImageScan';
 import type { SecurityTab } from '@/lib/events';
-import type { SecurityOverview, ScanSummary, ScanDetailTab, FleetRole } from '@/types/security';
+import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, FleetRole } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
-import { SecurityHistoryView } from './SecurityHistoryView';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab } from './security/OverviewTab';
@@ -25,6 +24,20 @@ import { FindingsTab } from './security/FindingsTab';
 import { PolicyPacksTab } from './security/PolicyPacksTab';
 import { ScanPolicyManager } from './security/ScanPolicyManager';
 import { ScannerSetupTab } from './security/ScannerSetupTab';
+import { HistoryTab } from './security/HistoryTab';
+
+/** A /security/image-summaries 200 body must be a map of scan summaries. An
+ *  unexpected shape is treated as an error, never as a benign "no findings". An
+ *  empty object is valid (a node with no scans yet). */
+function isScanSummaryMap(v: unknown): v is Record<string, ScanSummary> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  return Object.values(v).every(
+    (s) =>
+      !!s && typeof s === 'object'
+      && typeof (s as ScanSummary).image_ref === 'string'
+      && typeof (s as ScanSummary).scan_id === 'number',
+  );
+}
 
 interface SecurityViewProps {
   activeTab: SecurityTab;
@@ -44,16 +57,24 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
   const [summaries, setSummaries] = useState<Record<string, ScanSummary>>({});
   const [summariesLoading, setSummariesLoading] = useState(true);
   const [summariesError, setSummariesError] = useState(false);
+  const [trend, setTrend] = useState<SecurityRiskTrendPoint[]>([]);
   const [isReplica, setIsReplica] = useState(false);
 
   const [inspectScanId, setInspectScanId] = useState<number | null>(null);
   const [inspectInitialTab, setInspectInitialTab] = useState<ScanDetailTab | undefined>(undefined);
-  const [historyOpen, setHistoryOpen] = useState(false);
 
   const onInspect = useCallback((scanId: number, initialTab?: ScanDetailTab) => {
     setInspectInitialTab(initialTab);
     setInspectScanId(scanId);
   }, []);
+
+  // Scanner readiness gates the Images Actions column; an admin on a node whose
+  // scanner is available can trigger scans inline.
+  const canScan = isAdmin && !!overview?.scanner.available;
+  const { scanningRef, scanImage } = useImageScan({
+    onComplete: (scanId) => onInspect(scanId, 'vulns'),
+    onSummaries: setSummaries,
+  });
 
   // Active-node scoped data: overview rollup + image summaries follow x-node-id.
   // A failed fetch (5xx, network, malformed body) must surface as an error, never
@@ -66,6 +87,14 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
       setSummariesLoading(true);
       setOverviewLoadError(null);
       setSummariesError(false);
+      // The trend chart is non-critical: isolate its fetch entirely (transport
+      // failure included, not just a non-OK/malformed body) so it can never
+      // poison the overview/summaries error state. It degrades to an empty chart
+      // with its own "no history" message.
+      const trendPromise: Promise<SecurityRiskTrendPoint[]> = apiFetch('/security/overview/trend')
+        .then((r) => (r.ok ? r.json() : []))
+        .then((t) => (Array.isArray(t) ? t : []))
+        .catch(() => []);
       try {
         const [overviewRes, summariesRes] = await Promise.all([
           apiFetch('/security/overview'),
@@ -82,7 +111,15 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
           }
         }
         if (summariesRes.ok) {
-          setSummaries(await summariesRes.json());
+          const body = await summariesRes.json();
+          if (isScanSummaryMap(body)) {
+            setSummaries(body);
+          } else {
+            // A 200 with an unexpected shape must not read as "no findings".
+            setSummaries({});
+            setSummariesError(true);
+            console.warn('[Security] image-summaries returned an unexpected shape');
+          }
         } else {
           setSummaries({});
           setSummariesError(true);
@@ -98,6 +135,8 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
       } finally {
         if (!cancelled) setSummariesLoading(false);
       }
+      const trend = await trendPromise;
+      if (!cancelled) setTrend(trend);
     })();
     return () => { cancelled = true; };
   }, [activeNode?.id]);
@@ -121,17 +160,6 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
     })();
     return () => { cancelled = true; };
   }, [isRemote, activeNode?.id]);
-
-  // A deep-link to History (e.g. the Resources "Scan history" button, which
-  // mounts this view with the History tab active) auto-opens the sheet once on
-  // mount. Selecting the History tab manually shows the persistent launcher
-  // body instead, so the sheet does not pop on every tab click; closing it
-  // always leaves the launcher.
-  const deepLinkedToHistory = useRef(activeTab === 'history');
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (deepLinkedToHistory.current) setHistoryOpen(true);
-  }, []);
 
   const { state, tone } = deriveMasthead(overview, overviewLoadError !== null);
   const pulsing = tone === 'live' && !!overview?.scanner.available;
@@ -183,12 +211,27 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
         </TabsList>
 
         <TabsContent value="overview">
-          <OverviewTab overview={overview} loadError={overviewLoadError} onNavigate={onTabChange} />
+          <OverviewTab
+            overview={overview}
+            loadError={overviewLoadError}
+            summaries={summaries}
+            trend={trend}
+            onNavigate={onTabChange}
+            onInspect={onInspect}
+          />
         </TabsContent>
 
         <TabsContent value="images">
           <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning">
-            <ImagesTab summaries={summaries} loading={summariesLoading} error={summariesError} onInspect={onInspect} />
+            <ImagesTab
+              summaries={summaries}
+              loading={summariesLoading}
+              error={summariesError}
+              onInspect={onInspect}
+              canScan={canScan}
+              scanningRef={scanningRef}
+              onScan={scanImage}
+            />
           </CapabilityGate>
         </TabsContent>
 
@@ -206,8 +249,8 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
 
         <TabsContent value="policies">
           <div className="space-y-8">
-            <PolicyPacksTab />
             <ScanPolicyManager />
+            <PolicyPacksTab />
           </div>
         </TabsContent>
 
@@ -232,20 +275,7 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
 
         <TabsContent value="history">
           <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning">
-            <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 flex items-center justify-between gap-4 flex-wrap">
-              <div className="min-w-0">
-                <h3 className="font-medium text-sm">Scan history</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {overview
-                    ? `${overview.scannedImages} image${overview.scannedImages === 1 ? '' : 's'} scanned · last scan ${overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never'}`
-                    : 'Browse completed scans and compare them.'}
-                </p>
-              </div>
-              <Button variant="outline" size="sm" onClick={() => setHistoryOpen(true)}>
-                <HistoryIcon className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
-                Open scan history
-              </Button>
-            </div>
+            <HistoryTab onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
 
@@ -253,8 +283,6 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
           <ScannerSetupTab />
         </TabsContent>
       </Tabs>
-
-      <SecurityHistoryView open={historyOpen} onClose={() => setHistoryOpen(false)} />
 
       <VulnerabilityScanSheet
         scanId={inspectScanId}

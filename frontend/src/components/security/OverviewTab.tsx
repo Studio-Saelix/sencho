@@ -1,15 +1,25 @@
 import { ShieldOff } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
+import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import type { SecurityOverview } from '@/types/security';
+import type { SecurityOverview, ScanSummary, SecurityRiskTrendPoint } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
+import {
+  SeverityDonutChart,
+  RiskTrendChart,
+  TopExposedImagesChart,
+  FindingsByTypeChart,
+} from './SecurityCharts';
 
 interface OverviewTabProps {
   overview: SecurityOverview | null;
   /** 'unsupported' = node has no overview endpoint (benign); 'failed' = a real error. */
   loadError: 'unsupported' | 'failed' | null;
+  summaries: Record<string, ScanSummary>;
+  trend: SecurityRiskTrendPoint[];
   onNavigate: (tab: SecurityTab) => void;
+  onInspect: (scanId: number) => void;
 }
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
@@ -28,7 +38,16 @@ function StatusRow({ label, value, tone }: { label: string; value: string; tone?
   );
 }
 
-export function OverviewTab({ overview, loadError, onNavigate }: OverviewTabProps) {
+function ChartCard({ title, className, children }: { title: string; className?: string; children: React.ReactNode }) {
+  return (
+    <div className={cn('rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4', className)}>
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle mb-3">{title}</h3>
+      {children}
+    </div>
+  );
+}
+
+export function OverviewTab({ overview, loadError, summaries, trend, onNavigate, onInspect }: OverviewTabProps) {
   if (loadError === 'unsupported') {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -56,11 +75,13 @@ export function OverviewTab({ overview, loadError, onNavigate }: OverviewTabProp
   if (!overview) {
     return (
       <div className="space-y-4" aria-busy="true">
-        <Skeleton className="h-20 w-full rounded-lg" />
+        <Skeleton className="h-56 w-full rounded-lg" />
         <Skeleton className="h-40 w-full rounded-lg" />
       </div>
     );
   }
+
+  const summaryList = Object.values(summaries);
 
   const tiles: SignalTile[] = [
     { kicker: 'Scanned images', value: String(overview.scannedImages) },
@@ -77,8 +98,26 @@ export function OverviewTab({ overview, loadError, onNavigate }: OverviewTabProp
 
   return (
     <div className="space-y-6">
-      {/* Signal rail of supporting counts. Wrapped so a phone scrolls the rail
-          instead of crushing the fixed columns. */}
+      {/* Charts lead the dashboard. */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <ChartCard title="Risk trend · 30 days · critical + high" className="lg:col-span-2">
+          <RiskTrendChart trend={trend} />
+        </ChartCard>
+        <ChartCard title="Severity distribution">
+          <SeverityDonutChart summaries={summaryList} />
+        </ChartCard>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <ChartCard title="Top exposed images">
+          <TopExposedImagesChart summaries={summaryList} onInspect={onInspect} />
+        </ChartCard>
+        <ChartCard title="Findings by type">
+          <FindingsByTypeChart summaries={summaryList} />
+        </ChartCard>
+      </div>
+
+      {/* Supporting counts + posture, secondary to the charts above. */}
       <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden max-md:overflow-x-auto">
         <div className="min-w-[640px]">
           <SignalRail tiles={tiles} className="border-b-0" />

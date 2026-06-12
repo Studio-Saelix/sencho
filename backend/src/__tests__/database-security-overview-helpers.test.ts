@@ -58,6 +58,40 @@ function seedFailed(imageRef: string): void {
   });
 }
 
+/** Midnight (UTC) `daysAgo` days back, so seeded times stay within one calendar day. */
+function dayStartMs(daysAgo: number): number {
+  const d = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function seedCompleted(o: { imageRef: string; scannedAt: number; critical: number; high: number; nodeId?: number; status?: 'completed' | 'failed' }): void {
+  db().createVulnerabilityScan({
+    node_id: o.nodeId ?? 1,
+    image_ref: o.imageRef,
+    image_digest: `sha256:${o.imageRef}-${Math.random().toString(16).slice(2)}`,
+    scanned_at: o.scannedAt,
+    total_vulnerabilities: o.critical + o.high,
+    critical_count: o.critical,
+    high_count: o.high,
+    medium_count: 0,
+    low_count: 0,
+    unknown_count: 0,
+    fixable_count: 0,
+    secret_count: 0,
+    misconfig_count: 0,
+    scanners_used: 'vuln',
+    highest_severity: o.critical > 0 ? 'CRITICAL' : o.high > 0 ? 'HIGH' : null,
+    os_info: null,
+    trivy_version: null,
+    scan_duration_ms: null,
+    triggered_by: 'manual',
+    status: o.status ?? 'completed',
+    error: o.status === 'failed' ? 'boom' : null,
+    stack_context: null,
+  });
+}
+
 function seedPolicy(overrides: Partial<Omit<ScanPolicy, 'id' | 'created_at' | 'updated_at'>>): void {
   db().createScanPolicy({
     name: overrides.name ?? 'p',
@@ -114,5 +148,35 @@ describe('countEligibleBlockPolicies (replica)', () => {
     seedPolicy({ name: 'sibling', node_id: null, replicated_from_control: 1, node_identity: 'sibling-id' });
 
     expect(db().countEligibleBlockPolicies(1, 'replica', 'self-id')).toBe(1);
+  });
+});
+
+describe('getDailyRiskTrend', () => {
+  it('sums latest-per-image critical/high per day and orders days ascending', () => {
+    const day1 = dayStartMs(3);
+    const day2 = dayStartMs(2);
+    // Day 1: imageA scanned twice; the later scan replaces the earlier one.
+    seedCompleted({ imageRef: 'a:1', scannedAt: day1 + 3_600_000, critical: 5, high: 2 });
+    seedCompleted({ imageRef: 'a:1', scannedAt: day1 + 7_200_000, critical: 3, high: 1 });
+    seedCompleted({ imageRef: 'b:1', scannedAt: day1 + 3_600_000, critical: 1, high: 1 });
+    // Day 2: a single image.
+    seedCompleted({ imageRef: 'a:1', scannedAt: day2 + 3_600_000, critical: 0, high: 4 });
+
+    const trend = db().getDailyRiskTrend(1, 30);
+    expect(trend).toHaveLength(2);
+    expect(trend[0]).toMatchObject({ critical: 4, high: 2 }); // latest a (3,1) + b (1,1)
+    expect(trend[1]).toMatchObject({ critical: 0, high: 4 });
+    expect(trend[0].date < trend[1].date).toBe(true);
+  });
+
+  it('excludes other nodes and non-completed scans', () => {
+    const day = dayStartMs(1);
+    seedCompleted({ imageRef: 'a:1', scannedAt: day + 3_600_000, critical: 2, high: 1 });
+    seedCompleted({ imageRef: 'other:1', scannedAt: day + 3_600_000, critical: 9, high: 9, nodeId: 2 });
+    seedCompleted({ imageRef: 'failed:1', scannedAt: day + 3_600_000, critical: 7, high: 7, status: 'failed' });
+
+    const trend = db().getDailyRiskTrend(1, 30);
+    expect(trend).toHaveLength(1);
+    expect(trend[0]).toMatchObject({ critical: 2, high: 1 });
   });
 });

@@ -15,8 +15,8 @@ import type { ScheduleTaskPrefill } from '../ScheduledOperationsView';
 import type { ActiveView } from './hooks/useViewNavigationState';
 import type { SecurityTab } from '@/lib/events';
 
-// Paid-tier views and the security-history overlay are loaded on demand.
-// Their internal PaidGate / CapabilityGate wrappers render
+// Paid-tier views are loaded on demand. Their internal PaidGate /
+// CapabilityGate wrappers render
 // the upsell or capability-missing card with blurred children rather than
 // short-circuiting, so a tier-locked or capability-missing operator
 // opening one of these tabs still triggers the chunk fetch to render the

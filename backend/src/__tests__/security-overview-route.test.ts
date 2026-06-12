@@ -139,6 +139,38 @@ describe('GET /api/security/overview', () => {
   });
 });
 
+describe('GET /api/security/overview/trend', () => {
+  beforeEach(() => resetSecurity());
+
+  const dayStart = (daysAgo: number): number => {
+    const d = new Date(Date.now() - daysAgo * DAY);
+    d.setUTCHours(0, 0, 0, 0);
+    return d.getTime();
+  };
+
+  it('returns ascending daily critical/high points, node-scoped and completed only', async () => {
+    const d1 = dayStart(3);
+    const d2 = dayStart(2);
+    seedScan({ image_ref: 'a:1', scanned_at: d1 + 3_600_000, critical: 4, high: 2 });
+    seedScan({ image_ref: 'a:1', scanned_at: d2 + 3_600_000, critical: 1, high: 5 });
+    seedScan({ node_id: 2, image_ref: 'x:1', scanned_at: d2 + 3_600_000, critical: 9, high: 9 }); // other node
+    seedScan({ image_ref: 'f:1', scanned_at: d2 + 3_600_000, critical: 7, high: 7, status: 'failed' }); // failed
+
+    const res = await request(app).get('/api/security/overview/trend').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(2);
+    expect(res.body[0]).toMatchObject({ critical: 4, high: 2 });
+    expect(res.body[1]).toMatchObject({ critical: 1, high: 5 });
+    expect(res.body[0].date < res.body[1].date).toBe(true);
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).get('/api/security/overview/trend');
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('GET /api/security/policy-packs', () => {
   it('returns the 5 default packs with fully-formed rules (auth-only)', async () => {
     const res = await request(app).get('/api/security/policy-packs').set('Cookie', adminCookie);

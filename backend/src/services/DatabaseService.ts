@@ -4516,6 +4516,46 @@ export class DatabaseService {
     }
 
     /**
+     * Daily Critical/High totals for the node over the last `days` days, for the
+     * Security overview risk-trend chart. For each calendar day with scans, takes
+     * the latest completed scan per image (so a re-scan replaces, not adds) and
+     * sums the critical and high counts across images. Days with no scans are
+     * omitted from the result.
+     */
+    public getDailyRiskTrend(
+        nodeId: number,
+        days = 30,
+    ): Array<{ date: string; critical: number; high: number }> {
+        const window = Math.max(1, Math.min(days, 365));
+        const cutoffMs = Date.now() - window * 24 * 60 * 60 * 1000;
+        const rows = this.db
+            .prepare(
+                `WITH daily_latest AS (
+                   SELECT
+                     DATE(scanned_at / 1000, 'unixepoch') AS day,
+                     image_ref,
+                     critical_count,
+                     high_count,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY DATE(scanned_at / 1000, 'unixepoch'), image_ref
+                       ORDER BY scanned_at DESC
+                     ) AS rn
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed' AND scanned_at >= ?
+                 )
+                 SELECT day,
+                        SUM(critical_count) AS critical,
+                        SUM(high_count) AS high
+                 FROM daily_latest
+                 WHERE rn = 1
+                 GROUP BY day
+                 ORDER BY day ASC`,
+            )
+            .all(nodeId, cutoffMs) as Array<{ day: string; critical: number; high: number }>;
+        return rows.map((r) => ({ date: r.day, critical: r.critical ?? 0, high: r.high ?? 0 }));
+    }
+
+    /**
      * Count of enabled block-on-deploy policies that are eligible to apply to
      * this node: fleet-wide (node_id IS NULL) or scoped to this node. Built on
      * `getScanPoliciesForUi` so a replica never counts policies scoped to a

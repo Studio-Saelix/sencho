@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
@@ -30,6 +31,15 @@ function EnforcementBadge({ enforcement }: { enforcement: PolicyPackRule['enforc
 export function PolicyPacksTab() {
   const [packs, setPacks] = useState<PolicyPack[] | null>(null);
   const [error, setError] = useState(false);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const toggle = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   useEffect(() => {
     let cancelled = false;
@@ -62,8 +72,8 @@ export function PolicyPacksTab() {
   if (!packs) {
     return (
       <div className="space-y-3" aria-busy="true">
-        <Skeleton className="h-40 w-full rounded-lg" />
-        <Skeleton className="h-40 w-full rounded-lg" />
+        <Skeleton className="h-16 w-full rounded-lg" />
+        <Skeleton className="h-16 w-full rounded-lg" />
       </div>
     );
   }
@@ -75,38 +85,61 @@ export function PolicyPacksTab() {
         Community: they explain what good looks like. Block-on-deploy enforcement is an Admiral capability.
       </p>
 
-      {packs.map((pack) => (
-        <div key={pack.id} className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-          <div className="border-b border-card-border px-4 py-3">
-            <h3 className="font-display italic text-[18px] leading-6 text-stat-value">{pack.name}</h3>
-            <p className="text-sm text-muted-foreground">{pack.tagline}</p>
-            <p className="text-xs text-stat-subtitle mt-1">{pack.tierCopy}</p>
-          </div>
-          <ul className="divide-y divide-card-border/40">
-            {pack.rules.map((rule) => (
-              <li key={rule.id} className="px-4 py-3">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="font-medium text-sm">{rule.name}</span>
-                    <span className={cn('font-mono text-[10px] uppercase tracking-[0.18em]', SEVERITY_TEXT[rule.severity])}>
-                      {rule.severity}
-                    </span>
-                  </div>
-                  <EnforcementBadge enforcement={rule.enforcement} />
+      <div className="space-y-3">
+        {packs.map((pack) => {
+          const isOpen = expanded.has(pack.id);
+          return (
+            <div key={pack.id} className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+              <button
+                type="button"
+                onClick={() => toggle(pack.id)}
+                aria-expanded={isOpen}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-glass-highlight transition-colors"
+              >
+                {isOpen
+                  ? <ChevronDown className="w-4 h-4 text-stat-subtitle shrink-0" strokeWidth={1.5} />
+                  : <ChevronRight className="w-4 h-4 text-stat-subtitle shrink-0" strokeWidth={1.5} />}
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-display italic text-[18px] leading-6 text-stat-value">{pack.name}</h3>
+                  <p className="text-sm text-muted-foreground">{pack.tagline}</p>
                 </div>
-                <dl className="mt-2 grid gap-1.5 text-xs sm:grid-cols-[7rem_1fr]">
-                  <dt className="font-mono uppercase tracking-[0.18em] text-stat-subtitle">Checks</dt>
-                  <dd className="text-stat-subtitle">{rule.whatItChecks}</dd>
-                  <dt className="font-mono uppercase tracking-[0.18em] text-stat-subtitle">Why</dt>
-                  <dd className="text-stat-subtitle">{rule.why}</dd>
-                  <dt className="font-mono uppercase tracking-[0.18em] text-stat-subtitle">Fix</dt>
-                  <dd className="text-stat-subtitle">{rule.howToFix}</dd>
-                </dl>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
+                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle shrink-0 tabular-nums">
+                  {pack.rules.length} rule{pack.rules.length === 1 ? '' : 's'}
+                </span>
+              </button>
+
+              {isOpen && (
+                <div className="border-t border-card-border">
+                  <p className="px-4 py-2 text-xs text-stat-subtitle">{pack.tierCopy}</p>
+                  <ul className="divide-y divide-card-border/40 border-t border-card-border/40">
+                    {pack.rules.map((rule) => (
+                      <li key={rule.id} className="px-4 py-3">
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-medium text-sm">{rule.name}</span>
+                            <span className={cn('font-mono text-[10px] uppercase tracking-[0.18em]', SEVERITY_TEXT[rule.severity])}>
+                              {rule.severity}
+                            </span>
+                          </div>
+                          <EnforcementBadge enforcement={rule.enforcement} />
+                        </div>
+                        <dl className="mt-2 grid gap-1.5 text-xs sm:grid-cols-[7rem_1fr]">
+                          <dt className="font-mono uppercase tracking-[0.18em] text-stat-subtitle">Checks</dt>
+                          <dd className="text-stat-subtitle">{rule.whatItChecks}</dd>
+                          <dt className="font-mono uppercase tracking-[0.18em] text-stat-subtitle">Why</dt>
+                          <dd className="text-stat-subtitle">{rule.why}</dd>
+                          <dt className="font-mono uppercase tracking-[0.18em] text-stat-subtitle">Fix</dt>
+                          <dd className="text-stat-subtitle">{rule.howToFix}</dd>
+                        </dl>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

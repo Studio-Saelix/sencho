@@ -252,10 +252,10 @@ export function ScanPolicyManager() {
       <div className="flex items-center justify-between gap-3">
         <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">Deploy enforcement policies</h3>
         {isAdmin && !isRemote && !isReplica && (
-          <SettingsPrimaryButton size="sm" onClick={openCreate}>
-            <Plus className="w-4 h-4" />
+          <Button size="sm" onClick={openCreate}>
+            <Plus className="w-4 h-4 mr-1.5" />
             Add policy
-          </SettingsPrimaryButton>
+          </Button>
         )}
       </div>
 

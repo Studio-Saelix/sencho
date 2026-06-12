@@ -161,7 +161,6 @@ export default function EditorLayout() {
     activeView, setActiveView,
     settingsSection, setSettingsSection,
     securityTab, setSecurityTab,
-    securityHistoryOpen, setSecurityHistoryOpen,
     filterNodeId, setFilterNodeId,
     schedulePrefill,
     mobileNavOpen, setMobileNavOpen,
@@ -729,8 +728,6 @@ export default function EditorLayout() {
           stackName={stackName}
           gitSourceOpen={gitSourceOpen}
           setGitSourceOpen={setGitSourceOpen}
-          securityHistoryOpen={securityHistoryOpen}
-          setSecurityHistoryOpen={setSecurityHistoryOpen}
         />
       );
 
