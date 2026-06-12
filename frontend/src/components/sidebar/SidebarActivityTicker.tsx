@@ -1,4 +1,4 @@
-import { Rocket, RefreshCw, CircleStop, AlertTriangle, Clock, Activity } from 'lucide-react';
+import { Rocket, RefreshCw, CircleStop, AlertTriangle, Clock, Activity, ShieldCheck } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatTimeAgo, formatAgeShort } from '@/lib/relativeTime';
@@ -33,6 +33,7 @@ const VERB_ICON: Record<ActionVerb, LucideIcon> = {
   restart: RefreshCw,
   down: CircleStop,
   stop: CircleStop,
+  scan: ShieldCheck,
 };
 
 function formatClockHHMM(unixSecs: number): string {

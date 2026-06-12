@@ -150,6 +150,25 @@ export interface ScanAllNodeImagesResult {
     violations: ScanAllNodeImagesViolation[];
 }
 
+/** Which scan types a node-wide scan should run. At least one must be true. */
+export interface ScanNodeOptions {
+    vulns: boolean;
+    secrets: boolean;
+    misconfig: boolean;
+}
+
+/** Combined result of a node-wide scan (images for vuln/secret + stacks for misconfig). */
+export interface ScanNodeResult {
+    /** Image scan totals, or null when neither vuln nor secret scanning ran. */
+    images: ScanAllNodeImagesResult | null;
+    /** Stack misconfig totals, or null when misconfig scanning did not run. */
+    stacks: { scanned: number; failed: number; total: number } | null;
+    /** Severity totals across images AND stacks (a superset of `images.severity`). */
+    severity: ScanAllNodeImagesSeverityTotals;
+    /** Policy violations; only image scans contribute, stacks never do. */
+    violations: ScanAllNodeImagesViolation[];
+}
+
 export interface TrivyVulnerability {
     vulnerabilityId: string;
     pkgName: string;
@@ -347,6 +366,9 @@ class TrivyService {
     private binaryPath: string | null = null;
     private source: TrivySource = 'none';
     private scanningImages: Set<string> = new Set();
+    // Per-node lock so two node-wide scans (or a node scan and the scheduled
+    // sweep) never overlap an expensive Trivy run on the same node.
+    private scanningNodes: Set<number> = new Set();
     private cacheDirEnsured: string | null = null;
     private detectionTimestamp = 0;
 
@@ -1033,13 +1055,34 @@ class TrivyService {
         }
     }
 
+    /**
+     * Vuln-only image sweep for the scheduler. Thin compatibility wrapper over
+     * the generalized image loop; the signature, semantics, limits, cache, and
+     * ScanAllNodeImagesResult shape are unchanged.
+     */
     async scanAllNodeImages(
         nodeId: number,
         triggeredBy: VulnScanTrigger = 'scheduled',
     ): Promise<ScanAllNodeImagesResult> {
+        return this.scanNodeImages(nodeId, triggeredBy, ['vuln']);
+    }
+
+    /**
+     * Scan every image on a node with the given scanners, reusing the digest
+     * cache (keyed by the scanner set), throttle, and image/duration caps. Emits
+     * one sanitized progress line per image when `onProgress` is supplied. A
+     * failed image increments `failed` and does not abort the batch.
+     */
+    private async scanNodeImages(
+        nodeId: number,
+        triggeredBy: VulnScanTrigger,
+        scanners: readonly TrivyScanner[],
+        onProgress?: (line: string) => void,
+    ): Promise<ScanAllNodeImagesResult> {
         if (this.source === 'none') {
             throw new Error('Trivy is not available on this host');
         }
+        const scannersUsed = normalizeScanners(scanners).join(',');
         const batchStartedAt = Date.now();
         const images = await DockerController.getInstance(nodeId).getImages();
         const imageRefs = new Set<string>();
@@ -1106,27 +1149,31 @@ class TrivyService {
                 break;
             }
             processedImages++;
+            onProgress?.(`scanning ${ref}`);
             try {
                 const digest = await this.getImageDigest(ref, nodeId);
                 if (digest) {
                     if (countedDigests.has(digest)) continue;
                     const cached =
-                        DatabaseService.getInstance().getLatestScanByDigest(digest, 'vuln');
+                        DatabaseService.getInstance().getLatestScanByDigest(digest, scannersUsed);
                     if (cached && Date.now() - cached.scanned_at < DIGEST_CACHE_TTL_MS) {
                         skipped++;
                         addSeverity(cached);
                         collectViolation(cached);
                         countedDigests.add(digest);
+                        onProgress?.(`${ref}: cached (${cached.critical_count}C ${cached.high_count}H)`);
                         continue;
                     }
                 }
-                const fresh = await this.runScanAndPersist(ref, nodeId, triggeredBy, null);
+                const fresh = await this.runScanAndPersist(ref, nodeId, triggeredBy, null, { scanners });
                 addSeverity(fresh);
                 collectViolation(fresh);
                 scanned++;
                 if (digest) countedDigests.add(digest);
+                onProgress?.(`${ref}: ${fresh.critical_count}C ${fresh.high_count}H${fresh.secret_count ? ` ${fresh.secret_count} secret` : ''}`);
             } catch (err) {
                 failed++;
+                onProgress?.(`${ref}: scan failed`);
                 console.warn(`[Trivy] Failed to scan ${ref}:`, getErrorMessage(err, 'unknown error'));
             }
             await new Promise((r) => setTimeout(r, 300));
@@ -1147,6 +1194,84 @@ class TrivyService {
             severity,
             violations,
         };
+    }
+
+    /**
+     * On-demand node-wide scan: images for the selected scanners (vuln/secret)
+     * and, when requested, every stack's compose config for misconfigurations.
+     * Streams sanitized progress lines via `onProgress`. A per-node lock prevents
+     * an overlapping sweep; a failed image/stack is counted, not fatal.
+     */
+    async scanNode(
+        nodeId: number,
+        opts: ScanNodeOptions,
+        triggeredBy: VulnScanTrigger = 'manual',
+        onProgress?: (line: string) => void,
+    ): Promise<ScanNodeResult> {
+        if (this.source === 'none') {
+            throw new Error('Trivy is not available on this host');
+        }
+        if (!opts.vulns && !opts.secrets && !opts.misconfig) {
+            throw new Error('Select at least one scan type');
+        }
+        if (this.scanningNodes.has(nodeId)) {
+            throw new Error('Already scanning this node');
+        }
+        this.scanningNodes.add(nodeId);
+        const severity = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+        const addSeverity = (s: { critical: number; high: number; medium: number; low: number; unknown: number }): void => {
+            severity.critical += s.critical;
+            severity.high += s.high;
+            severity.medium += s.medium;
+            severity.low += s.low;
+            severity.unknown += s.unknown;
+        };
+        const violations: ScanAllNodeImagesViolation[] = [];
+        let images: ScanAllNodeImagesResult | null = null;
+        let stacks: { scanned: number; failed: number; total: number } | null = null;
+        try {
+            const scanners: TrivyScanner[] = [];
+            if (opts.vulns) scanners.push('vuln');
+            if (opts.secrets) scanners.push('secret');
+
+            if (scanners.length > 0) {
+                images = await this.scanNodeImages(nodeId, triggeredBy, scanners, onProgress);
+                addSeverity(images.severity);
+                violations.push(...images.violations);
+            }
+
+            if (opts.misconfig) {
+                const stackNames = await FileSystemService.getInstance(nodeId).getStacks();
+                let scanned = 0;
+                let failed = 0;
+                for (const name of stackNames) {
+                    onProgress?.(`scanning stack:${name}`);
+                    try {
+                        const row = await this.scanComposeStack(nodeId, name, triggeredBy);
+                        addSeverity({
+                            critical: row.critical_count, high: row.high_count, medium: row.medium_count,
+                            low: row.low_count, unknown: row.unknown_count,
+                        });
+                        scanned++;
+                        onProgress?.(`stack:${name}: ${row.misconfig_count} misconfigurations`);
+                    } catch (err) {
+                        failed++;
+                        onProgress?.(`stack:${name}: scan failed`);
+                        console.warn(`[Trivy] Failed to scan stack ${name}:`, getErrorMessage(err, 'unknown error'));
+                    }
+                }
+                stacks = { scanned, failed, total: stackNames.length };
+            }
+
+            const imagePart = images
+                ? `${images.scanned} scanned / ${images.skipped} cached / ${images.failed} failed images`
+                : 'images skipped';
+            const stackPart = stacks ? `, ${stacks.scanned} stacks (${stacks.failed} failed)` : '';
+            onProgress?.(`Scan complete: ${imagePart}${stackPart}`);
+            return { images, stacks, severity, violations };
+        } finally {
+            this.scanningNodes.delete(nodeId);
+        }
     }
 
     async generateSBOM(imageRef: string, format: SbomFormat): Promise<string> {
