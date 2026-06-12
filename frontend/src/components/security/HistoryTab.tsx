@@ -79,8 +79,14 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
         return;
       }
       const data = await res.json();
-      setScans(Array.isArray(data.items) ? data.items : []);
-      setTotal(typeof data.total === 'number' ? data.total : 0);
+      if (!data || !Array.isArray(data.items)) {
+        // A 200 with an unexpected shape must surface as an error, not as an
+        // empty "no completed scans yet" state.
+        setError(true);
+        return;
+      }
+      setScans(data.items);
+      setTotal(typeof data.total === 'number' ? data.total : data.items.length);
     } catch (err) {
       console.error('[Security] Failed to load scan history:', err);
       toast.error('Failed to load scan history');

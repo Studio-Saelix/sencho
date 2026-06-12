@@ -141,4 +141,11 @@ describe('HistoryTab', () => {
     render(<HistoryTab onInspect={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/Couldn't load scan history/)).toBeInTheDocument());
   });
+
+  it('treats a malformed 200 response (no items array) as an error, not an empty list', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ oops: true }) } as unknown as Response);
+    render(<HistoryTab onInspect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/Couldn't load scan history/)).toBeInTheDocument());
+    expect(screen.queryByText(/No completed scans yet/)).not.toBeInTheDocument();
+  });
 });

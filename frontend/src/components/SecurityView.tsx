@@ -26,6 +26,19 @@ import { ScanPolicyManager } from './security/ScanPolicyManager';
 import { ScannerSetupTab } from './security/ScannerSetupTab';
 import { HistoryTab } from './security/HistoryTab';
 
+/** A /security/image-summaries 200 body must be a map of scan summaries. An
+ *  unexpected shape is treated as an error, never as a benign "no findings". An
+ *  empty object is valid (a node with no scans yet). */
+function isScanSummaryMap(v: unknown): v is Record<string, ScanSummary> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  return Object.values(v).every(
+    (s) =>
+      !!s && typeof s === 'object'
+      && typeof (s as ScanSummary).image_ref === 'string'
+      && typeof (s as ScanSummary).scan_id === 'number',
+  );
+}
+
 interface SecurityViewProps {
   activeTab: SecurityTab;
   onTabChange: (tab: SecurityTab) => void;
@@ -74,11 +87,18 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
       setSummariesLoading(true);
       setOverviewLoadError(null);
       setSummariesError(false);
+      // The trend chart is non-critical: isolate its fetch entirely (transport
+      // failure included, not just a non-OK/malformed body) so it can never
+      // poison the overview/summaries error state. It degrades to an empty chart
+      // with its own "no history" message.
+      const trendPromise: Promise<SecurityRiskTrendPoint[]> = apiFetch('/security/overview/trend')
+        .then((r) => (r.ok ? r.json() : []))
+        .then((t) => (Array.isArray(t) ? t : []))
+        .catch(() => []);
       try {
-        const [overviewRes, summariesRes, trendRes] = await Promise.all([
+        const [overviewRes, summariesRes] = await Promise.all([
           apiFetch('/security/overview'),
           apiFetch('/security/image-summaries'),
-          apiFetch('/security/overview/trend'),
         ]);
         if (cancelled) return;
         if (overviewRes.ok) {
@@ -92,21 +112,18 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
         }
         if (summariesRes.ok) {
           const body = await summariesRes.json();
-          setSummaries(body && typeof body === 'object' ? body : {});
+          if (isScanSummaryMap(body)) {
+            setSummaries(body);
+          } else {
+            // A 200 with an unexpected shape must not read as "no findings".
+            setSummaries({});
+            setSummariesError(true);
+            console.warn('[Security] image-summaries returned an unexpected shape');
+          }
         } else {
           setSummaries({});
           setSummariesError(true);
           console.warn('[Security] image-summaries request failed:', summariesRes.status);
-        }
-        // The trend chart is non-critical: a failed OR malformed trend response
-        // leaves it empty (the chart shows its own "no history" state). Parse it
-        // in isolation so a bad trend body can never poison the overview/summaries
-        // error state or crash the chart with a non-array value.
-        try {
-          const t = trendRes.ok ? await trendRes.json() : [];
-          if (!cancelled) setTrend(Array.isArray(t) ? t : []);
-        } catch {
-          if (!cancelled) setTrend([]);
         }
       } catch (err) {
         if (cancelled) return;
@@ -115,10 +132,11 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
         setOverviewLoadError('failed');
         setSummaries({});
         setSummariesError(true);
-        setTrend([]);
       } finally {
         if (!cancelled) setSummariesLoading(false);
       }
+      const trend = await trendPromise;
+      if (!cancelled) setTrend(trend);
     })();
     return () => { cancelled = true; };
   }, [activeNode?.id]);

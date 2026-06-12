@@ -68,9 +68,9 @@ export function useImageScan({ onComplete, onSummaries }: UseImageScanOptions) {
           }
           const pollData = await poll.json();
           if (signal.aborted) return;
-          if (pollData.status !== 'in_progress') {
-            if (pollData.status === 'failed') throw new Error(pollData.error || 'Scan failed');
-            toast.success(`Scan complete: ${pollData.total_vulnerabilities} vulnerabilities found`);
+          if (pollData.status === 'in_progress') continue;
+          if (pollData.status === 'completed') {
+            toast.success(`Scan complete: ${pollData.total_vulnerabilities ?? 0} vulnerabilities found`);
             onComplete(scanId);
             const summariesRes = await apiFetch('/security/image-summaries', { signal });
             if (signal.aborted) return;
@@ -78,9 +78,15 @@ export function useImageScan({ onComplete, onSummaries }: UseImageScanOptions) {
               const summaries = await summariesRes.json();
               if (signal.aborted) return;
               onSummaries(summaries ?? {});
+            } else {
+              // The scan succeeded; only the summaries refresh failed. Keep the
+              // table from silently going stale by surfacing it.
+              console.warn('[Security] image-summaries refresh after scan failed:', summariesRes.status);
             }
             return;
           }
+          // 'failed' or any unexpected/malformed status: never read as success.
+          throw new Error(pollData.error || `Scan failed (status: ${pollData.status ?? 'unknown'})`);
         }
         throw new Error('Scan timed out');
       } catch (error) {
