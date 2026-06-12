@@ -3,7 +3,7 @@ title: "Fleet Actions"
 description: "Bulk operations across the fleet from one tab: stop stacks by label, replace labels on a batch of stacks, and reclaim Docker disk space on every node."
 ---
 
-The **Fleet Actions** tab on the Fleet view groups bulk operations that touch more than a single stack on a single node. Each action lives in its own card, runs from the control instance, and reports per-node and per-stack results inline so you never have to click through a modal to learn what happened.
+The **Actions** tab on the Fleet view groups bulk operations that touch more than a single stack on a single node. Each action lives in its own card, runs from the control instance, and reports per-node and per-stack results inline so you never have to click through a modal to learn what happened.
 
 Three cards ship today: **Stop fleet by label**, **Bulk label assign**, and **Prune Docker resources fleet-wide**.
 
@@ -45,7 +45,7 @@ Stop every stack that carries a given label name on every node where that label 
 
 ### Step by step
 
-1. Open **Fleet → Fleet Actions**.
+1. Open **Fleet → Actions**.
 2. Type a label name in the **Label name** field. The input autocompletes against label names that already exist on any **online** node; an offline node with an unseen label still receives the request, it just won't show up in the suggestions.
 3. Click **Stop matching stacks**.
 4. A confirmation appears with the kicker **Fleet stop** and the title `Stop all stacks labeled "<name>"?`. Click **Stop fleet** to commit.
@@ -207,5 +207,5 @@ Fleet Actions is one slice of the Fleet view. Each adjacent surface answers a di
 | [Fleet Federation](/features/fleet-federation) | Operator-driven placement controls (cordon, pin) for [Blueprints](/features/blueprint-model). | Federation steers declarative placement; Fleet Actions runs imperative operations on what already exists. |
 | [Fleet Sync](/features/fleet-sync) | Push-only replication of security rules from a control instance to its replicas. | Fleet Sync replicates state; Fleet Actions runs operations. |
 | [Multi-Node Management](/features/multi-node) | How nodes get added to the fleet (proxy or pilot mode) and how the license tier propagates. | Multi-Node Management is the prerequisite; Fleet Actions runs against whatever Multi-Node Management already configured. |
-| [Fleet View](/features/fleet-view) | The masthead, tab strip, and node grid that host the Fleet Actions tab. | Fleet Actions is one tab inside Fleet View. |
+| [Fleet View](/features/fleet-view) | The masthead, tab strip, and node grid that host the Actions tab. | Fleet Actions is one tab inside Fleet View. |
 | [Licensing](/features/licensing) | The full tier matrix and what each tier unlocks. | Licensing covers tier coverage across the product; Fleet Actions only cites the admin role check above. |

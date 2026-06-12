@@ -23,9 +23,36 @@ function props(overrides: Partial<React.ComponentProps<typeof OverviewToolbar>> 
 }
 
 describe('OverviewToolbar', () => {
-  it('shows search and sort controls in grid mode', () => {
+  it('collapses the search to an icon button by default and expands it on click', () => {
     render(<OverviewToolbar {...props()} />);
+    expect(screen.queryByPlaceholderText('Search nodes or stacks...')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Search nodes or stacks' }));
     expect(screen.getByPlaceholderText('Search nodes or stacks...')).toBeInTheDocument();
+  });
+
+  it('renders the search expanded when a query is already active', () => {
+    render(<OverviewToolbar {...props({ searchQuery: 'plex' })} />);
+    expect(screen.getByDisplayValue('plex')).toBeInTheDocument();
+  });
+
+  it('focuses the input when the search expands', () => {
+    render(<OverviewToolbar {...props()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Search nodes or stacks' }));
+    expect(screen.getByPlaceholderText('Search nodes or stacks...')).toHaveFocus();
+  });
+
+  it('collapses back to the icon button on blur when the query is empty', () => {
+    render(<OverviewToolbar {...props()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Search nodes or stacks' }));
+    fireEvent.blur(screen.getByPlaceholderText('Search nodes or stacks...'));
+    expect(screen.queryByPlaceholderText('Search nodes or stacks...')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Search nodes or stacks' })).toBeInTheDocument();
+  });
+
+  it('stays expanded on blur while a query is active', () => {
+    render(<OverviewToolbar {...props({ searchQuery: 'plex' })} />);
+    fireEvent.blur(screen.getByPlaceholderText('Search nodes or stacks...'));
+    expect(screen.getByDisplayValue('plex')).toBeInTheDocument();
   });
 
   it('hides grid controls in topology mode', () => {
@@ -33,9 +60,10 @@ describe('OverviewToolbar', () => {
     expect(screen.queryByPlaceholderText('Search nodes or stacks...')).not.toBeInTheDocument();
   });
 
-  it('forwards search input changes', () => {
+  it('forwards search input changes once expanded', () => {
     const onSearchQueryChange = vi.fn();
     render(<OverviewToolbar {...props({ onSearchQueryChange })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Search nodes or stacks' }));
     fireEvent.change(screen.getByPlaceholderText('Search nodes or stacks...'), { target: { value: 'web' } });
     expect(onSearchQueryChange).toHaveBeenCalledWith('web');
   });
@@ -52,5 +80,17 @@ describe('OverviewToolbar', () => {
     render(<OverviewToolbar {...props()} />);
     fireEvent.click(screen.getByRole('button', { name: /Filters/ }));
     expect(screen.queryByText('Tags')).not.toBeInTheDocument();
+  });
+
+  it('renders the Add node button and fires onAddNode when provided', () => {
+    const onAddNode = vi.fn();
+    render(<OverviewToolbar {...props({ onAddNode })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add node' }));
+    expect(onAddNode).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the Add node button when onAddNode is not provided', () => {
+    render(<OverviewToolbar {...props()} />);
+    expect(screen.queryByRole('button', { name: 'Add node' })).not.toBeInTheDocument();
   });
 });
