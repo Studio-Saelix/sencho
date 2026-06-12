@@ -89,6 +89,22 @@ describe('networking summary', () => {
     expect(res.body.unknownExposure.stacks).not.toContain(STACK);
   });
 
+  it('a service-level intent on the only publishing service drops it from unknown-exposure', async () => {
+    // No stack-level row; classifying the publishing service is enough.
+    DatabaseService.getInstance().setStackExposureIntent(1, STACK, 'web', 'public', 'admin');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unknownExposure.stacks).not.toContain(STACK);
+  });
+
+  it('keeps the stack unknown when only some publishing services are classified', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "8080:80"\n  api:\n    image: nginx:latest\n    ports:\n      - "9090:90"\n');
+    // web classified, api still unset, so the stack remains effectively unknown.
+    DatabaseService.getInstance().setStackExposureIntent(1, STACK, 'web', 'public', 'admin');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+  });
+
   it('the fleet aggregate returns a per-node summary for the hub', async () => {
     const res = await request(app).get('/api/fleet/networking-summary').set('Authorization', authHeader);
     expect(res.status).toBe(200);

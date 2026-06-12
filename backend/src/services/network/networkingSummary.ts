@@ -64,9 +64,18 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
     if (declared.services.some(s => s.ports.some(p => !isLoopback(p.hostIp)))) exposed.push(stack);
 
     if (publishesPort) {
+      // Unknown only when a publishing service is effectively unclassified: a
+      // service-level intent overrides the stack-level row for that service.
       const intents = db.getStackExposureIntents(nodeId, stack);
       const stackIntent = intents.find(i => i.service === '')?.intent ?? null;
-      if (stackIntent === null || stackIntent === 'unknown') unknownExposure.push(stack);
+      const byService = new Map(intents.filter(i => i.service !== '').map(i => [i.service, i.intent]));
+      const anyUnclassified = declared.services
+        .filter(s => s.ports.length > 0)
+        .some(s => {
+          const intent = byService.get(s.name) ?? stackIntent;
+          return intent === null || intent === 'unknown';
+        });
+      if (anyUnclassified) unknownExposure.push(stack);
     }
 
     if (snapshot) {

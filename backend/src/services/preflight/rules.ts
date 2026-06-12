@@ -572,8 +572,16 @@ const exposureUnclassified: PreflightRule = {
   id: 'exposure-unclassified',
   run(ctx) {
     if (!ctx.model) return [];
-    if (!ctx.model.services.some(s => s.ports.length > 0)) return [];
-    if (ctx.stackIntent !== null && ctx.stackIntent !== 'unknown') return [];
+    const publishing = ctx.model.services.filter(s => s.ports.length > 0);
+    if (publishing.length === 0) return [];
+    // Fire only when a publishing service is still effectively unclassified: a
+    // service-level intent suppresses the warning for that service even when the
+    // stack itself is unset.
+    const unclassified = publishing.some(s => {
+      const intent = effectiveIntent(ctx, s.name);
+      return intent === null || intent === 'unknown';
+    });
+    if (!unclassified) return [];
     return [{
       ruleId: 'exposure-unclassified',
       severity: 'warning',

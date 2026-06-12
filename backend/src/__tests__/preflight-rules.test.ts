@@ -266,6 +266,13 @@ describe('exposure-intent rules', () => {
     expect(ids(runRules(ctx({ model: withPort(), stackIntent: 'unknown' })), 'exposure-unclassified')).toHaveLength(1);
     expect(ids(runRules(ctx({ model: withPort(), stackIntent: 'lan' })), 'exposure-unclassified')).toHaveLength(0);
   });
+  it('lets a service-level intent suppress the unclassified warning even when the stack is unset', () => {
+    // web is the only publishing service; classifying it removes the gap.
+    expect(ids(runRules(ctx({ model: withPort(), stackIntent: null, serviceIntents: { web: 'public' } })), 'exposure-unclassified')).toHaveLength(0);
+  });
+  it('still warns when a publishing service is explicitly unknown over a classified stack', () => {
+    expect(ids(runRules(ctx({ model: withPort(), stackIntent: 'public', serviceIntents: { web: 'unknown' } })), 'exposure-unclassified')).toHaveLength(1);
+  });
   it('does not warn unclassified when no port is published', () => {
     expect(ids(runRules(ctx({ model: model([svc()]), stackIntent: null })), 'exposure-unclassified')).toHaveLength(0);
   });
