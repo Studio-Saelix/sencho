@@ -59,6 +59,7 @@ export type SectionId =
     | 'data-retention'
     | 'nodes'
     | 'app-store'
+    | 'stacks'
     | 'notification-routing'
     | 'recovery'
     | 'support'

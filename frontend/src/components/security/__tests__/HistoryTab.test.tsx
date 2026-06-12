@@ -125,11 +125,11 @@ describe('HistoryTab', () => {
     expect(screen.getByRole('button', { name: /Compare \(2\/2\)/ })).toBeInTheDocument();
   });
 
-  it('searches by image on Enter, adding imageRefLike to the request', async () => {
+  it('searches by image as you type (no Enter), adding imageRefLike to the request', async () => {
     mockedFetch.mockResolvedValue(listResponse([scan({ image_ref: 'alpine:3.19' })]));
     render(<HistoryTab onInspect={vi.fn()} />);
     await waitFor(() => expect(screen.getByText('alpine:3.19')).toBeInTheDocument());
-    await userEvent.type(screen.getByPlaceholderText('Search by image...'), 'redis{Enter}');
+    await userEvent.type(screen.getByPlaceholderText('Search by image...'), 'redis');
     await waitFor(() => {
       const calls = mockedFetch.mock.calls.map((c) => c[0] as string);
       expect(calls.some((u) => u.includes('imageRefLike=redis'))).toBe(true);

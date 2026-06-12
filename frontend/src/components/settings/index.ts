@@ -10,6 +10,7 @@ export { NotificationsSection } from './NotificationsSection';
 export { DeveloperSection } from './DeveloperSection';
 export { DataRetentionSection } from './DataRetentionSection';
 export { AppStoreSection } from './AppStoreSection';
+export { StacksSection } from './StacksSection';
 export { SupportSection } from './SupportSection';
 export { AboutSection } from './AboutSection';
 export { RecoverySection } from './RecoverySection';
@@ -30,6 +31,7 @@ export {
     getSettingsGroup,
     isItemVisible,
     isItemLocked,
+    scopeLabel,
 } from './registry';
 export type {
     SettingsGroupId,
