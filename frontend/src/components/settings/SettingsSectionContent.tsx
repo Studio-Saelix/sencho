@@ -13,6 +13,7 @@ import {
     DeveloperSection,
     DataRetentionSection,
     AppStoreSection,
+    StacksSection,
     SupportSection,
     AboutSection,
     RecoverySection,
@@ -90,6 +91,7 @@ function renderSection(
         case 'data-retention': return <DataRetentionSection onDirtyChange={(d) => onDirtyChange('data-retention', d)} />;
         case 'nodes': return <NodeManager />;
         case 'app-store': return <AppStoreSection />;
+        case 'stacks': return <StacksSection />;
         case 'recovery': return <RecoverySection />;
         case 'support': return <SupportSection />;
         case 'about': return <AboutSection />;
