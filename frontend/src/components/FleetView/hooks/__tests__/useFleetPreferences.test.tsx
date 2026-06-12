@@ -12,7 +12,7 @@ describe('useFleetPreferences', () => {
   it('starts from defaults when nothing is stored', () => {
     const { result } = renderHook(() => useFleetPreferences());
     expect(result.current.prefs).toEqual({
-      sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false,
+      sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all',
     });
   });
 
