@@ -10,16 +10,13 @@ import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/comp
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { ShieldCheck, Plus, Trash2, Pencil, Info } from 'lucide-react';
-import { SettingsCallout } from './SettingsCallout';
-import { SettingsPrimaryButton } from './SettingsActions';
-import { useMastheadStats } from './MastheadStatsContext';
-import type { FleetRole, ScanPolicy, VulnSeverity } from '@/types/security';
+import { SettingsCallout } from '@/components/settings/SettingsCallout';
+import { SettingsPrimaryButton } from '@/components/settings/SettingsActions';
 import { useNodes } from '@/context/NodeContext';
-import { useTrivyStatus } from '@/hooks/useTrivyStatus';
-import { TrivyManager } from '@/components/security/TrivyManager';
-import { SuppressionsPanel } from './SuppressionsPanel';
-import { MisconfigAckPanel } from './MisconfigAckPanel';
 import { useAuth } from '@/context/AuthContext';
+import { useLicense } from '@/context/LicenseContext';
+import { useTrivyStatus } from '@/hooks/useTrivyStatus';
+import type { FleetRole, ScanPolicy, VulnSeverity } from '@/types/security';
 
 const SEVERITY_OPTIONS: Array<{ value: VulnSeverity; label: string }> = [
   { value: 'CRITICAL', label: 'Critical' },
@@ -44,8 +41,22 @@ const EMPTY_FORM: PolicyFormState = {
   enabled: true,
 };
 
-export function SecuritySection({ isPaid }: { isPaid: boolean }) {
+/**
+ * Deploy-enforcement scan policies (block-on-deploy severity thresholds), the
+ * honor-suppressions toggle, and the replica "managed by control" state. This
+ * is the paid governance surface for the Security page Policies tab; it returns
+ * null for Community (no enforcement management) so the catalog is all a
+ * Community operator sees. Policies are control-governed: fetched localOnly and
+ * shown only on the local node, mirroring how the rest of the fleet-governance
+ * UI behaves.
+ */
+export function ScanPolicyManager() {
+  const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
+  const { activeNode } = useNodes();
+  const isRemote = activeNode?.type === 'remote';
+  const { status: trivy, refresh: refreshTrivy } = useTrivyStatus();
+
   const [policies, setPolicies] = useState<ScanPolicy[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -53,35 +64,12 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
   const [form, setForm] = useState<PolicyFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
-
-  const { activeNode } = useNodes();
-  const isRemote = activeNode?.type === 'remote';
-  const { status: trivy, updateCheck, refresh: refreshTrivy, refreshUpdateCheck } = useTrivyStatus();
   const [honorBusy, setHonorBusy] = useState(false);
   const [fleetRole, setFleetRole] = useState<FleetRole>('control');
   const [fleetRoleProbeFailed, setFleetRoleProbeFailed] = useState(false);
   const [demoteConfirm, setDemoteConfirm] = useState(false);
   const [demoteBusy, setDemoteBusy] = useState(false);
   const isReplica = fleetRole === 'replica';
-
-  const handleHonorSuppressionsToggle = async (enabled: boolean) => {
-    setHonorBusy(true);
-    try {
-      const res = await apiFetch('/security/deploy-block-honor-suppressions', {
-        method: 'PUT',
-        body: JSON.stringify({ enabled }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.error || 'Failed to update setting');
-      }
-      await refreshTrivy();
-    } catch (err) {
-      toast.error((err as Error)?.message || 'Failed to update setting');
-    } finally {
-      setHonorBusy(false);
-    }
-  };
 
   const fetchPolicies = async () => {
     try {
@@ -99,17 +87,17 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
   };
 
   useEffect(() => {
-    if (!isPaid) { setLoading(false); return; }
-    if (isRemote) { setPolicies([]); setLoading(false); return; }
+    if (!isPaid || isRemote) { setLoading(false); return; }
     fetchPolicies();
   }, [isPaid, isRemote]);
 
   useEffect(() => {
+    if (!isPaid || isRemote) return;
     void refreshTrivy();
-  }, [activeNode?.id, refreshTrivy]);
+  }, [isPaid, isRemote, activeNode?.id, refreshTrivy]);
 
   useEffect(() => {
-    if (isRemote) return;
+    if (!isPaid || isRemote) return;
     let cancelled = false;
     (async () => {
       try {
@@ -131,7 +119,26 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [isRemote]);
+  }, [isPaid, isRemote]);
+
+  const handleHonorSuppressionsToggle = async (enabled: boolean) => {
+    setHonorBusy(true);
+    try {
+      const res = await apiFetch('/security/deploy-block-honor-suppressions', {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to update setting');
+      }
+      await refreshTrivy();
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Failed to update setting');
+    } finally {
+      setHonorBusy(false);
+    }
+  };
 
   const handleDemote = async () => {
     setDemoteBusy(true);
@@ -229,27 +236,35 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
     }
   };
 
-  useMastheadStats(
-    loading
-      ? null
-      : [
-          ...(isPaid ? [{ label: 'POLICIES', value: `${policies.length}` }] : []),
-          {
-            label: 'TRIVY',
-            value: trivy.source === 'none' ? 'missing' : trivy.source,
-            tone: trivy.source === 'none' ? 'warn' : 'value' as const,
-          },
-        ],
-  );
+  // Enforcement management is a paid governance surface; Community sees only the
+  // policy-pack catalog above it.
+  if (!isPaid) return null;
 
   return (
-    <div className="space-y-6">
-      {isPaid && isAdmin && !isRemote && !isReplica && (
-        <div className="flex justify-end">
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">Deploy enforcement policies</h3>
+        {isAdmin && !isRemote && !isReplica && (
           <SettingsPrimaryButton size="sm" onClick={openCreate}>
             <Plus className="w-4 h-4" />
             Add policy
           </SettingsPrimaryButton>
+        )}
+      </div>
+
+      {isRemote && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-start gap-2 rounded-lg border border-card-border bg-muted/30 px-4 py-3"
+        >
+          <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} aria-hidden="true" />
+          <div className="text-sm">
+            <div className="font-medium">Managed on the local instance</div>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Scan policies are managed on the local Sencho instance. Switch to the local node to manage them.
+            </p>
+          </div>
         </div>
       )}
 
@@ -296,29 +311,6 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
         </div>
       )}
 
-      <TrivyManager
-        status={trivy}
-        updateCheck={updateCheck}
-        refresh={refreshTrivy}
-        refreshUpdateCheck={refreshUpdateCheck}
-      />
-
-      {isRemote && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="flex items-start gap-2 rounded-lg border border-card-border bg-muted/30 px-4 py-3"
-        >
-          <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} aria-hidden="true" />
-          <div className="text-sm">
-            <div className="font-medium">Scanner is per-node</div>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Trivy is installed independently on each Sencho instance. Scan policies and CVE suppressions are managed on the control node.
-            </p>
-          </div>
-        </div>
-      )}
-
       {!isRemote && loading && (
         <div className="space-y-3">
           <Skeleton className="h-20 w-full rounded-lg" />
@@ -326,7 +318,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
         </div>
       )}
 
-      {isPaid && !isRemote && !loading && policies.length === 0 && (
+      {!isRemote && !loading && policies.length === 0 && (
         <SettingsCallout
           icon={<ShieldCheck className="h-4 w-4" />}
           title="No scan policies configured"
@@ -334,7 +326,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
         />
       )}
 
-      {isPaid && !isRemote && !loading &&
+      {!isRemote && !loading &&
         policies.map((policy) => (
           <div key={policy.id} className="border border-glass-border rounded-lg p-4 space-y-3">
             <div className="flex items-center justify-between gap-3">
@@ -386,7 +378,7 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
           </div>
         ))}
 
-      {isPaid && isAdmin && !isRemote && (
+      {isAdmin && !isRemote && (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-4 py-3">
           <div className="min-w-0">
             <Label className="text-sm">Honor suppressions in deploy blocks</Label>
@@ -402,100 +394,92 @@ export function SecuritySection({ isPaid }: { isPaid: boolean }) {
         </div>
       )}
 
-      {!isRemote && <SuppressionsPanel isReplica={isReplica} />}
-
-      {!isRemote && <MisconfigAckPanel isReplica={isReplica} />}
-
-      {isPaid && (
-        <>
-          <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
-            <ModalHeader
-              kicker={editingId ? 'SECURITY · EDIT POLICY' : 'SECURITY · NEW POLICY'}
-              title={editingId ? 'Edit policy' : 'New policy'}
-              description="Configure the severity threshold and scope for this scan policy."
+      <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
+        <ModalHeader
+          kicker={editingId ? 'SECURITY · EDIT POLICY' : 'SECURITY · NEW POLICY'}
+          title={editingId ? 'Edit policy' : 'New policy'}
+          description="Configure the severity threshold and scope for this scan policy."
+        />
+        <ModalBody>
+          <div className="space-y-2">
+            <Label htmlFor="policy-name">Name</Label>
+            <Input
+              id="policy-name"
+              placeholder="Production block on critical"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
             />
-            <ModalBody>
-              <div className="space-y-2">
-                <Label htmlFor="policy-name">Name</Label>
-                <Input
-                  id="policy-name"
-                  placeholder="Production block on critical"
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="policy-pattern">Stack pattern (optional)</Label>
-                <Input
-                  id="policy-pattern"
-                  placeholder="e.g. prod-* or leave blank for all"
-                  value={form.stack_pattern}
-                  onChange={(e) => setForm({ ...form, stack_pattern: e.target.value })}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Glob-style pattern matched against stack names. Leave blank to apply to all stacks.
-                </p>
-              </div>
-              <div className="space-y-2">
-                <Label>Max severity</Label>
-                <Combobox
-                  options={SEVERITY_OPTIONS}
-                  value={form.max_severity}
-                  onValueChange={(v) => setForm({ ...form, max_severity: v as VulnSeverity })}
-                />
-              </div>
-              <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
-                <div>
-                  <Label className="text-sm">Block on deploy</Label>
-                  <p className="text-xs text-muted-foreground">
-                    Reject a deploy before containers start when any image meets or exceeds the threshold. With this off, the policy only evaluates and raises an alert.
-                  </p>
-                </div>
-                <TogglePill
-                  checked={form.block_on_deploy}
-                  onChange={(c) => setForm({ ...form, block_on_deploy: c })}
-                />
-              </div>
-              <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
-                <div>
-                  <Label className="text-sm">Enabled</Label>
-                  <p className="text-xs text-muted-foreground">Disabled policies are skipped during evaluation.</p>
-                </div>
-                <TogglePill
-                  checked={form.enabled}
-                  onChange={(c) => setForm({ ...form, enabled: c })}
-                />
-              </div>
-            </ModalBody>
-            <ModalFooter
-              secondary={
-                <Button variant="outline" size="sm" onClick={() => setDialogOpen(false)}>
-                  Cancel
-                </Button>
-              }
-              primary={
-                <SettingsPrimaryButton size="sm" onClick={handleSave} disabled={saving}>
-                  {saving ? 'Saving...' : editingId ? 'Update' : 'Create'}
-                </SettingsPrimaryButton>
-              }
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="policy-pattern">Stack pattern (optional)</Label>
+            <Input
+              id="policy-pattern"
+              placeholder="e.g. prod-* or leave blank for all"
+              value={form.stack_pattern}
+              onChange={(e) => setForm({ ...form, stack_pattern: e.target.value })}
             />
-          </Modal>
-
-          <ConfirmModal
-            open={deleteId != null}
-            onOpenChange={(open) => !open && setDeleteId(null)}
-            variant="destructive"
-            kicker="SECURITY · DELETE · IRREVERSIBLE"
-            title="Delete scan policy"
-            confirmLabel="Delete"
-            onConfirm={handleDelete}
-          >
-            <p className="text-sm text-stat-subtitle">
-              Removes the policy immediately. Existing scans are not affected.
+            <p className="text-xs text-muted-foreground">
+              Glob-style pattern matched against stack names. Leave blank to apply to all stacks.
             </p>
-          </ConfirmModal>
-        </>
-      )}
+          </div>
+          <div className="space-y-2">
+            <Label>Max severity</Label>
+            <Combobox
+              options={SEVERITY_OPTIONS}
+              value={form.max_severity}
+              onValueChange={(v) => setForm({ ...form, max_severity: v as VulnSeverity })}
+            />
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
+            <div>
+              <Label className="text-sm">Block on deploy</Label>
+              <p className="text-xs text-muted-foreground">
+                Reject a deploy before containers start when any image meets or exceeds the threshold. With this off, the policy only evaluates and raises an alert.
+              </p>
+            </div>
+            <TogglePill
+              checked={form.block_on_deploy}
+              onChange={(c) => setForm({ ...form, block_on_deploy: c })}
+            />
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
+            <div>
+              <Label className="text-sm">Enabled</Label>
+              <p className="text-xs text-muted-foreground">Disabled policies are skipped during evaluation.</p>
+            </div>
+            <TogglePill
+              checked={form.enabled}
+              onChange={(c) => setForm({ ...form, enabled: c })}
+            />
+          </div>
+        </ModalBody>
+        <ModalFooter
+          secondary={
+            <Button variant="outline" size="sm" onClick={() => setDialogOpen(false)}>
+              Cancel
+            </Button>
+          }
+          primary={
+            <SettingsPrimaryButton size="sm" onClick={handleSave} disabled={saving}>
+              {saving ? 'Saving...' : editingId ? 'Update' : 'Create'}
+            </SettingsPrimaryButton>
+          }
+        />
+      </Modal>
+
+      <ConfirmModal
+        open={deleteId != null}
+        onOpenChange={(open) => !open && setDeleteId(null)}
+        variant="destructive"
+        kicker="SECURITY · DELETE · IRREVERSIBLE"
+        title="Delete scan policy"
+        confirmLabel="Delete"
+        onConfirm={handleDelete}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Removes the policy immediately. Existing scans are not affected.
+        </p>
+      </ConfirmModal>
 
       <ConfirmModal
         open={demoteConfirm}

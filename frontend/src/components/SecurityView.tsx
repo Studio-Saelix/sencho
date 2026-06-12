@@ -23,6 +23,7 @@ import { OverviewTab } from './security/OverviewTab';
 import { ImagesTab } from './security/ImagesTab';
 import { FindingsTab } from './security/FindingsTab';
 import { PolicyPacksTab } from './security/PolicyPacksTab';
+import { ScanPolicyManager } from './security/ScanPolicyManager';
 import { ScannerSetupTab } from './security/ScannerSetupTab';
 
 interface SecurityViewProps {
@@ -202,7 +203,10 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
         </TabsContent>
 
         <TabsContent value="policies">
-          <PolicyPacksTab />
+          <div className="space-y-8">
+            <PolicyPacksTab />
+            <ScanPolicyManager />
+          </div>
         </TabsContent>
 
         <TabsContent value="suppressions">

@@ -63,7 +63,10 @@ describe('settings registry', () => {
         const byId = new Map(SETTINGS_ITEMS.map(i => [i.id, i]));
         expect(byId.get('notifications')?.label).toBe('Channels');
         expect(byId.get('notification-routing')?.label).toBe('Notification Routing');
-        expect(byId.get('security')?.label).toBe('Vulnerability Scanning');
+    });
+
+    it('no longer registers the standalone Vulnerability Scanning section (moved to the Security page)', () => {
+        expect(SETTINGS_ITEMS.some(i => (i.id as string) === 'security')).toBe(false);
     });
 
     it('opens Registries to Community while keeping it admin-only', () => {
