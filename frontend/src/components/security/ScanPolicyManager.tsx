@@ -59,6 +59,7 @@ export function ScanPolicyManager() {
 
   const [policies, setPolicies] = useState<ScanPolicy[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<PolicyFormState>(EMPTY_FORM);
@@ -72,15 +73,21 @@ export function ScanPolicyManager() {
   const isReplica = fleetRole === 'replica';
 
   const fetchPolicies = async () => {
+    setLoadError(false);
     try {
       const res = await apiFetch('/security/policies', { localOnly: true });
-      if (res.ok) {
-        const data = await res.json();
-        setPolicies(Array.isArray(data) ? data : []);
+      if (!res.ok) {
+        // A non-OK response must not read as "no policies configured", which
+        // would falsely imply nothing is enforcing.
+        setLoadError(true);
+        return;
       }
+      const data = await res.json();
+      setPolicies(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to load scan policies:', err);
       toast.error('Failed to load scan policies');
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -318,7 +325,15 @@ export function ScanPolicyManager() {
         </div>
       )}
 
-      {!isRemote && !loading && policies.length === 0 && (
+      {!isRemote && !loading && loadError && (
+        <SettingsCallout
+          icon={<ShieldCheck className="h-4 w-4" />}
+          title="Couldn't load scan policies"
+          subtitle="Scan policies failed to load. Try again shortly."
+        />
+      )}
+
+      {!isRemote && !loading && !loadError && policies.length === 0 && (
         <SettingsCallout
           icon={<ShieldCheck className="h-4 w-4" />}
           title="No scan policies configured"

@@ -11,8 +11,13 @@ import type { ScanSummary, VulnSeverity } from '@/types/security';
  * and the Security page so the badge stays identical everywhere.
  */
 export function SeverityBadge({ summary, onClick }: { summary: ScanSummary; onClick: () => void }) {
-    const key: VulnSeverity | 'CLEAN' = summary.highest_severity ?? 'CLEAN';
-    const label = key === 'CLEAN' ? 'Clean' : key;
+    // highest_severity is derived from vulnerabilities only, so a scan with
+    // secrets or misconfigurations but zero CVEs would otherwise read "Clean".
+    // Treat those as a non-clean "Findings" state.
+    const hasNonVulnFindings = (summary.secret_count ?? 0) > 0 || (summary.misconfig_count ?? 0) > 0;
+    const key: VulnSeverity | 'CLEAN' | 'FINDINGS' =
+        summary.highest_severity ?? (hasNonVulnFindings ? 'FINDINGS' : 'CLEAN');
+    const label = key === 'CLEAN' ? 'Clean' : key === 'FINDINGS' ? 'Findings' : key;
     const [relative, setRelative] = useState<string>('');
     useEffect(() => {
         const compute = () => {
@@ -60,8 +65,14 @@ export function SeverityBadge({ summary, onClick }: { summary: ScanSummary; onCl
                                 {summary.low > 0 && <span className="text-muted-foreground">{summary.low}L</span>}
                             </div>
                         )}
-                        {summary.total === 0 && (
-                            <div className="text-success">No vulnerabilities</div>
+                        {summary.total === 0 && hasNonVulnFindings && (
+                            <div className="flex gap-3 mt-1 text-warning">
+                                {(summary.secret_count ?? 0) > 0 && <span>{summary.secret_count} secret</span>}
+                                {(summary.misconfig_count ?? 0) > 0 && <span>{summary.misconfig_count} misconfig</span>}
+                            </div>
+                        )}
+                        {summary.total === 0 && !hasNonVulnFindings && (
+                            <div className="text-success">No findings</div>
                         )}
                     </div>
                 </div>

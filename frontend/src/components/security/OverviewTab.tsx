@@ -121,7 +121,7 @@ export function OverviewTab({ overview, loadError, onNavigate }: OverviewTabProp
             tone="subtitle"
           />
           <p className="mt-2 text-xs text-muted-foreground">
-            Enforcement policies are managed in Settings. This is a read-only posture for the active node.
+            Manage enforcement policies on the Policies tab. This is a read-only posture for the active node.
           </p>
         </div>
       </div>

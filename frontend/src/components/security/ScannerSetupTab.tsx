@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Info } from 'lucide-react';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { useNodes } from '@/context/NodeContext';
@@ -9,6 +10,15 @@ export function ScannerSetupTab() {
   const { status, updateCheck, refresh, refreshUpdateCheck } = useTrivyStatus();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
+
+  // useTrivyStatus only refreshes on mount. Re-fetch when the active node
+  // changes so the displayed scanner state matches the node TrivyManager's
+  // actions target (both follow x-node-id); otherwise switching nodes while on
+  // this tab would show node A's status while install/update hit node B.
+  useEffect(() => {
+    void refresh();
+  }, [activeNode?.id, refresh]);
+
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground max-w-2xl">

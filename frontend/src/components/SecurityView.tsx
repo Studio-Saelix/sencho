@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   LayoutDashboard, Boxes, FileWarning, KeyRound, BookCheck, EyeOff, History as HistoryIcon, Wrench, Info,
 } from 'lucide-react';
@@ -122,14 +122,16 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
     return () => { cancelled = true; };
   }, [isRemote, activeNode?.id]);
 
-  // Landing on History (via the tab or a deep-link) opens the scan-history
-  // sheet once; closing it leaves the launcher body, so the tab is never empty.
+  // A deep-link to History (e.g. the Resources "Scan history" button, which
+  // mounts this view with the History tab active) auto-opens the sheet once on
+  // mount. Selecting the History tab manually shows the persistent launcher
+  // body instead, so the sheet does not pop on every tab click; closing it
+  // always leaves the launcher.
+  const deepLinkedToHistory = useRef(activeTab === 'history');
   useEffect(() => {
-    if (activeTab === 'history') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setHistoryOpen(true);
-    }
-  }, [activeTab]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (deepLinkedToHistory.current) setHistoryOpen(true);
+  }, []);
 
   const { state, tone } = deriveMasthead(overview, overviewLoadError !== null);
   const pulsing = tone === 'live' && !!overview?.scanner.available;

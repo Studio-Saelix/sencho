@@ -36,7 +36,18 @@ it('renders the highest severity and fires onClick', async () => {
   expect(onClick).toHaveBeenCalledOnce();
 });
 
-it('renders "Clean" when there is no highest severity', () => {
+it('renders "Clean" when there are no findings of any kind', () => {
   render(<SeverityBadge summary={summary({ highest_severity: null })} onClick={() => {}} />);
   expect(screen.getByRole('button', { name: /Clean/ })).toBeInTheDocument();
+});
+
+it('renders "Findings" (not "Clean") for a secret-only scan with no CVE severity', () => {
+  render(<SeverityBadge summary={summary({ highest_severity: null, secret_count: 2 })} onClick={() => {}} />);
+  expect(screen.getByRole('button', { name: /Findings/ })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Clean/ })).not.toBeInTheDocument();
+});
+
+it('renders "Findings" for a misconfig-only scan', () => {
+  render(<SeverityBadge summary={summary({ highest_severity: null, misconfig_count: 3 })} onClick={() => {}} />);
+  expect(screen.getByRole('button', { name: /Findings/ })).toBeInTheDocument();
 });

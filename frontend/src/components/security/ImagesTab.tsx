@@ -73,8 +73,10 @@ export function ImagesTab({ summaries, loading, error, onInspect }: ImagesTabPro
               <td className="px-4 py-2.5 font-mono tabular-nums text-xs text-stat-subtitle max-md:hidden">
                 {s.critical > 0 && <span className="text-destructive mr-2">{s.critical}C</span>}
                 {s.high > 0 && <span className="text-warning mr-2">{s.high}H</span>}
+                {s.secret_count > 0 && <span className="text-warning mr-2">{s.secret_count} secret</span>}
+                {s.misconfig_count > 0 && <span className="text-warning mr-2">{s.misconfig_count} misconfig</span>}
                 {s.fixable > 0 && <span className="text-stat-subtitle">{s.fixable} fixable</span>}
-                {s.total === 0 && <span className="text-success">clean</span>}
+                {s.total === 0 && s.secret_count === 0 && s.misconfig_count === 0 && <span className="text-success">clean</span>}
               </td>
               <td className="px-4 py-2.5 text-right">
                 <SeverityBadge summary={s} onClick={() => onInspect(s.scan_id, 'vulns')} />
