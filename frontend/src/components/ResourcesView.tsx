@@ -28,7 +28,8 @@ import { CapabilityGate } from './CapabilityGate';
 import LazyBoundary from './LazyBoundary';
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
-import { SENCHO_OPEN_LOGS_EVENT } from '@/lib/events';
+import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
+import type { SenchoOpenStackDetail } from '@/lib/events';
 import type { SenchoOpenLogsDetail } from '@/lib/events';
 import { lazy, Suspense } from 'react';
 import { ReclaimHero } from './resources/ReclaimHero';
@@ -173,17 +174,23 @@ function FilterToggle({ value, onChange, counts }: FilterToggleProps) {
 
 // ── Managed Status Badge ───────────────────────────────────────────────────────
 
-function ManagedBadge({ status, managedBy }: {
+function ManagedBadge({ status, managedBy, onOpenStack }: {
     status: 'managed' | 'unmanaged' | 'unused' | 'system';
     managedBy: string | null;
+    /** When provided on a managed resource, the owning-stack badge becomes a link to that stack. */
+    onOpenStack?: (stack: string) => void;
 }) {
     if (status === 'managed') {
-        return (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium">
-                <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
-                {managedBy}
-            </span>
-        );
+        const cls = "inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium";
+        const inner = (<><span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />{managedBy}</>);
+        if (onOpenStack && managedBy) {
+            return (
+                <button type="button" className={`${cls} hover:bg-success/15 transition-colors`} title={`Open stack ${managedBy}`} onClick={() => onOpenStack(managedBy)}>
+                    {inner}
+                </button>
+            );
+        }
+        return <span className={cls}>{inner}</span>;
     }
     if (status === 'unmanaged') {
         return (
@@ -1131,7 +1138,13 @@ export default function ResourcesView() {
                                             <TableCell><Badge variant="outline" className="text-[10px] h-5">{net.Scope}</Badge></TableCell>
                                             <TableCell>
                                                 <div className="flex items-center gap-1.5 flex-wrap">
-                                                    <ManagedBadge status={net.managedStatus} managedBy={net.managedBy} />
+                                                    <ManagedBadge
+                                                        status={net.managedStatus}
+                                                        managedBy={net.managedBy}
+                                                        onOpenStack={activeNode ? (stack) => window.dispatchEvent(
+                                                            new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, { detail: { nodeId: activeNode.id, stackName: stack } }),
+                                                        ) : undefined}
+                                                    />
                                                     {net.isSencho && <SenchoBadge />}
                                                 </div>
                                             </TableCell>

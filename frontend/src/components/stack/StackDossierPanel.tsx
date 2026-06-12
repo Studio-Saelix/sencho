@@ -12,6 +12,7 @@ import {
   type StackDossierFields,
 } from '@/lib/dossierMarkdown';
 import type { AnatomyMarkdownInput } from '@/lib/anatomyMarkdown';
+import { buildNetworkExposureSummary, type NetworkExposureSummary } from '@/lib/networkExposureSummary';
 import { computeDocDrift, type DocDriftFinding } from '@/lib/docDrift';
 import { RollbackReadinessSection } from './RollbackReadinessSection';
 import { useNodes } from '@/context/NodeContext';
@@ -201,6 +202,23 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
     return () => { cancelled = true; };
   }, [stackName, nodeId, reloadKey]);
 
+  // Fetched only when the user exports, so opening the panel costs nothing.
+  // Fail-soft: if it is unavailable the export simply omits the section.
+  const loadNetworkingSummary = async (): Promise<NetworkExposureSummary | null> => {
+    try {
+      const [factsRes, exposureRes] = await Promise.all([
+        apiFetch(`/stacks/${stackName}/networking`),
+        apiFetch(`/stacks/${stackName}/exposure`),
+      ]);
+      const facts = factsRes.ok ? await factsRes.json() : null;
+      const intents = exposureRes.ok ? (await exposureRes.json()).intents ?? [] : [];
+      return buildNetworkExposureSummary(facts, intents);
+    } catch (err) {
+      console.warn(`[Dossier] networking summary load failed for "${stackName}":`, err);
+      return null;
+    }
+  };
+
   const dirty = useMemo(
     () => FIELD_KEYS.some(k => fields[k] !== serverFields[k]),
     [fields, serverFields],
@@ -247,20 +265,22 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
   const handleCopy = async () => {
     if (!anatomy) return;
     try {
-      await copyToClipboard(buildStackDossierMarkdown(anatomy, fields));
+      const networking = await loadNetworkingSummary();
+      await copyToClipboard(buildStackDossierMarkdown(anatomy, fields, networking));
       toast.success('Stack dossier copied as Markdown.');
     } catch {
       toast.error('Failed to copy to clipboard.');
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (!anatomy) return;
     try {
+      const networking = await loadNetworkingSummary();
       // Stack names are already constrained, but sanitize defensively so the
       // file always has a coherent, safe name ending in .md.
       const base = stackName.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'stack';
-      downloadTextFile(`${base}-dossier.md`, buildStackDossierMarkdown(anatomy, fields));
+      downloadTextFile(`${base}-dossier.md`, buildStackDossierMarkdown(anatomy, fields, networking));
     } catch {
       toast.error('Failed to download the dossier.');
     }
@@ -274,7 +294,7 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
           <button type="button" data-testid="dossier-copy-btn" onClick={() => { void handleCopy(); }} disabled={!anatomy || loadError} className={ACTION_CLASS}>
             <Copy className="h-3 w-3" strokeWidth={1.5} /> copy md
           </button>
-          <button type="button" data-testid="dossier-download-btn" onClick={handleDownload} disabled={!anatomy || loadError} className={ACTION_CLASS}>
+          <button type="button" data-testid="dossier-download-btn" onClick={() => { void handleDownload(); }} disabled={!anatomy || loadError} className={ACTION_CLASS}>
             <Download className="h-3 w-3" strokeWidth={1.5} /> download
           </button>
         </div>

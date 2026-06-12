@@ -126,7 +126,7 @@ describe('StackDossierPanel', () => {
     expect(vi.mocked(copyToClipboard).mock.calls[0][0]).toContain('# web');
 
     fireEvent.click(screen.getByTestId('dossier-download-btn'));
-    expect(downloadTextFile).toHaveBeenCalledWith('web-dossier.md', expect.stringContaining('# web'));
+    await waitFor(() => expect(downloadTextFile).toHaveBeenCalledWith('web-dossier.md', expect.stringContaining('# web')));
   });
 
   // Anatomy that publishes a single TCP host port, for documentation-drift tests.

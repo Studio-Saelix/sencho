@@ -4,6 +4,7 @@ import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
 import type { AuditStatsInput } from './AuditAnomalyService';
+import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -150,6 +151,17 @@ export interface StackDriftFindingRow {
     actual_json: string | null;
     detected_at: number;
     resolved_at: number | null;
+}
+
+export interface StackExposureIntentRow {
+    id: number;
+    node_id: number;
+    stack_name: string;
+    /** '' = the stack-level classification; otherwise a service name. */
+    service: string;
+    intent: ExposureIntent;
+    updated_at: number;
+    updated_by: string | null;
 }
 
 export interface Node {
@@ -1263,6 +1275,19 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_stack_drift_findings_open
         ON stack_drift_findings(node_id, stack_name, resolved_at);
 
+      CREATE TABLE IF NOT EXISTS stack_exposure_intent (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        service TEXT NOT NULL DEFAULT '',
+        intent TEXT NOT NULL CHECK(intent IN (${EXPOSURE_INTENTS.map(i => `'${i}'`).join(', ')})),
+        updated_at INTEGER NOT NULL,
+        updated_by TEXT,
+        UNIQUE(node_id, stack_name, service)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stack_exposure_intent_stack
+        ON stack_exposure_intent(node_id, stack_name);
+
       CREATE TABLE IF NOT EXISTS preflight_runs (
         id TEXT PRIMARY KEY,
         node_id INTEGER NOT NULL,
@@ -2300,6 +2325,37 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
+    // --- Stack Exposure Intent (per-stack and per-service exposure classification) ---
+
+    /** All intent rows for a stack: the stack-level row (service '') and any per-service rows. */
+    public getStackExposureIntents(nodeId: number, stackName: string): StackExposureIntentRow[] {
+        return this.db.prepare(
+            'SELECT * FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ? ORDER BY service ASC'
+        ).all(nodeId, stackName) as StackExposureIntentRow[];
+    }
+
+    /** Upsert one intent row. `service` is '' for the stack-level classification. */
+    public setStackExposureIntent(nodeId: number, stackName: string, service: string, intent: ExposureIntent, updatedBy: string | null): void {
+        this.db.prepare(
+            `INSERT INTO stack_exposure_intent (node_id, stack_name, service, intent, updated_at, updated_by)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, stack_name, service) DO UPDATE SET
+                intent = excluded.intent,
+                updated_at = excluded.updated_at,
+                updated_by = excluded.updated_by`
+        ).run(nodeId, stackName, service, intent, Date.now(), updatedBy);
+    }
+
+    /** Clear one intent row, leaving that scope unset; consumers treat a service with no row as inheriting the stack intent. */
+    public deleteStackExposureIntent(nodeId: number, stackName: string, service: string): void {
+        this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ? AND service = ?').run(nodeId, stackName, service);
+    }
+
+    /** Clear every intent row for a stack (used when the stack is deleted). */
+    public deleteStackExposureIntents(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    }
+
     // --- Compose Doctor / Preflight ---
 
     /** Store a run and its findings, replacing any prior run for this (node, stack). */
@@ -2732,6 +2788,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_dossiers WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);

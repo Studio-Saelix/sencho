@@ -14,12 +14,15 @@
 
 import type { AnatomyMarkdownInput } from './anatomyMarkdown';
 import { buildStackDossierMarkdown, operatorNotesSection, type StackDossierFields } from './dossierMarkdown';
+import type { NetworkExposureSummary } from './networkExposureSummary';
 
 export interface FleetDossierStack {
   stackName: string;
   /** Generated anatomy, or null when the stack's compose.yaml could not be parsed. */
   anatomy: AnatomyMarkdownInput | null;
   dossier: StackDossierFields;
+  /** Redacted networking + exposure summary, or null when unavailable. */
+  networking?: NetworkExposureSummary | null;
 }
 
 interface FleetDossierNodeBase {
@@ -103,7 +106,7 @@ function stackSlugs(names: string[]): Map<string, string> {
 
 function stackPageMarkdown(stack: FleetDossierStack): string {
   if (stack.anatomy) {
-    return `${buildStackDossierMarkdown(stack.anatomy, stack.dossier)}\n`;
+    return `${buildStackDossierMarkdown(stack.anatomy, stack.dossier, stack.networking ?? null)}\n`;
   }
   // Compose could not be parsed: keep the operator's notes rather than dropping
   // the stack from the export entirely.

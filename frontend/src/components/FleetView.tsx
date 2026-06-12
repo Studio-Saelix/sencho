@@ -1,5 +1,5 @@
 import {
-    RefreshCw, Search, Camera, Plus, FileDown,
+    RefreshCw, RefreshCcwDot, Camera, FileDown,
     Network, SlidersHorizontal,
     Send, KeyRound, ArrowLeftRight, Wrench, Workflow,
 } from 'lucide-react';
@@ -29,7 +29,6 @@ import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 import { SecretsTab } from './fleet/secrets/SecretsTab';
 import { DependencyMapTab } from './fleet/DependencyMapTab';
 import { useNodeActions } from './nodes/useNodeActions';
-import { SettingsPrimaryButton } from './settings/SettingsActions';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
@@ -94,7 +93,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             </TabsHighlightItem>
                             <TabsHighlightItem value="dependencies">
                                 <TabsTrigger value="dependencies">
-                                    <Workflow className="w-4 h-4 mr-1.5" />Dependencies
+                                    <Workflow className="w-4 h-4 mr-1.5" />Map
                                 </TabsTrigger>
                             </TabsHighlightItem>
                             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
@@ -121,7 +120,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             )}
                             <TabsHighlightItem value="actions">
                                 <TabsTrigger value="actions">
-                                    <Wrench className="w-4 h-4 mr-1.5" />Fleet Actions
+                                    <Wrench className="w-4 h-4 mr-1.5" />Actions
                                 </TabsTrigger>
                             </TabsHighlightItem>
                             {isPaid && isAdmin && (
@@ -140,7 +139,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                             onClick={updateStatus.checkUpdates}
                             className="gap-2"
                         >
-                            <Search className="w-4 h-4" />
+                            <RefreshCcwDot className="w-4 h-4" />
                             Check Updates
                         </Button>
                         <Button
@@ -164,16 +163,6 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                                 <FileDown className={`w-4 h-4 ${exporting ? 'animate-pulse' : ''}`} />
                                 {exporting ? 'Exporting…' : 'Export Dossier'}
                             </Button>
-                        )}
-                        {isAdmin && (
-                            <SettingsPrimaryButton
-                                size="sm"
-                                onClick={openCreate}
-                                className="gap-1"
-                            >
-                                <Plus className="w-4 h-4" />
-                                Add node
-                            </SettingsPrimaryButton>
                         )}
                     </div>
                 </div>
@@ -205,6 +194,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         onCordonChange={() => { void overview.fetchOverview(true); }}
                         onEditNode={isAdmin ? openEdit : undefined}
                         onDeleteNode={isAdmin ? openDelete : undefined}
+                        onAddNode={isAdmin ? openCreate : undefined}
                         topologyMode={topology.prefs.mode}
                         onTopologyModeChange={topology.setMode}
                         topologyPositions={topology.prefs.positions}

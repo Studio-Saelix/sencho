@@ -4,7 +4,7 @@ import type { FleetPreferences } from '../types';
 const PREFS_KEY = 'sencho-fleet-preferences';
 
 const DEFAULT_PREFS: FleetPreferences = {
-    sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false,
+    sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all',
 };
 
 function loadPreferences(): FleetPreferences {
