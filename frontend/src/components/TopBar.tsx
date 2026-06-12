@@ -4,6 +4,7 @@ import { Menu } from 'lucide-react';
 import { Button } from './ui/button';
 import { Sheet, SheetContent, SheetTrigger } from './ui/sheet';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
+import type { TopNavAlign } from '@/hooks/use-top-nav-align';
 import { cn } from '@/lib/utils';
 
 export interface TopBarNavItem {
@@ -24,6 +25,8 @@ interface TopBarProps {
     userMenu: ReactNode;
     /** Show text labels beside the desktop nav icons. When false, the bar is icon-only. */
     showLabels?: boolean;
+    /** Desktop nav placement in icon-only mode. Ignored while labels are shown (always left). */
+    navAlign?: TopNavAlign;
 }
 
 export function TopBar({
@@ -37,7 +40,11 @@ export function TopBar({
     notifications,
     userMenu,
     showLabels = true,
+    navAlign = 'left',
 }: TopBarProps) {
+    // Centering applies only to the icon-only bar; with labels on the nav stays
+    // left so the long labels read from the edge.
+    const centered = !showLabels && navAlign === 'center';
     return (
         <div
             className={cn(
@@ -46,7 +53,10 @@ export function TopBar({
                 'shadow-chrome-top',
             )}
         >
-            {/* LEFT ZONE: Navigation (hidden on mobile) */}
+            {/* LEFT SPACER: balances the right utilities so the nav centers. */}
+            {centered && <div className="flex-1 min-w-0" />}
+
+            {/* NAV ZONE: Navigation (hidden on mobile) */}
             <TooltipProvider delayDuration={300} disableHoverableContent>
                 <nav aria-label="Primary" className="hidden md:flex self-stretch items-stretch">
                     {navItems.map(({ value, label, icon: Icon }) => {

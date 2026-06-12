@@ -39,6 +39,7 @@ import { usePanelSessionStartedAt } from '@/components/sidebar/usePanelSessionSt
 import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivityTicker';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
+import { useTopNavAlign } from '@/hooks/use-top-nav-align';
 import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
@@ -146,6 +147,7 @@ export default function EditorLayout() {
 
   const [diffPreviewEnabled] = useComposeDiffPreviewEnabled();
   const [topNavLabels] = useTopNavLabels();
+  const [topNavAlign] = useTopNavAlign();
 
   // Use a ref to break the circular dependency:
   // useViewNavigationState needs onNavigateToDashboard -> resetEditorState
@@ -667,6 +669,7 @@ export default function EditorLayout() {
           notifications={notificationsEl}
           userMenu={userMenuEl}
           showLabels={topNavLabels}
+          navAlign={topNavAlign}
         />
       );
 

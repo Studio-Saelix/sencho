@@ -69,4 +69,21 @@ describe('TopBar showLabels', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Fleet' }));
     expect(onNavigate).toHaveBeenCalledWith('fleet');
   });
+
+  it('adds a leading spacer to center the nav only in icon-only center mode', () => {
+    // Centered: a flex-1 spacer precedes the nav.
+    const { unmount } = renderTopBar({ showLabels: false, navAlign: 'center' });
+    expect(screen.getByRole('navigation', { name: 'Primary' }).previousElementSibling)
+      .toHaveClass('flex-1');
+    unmount();
+
+    // Icon-only but left-aligned: no leading spacer.
+    const second = renderTopBar({ showLabels: false, navAlign: 'left' });
+    expect(screen.getByRole('navigation', { name: 'Primary' }).previousElementSibling).toBeNull();
+    second.unmount();
+
+    // Labels on always stays left, even if center is requested.
+    renderTopBar({ showLabels: true, navAlign: 'center' });
+    expect(screen.getByRole('navigation', { name: 'Primary' }).previousElementSibling).toBeNull();
+  });
 });
