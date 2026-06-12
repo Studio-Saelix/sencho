@@ -171,7 +171,11 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
         state={state}
         tone={tone}
         pulsing={pulsing}
+        size="hero"
         className="rounded-lg mb-4"
+        subtitle={overview
+          ? `${overview.scannedImages} ${overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner ${overview.scanner.available ? 'ready' : 'not installed'}`
+          : undefined}
         metadata={overview ? [
           { label: 'CRITICAL', value: String(overview.critical), tone: overview.critical > 0 ? 'error' : 'value' },
           { label: 'HIGH', value: String(overview.high), tone: overview.high > 0 ? 'warn' : 'value' },
