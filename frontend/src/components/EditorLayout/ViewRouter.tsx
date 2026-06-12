@@ -13,6 +13,7 @@ import HomeDashboard from '../HomeDashboard';
 import type { NotificationItem } from '../dashboard/types';
 import type { ScheduleTaskPrefill } from '../ScheduledOperationsView';
 import type { ActiveView } from './hooks/useViewNavigationState';
+import type { SecurityTab } from '@/lib/events';
 
 // Paid-tier views and the security-history overlay are loaded on demand.
 // Their internal PaidGate / CapabilityGate wrappers render
@@ -39,6 +40,9 @@ const AuditLogView = lazy(() =>
 );
 const ScheduledOperationsView = lazy(() => import('../ScheduledOperationsView'));
 const AutoUpdateReadinessView = lazy(() => import('../AutoUpdateReadinessView'));
+const SecurityView = lazy(() =>
+    import('../SecurityView').then(m => ({ default: m.SecurityView })),
+);
 
 // Sized for the main workspace area (flex-1 with p-6 padding). Visible
 // only during the brief window between an unlocked view's chunk request
@@ -81,6 +85,8 @@ export interface ViewRouterProps {
     onNavigateToStack: (stackFile: string) => void;
     onOpenSettingsSection: (section: SectionId) => void;
     onClearNotifications: () => void;
+    securityTab: SecurityTab;
+    onSecurityTabChange: (tab: SecurityTab) => void;
     // Render slot for the inline editor view. Kept as a callback so the
     // (large) editor JSX is only allocated when activeView === 'editor',
     // not on every parent render that lands on a different view.
@@ -104,6 +110,8 @@ export function ViewRouter({
     onNavigateToStack,
     onOpenSettingsSection,
     onClearNotifications,
+    securityTab,
+    onSecurityTabChange,
     renderEditor,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
@@ -120,6 +128,16 @@ export function ViewRouter({
     }
     if (activeView === 'resources') {
         return <ResourcesView />;
+    }
+    if (activeView === 'security') {
+        // Node-scoped (not hub-only): scan/scanner data follows the active node
+        // like Resources. The page itself is Community; per-tab gates handle
+        // capability-missing nodes and the local-control governance tabs.
+        return (
+            <LazyView>
+                <SecurityView activeTab={securityTab} onTabChange={onSecurityTabChange} />
+            </LazyView>
+        );
     }
     if (activeView === 'host-console') {
         // Mirror the backend RBAC gate (system:console, admin-only). The nav

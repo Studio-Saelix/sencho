@@ -136,6 +136,8 @@ export interface ScanSummary {
   low: number;
   unknown: number;
   fixable: number;
+  secret_count: number;
+  misconfig_count: number;
 }
 
 export interface ScanPolicy {
@@ -174,4 +176,51 @@ export interface ScanCompareResult {
   unchanged: ScanCompareVulnerability[];
   truncated?: boolean;
   row_limit?: number;
+}
+
+/** Node-scoped security posture rollup for the Security page Overview. */
+export interface SecurityOverview {
+  scannedImages: number;
+  critical: number;
+  high: number;
+  fixable: number;
+  secrets: number;
+  misconfigs: number;
+  staleScans: number;
+  failedScans: number;
+  lastSuccessfulScanAt: number | null;
+  scanner: {
+    available: boolean;
+    version: string | null;
+    source: TrivySource;
+    autoUpdate: boolean;
+  };
+  deployEnforcement: {
+    honorSuppressionsOnDeploy: boolean;
+    /** Approximate count of enabled block-on-deploy policies eligible for this node. */
+    eligibleBlockPolicies: number;
+  };
+}
+
+/** Which detail tab the scan sheet opens on. Matches VulnerabilityScanSheet's tabs. */
+export type ScanDetailTab = 'vulns' | 'secrets' | 'misconfigs';
+
+export type PolicyRuleEnforcement = 'warning' | 'enforceable';
+
+export interface PolicyPackRule {
+  id: string;
+  name: string;
+  severity: Exclude<VulnSeverity, 'UNKNOWN'>;
+  whatItChecks: string;
+  why: string;
+  howToFix: string;
+  enforcement: PolicyRuleEnforcement;
+}
+
+export interface PolicyPack {
+  id: string;
+  name: string;
+  tagline: string;
+  tierCopy: string;
+  rules: PolicyPackRule[];
 }

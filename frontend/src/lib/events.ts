@@ -22,3 +22,15 @@ export interface SenchoOpenStackDetail {
   nodeId: number;
   stackName: string;
 }
+
+/** Tabs of the top-level Security view. Used by the nav state and by
+ *  cross-component navigate events that deep-link into a specific tab. */
+export type SecurityTab =
+  | 'overview'
+  | 'images'
+  | 'compose'
+  | 'secrets'
+  | 'policies'
+  | 'suppressions'
+  | 'history'
+  | 'scanner';

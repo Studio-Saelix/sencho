@@ -194,7 +194,6 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
                         <div className="px-7 pt-6 pb-8 flex flex-col gap-6 min-w-0">
                             <SettingsSectionContent
                                 sectionId={safeSection}
-                                isPaid={isPaid}
                                 onDirtyChange={handleDirtyChange}
                                 showDescription
                             />

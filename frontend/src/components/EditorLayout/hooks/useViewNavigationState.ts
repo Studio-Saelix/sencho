@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Terminal, CloudDownload, Home, HardDrive, ScrollText,
-  Activity, Radar, RefreshCw, Clock,
+  Activity, Radar, RefreshCw, Clock, ShieldCheck,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
@@ -9,6 +9,7 @@ import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
 import { SENCHO_NAVIGATE_EVENT } from '@/components/NodeManager';
 import type { SenchoNavigateDetail } from '@/components/NodeManager';
+import type { SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ScheduleTaskPrefill } from '@/components/ScheduledOperationsView';
 
@@ -20,6 +21,7 @@ export type ActiveView =
   | 'templates'
   | 'global-observability'
   | 'fleet'
+  | 'security'
   | 'audit-log'
   | 'scheduled-ops'
   | 'auto-updates'
@@ -58,6 +60,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
 
   const [activeView, setActiveView] = useState<ActiveView>('dashboard');
   const [settingsSection, setSettingsSection] = useState<SectionId>('appearance');
+  const [securityTab, setSecurityTab] = useState<SecurityTab>('overview');
   const [securityHistoryOpen, setSecurityHistoryOpen] = useState(false);
   const [filterNodeId, setFilterNodeId] = useState<number | null>(null);
   const [schedulePrefill, setSchedulePrefill] = useState<ScheduleTaskPrefill | null>(null);
@@ -91,6 +94,14 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
         setFilterNodeId(detail.nodeId ?? null);
         return;
       }
+      if (detail.view === 'security') {
+        // Set the target tab before switching the view so the controlled
+        // SecurityView lands on it deterministically (no mount race).
+        setSecurityTab(detail.tab ?? 'overview');
+        setActiveView('security');
+        setFilterNodeId(detail.nodeId ?? null);
+        return;
+      }
       setActiveView(detail.view as ActiveView);
       setFilterNodeId(detail.nodeId ?? null);
     };
@@ -103,6 +114,9 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
       { value: 'dashboard', label: 'Home', icon: Home },
       { value: 'fleet', label: 'Fleet', icon: Radar },
       { value: 'resources', label: 'Resources', icon: HardDrive },
+      // Security is a Community, node-scoped review surface (not hub-only), so
+      // it shows for every authenticated user and on remote nodes too.
+      { value: 'security', label: 'Security', icon: ShieldCheck },
       { value: 'templates', label: 'App Store', icon: CloudDownload },
     ];
     // The aggregated Logs feed crosses every managed stack, so it is an
@@ -137,6 +151,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   return {
     activeView, setActiveView,
     settingsSection, setSettingsSection,
+    securityTab, setSecurityTab,
     securityHistoryOpen, setSecurityHistoryOpen,
     filterNodeId, setFilterNodeId,
     schedulePrefill, setSchedulePrefill,
