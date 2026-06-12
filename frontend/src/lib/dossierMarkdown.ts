@@ -11,6 +11,7 @@
  */
 
 import { buildStackAnatomyMarkdown, type AnatomyMarkdownInput } from './anatomyMarkdown';
+import { networkExposureSection, type NetworkExposureSummary } from './networkExposureSummary';
 
 /**
  * Operator-authored dossier fields. Mirrors the backend `StackDossierFields`
@@ -84,8 +85,12 @@ export function operatorNotesSection(d: StackDossierFields): string | null {
 export function buildStackDossierMarkdown(
   anatomy: AnatomyMarkdownInput,
   dossier: StackDossierFields,
+  networking?: NetworkExposureSummary | null,
 ): string {
-  const anatomyMarkdown = buildStackAnatomyMarkdown(anatomy);
-  const notes = operatorNotesSection(dossier);
-  return notes ? `${anatomyMarkdown}\n\n${notes}` : anatomyMarkdown;
+  const sections = [
+    buildStackAnatomyMarkdown(anatomy),
+    networkExposureSection(networking ?? null),
+    operatorNotesSection(dossier),
+  ].filter((s): s is string => s !== null && s !== '');
+  return sections.join('\n\n');
 }
