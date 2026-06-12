@@ -20,11 +20,12 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 | **Notifications** | Channels, Notification Routing |
 | **Automation** | Webhooks |
 | **Organization** | Labels |
-| **Security** | Vulnerability Scanning |
 | **Operations** | Data Retention, Developer Diagnostics, Recovery |
 | **Help** | Support, About |
 
-Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Fleet Mesh, Registries, Cloud Backup, Notification Routing, Vulnerability Scanning) stay hidden for non-admin operators.
+Vulnerability scanning is no longer a Settings section: scanner setup, scan policies, suppressions, and acknowledgements now live on the dedicated [Security page](/features/security).
+
+Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Fleet Mesh, Registries, Cloud Backup, Notification Routing) stay hidden for non-admin operators.
 
 ### Page chrome
 
@@ -35,11 +36,11 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 | **SCOPE** `operator` / `global` | Setting applies to your account or this browser (Personal sections) or to the whole instance (every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
-| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `TRIVY managed`/`host`/`missing` and `POLICIES` (Vulnerability Scanning); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer Diagnostics) |
+| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer Diagnostics) |
 
 ### Quick search
 
-Click **Filter** at the top of the sidebar, or press `Ctrl+K` / `⌘K` while the hub is open, to open the command palette. Type any section name, keyword, or synonym (for example, `saml` finds SSO and `trivy` finds Security) and press Enter to jump to it.
+Click **Filter** at the top of the sidebar, or press `Ctrl+K` / `⌘K` while the hub is open, to open the command palette. Type any section name, keyword, or synonym (for example, `saml` finds SSO) and press Enter to jump to it.
 
 <Frame>
   <img src="/images/settings/settings-search.png" alt="Settings command palette filtered to a webhook query" />
@@ -429,44 +430,6 @@ See [Webhooks](/features/webhooks) for the full walkthrough including authentica
 Create, edit, and delete labels used to organize and filter stacks across your fleet. Each label has a name and one of ten available colors. Up to 100 labels per node. The masthead publishes a **LABELS** pill with the current and maximum counts.
 
 See [Stack Labels](/features/stack-labels) for the full walkthrough.
-
----
-
-## Vulnerability Scanning
-
-<Note>
-  Vulnerability Scanning is admin-only. The Trivy installer, the **Auto-update Trivy** toggle (which also requires a managed Trivy binary), and CVE/misconfig suppressions are available on all tiers; scan policies require an Admiral license.
-</Note>
-
-**Scope:** Per-node
-
-Manage the Trivy scanner, scan policies, suppressions, and acknowledgements that power [vulnerability scanning](/features/vulnerability-scanning) across the fleet. The masthead publishes a **TRIVY** pill (`managed` / `host` / `missing`) and a **POLICIES** pill with the active rule count.
-
-<Frame>
-  <img src="/images/settings/settings-security.png" alt="Security section showing the Trivy installer card and the empty scan-policy state" />
-</Frame>
-
-### Trivy scanner
-
-| Element | Description |
-|---------|-------------|
-| **Status** | `Installed (managed)` when Sencho manages the binary, `Installed (host)` when an existing host binary is being reused, or empty when nothing is detected. |
-| **Version** | The current Trivy version, when installed. |
-| **Install / Update / Uninstall** | Lifecycle actions for the managed binary. Uninstall asks for confirmation. |
-| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires a managed Trivy binary. |
-
-### Scan policies
-
-A scan policy enforces a severity threshold on a set of stacks. Each policy carries a severity level (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`), a stack pattern (regex), a **Block on deploy** toggle, and an **Enabled** toggle. Use **Add policy** to create one.
-
-### CVE Suppressions and Misconfig Acknowledgements
-
-- **CVE Suppressions** are fleet-wide accepted CVEs. They apply at read time across every instance and never modify stored scan data. See [CVE Suppressions](/features/cve-suppressions).
-- **Misconfig Acknowledgements** are fleet-wide accepted misconfigurations, with the same read-time semantics.
-
-### Fleet role
-
-Sencho instances on the Admiral tier can act as a security control plane for the fleet or as a replica. When this instance is a replica, the section shows a **Managed by control node** banner and a **Demote to control** button that converts the replica back into a standalone control.
 
 ---
 

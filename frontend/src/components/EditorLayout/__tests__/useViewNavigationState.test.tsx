@@ -334,4 +334,46 @@ describe('useViewNavigationState', () => {
     expect(result.current.activeView).toBe('resources');
     expect(onNavigateToDashboard).not.toHaveBeenCalled();
   });
+
+  // ── Security view: node-scoped, deep-linkable tab ──────────────────────────
+
+  it('includes the Security nav item for a community user', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.navItems.map(i => i.value)).toContain('security');
+  });
+
+  it('keeps Security visible on a remote node (node-scoped, not hub-only)', () => {
+    mockActiveNode('remote');
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.navItems.map(i => i.value)).toContain('security');
+  });
+
+  it('defaults securityTab to overview', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.securityTab).toBe('overview');
+  });
+
+  it('navigate to security with a tab sets securityTab then activeView (deep-link, no race)', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security', tab: 'history', nodeId: 4 } }),
+      );
+    });
+    expect(result.current.activeView).toBe('security');
+    expect(result.current.securityTab).toBe('history');
+    expect(result.current.filterNodeId).toBe(4);
+  });
+
+  it('navigate to security without a tab defaults securityTab to overview', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    act(() => result.current.setSecurityTab('history'));
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('security');
+    expect(result.current.securityTab).toBe('overview');
+  });
 });

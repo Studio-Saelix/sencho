@@ -1,0 +1,83 @@
+---
+title: "Security"
+description: "The command center for your fleet's security posture: an overview dashboard, image and Compose findings, secrets, scan history, suppressions, policy packs, and scanner setup, all in one place."
+---
+
+Security is a primary surface in Sencho. The **Security** page in the top navigation brings the
+capabilities that power [vulnerability scanning](/features/vulnerability-scanning) into one command
+center, so you can answer "what should I look at first?" without hunting through other pages. It is
+scoped to the active node: the findings and scanner status you see reflect whichever node is selected.
+
+The page is organized into tabs.
+
+## Overview
+
+The overview opens with a status masthead that reads your worst active severity at a glance,
+**Secure**, **At risk**, or **Critical**, alongside the critical and high counts and the time of the
+last successful scan. Below it, a signal rail summarizes the supporting numbers: scanned images,
+fixable findings, secrets, Compose misconfigurations, stale scans, and failed scans. A status strip
+shows scanner health (installed source and version, auto-update) and the active node's deploy
+enforcement posture.
+
+If a node does not report an overview (for example an older remote node), the page falls back to a
+clear "overview unavailable" state and the other tabs keep working.
+
+## Images
+
+Image findings list every scanned image on the active node with its highest severity. Selecting an
+image opens the full scan report, where you can review vulnerabilities, suppress a CVE, and export an
+SBOM.
+
+## Compose risks
+
+Compose risks surface misconfigurations in your stack definitions rather than image CVEs: privileged
+containers, Docker socket mounts, host networking, broad host bind mounts, missing healthchecks, public
+database ports, containers running as root, unpinned image tags, and missing restart policies. Each
+entry opens its scan report with the specific findings and how to fix them. The [Policy packs](#policy-packs)
+tab explains each category in depth.
+
+## Secrets
+
+The secrets tab lists images where Trivy detected exposed credentials or keys, and opens straight to
+the secret findings for a scan.
+
+## Policy packs
+
+Policy packs are curated bundles of security expectations for a deployment posture. Sencho ships five
+defaults:
+
+- **Homelab baseline**: gentle defaults for a single-operator homelab.
+- **Production hardening**: sensible hardening for services that face real traffic.
+- **Strict production**: a zero-tolerance posture for critical workloads.
+- **Public edge service**: focused on services exposed to the public internet.
+- **Internal service**: least-privilege defaults for east-west internal services.
+
+Each pack lists its rules with the severity, what the rule checks, why it matters, and how to fix it.
+Every rule is marked **warning** or **enforceable**. In Community, packs are advisory: they explain
+what good looks like. Block-on-deploy enforcement is an Admiral capability, configured under
+[scan policies](/features/vulnerability-scanning#scan-policies).
+
+## Suppressions
+
+CVE suppressions and misconfiguration acknowledgements are managed here, the same controls available
+in Settings. These are governed by the local instance, so this tab is shown when you are on the local
+node; switch to the local node to manage them.
+
+## History
+
+The History tab opens the scan history sheet, listing completed scans grouped by image with search and
+two-scan comparison. Closing the sheet leaves the tab in place so you can reopen it. The **Scan
+history** button in the [Resources Hub](/features/resources) is a shortcut to the same place.
+
+## Scanner setup
+
+Scanner setup manages the Trivy binary for the active node: install the managed binary, update it when
+a new release is available, and toggle automatic updates. Trivy is installed independently on each
+node. See [Installing Trivy](/operations/trivy-setup) for the full setup options.
+
+## What stays where
+
+Resources keeps its per-image severity badges and scan actions, so you can still scan and inspect an
+image from your inventory. Security is the place to review the whole picture; the deeper scanning
+workflow (on-demand scans, scheduled fleet scans, scan policies, SBOM and SARIF export) is documented
+under [Vulnerability scanning](/features/vulnerability-scanning).

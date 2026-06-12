@@ -54,7 +54,6 @@ export type SectionId =
     | 'fleet-mesh'
     | 'notifications'
     | 'webhooks'
-    | 'security'
     | 'cloud-backup'
     | 'developer'
     | 'data-retention'

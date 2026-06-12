@@ -54,7 +54,7 @@ export function MobileSettings({ headerActions }: MobileSettingsProps) {
           <span className="font-display italic text-[30px] leading-[34px] text-stat-value">{item.label}</span>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden px-4 pb-8 pt-4 flex flex-col gap-6">
-          <SettingsSectionContent sectionId={activeSection} isPaid={isPaid} onDirtyChange={NOOP} showDescription />
+          <SettingsSectionContent sectionId={activeSection} onDirtyChange={NOOP} showDescription />
         </div>
       </div>
     );

@@ -8,7 +8,6 @@ export type SettingsGroupId =
     | 'notifications'
     | 'automation'
     | 'organization'
-    | 'security'
     | 'operations'
     | 'help';
 
@@ -27,7 +26,6 @@ export const SETTINGS_GROUPS: readonly SettingsGroupMeta[] = [
     { id: 'notifications', label: 'Notifications', glyph: '\u25C7' },
     { id: 'automation', label: 'Automation', glyph: '\u25C7' },
     { id: 'organization', label: 'Organization', glyph: '\u25C7' },
-    { id: 'security', label: 'Security', glyph: '\u25C6' },
     { id: 'operations', label: 'Operations', glyph: '\u25C7' },
     { id: 'help', label: 'Help', glyph: '\u25C7' },
 ];
@@ -224,17 +222,6 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['labels', 'tags', 'palette', 'organisation'],
         tier: null,
         scope: 'node',
-    },
-    // Security
-    {
-        id: 'security',
-        group: 'security',
-        label: 'Vulnerability Scanning',
-        description: 'Image scanning, suppressions, and posture defaults.',
-        keywords: ['scan', 'cve', 'trivy', 'suppressions', 'hardening', 'vulnerability', 'misconfig'],
-        tier: null,
-        scope: 'node',
-        adminOnly: true,
     },
     // Operations
     {

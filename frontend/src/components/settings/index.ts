@@ -14,7 +14,7 @@ export { SupportSection } from './SupportSection';
 export { AboutSection } from './AboutSection';
 export { RecoverySection } from './RecoverySection';
 
-// Paid-tier sections (UsersSection, WebhooksSection, SecuritySection,
+// Paid-tier sections (UsersSection, WebhooksSection,
 // LabelsSection, CloudBackupSection, NotificationRoutingSection) are NOT
 // re-exported from this barrel. They are dynamically imported with
 // React.lazy in SettingsPage.tsx so their JSX, copy, and prop shapes do not

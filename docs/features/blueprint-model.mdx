@@ -313,7 +313,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     The reconciler will not auto-deploy a stateful blueprint to a node it has never run on. Click **Confirm deploy** on the row, then choose **Deploy fresh** in the dialog. Sencho will create empty named volumes and start the stack.
   </Accordion>
   <Accordion title="A deploy was blocked by vulnerability policy">
-    Open **Settings · Security · Vulnerability Scanning** and review the active scan policies for the target node. The Blueprint deployment row records the blocking policy and affected image count. Either fix the image, relax the policy, or deploy through an explicit admin-approved bypass on the stack surface. Blueprints do not silently bypass deploy enforcement.
+    Open the **Security** page and review the active scan policies for the target node on the **Policies** tab. The Blueprint deployment row records the blocking policy and affected image count. Either fix the image, relax the policy, or deploy through an explicit admin-approved bypass on the stack surface. Blueprints do not silently bypass deploy enforcement.
   </Accordion>
   <Accordion title="Compose content was rejected on save">
     Sencho accepts valid YAML up to 96 KiB. Split very large compose files into smaller blueprints or move generated content out of the Blueprint. Do not paste secrets into the compose body; use environment files or [Fleet Secrets](/features/fleet-secrets) where appropriate.

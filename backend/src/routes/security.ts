@@ -17,6 +17,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
 import { validateStackPatternForRedos } from './fleet';
 import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
+import { DEFAULT_POLICY_PACKS } from '../services/policy-packs';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 // Trivy emits misconfig rule ids in two shapes that Sencho persists verbatim:
@@ -111,6 +112,28 @@ function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 
 } {
   const { policy_evaluation, ...rest } = scan;
   return { ...rest, policy_evaluation: parsePolicyEvaluation(policy_evaluation) };
+}
+
+// A completed scan whose latest run is older than this is considered "stale" in
+// the Security overview. Named so the route and its tests share one value.
+export const STALE_SCAN_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Shape of the /overview response. Mirrors the frontend `SecurityOverview` type
+// (frontend/src/types/security.ts); annotating the response below makes a
+// renamed or dropped field a compile error here instead of an undefined read in
+// the UI. Keep the two in sync.
+interface SecurityOverviewResponse {
+  scannedImages: number;
+  critical: number;
+  high: number;
+  fixable: number;
+  secrets: number;
+  misconfigs: number;
+  staleScans: number;
+  failedScans: number;
+  lastSuccessfulScanAt: number | null;
+  scanner: { available: boolean; version: string | null; source: 'managed' | 'host' | 'none'; autoUpdate: boolean };
+  deployEnforcement: { honorSuppressionsOnDeploy: boolean; eligibleBlockPolicies: number };
 }
 
 export const securityRouter = Router();
@@ -435,6 +458,83 @@ securityRouter.get('/image-summaries', authMiddleware, (req: Request, res: Respo
     console.error('[Security] Failed to fetch image summaries:', error);
     res.status(500).json({ error: 'Failed to fetch image summaries' });
   }
+});
+
+// Node-scoped security posture rollup for the Security page Overview. Read-only,
+// auth-only (Community). Counts derive from the latest-completed-scan-per-image
+// summaries plus two precise helpers; the deploy-enforcement block is this
+// node's read-only posture, not policy management.
+securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): void => {
+  try {
+    const db = DatabaseService.getInstance();
+    const summaries = Object.values(db.getImageScanSummaries(req.nodeId));
+    const settings = db.getGlobalSettings();
+    const svc = TrivyService.getInstance();
+
+    const now = Date.now();
+    let scannedImages = 0;
+    let critical = 0;
+    let high = 0;
+    let fixable = 0;
+    let secrets = 0;
+    let misconfigs = 0;
+    let staleScans = 0;
+    let lastSuccessfulScanAt: number | null = null;
+
+    for (const s of summaries) {
+      // Severity, secret, and misconfig totals are summed across every summary
+      // (real images and stack/config scans alike). Only scannedImages excludes
+      // the stack/config rows (stored under a "stack:" image_ref), since those
+      // are stacks, not images.
+      if (!s.image_ref.startsWith('stack:')) scannedImages += 1;
+      critical += s.critical;
+      high += s.high;
+      fixable += s.fixable;
+      secrets += s.secret_count;
+      misconfigs += s.misconfig_count;
+      if (now - s.scanned_at > STALE_SCAN_THRESHOLD_MS) staleScans += 1;
+      if (lastSuccessfulScanAt === null || s.scanned_at > lastSuccessfulScanAt) {
+        lastSuccessfulScanAt = s.scanned_at;
+      }
+    }
+
+    const overview: SecurityOverviewResponse = {
+      scannedImages,
+      critical,
+      high,
+      fixable,
+      secrets,
+      misconfigs,
+      staleScans,
+      failedScans: db.countScansByStatus(req.nodeId, 'failed'),
+      lastSuccessfulScanAt,
+      scanner: {
+        available: svc.isTrivyAvailable(),
+        version: svc.getVersion(),
+        source: svc.getSource(),
+        autoUpdate: settings.trivy_auto_update === '1',
+      },
+      deployEnforcement: {
+        honorSuppressionsOnDeploy: settings.deploy_block_honor_suppressions === '1',
+        eligibleBlockPolicies: db.countEligibleBlockPolicies(
+          req.nodeId,
+          FleetSyncService.getRole(),
+          FleetSyncService.getSelfIdentity(),
+        ),
+      },
+    };
+    res.json(overview);
+  } catch (error) {
+    console.error('[Security] Failed to build overview:', error);
+    res.status(500).json({ error: 'Failed to build security overview' });
+  }
+});
+
+// Static, read-only policy-pack catalog. Auth-only (Community), no DB, no
+// enforcement. The frontend fetches this with localOnly so the global catalog
+// is available regardless of which node is active.
+securityRouter.get('/policy-packs', authMiddleware, (_req: Request, res: Response): void => {
+  res.json(DEFAULT_POLICY_PACKS);
 });
 
 securityRouter.post('/sbom', authMiddleware, async (req: Request, res: Response): Promise<void> => {

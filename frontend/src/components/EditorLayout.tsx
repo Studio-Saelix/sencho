@@ -160,6 +160,7 @@ export default function EditorLayout() {
   const {
     activeView, setActiveView,
     settingsSection, setSettingsSection,
+    securityTab, setSecurityTab,
     securityHistoryOpen, setSecurityHistoryOpen,
     filterNodeId, setFilterNodeId,
     schedulePrefill,
@@ -710,6 +711,8 @@ export default function EditorLayout() {
             onNavigateToStack={(stackFile) => { void stackActions.loadFile(stackFile); }}
             onOpenSettingsSection={(section) => openSettings(section)}
             onClearNotifications={clearAllNotifications}
+            securityTab={securityTab}
+            onSecurityTabChange={setSecurityTab}
             renderEditor={renderEditor}
           />
         </div>
