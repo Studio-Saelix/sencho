@@ -38,6 +38,7 @@ import { useNextAutoUpdateRun } from '@/components/sidebar/useNextAutoUpdateRun'
 import { usePanelSessionStartedAt } from '@/components/sidebar/usePanelSessionStartedAt';
 import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivityTicker';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
+import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
@@ -144,6 +145,7 @@ export default function EditorLayout() {
   }, [setCreateDialogOpen]);
 
   const [diffPreviewEnabled] = useComposeDiffPreviewEnabled();
+  const [topNavLabels] = useTopNavLabels();
 
   // Use a ref to break the circular dependency:
   // useViewNavigationState needs onNavigateToDashboard -> resetEditorState
@@ -664,6 +666,7 @@ export default function EditorLayout() {
           themeSwitch={themeSwitchEl}
           notifications={notificationsEl}
           userMenu={userMenuEl}
+          showLabels={topNavLabels}
         />
       );
 

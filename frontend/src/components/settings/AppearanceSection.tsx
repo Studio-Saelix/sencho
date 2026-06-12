@@ -2,11 +2,13 @@ import { Combobox } from '@/components/ui/combobox';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Slider } from '@/components/ui/slider';
 import { SegmentedControl } from '@/components/ui/segmented-control';
+import { TogglePill } from '@/components/ui/toggle-pill';
 import { useDensity } from '@/hooks/use-density';
 import type { Density } from '@/hooks/use-density';
 import { useDeployFeedbackEnabled } from '@/hooks/use-deploy-feedback-enabled';
 import { useDeployFeedbackStyle, type DeployFeedbackStyle } from '@/hooks/use-deploy-feedback-style';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
+import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTheme, THEME_MODE_OPTIONS, ACCENTS, CONTRAST, BORDER_BOOST, GLOW, TYPE_SCALE } from '@/hooks/use-theme';
 import { AccentPicker } from '@/components/theme/AccentPicker';
 import { ThemePreview } from '@/components/theme/ThemePreview';
@@ -38,6 +40,7 @@ export function AppearanceSection() {
     const [isEnabled, setEnabled] = useDeployFeedbackEnabled();
     const [feedbackStyle, setFeedbackStyle] = useDeployFeedbackStyle();
     const [diffPreviewEnabled, setDiffPreviewEnabled] = useComposeDiffPreviewEnabled();
+    const [topNavLabels, setTopNavLabels] = useTopNavLabels();
     const {
         theme, accent, borderBoost, glow, contrast, uiFont, monoFont, typeScale,
         setTheme, setAccent, setBorderBoost, setGlow, setContrast, setUiFont, setMonoFont, setTypeScale,
@@ -191,6 +194,13 @@ export function AppearanceSection() {
                         }}
                         placeholder="Select density"
                     />
+                </SettingsField>
+
+                <SettingsField
+                    label="Top navigation labels"
+                    helper="Show text labels beside top navigation icons. Turn off for a more compact navigation bar."
+                >
+                    <TogglePill checked={topNavLabels} onChange={setTopNavLabels} />
                 </SettingsField>
 
                 <SettingsField

@@ -217,7 +217,7 @@ describe('useViewNavigationState', () => {
     expect(result.current.navItems.map(i => i.value)).toContain('global-observability');
   });
 
-  it('shows Auto-Update and Schedules for a community admin (now free) but hides paid Console and Audit', () => {
+  it('shows Update and Schedules for a community admin (now free) but hides paid Console and Audit', () => {
     mockCommunityAdmin();
     const { result } = renderHook(() => useViewNavigationState());
     const values = result.current.navItems.map(i => i.value);
@@ -225,6 +225,8 @@ describe('useViewNavigationState', () => {
     expect(values).toContain('scheduled-ops');
     expect(values).not.toContain('host-console');
     expect(values).not.toContain('audit-log');
+    // The auto-updates nav item surfaces under the short label "Update".
+    expect(result.current.navItems.find(i => i.value === 'auto-updates')?.label).toBe('Update');
   });
 
   it('redirects a non-admin off the Logs view when reached via a deep-link event', () => {

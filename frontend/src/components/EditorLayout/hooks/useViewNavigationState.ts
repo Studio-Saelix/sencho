@@ -109,7 +109,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     // admin-only operator view (the backend gates the same routes on admin).
     if (isAdmin) items.push({ value: 'global-observability', label: 'Logs', icon: Activity });
     if (isAdmin) {
-      items.push({ value: 'auto-updates', label: 'Auto-Update', icon: RefreshCw });
+      items.push({ value: 'auto-updates', label: 'Update', icon: RefreshCw });
       items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
     }
     if (isPaid) {
