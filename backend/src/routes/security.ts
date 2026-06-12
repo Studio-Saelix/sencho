@@ -18,6 +18,7 @@ import { blockIfReplica } from '../middleware/fleetSyncGuards';
 import { validateStackPatternForRedos } from './fleet';
 import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
 import { DEFAULT_POLICY_PACKS } from '../services/policy-packs';
+import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 // Trivy emits misconfig rule ids in two shapes that Sencho persists verbatim:
@@ -326,6 +327,73 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
     }
     console.error('[Security] Stack config scan failed:', error);
     res.status(500).json({ error: message || 'Failed to scan stack' });
+  }
+});
+
+// On-demand node-wide scan: images for the selected scanners (vuln/secret) and,
+// when requested, every stack's compose config for misconfigurations. Streams
+// sanitized progress to the deploy-feedback terminal when the client opened one.
+securityRouter.post('/scan-node', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const svc = TrivyService.getInstance();
+  if (!svc.isTrivyAvailable()) {
+    res.status(503).json({ error: 'Trivy is not available on this host' });
+    return;
+  }
+  const body = req.body ?? {};
+  if (![body.vulns, body.secrets, body.misconfig].every((v) => v === undefined || typeof v === 'boolean')) {
+    res.status(400).json({ error: 'vulns, secrets and misconfig must be booleans' });
+    return;
+  }
+  const vulns = body.vulns === true;
+  const secrets = body.secrets === true;
+  const misconfig = body.misconfig === true;
+  if (!vulns && !secrets && !misconfig) {
+    res.status(400).json({ error: 'Select at least one scan type' });
+    return;
+  }
+  const nodeId = req.nodeId;
+
+  // Stream progress to the deploy-feedback terminal only when the client supplied
+  // a session id: a bare getTerminalWs(undefined) falls back to the most recent
+  // terminal and could cross-stream this scan into an unrelated deploy. scanNode
+  // emits only counts and rule ids, never raw secret values; the wrapper here
+  // additionally strips CR/LF and caps line length before sending.
+  const sessionId = req.get(DEPLOY_SESSION_HEADER);
+  const ws = sessionId ? getTerminalWs(sessionId) : undefined;
+  const onProgress = ws
+    ? (line: string): void => {
+        try { ws.send(line.replace(/[\r\n]+/g, ' ').slice(0, 2000) + '\r\n'); }
+        catch { /* socket closed mid-scan; the scan still runs to completion */ }
+      }
+    : undefined;
+
+  try {
+    DatabaseService.getInstance().insertAuditLog({
+      timestamp: Date.now(),
+      username: req.user?.username ?? 'unknown',
+      method: req.method,
+      path: req.originalUrl || req.url,
+      status_code: 200,
+      node_id: nodeId,
+      ip_address: req.ip ?? '',
+      summary: `node-wide scan triggered (vulns=${vulns} secrets=${secrets} misconfig=${misconfig})`,
+    });
+  } catch (auditErr) {
+    console.warn('[Security] failed to record node-scan audit log:', getErrorMessage(auditErr, 'unknown'));
+  }
+
+  try {
+    const result = await svc.scanNode(nodeId, { vulns, secrets, misconfig }, 'manual', onProgress);
+    res.status(200).json(result);
+  } catch (err) {
+    const message = getErrorMessage(err, 'Failed to run node scan');
+    if (message === 'Already scanning this node') {
+      res.status(409).json({ error: message });
+      return;
+    }
+    console.error('[Security] node-wide scan failed:', sanitizeForLog(message));
+    res.status(500).json({ error: 'Failed to run node scan' });
   }
 });
 

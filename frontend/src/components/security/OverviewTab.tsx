@@ -11,6 +11,7 @@ import {
   TopExposedImagesChart,
   FindingsByTypeChart,
 } from './SecurityCharts';
+import { ScanNodeLauncher } from './ScanNodeLauncher';
 
 interface OverviewTabProps {
   overview: SecurityOverview | null;
@@ -20,6 +21,10 @@ interface OverviewTabProps {
   trend: SecurityRiskTrendPoint[];
   onNavigate: (tab: SecurityTab) => void;
   onInspect: (scanId: number) => void;
+  /** Admin on a node with a ready scanner; enables the node-scan launcher. */
+  canScan: boolean;
+  /** Refresh the overview after a node-wide scan completes. */
+  onScanComplete: () => void;
 }
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
@@ -47,7 +52,7 @@ function ChartCard({ title, className, children }: { title: string; className?: 
   );
 }
 
-export function OverviewTab({ overview, loadError, summaries, trend, onNavigate, onInspect }: OverviewTabProps) {
+export function OverviewTab({ overview, loadError, summaries, trend, onNavigate, onInspect, canScan, onScanComplete }: OverviewTabProps) {
   if (loadError === 'unsupported') {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -98,6 +103,17 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
 
   return (
     <div className="space-y-6">
+      {canScan && (
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-stat-subtitle">
+            {overview.scannedImages === 0
+              ? 'No images scanned on this node yet.'
+              : `${overview.scannedImages} image${overview.scannedImages === 1 ? '' : 's'} scanned.`}
+          </p>
+          <ScanNodeLauncher canScan={canScan} onComplete={onScanComplete} />
+        </div>
+      )}
+
       {/* Charts lead the dashboard. */}
       <div className="grid gap-4 lg:grid-cols-3">
         <ChartCard title="Risk trend · 30 days · critical + high" className="lg:col-span-2">

@@ -59,6 +59,8 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
   const [summariesError, setSummariesError] = useState(false);
   const [trend, setTrend] = useState<SecurityRiskTrendPoint[]>([]);
   const [isReplica, setIsReplica] = useState(false);
+  // Bumped after a node-wide scan completes to refetch the active node's posture.
+  const [reloadToken, setReloadToken] = useState(0);
 
   const [inspectScanId, setInspectScanId] = useState<number | null>(null);
   const [inspectInitialTab, setInspectInitialTab] = useState<ScanDetailTab | undefined>(undefined);
@@ -139,7 +141,7 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
       if (!cancelled) setTrend(trend);
     })();
     return () => { cancelled = true; };
-  }, [activeNode?.id]);
+  }, [activeNode?.id, reloadToken]);
 
   // Governance panels (suppressions/acks) are control-governed; probe the local
   // fleet role so a replica renders them read-only, mirroring Settings.
@@ -222,6 +224,8 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
             trend={trend}
             onNavigate={onTabChange}
             onInspect={onInspect}
+            canScan={canScan}
+            onScanComplete={() => setReloadToken((t) => t + 1)}
           />
         </TabsContent>
 

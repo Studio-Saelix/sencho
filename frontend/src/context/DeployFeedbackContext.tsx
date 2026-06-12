@@ -4,7 +4,7 @@ import { type ParsedLogRow, parseLogChunk } from '../components/log-rendering/co
 import { useDeployFeedbackEnabled } from '../hooks/use-deploy-feedback-enabled';
 import { readDeployFeedbackStyle } from '../hooks/use-deploy-feedback-style';
 
-export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install';
+export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install' | 'scan';
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const VERB_LABELS: Record<ActionVerb, { present: string; past: string }> = {
@@ -14,6 +14,7 @@ export const VERB_LABELS: Record<ActionVerb, { present: string; past: string }> 
   restart: { present: 'Restarting', past: 'Restarted' },
   stop:    { present: 'Stopping',   past: 'Stopped'   },
   install: { present: 'Installing', past: 'Installed' },
+  scan:    { present: 'Scanning',   past: 'Scanned'   },
 };
 
 export interface DeployPanelState {
