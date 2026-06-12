@@ -15,8 +15,16 @@ export interface PageMastheadProps {
     tone: MastheadTone;
     pulsing?: boolean;
     metadata?: MastheadMetadataItem[];
+    /** Optional meta line under the state word (e.g. a one-line posture summary). */
+    subtitle?: ReactNode;
     children?: ReactNode;
     className?: string;
+    /**
+     * `hero` matches the larger title of the primary nav pages (Home, Fleet);
+     * `default` is the compact title used by the secondary tool pages (Settings,
+     * Console, Logs).
+     */
+    size?: 'default' | 'hero';
 }
 
 const toneConfig: Record<MastheadTone, {
@@ -59,8 +67,10 @@ export function PageMasthead({
     tone,
     pulsing = false,
     metadata,
+    subtitle,
     children,
     className,
+    size = 'default',
 }: PageMastheadProps) {
     const config = toneConfig[tone];
     const shouldPulse = pulsing && (tone === 'live' || tone === 'warn');
@@ -88,9 +98,20 @@ export function PageMasthead({
                         <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
                             {kicker}
                         </span>
-                        <span className={cn('font-display italic text-[22px] leading-7 tracking-[-0.01em]', config.stateTextClass)}>
+                        <span
+                            className={cn(
+                                'font-display italic tracking-[-0.01em]',
+                                size === 'hero' ? 'text-3xl leading-none' : 'text-[22px] leading-7',
+                                config.stateTextClass,
+                            )}
+                        >
                             {state}
                         </span>
+                        {subtitle ? (
+                            <span className="font-mono text-[11px] leading-tight text-stat-subtitle/90 truncate">
+                                {subtitle}
+                            </span>
+                        ) : null}
                     </div>
                     {children ? <div className="ml-2 min-w-0">{children}</div> : null}
                 </div>

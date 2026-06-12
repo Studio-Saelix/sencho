@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -98,6 +98,18 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
 
   useEffect(() => { void load(safePage, search); }, [load, safePage, search, nodeId]);
 
+  // Realtime search: apply the draft automatically a beat after typing stops (no
+  // Enter), then refetch from page 0. Debounced rather than per-keystroke because
+  // the list is server-paginated, so the query searches every completed scan, not
+  // just the loaded page. Skip the initial mount so it does not reset pagination.
+  const prevSearchDraftRef = useRef(searchDraft);
+  useEffect(() => {
+    if (prevSearchDraftRef.current === searchDraft) return;
+    prevSearchDraftRef.current = searchDraft;
+    const t = setTimeout(() => { setSearch(searchDraft); setPage(0); }, 250);
+    return () => clearTimeout(t);
+  }, [searchDraft]);
+
   const toggleSelect = (scanId: number) => {
     setSelected((prev) => {
       if (prev.includes(scanId)) return prev.filter((x) => x !== scanId);
@@ -157,7 +169,6 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
           placeholder="Search by image..."
           value={searchDraft}
           onChange={(e) => setSearchDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') { setPage(0); setSearch(searchDraft); } }}
           className="pl-8"
         />
       </div>
