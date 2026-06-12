@@ -172,6 +172,7 @@
                   "features/rbac",
                   "features/sso",
                   "features/api-tokens",
+                  "features/security",
                   "features/vulnerability-scanning",
                   "features/cve-suppressions",
                   "features/private-registries"

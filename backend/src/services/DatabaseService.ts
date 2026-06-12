@@ -691,6 +691,8 @@ export interface ScanSummary {
     low: number;
     unknown: number;
     fixable: number;
+    secret_count: number;
+    misconfig_count: number;
     scanned_at: number;
     scan_id: number;
 }
@@ -4394,7 +4396,7 @@ export class DatabaseService {
             .prepare(
                 `SELECT vs.image_ref, vs.id as scan_id, vs.highest_severity, vs.total_vulnerabilities,
                     vs.critical_count, vs.high_count, vs.medium_count, vs.low_count,
-                    vs.unknown_count, vs.fixable_count, vs.scanned_at
+                    vs.unknown_count, vs.fixable_count, vs.secret_count, vs.misconfig_count, vs.scanned_at
                  FROM vulnerability_scans vs
                  INNER JOIN (
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
@@ -4415,6 +4417,8 @@ export class DatabaseService {
                 low_count: number;
                 unknown_count: number;
                 fixable_count: number;
+                secret_count: number;
+                misconfig_count: number;
                 scanned_at: number;
             }>;
         const out: Record<string, ScanSummary> = {};
@@ -4429,11 +4433,50 @@ export class DatabaseService {
                 low: r.low_count,
                 unknown: r.unknown_count,
                 fixable: r.fixable_count,
+                secret_count: r.secret_count,
+                misconfig_count: r.misconfig_count,
                 scanned_at: r.scanned_at,
                 scan_id: r.scan_id,
             };
         }
         return out;
+    }
+
+    /**
+     * Uncapped count of scans in a given status for a node. Unlike
+     * `getVulnerabilityScans`, this never applies the per-image history cap, so
+     * the Security overview reports the true number of (for example) failed
+     * scans rather than a capped grouped total.
+     */
+    public countScansByStatus(nodeId: number, status: VulnScanStatus): number {
+        return (
+            this.db
+                .prepare(
+                    'SELECT COUNT(*) AS cnt FROM vulnerability_scans WHERE node_id = ? AND status = ?',
+                )
+                .get(nodeId, status) as { cnt: number }
+        ).cnt;
+    }
+
+    /**
+     * Count of enabled block-on-deploy policies that are eligible to apply to
+     * this node: fleet-wide (node_id IS NULL) or scoped to this node. Built on
+     * `getScanPoliciesForUi` so a replica never counts policies scoped to a
+     * sibling node's identity. Stack-pattern applicability is not evaluated
+     * (there is no concrete stack name at overview scope), so this is an
+     * approximate "is this node enforcing" indicator, not a per-stack guarantee.
+     */
+    public countEligibleBlockPolicies(
+        nodeId: number,
+        role: 'control' | 'replica',
+        selfIdentity: string,
+    ): number {
+        return this.getScanPoliciesForUi(role, selfIdentity).filter(
+            (p) =>
+                p.enabled === 1 &&
+                p.block_on_deploy === 1 &&
+                (p.node_id === null || p.node_id === nodeId),
+        ).length;
     }
 
     // --- Scan Policies ---

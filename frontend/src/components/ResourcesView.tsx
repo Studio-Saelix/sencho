@@ -16,11 +16,11 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen } from 'lucide-react';
-import { CursorProvider, CursorContainer, Cursor, CursorFollow } from '@/components/animate-ui/primitives/animate/cursor';
+import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from './NodeManager';
-import type { ScanSummary, VulnSeverity } from '@/types/security';
+import type { ScanSummary } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
@@ -219,84 +219,6 @@ function SenchoBadge() {
 }
 
 // ── Severity Badge ─────────────────────────────────────────────────────────────
-
-const SEVERITY_BADGE_CLASSES: Record<VulnSeverity | 'CLEAN', string> = {
-    CRITICAL: 'border-destructive/25 bg-destructive/8 text-destructive',
-    HIGH: 'border-warning/25 bg-warning/8 text-warning',
-    MEDIUM: 'border-warning/25 bg-warning/8 text-warning',
-    LOW: 'border-border bg-muted/30 text-muted-foreground',
-    UNKNOWN: 'border-border bg-muted/20 text-muted-foreground',
-    CLEAN: 'border-success/25 bg-success/8 text-success',
-};
-
-const SEVERITY_DOT_CLASSES: Record<VulnSeverity | 'CLEAN', string> = {
-    CRITICAL: 'bg-destructive',
-    HIGH: 'bg-warning',
-    MEDIUM: 'bg-warning',
-    LOW: 'bg-muted-foreground/60',
-    UNKNOWN: 'bg-muted-foreground/40',
-    CLEAN: 'bg-success',
-};
-
-function SeverityBadge({ summary, onClick }: { summary: ScanSummary; onClick: () => void }) {
-    const key: VulnSeverity | 'CLEAN' = summary.highest_severity ?? 'CLEAN';
-    const label = key === 'CLEAN' ? 'Clean' : key;
-    const [relative, setRelative] = useState<string>('');
-    useEffect(() => {
-        const compute = () => {
-            const scanAge = Math.round((Date.now() - summary.scanned_at) / 60000);
-            setRelative(
-                scanAge < 1 ? 'just now'
-                    : scanAge < 60 ? `${scanAge}m ago`
-                    : scanAge < 1440 ? `${Math.round(scanAge / 60)}h ago`
-                    : `${Math.round(scanAge / 1440)}d ago`,
-            );
-        };
-        compute();
-        const id = setInterval(compute, 60000);
-        return () => clearInterval(id);
-    }, [summary.scanned_at]);
-
-    return (
-        <CursorProvider>
-            <CursorContainer className="inline-flex">
-                <button
-                    type="button"
-                    onClick={onClick}
-                    className={cn(
-                        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium cursor-pointer hover:brightness-110 transition',
-                        SEVERITY_BADGE_CLASSES[key],
-                    )}
-                >
-                    <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', SEVERITY_DOT_CLASSES[key])} />
-                    {label}
-                </button>
-            </CursorContainer>
-            <Cursor>
-                <div className="h-2 w-2 rounded-full bg-brand" />
-            </Cursor>
-            <CursorFollow side="bottom" align="end" sideOffset={8}>
-                <div className="bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] border border-card-border shadow-md rounded-md px-3 py-2">
-                    <div className="font-mono tabular-nums text-xs space-y-1">
-                        <div className="text-stat-subtitle uppercase tracking-wide">Last scanned</div>
-                        <div className="text-stat-value">{relative}</div>
-                        {summary.total > 0 && (
-                            <div className="flex gap-3 mt-1">
-                                {summary.critical > 0 && <span className="text-destructive">{summary.critical}C</span>}
-                                {summary.high > 0 && <span className="text-warning">{summary.high}H</span>}
-                                {summary.medium > 0 && <span className="text-warning">{summary.medium}M</span>}
-                                {summary.low > 0 && <span className="text-muted-foreground">{summary.low}L</span>}
-                            </div>
-                        )}
-                        {summary.total === 0 && (
-                            <div className="text-success">No vulnerabilities</div>
-                        )}
-                    </div>
-                </div>
-            </CursorFollow>
-        </CursorProvider>
-    );
-}
 
 // ── Quick Clean Prune Button ───────────────────────────────────────────────────
 
@@ -913,7 +835,7 @@ export default function ResourcesView() {
                             className="border-border"
                             onClick={() => {
                                 window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
-                                    detail: { view: 'security-history' },
+                                    detail: { view: 'security', tab: 'history' },
                                 }));
                             }}
                             title="View completed vulnerability scans and compare them"

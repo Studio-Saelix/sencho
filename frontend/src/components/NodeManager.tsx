@@ -19,6 +19,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useNodeActions, type NodeTestInfo } from './nodes/useNodeActions';
 import { useFleetSyncStatus } from '@/hooks/useFleetSyncStatus';
 import { resetFleetSyncAnchor, STICKY_CONTROL_IDENTITY_MISMATCH } from '@/lib/fleetSyncApi';
+import type { SecurityTab } from '@/lib/events';
 
 interface NodeSchedulingSummary {
   active_tasks: number;
@@ -29,8 +30,10 @@ interface NodeSchedulingSummary {
 
 export const SENCHO_NAVIGATE_EVENT = 'sencho-navigate';
 export interface SenchoNavigateDetail {
-  view: 'scheduled-ops' | 'auto-updates' | 'security-history';
+  view: 'scheduled-ops' | 'auto-updates' | 'security-history' | 'security';
   nodeId?: number;
+  /** Target tab when navigating to the Security view. */
+  tab?: SecurityTab;
 }
 
 export function NodeManager() {

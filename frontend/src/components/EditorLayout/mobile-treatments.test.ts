@@ -13,6 +13,10 @@ describe('mobile treatments', () => {
     }
   });
 
+  it('treats the Security view as responsive (reflowed, not bespoke or desktop-only)', () => {
+    expect(MOBILE_TREATMENTS.security).toBe('responsive');
+  });
+
   it('keeps BESPOKE_MOBILE_VIEWS in lockstep with the bespoke treatments', () => {
     const declaredBespoke = Object.entries(MOBILE_TREATMENTS)
       .filter(([, treatment]) => treatment === 'bespoke')
