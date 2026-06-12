@@ -39,6 +39,7 @@ interface OverviewTabProps {
     onTopologyModeChange: (mode: LayoutMode) => void;
     topologyPositions: SavedPositions;
     onTopologyPositionsChange: (positions: SavedPositions) => void;
+    onAddNode?: () => void;
 }
 
 export function OverviewTab({
@@ -71,6 +72,7 @@ export function OverviewTab({
     onTopologyModeChange,
     topologyPositions,
     onTopologyPositionsChange,
+    onAddNode,
 }: OverviewTabProps) {
     return (
         <>
@@ -113,6 +115,7 @@ export function OverviewTab({
                         labelFilters={labelFilters}
                         onLabelFiltersChange={onLabelFiltersChange}
                         onClearFilters={onClearFilters}
+                        onAddNode={onAddNode}
                     />
 
                     {viewMode === 'topology' && processedNodes.length > 0 ? (

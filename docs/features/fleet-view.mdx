@@ -3,7 +3,7 @@ title: Fleet View
 description: Monitor every node in your Sencho deployment from one screen, drill into stacks and containers, and orchestrate Sencho version updates across the fleet.
 ---
 
-The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Status, Deployments, Routing, Federation, Fleet Actions, Secrets), each linking out to its own dedicated page.
+The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Status, Deployments, Routing, Federation, Actions, Secrets), each linking out to its own dedicated page.
 
 <Note>
   Fleet is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
@@ -45,11 +45,11 @@ The Fleet view is a tab strip. Five tab triggers are visible to every tier; the 
 | **Overview** | Community | The grid or topology view of every node and its health. Covered in the next section. |
 | **Snapshots** | Community | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
 | **Status** | Community | One card per node summarising which automations and security features are configured. Covered below. |
-| **Dependencies** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
+| **Map** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
 | **Deployments** | Admiral | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Admiral | Cross-node service routing via Sencho Mesh. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Admiral | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
-| **Fleet Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |
+| **Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |
 | **Secrets** | Admiral | Encrypted env-var bundles you push to labeled nodes. See [Fleet Secrets](/features/fleet-secrets). |
 
 ### Action buttons
@@ -203,9 +203,9 @@ Offline nodes show a muted card with the heading and the message `Node is unreac
 
 The tab fetches each node's configuration in parallel; a single dead node does not block the rest from rendering.
 
-## The Dependency Map tab
+## The Map tab
 
-The **Dependencies** tab draws a read-only map of how everything on the fleet fits together: each node, the stacks on it, and how those stacks' services connect to networks, volumes, and published ports. It is built for troubleshooting ("which stacks share this network?", "what is still claiming port 8080?", "why is this volume sitting unused?") rather than for editing anything. Nothing on this tab changes your stacks.
+The **Map** tab draws a read-only diagram of how everything on the fleet fits together: each node, the stacks on it, and how those stacks' services connect to networks, volumes, and published ports. It is built for troubleshooting ("which stacks share this network?", "what is still claiming port 8080?", "why is this volume sitting unused?") rather than for editing anything. Nothing on this tab changes your stacks.
 
 The map is assembled from what Docker and your compose files already describe, so it reflects the live state every time you open the tab or press **Refresh**.
 
