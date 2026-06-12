@@ -106,6 +106,7 @@
                   "features/stack-dossier",
                   "features/stack-drift",
                   "features/compose-doctor",
+                  "features/compose-networking",
                   "features/stack-labels",
                   "features/sidebar"
                 ]
