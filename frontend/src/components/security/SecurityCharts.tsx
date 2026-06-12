@@ -1,0 +1,171 @@
+import { useMemo } from 'react';
+import { PieChart, Pie, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, LabelList } from 'recharts';
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
+import type { ScanSummary, SecurityRiskTrendPoint } from '@/types/security';
+
+// Severity palette stays within the design's semantic tokens: --destructive
+// (critical), --warning (high), a muted --warning (medium), --muted-foreground
+// (low). No new chart hue.
+const SEVERITY_CONFIG = {
+  critical: { label: 'Critical', color: 'var(--destructive)' },
+  high: { label: 'High', color: 'var(--warning)' },
+  medium: { label: 'Medium', color: 'color-mix(in oklch, var(--warning) 55%, var(--muted))' },
+  low: { label: 'Low', color: 'var(--muted-foreground)' },
+} satisfies ChartConfig;
+
+// The trend and top-exposed charts both plot only the Critical + High slots.
+const CRITICAL_HIGH_CONFIG = {
+  critical: SEVERITY_CONFIG.critical,
+  high: SEVERITY_CONFIG.high,
+} satisfies ChartConfig;
+
+function EmptyChart({ label, height }: { label: string; height: number }) {
+  return (
+    <div className="flex items-center justify-center text-xs text-stat-subtitle" style={{ height }}>
+      {label}
+    </div>
+  );
+}
+
+/** Donut of total findings by severity across the node's scanned images. */
+export function SeverityDonutChart({ summaries }: { summaries: ScanSummary[] }) {
+  const data = useMemo(() => {
+    const totals = { critical: 0, high: 0, medium: 0, low: 0 };
+    for (const s of summaries) {
+      totals.critical += s.critical;
+      totals.high += s.high;
+      totals.medium += s.medium;
+      totals.low += s.low;
+    }
+    return (['critical', 'high', 'medium', 'low'] as const)
+      .map((k) => ({ key: k, label: SEVERITY_CONFIG[k].label, value: totals[k], fill: `var(--color-${k})` }))
+      .filter((d) => d.value > 0);
+  }, [summaries]);
+
+  const total = data.reduce((sum, d) => sum + d.value, 0);
+  if (total === 0) return <EmptyChart label="No findings to chart" height={220} />;
+
+  return (
+    <ChartContainer config={SEVERITY_CONFIG} className="h-[220px] w-full">
+      <PieChart>
+        <ChartTooltip content={<ChartTooltipContent nameKey="label" hideLabel />} />
+        <Pie data={data} dataKey="value" nameKey="label" innerRadius={55} outerRadius={85} strokeWidth={2} paddingAngle={2} />
+      </PieChart>
+    </ChartContainer>
+  );
+}
+
+/** Stacked area of Critical + High findings by scan-day (days with no scans are omitted). */
+export function RiskTrendChart({ trend }: { trend: SecurityRiskTrendPoint[] }) {
+  if (trend.length === 0) return <EmptyChart label="No scan history yet" height={220} />;
+
+  const fmtDate = (d: string) => d.slice(5); // MM-DD
+
+  return (
+    <ChartContainer config={CRITICAL_HIGH_CONFIG} className="h-[220px] w-full">
+      <AreaChart data={trend} margin={{ left: 4, right: 8, top: 8 }}>
+        <defs>
+          <linearGradient id="riskHigh" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor="var(--color-high)" stopOpacity={0.35} />
+            <stop offset="95%" stopColor="var(--color-high)" stopOpacity={0.02} />
+          </linearGradient>
+          <linearGradient id="riskCritical" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor="var(--color-critical)" stopOpacity={0.4} />
+            <stop offset="95%" stopColor="var(--color-critical)" stopOpacity={0.02} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" />
+        <XAxis dataKey="date" tickFormatter={fmtDate} tickLine={false} axisLine={false} fontSize={10} minTickGap={24} />
+        <YAxis tickLine={false} axisLine={false} fontSize={10} width={28} allowDecimals={false} />
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <Area dataKey="high" stackId="risk" stroke="var(--color-high)" fill="url(#riskHigh)" strokeWidth={1.5} />
+        <Area dataKey="critical" stackId="risk" stroke="var(--color-critical)" fill="url(#riskCritical)" strokeWidth={1.5} />
+      </AreaChart>
+    </ChartContainer>
+  );
+}
+
+interface TopImageDatum { name: string; critical: number; high: number; scanId: number }
+
+/** Horizontal stacked bars of the top images by Critical+High; click opens the scan. */
+export function TopExposedImagesChart({
+  summaries,
+  onInspect,
+}: {
+  summaries: ScanSummary[];
+  onInspect: (scanId: number) => void;
+}) {
+  const data: TopImageDatum[] = useMemo(
+    () =>
+      summaries
+        .filter((s) => !s.image_ref.startsWith('stack:') && s.critical + s.high > 0)
+        .sort((a, b) => b.critical + b.high - (a.critical + a.high))
+        .slice(0, 6)
+        .map((s) => ({
+          name: s.image_ref.length > 28 ? `…${s.image_ref.slice(-27)}` : s.image_ref,
+          critical: s.critical,
+          high: s.high,
+          scanId: s.scan_id,
+        })),
+    [summaries],
+  );
+
+  if (data.length === 0) return <EmptyChart label="No exposed images" height={220} />;
+
+  const handleBarClick = (d: unknown) => {
+    const dd = d as TopImageDatum;
+    if (dd?.scanId != null) onInspect(dd.scanId);
+  };
+
+  return (
+    <ChartContainer config={CRITICAL_HIGH_CONFIG} className="h-[220px] w-full">
+      <BarChart data={data} layout="vertical" margin={{ left: 8, right: 16 }}>
+        <XAxis type="number" hide allowDecimals={false} />
+        <YAxis type="category" dataKey="name" width={150} tickLine={false} axisLine={false} fontSize={10} />
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <Bar dataKey="critical" stackId="r" fill="var(--color-critical)" radius={[2, 0, 0, 2]} className="cursor-pointer" onClick={handleBarClick} />
+        <Bar dataKey="high" stackId="r" fill="var(--color-high)" radius={[0, 2, 2, 0]} className="cursor-pointer" onClick={handleBarClick} />
+      </BarChart>
+    </ChartContainer>
+  );
+}
+
+/** Vertical bars comparing the three finding types. */
+export function FindingsByTypeChart({ summaries }: { summaries: ScanSummary[] }) {
+  const data = useMemo(() => {
+    let vulnerabilities = 0;
+    let secrets = 0;
+    let misconfigs = 0;
+    for (const s of summaries) {
+      vulnerabilities += s.total;
+      secrets += s.secret_count;
+      misconfigs += s.misconfig_count;
+    }
+    return [
+      { type: 'Vulnerabilities', value: vulnerabilities, fill: 'var(--brand)' },
+      { type: 'Secrets', value: secrets, fill: 'var(--destructive)' },
+      { type: 'Misconfigs', value: misconfigs, fill: 'var(--warning)' },
+    ];
+  }, [summaries]);
+
+  const total = data.reduce((sum, d) => sum + d.value, 0);
+  if (total === 0) return <EmptyChart label="No findings to chart" height={220} />;
+
+  const config = {
+    value: { label: 'Findings' },
+  } satisfies ChartConfig;
+
+  return (
+    <ChartContainer config={config} className="h-[220px] w-full">
+      <BarChart data={data} margin={{ left: 4, right: 8, top: 16 }}>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" />
+        <XAxis dataKey="type" tickLine={false} axisLine={false} fontSize={10} />
+        <YAxis tickLine={false} axisLine={false} fontSize={10} width={28} allowDecimals={false} />
+        <ChartTooltip content={<ChartTooltipContent hideLabel />} />
+        <Bar dataKey="value" radius={[4, 4, 0, 0]} maxBarSize={64}>
+          <LabelList dataKey="value" position="top" className="fill-stat-subtitle" fontSize={10} />
+        </Bar>
+      </BarChart>
+    </ChartContainer>
+  );
+}

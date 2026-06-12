@@ -530,6 +530,22 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
   }
 });
 
+// Daily Critical/High risk trend for the Security overview chart. Auth-only
+// (Community), node-scoped. ?days clamps to 1..365 in the DB layer.
+securityRouter.get('/overview/trend', authMiddleware, (req: Request, res: Response): void => {
+  try {
+    const days = req.query.days ? Number(req.query.days) : 30;
+    const trend = DatabaseService.getInstance().getDailyRiskTrend(
+      req.nodeId,
+      Number.isFinite(days) ? days : 30,
+    );
+    res.json(trend);
+  } catch (error) {
+    console.error('[Security] Failed to build risk trend:', error);
+    res.status(500).json({ error: 'Failed to build risk trend' });
+  }
+});
+
 // Static, read-only policy-pack catalog. Auth-only (Community), no DB, no
 // enforcement. The frontend fetches this with localOnly so the global catalog
 // is available regardless of which node is active.

@@ -51,3 +51,11 @@ it('renders "Findings" for a misconfig-only scan', () => {
   render(<SeverityBadge summary={summary({ highest_severity: null, misconfig_count: 3 })} onClick={() => {}} />);
   expect(screen.getByRole('button', { name: /Findings/ })).toBeInTheDocument();
 });
+
+it('renders the bare pill and fires onClick with tooltip disabled', async () => {
+  const onClick = vi.fn();
+  render(<SeverityBadge summary={summary({ highest_severity: 'HIGH', total: 1, high: 1 })} onClick={onClick} tooltip={false} />);
+  const btn = screen.getByRole('button', { name: /HIGH/ });
+  await userEvent.click(btn);
+  expect(onClick).toHaveBeenCalledOnce();
+});

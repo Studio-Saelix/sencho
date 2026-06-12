@@ -6,9 +6,10 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
-import { ChevronLeft, ChevronRight, Plus, ShieldCheck, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
+import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
 import type { MisconfigAcknowledgement } from '@/types/security';
 import { useAuth } from '@/context/AuthContext';
 
@@ -145,54 +146,48 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
   };
 
   return (
-    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <ShieldCheck className="w-4 h-4 text-muted-foreground shrink-0" strokeWidth={1.5} />
-          <span className="font-medium text-sm">Misconfig Acknowledgements</span>
-          <Badge variant="outline" className="text-[10px] shrink-0 font-mono tabular-nums">
-            {rows.length}
-          </Badge>
-        </div>
-        <div className="flex items-center gap-1 shrink-0">
-          {needsPagination && (
-            <>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6"
-                onClick={() => setPage(Math.max(0, safePage - 1))}
-                disabled={safePage === 0}
-              >
-                <ChevronLeft className="w-4 h-4" strokeWidth={1.5} />
-              </Button>
-              <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
-                {safePage + 1} / {totalPages}
-              </span>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6"
-                onClick={() => setPage(Math.min(totalPages - 1, safePage + 1))}
-                disabled={safePage >= totalPages - 1}
-              >
-                <ChevronRight className="w-4 h-4" strokeWidth={1.5} />
-              </Button>
-            </>
-          )}
-          {isAdmin && !isReplica && (
+    <div className="space-y-4">
+      <FleetTabHeading
+        title="Misconfig acknowledgements"
+        subtitle="Accept known-benign misconfigurations so they stop triggering alerts. Acknowledgements apply at read time across the fleet and never modify stored scan data."
+        action={
+          isAdmin && !isReplica ? (
             <Button size="sm" onClick={openCreate}>
               <Plus className="w-4 h-4 mr-1.5" />
-              Add Acknowledgement
+              Add acknowledgement
             </Button>
-          )}
-        </div>
-      </div>
+          ) : undefined
+        }
+      />
 
-      <p className="text-xs text-muted-foreground">
-        Accept known-benign misconfigurations so they stop triggering alerts. Acknowledgements apply at read time
-        across every instance in the fleet and never modify stored scan data.
-      </p>
+      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 space-y-3">
+      {needsPagination && !loading && rows.length > 0 && (
+        <div className="flex items-center justify-end gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={() => setPage(Math.max(0, safePage - 1))}
+            disabled={safePage === 0}
+            aria-label="Previous page"
+          >
+            <ChevronLeft className="w-4 h-4" strokeWidth={1.5} />
+          </Button>
+          <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
+            {safePage + 1} / {totalPages}
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={() => setPage(Math.min(totalPages - 1, safePage + 1))}
+            disabled={safePage >= totalPages - 1}
+            aria-label="Next page"
+          >
+            <ChevronRight className="w-4 h-4" strokeWidth={1.5} />
+          </Button>
+        </div>
+      )}
 
       {loading && (
         <div className="space-y-2">
@@ -248,6 +243,7 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
           </ul>
         </ScrollArea>
       )}
+      </div>
 
       <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
         <ModalHeader

@@ -5,6 +5,7 @@
  */
 import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 
@@ -44,18 +45,27 @@ beforeEach(() => {
   mockedFetch.mockResolvedValue(jsonResponse(200, PACKS));
 });
 
-it('fetches the catalog with localOnly and renders packs and rules', async () => {
+it('fetches the catalog with localOnly and reveals rules when a pack is expanded', async () => {
+  const user = userEvent.setup();
   render(<PolicyPacksTab />);
   await waitFor(() => expect(screen.getByText('Homelab baseline')).toBeInTheDocument());
   expect(screen.getByText('Strict production')).toBeInTheDocument();
+  expect(mockedFetch).toHaveBeenCalledWith('/security/policy-packs', { localOnly: true });
+
+  // Rules are collapsed behind the accordion until the pack header is clicked.
+  expect(screen.queryByText('Pin image tags')).not.toBeInTheDocument();
+  await user.click(screen.getByText('Homelab baseline'));
+  await user.click(screen.getByText('Strict production'));
   expect(screen.getByText('Pin image tags')).toBeInTheDocument();
   expect(screen.getByText('No privileged containers')).toBeInTheDocument();
-
-  expect(mockedFetch).toHaveBeenCalledWith('/security/policy-packs', { localOnly: true });
 });
 
-it('labels rules as warning or enforceable', async () => {
+it('labels expanded rules as warning or enforceable', async () => {
+  const user = userEvent.setup();
   render(<PolicyPacksTab />);
-  await waitFor(() => expect(screen.getByText('Warning')).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText('Homelab baseline')).toBeInTheDocument());
+  await user.click(screen.getByText('Homelab baseline'));
+  await user.click(screen.getByText('Strict production'));
+  expect(screen.getByText('Warning')).toBeInTheDocument();
   expect(screen.getByText('Enforceable')).toBeInTheDocument();
 });

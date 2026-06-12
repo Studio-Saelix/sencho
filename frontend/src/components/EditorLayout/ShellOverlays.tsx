@@ -1,6 +1,4 @@
-import { lazy, Suspense } from 'react';
 import BashExecModal from '../BashExecModal';
-import LazyBoundary from '../LazyBoundary';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
 import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
 import { DeleteStackDialog } from './DeleteStackDialog';
@@ -14,14 +12,6 @@ import type { OverlayState } from './hooks/useOverlayState';
 import type { StackActionsHook } from './hooks/useStackActions';
 import type { PermissionAction } from '@/context/AuthContext';
 
-// SecurityHistoryView is the only lazy-loaded view that lives outside
-// the ViewRouter switch -- it renders as an overlay sheet wired into the
-// settings flow, not as a top-level tab. The other tab-level lazy views
-// (HostConsole, FleetView, AuditLogView, etc.) live inside ViewRouter.
-const SecurityHistoryView = lazy(() =>
-  import('../SecurityHistoryView').then(m => ({ default: m.SecurityHistoryView })),
-);
-
 interface ShellOverlaysProps {
   overlayState: OverlayState;
   stackActions: StackActionsHook;
@@ -32,8 +22,6 @@ interface ShellOverlaysProps {
   stackName: string;
   gitSourceOpen: boolean;
   setGitSourceOpen: (open: boolean) => void;
-  securityHistoryOpen: boolean;
-  setSecurityHistoryOpen: (open: boolean) => void;
 }
 
 export function ShellOverlays({
@@ -46,8 +34,6 @@ export function ShellOverlays({
   stackName,
   gitSourceOpen,
   setGitSourceOpen,
-  securityHistoryOpen,
-  setSecurityHistoryOpen,
 }: ShellOverlaysProps) {
   const {
     deleteDialogOpen, closeDeleteDialog, stackToDelete,
@@ -171,21 +157,6 @@ export function ShellOverlays({
         }}
       />
 
-      {/* Scan history overlay. Conditionally mounted so the lazy chunk
-          only fetches when the user opens the overlay; an always-mounted
-          lazy component would fetch on EditorLayout's first render and
-          defeat the split. The overlay has no internal state that needs
-          to persist across opens. */}
-      {securityHistoryOpen ? (
-        <LazyBoundary>
-          <Suspense fallback={null}>
-            <SecurityHistoryView
-              open
-              onClose={() => setSecurityHistoryOpen(false)}
-            />
-          </Suspense>
-        </LazyBoundary>
-      ) : null}
     </>
   );
 }

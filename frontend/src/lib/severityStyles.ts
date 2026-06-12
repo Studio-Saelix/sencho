@@ -1,4 +1,17 @@
-import type { VulnSeverity } from '@/types/security';
+import type { ScanSummary, VulnSeverity } from '@/types/security';
+
+export type SeverityKey = VulnSeverity | 'CLEAN' | 'FINDINGS';
+
+/**
+ * The display "key" for a scan summary: its highest vulnerability severity, or
+ * `FINDINGS` when the scan has only secrets/misconfigurations (stored
+ * highest_severity is derived from CVEs alone), or `CLEAN` when nothing was
+ * found. Shared so the badge, sorting, and filtering all classify identically.
+ */
+export function getSeverityKey(summary: ScanSummary): SeverityKey {
+  const hasNonVulnFindings = (summary.secret_count ?? 0) > 0 || (summary.misconfig_count ?? 0) > 0;
+  return summary.highest_severity ?? (hasNonVulnFindings ? 'FINDINGS' : 'CLEAN');
+}
 
 export const SEVERITY_ROW_TINT: Record<VulnSeverity, string> = {
   CRITICAL: 'bg-destructive/10 border-l-[3px] border-destructive/70',
@@ -14,7 +27,7 @@ export const SEVERITY_ROW_TINT: Record<VulnSeverity, string> = {
  * state for a scan that has secrets or misconfigurations but zero CVEs (the
  * stored highest_severity is derived from vulnerabilities only).
  */
-export const SEVERITY_BADGE_CLASSES: Record<VulnSeverity | 'CLEAN' | 'FINDINGS', string> = {
+export const SEVERITY_BADGE_CLASSES: Record<SeverityKey, string> = {
   CRITICAL: 'border-destructive/25 bg-destructive/8 text-destructive',
   HIGH: 'border-warning/25 bg-warning/8 text-warning',
   MEDIUM: 'border-warning/25 bg-warning/8 text-warning',
@@ -25,7 +38,7 @@ export const SEVERITY_BADGE_CLASSES: Record<VulnSeverity | 'CLEAN' | 'FINDINGS',
 };
 
 /** Leading state-dot color for a severity pill. */
-export const SEVERITY_DOT_CLASSES: Record<VulnSeverity | 'CLEAN' | 'FINDINGS', string> = {
+export const SEVERITY_DOT_CLASSES: Record<SeverityKey, string> = {
   CRITICAL: 'bg-destructive',
   HIGH: 'bg-warning',
   MEDIUM: 'bg-warning',

@@ -61,7 +61,6 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   const [activeView, setActiveView] = useState<ActiveView>('dashboard');
   const [settingsSection, setSettingsSection] = useState<SectionId>('appearance');
   const [securityTab, setSecurityTab] = useState<SecurityTab>('overview');
-  const [securityHistoryOpen, setSecurityHistoryOpen] = useState(false);
   const [filterNodeId, setFilterNodeId] = useState<number | null>(null);
   const [schedulePrefill, setSchedulePrefill] = useState<ScheduleTaskPrefill | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -89,11 +88,6 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<SenchoNavigateDetail & { view: string }>).detail;
       if (!detail?.view) return;
-      if (detail.view === 'security-history') {
-        setSecurityHistoryOpen(true);
-        setFilterNodeId(detail.nodeId ?? null);
-        return;
-      }
       if (detail.view === 'security') {
         // Set the target tab before switching the view so the controlled
         // SecurityView lands on it deterministically (no mount race).
@@ -152,7 +146,6 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     activeView, setActiveView,
     settingsSection, setSettingsSection,
     securityTab, setSecurityTab,
-    securityHistoryOpen, setSecurityHistoryOpen,
     filterNodeId, setFilterNodeId,
     schedulePrefill, setSchedulePrefill,
     mobileNavOpen, setMobileNavOpen,

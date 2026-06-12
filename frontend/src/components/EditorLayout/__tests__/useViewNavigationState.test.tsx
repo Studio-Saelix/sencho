@@ -58,7 +58,6 @@ describe('useViewNavigationState', () => {
     const { result } = renderHook(() => useViewNavigationState());
     expect(result.current.activeView).toBe('dashboard');
     expect(result.current.settingsSection).toBe('appearance');
-    expect(result.current.securityHistoryOpen).toBe(false);
     expect(result.current.filterNodeId).toBeNull();
     expect(result.current.schedulePrefill).toBeNull();
     expect(result.current.mobileNavOpen).toBe(false);
@@ -154,18 +153,6 @@ describe('useViewNavigationState', () => {
     });
     expect(result.current.activeView).toBe('fleet');
     expect(result.current.filterNodeId).toBe(5);
-  });
-
-  it('SENCHO_NAVIGATE_EVENT with security-history opens the sheet without changing activeView', () => {
-    const { result } = renderHook(() => useViewNavigationState());
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security-history', nodeId: 3 } }),
-      );
-    });
-    expect(result.current.securityHistoryOpen).toBe(true);
-    expect(result.current.filterNodeId).toBe(3);
-    expect(result.current.activeView).toBe('dashboard');
   });
 
   it('SENCHO_NAVIGATE_EVENT with no nodeId sets filterNodeId to null', () => {

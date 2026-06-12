@@ -30,7 +30,7 @@ interface NodeSchedulingSummary {
 
 export const SENCHO_NAVIGATE_EVENT = 'sencho-navigate';
 export interface SenchoNavigateDetail {
-  view: 'scheduled-ops' | 'auto-updates' | 'security-history' | 'security';
+  view: 'scheduled-ops' | 'auto-updates' | 'security';
   nodeId?: number;
   /** Target tab when navigating to the Security view. */
   tab?: SecurityTab;

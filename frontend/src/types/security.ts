@@ -205,6 +205,16 @@ export interface SecurityOverview {
 /** Which detail tab the scan sheet opens on. Matches VulnerabilityScanSheet's tabs. */
 export type ScanDetailTab = 'vulns' | 'secrets' | 'misconfigs';
 
+/** Scanner kinds a scan request can run. Mirrors the backend's accepted set. */
+export type ScannerKind = 'vuln' | 'secret';
+
+/** One day's Critical/High totals for the Security overview risk-trend chart. */
+export interface SecurityRiskTrendPoint {
+  date: string;
+  critical: number;
+  high: number;
+}
+
 export type PolicyRuleEnforcement = 'warning' | 'enforceable';
 
 export interface PolicyPackRule {
