@@ -108,12 +108,14 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
   const [facts, setFacts] = useState<StackNetworkFacts | null>(null);
   const [intents, setIntents] = useState<IntentEntry[]>([]);
   const [loadError, setLoadError] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       setLoadError(false);
+      setRefreshing(true);
       try {
         const [factsRes, exposureRes] = await Promise.all([
           apiFetch(`/stacks/${stackName}/networking`),
@@ -136,6 +138,8 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
           setLoadError(true);
           toast.error('Failed to load the networking view.');
         }
+      } finally {
+        if (!cancelled) setRefreshing(false);
       }
     };
     void run();
@@ -193,8 +197,8 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
     <div data-testid="networking-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <span className={LABEL_CLASS}>networking</span>
-        <button type="button" onClick={() => setReloadKey(k => k + 1)} className={ACTION_CLASS}>
-          <RefreshCw className="h-3 w-3" strokeWidth={1.5} /> refresh
+        <button type="button" onClick={() => setReloadKey(k => k + 1)} disabled={refreshing} className={ACTION_CLASS}>
+          <RefreshCw className={cn('h-3 w-3', refreshing && 'animate-spin')} strokeWidth={1.5} /> refresh
         </button>
       </div>
 
