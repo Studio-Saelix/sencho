@@ -185,3 +185,118 @@ export function Masthead({
     </div>
   );
 }
+
+// Page header for a pushed full-screen secondary view (Resources, App Store,
+// Updates, Audit): 3px cyan left rail, a back chip + muted mono crumb, and a
+// serif-italic title with an optional right slot (e.g. a Recheck button).
+export function PageHead({ back, crumb, title, right, onBack }: {
+  back: string;
+  crumb?: ReactNode;
+  title: ReactNode;
+  right?: ReactNode;
+  onBack?: () => void;
+}) {
+  return (
+    <div className="relative shrink-0 border-b border-hairline px-4 pb-[13px] pt-1">
+      <span aria-hidden className="absolute left-0 top-[30px] bottom-[13px] w-[3px] bg-brand" />
+      <div className="flex items-center justify-between">
+        <BackChip label={back} onClick={onBack} />
+        {crumb ? <span className="font-mono text-[10px] text-stat-icon">{crumb}</span> : null}
+      </div>
+      <div className="ml-0.5 mt-0.5 flex items-end justify-between gap-3">
+        <div className="min-w-0 truncate font-display italic text-[32px] leading-[34px] tracking-[-0.01em] text-stat-value">
+          {title}
+        </div>
+        {right}
+      </div>
+    </div>
+  );
+}
+
+export interface MobileSubTab<T extends string = string> {
+  value: T;
+  label: string;
+  /** Optional trailing count badge (dimmed). */
+  count?: number;
+}
+
+// Horizontal mono tab scroller with a cyan underline on the active tab and an
+// edge mask-fade so the overflow reads as scrollable. Shared by the Security
+// page and the Tier 3 pages (Resources, Audit). Tap targets are >=44px.
+export function MobileSubTabs<T extends string>({ tabs, active, onSelect, ariaLabel }: {
+  tabs: MobileSubTab<T>[];
+  active: T;
+  onSelect: (value: T) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label={ariaLabel}
+      className="flex shrink-0 overflow-x-auto border-b border-hairline [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      style={{
+        maskImage: 'linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%)',
+        WebkitMaskImage: 'linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%)',
+      }}
+    >
+      {tabs.map((tab) => {
+        const on = tab.value === active;
+        return (
+          <button
+            key={tab.value}
+            type="button"
+            role="tab"
+            aria-selected={on}
+            onClick={() => onSelect(tab.value)}
+            className={cn(
+              'min-h-11 shrink-0 whitespace-nowrap px-3 py-[13px] font-mono text-[12px] tracking-[0.04em] transition-colors',
+              on ? 'text-brand shadow-[inset_0_-2px_0_0_var(--brand)]' : 'text-stat-subtitle',
+            )}
+          >
+            {tab.label}
+            {tab.count != null && <span className="ml-1.5 opacity-60">{tab.count}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export interface MobileChip<T extends string = string> {
+  value: T;
+  label: string;
+  /** Optional trailing count badge (dimmed). */
+  count?: number;
+}
+
+// Horizontal filter-chip scroller; active chip is cyan-filled. Shared by the
+// Security Images filter and the Tier 3 pages (Resources, App Store). Tap
+// targets are >=44px.
+export function MobileChipRow<T extends string>({ chips, active, onSelect, className }: {
+  chips: MobileChip<T>[];
+  active: T;
+  onSelect: (value: T) => void;
+  className?: string;
+}) {
+  return (
+    <div className={cn('flex gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden', className)}>
+      {chips.map((chip) => {
+        const on = chip.value === active;
+        return (
+          <button
+            key={chip.value}
+            type="button"
+            onClick={() => onSelect(chip.value)}
+            className={cn(
+              'min-h-11 shrink-0 whitespace-nowrap rounded-[7px] border px-[11px] font-mono text-[11px] tracking-[0.04em] transition-colors',
+              on ? 'border-brand bg-brand text-brand-foreground' : 'border-card-border bg-card text-stat-subtitle',
+            )}
+          >
+            {chip.label}
+            {chip.count != null && <span className="ml-1.5 opacity-60">{chip.count}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
