@@ -28,7 +28,7 @@ export function SecurityMobileTabs({ tabs, active, onSelect }: {
     <div
       role="tablist"
       aria-label="Security sections"
-      className="mb-4 flex overflow-x-auto border-b border-hairline [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className="flex shrink-0 overflow-x-auto border-b border-hairline [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       style={{
         maskImage: 'linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%)',
         WebkitMaskImage: 'linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%)',
@@ -129,7 +129,7 @@ export function SecurityFooterBand({ overview }: { overview: SecurityOverview })
     parts.push('scanner not installed');
   }
   return (
-    <div className="-mx-4 mt-2 border-t border-hairline bg-glass-highlight px-4 py-[9px]">
+    <div className="-mx-4 mt-2 border-t border-hairline bg-band px-4 py-[9px]">
       <Kicker className="text-stat-subtitle">{parts.join(' · ')}</Kicker>
     </div>
   );

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
   LayoutDashboard, Boxes, FileWarning, KeyRound, BookCheck, EyeOff, History as HistoryIcon, Wrench, Info,
 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
-import { PageMasthead } from '@/components/ui/PageMasthead';
+import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import { deriveMasthead } from './security/securityMasthead';
 import { springs } from '@/lib/motion';
@@ -14,6 +14,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useImageScan } from '@/hooks/useImageScan';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import type { SecurityTab } from '@/lib/events';
 import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, FleetRole } from '@/types/security';
@@ -43,9 +44,23 @@ function isScanSummaryMap(v: unknown): v is Record<string, ScanSummary> {
 interface SecurityViewProps {
   activeTab: SecurityTab;
   onTabChange: (tab: SecurityTab) => void;
+  /** Notifications + more-menu cluster for the mobile masthead right slot.
+   *  Passed only on the bespoke phone surface; absent on desktop. */
+  headerActions?: ReactNode;
 }
 
-export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
+// Maps the masthead tone (shared with the desktop PageMasthead) onto the mobile
+// masthead's dot tone, state-word color, and whether the dot pulses. Idle reads
+// as an amber caution (the mobile dot has no neutral grey).
+type StateWordClass = 'text-destructive' | 'text-warning' | 'text-stat-value' | 'text-stat-title';
+const MOBILE_MASTHEAD_TONE: Record<MastheadTone, { dot: Tone; word: StateWordClass; pulse: boolean }> = {
+  error: { dot: 'destructive', word: 'text-destructive', pulse: true },
+  warn: { dot: 'warning', word: 'text-warning', pulse: true },
+  live: { dot: 'brand', word: 'text-stat-value', pulse: false },
+  idle: { dot: 'warning', word: 'text-stat-title', pulse: false },
+};
+
+export function SecurityView({ activeTab, onTabChange, headerActions }: SecurityViewProps) {
   const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
   const { activeNode } = useNodes();
@@ -187,62 +202,14 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
     { value: 'scanner', label: 'Scanner setup' },
   ];
 
-  return (
-    <div className="h-full overflow-auto p-6 max-md:p-4">
-      <PageMasthead
-        kicker="SECURITY"
-        state={state}
-        tone={tone}
-        pulsing={pulsing}
-        size="hero"
-        className="rounded-lg mb-4"
-        subtitle={overview
-          ? `${overview.scannedImages} ${overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner ${overview.scanner.available ? 'ready' : 'not installed'}`
-          : undefined}
-        metadata={overview ? [
-          { label: 'CRITICAL', value: String(overview.critical), tone: overview.critical > 0 ? 'error' : 'value' },
-          { label: 'HIGH', value: String(overview.high), tone: overview.high > 0 ? 'warn' : 'value' },
-          { label: 'LAST SCAN', value: overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never', tone: 'subtitle' },
-        ] : undefined}
-      />
+  const subtitle = overview
+    ? `${overview.scannedImages} ${overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner ${overview.scanner.available ? 'ready' : 'not installed'}`
+    : undefined;
 
-      <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
-        {isMobile ? (
-          <SecurityMobileTabs tabs={mobileTabs} active={activeTab} onSelect={onTabChange} />
-        ) : (
-        <TabsList className="mb-4">
-          <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
-            <TabsHighlightItem value="overview">
-              <TabsTrigger value="overview"><LayoutDashboard className="w-4 h-4 mr-1.5" />Overview</TabsTrigger>
-            </TabsHighlightItem>
-            <TabsHighlightItem value="images">
-              <TabsTrigger value="images"><Boxes className="w-4 h-4 mr-1.5" />Images</TabsTrigger>
-            </TabsHighlightItem>
-            <TabsHighlightItem value="compose">
-              <TabsTrigger value="compose"><FileWarning className="w-4 h-4 mr-1.5" />Compose risks</TabsTrigger>
-            </TabsHighlightItem>
-            <TabsHighlightItem value="secrets">
-              <TabsTrigger value="secrets"><KeyRound className="w-4 h-4 mr-1.5" />Secrets</TabsTrigger>
-            </TabsHighlightItem>
-            <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-            {isPaid && (
-              <TabsHighlightItem value="policies">
-                <TabsTrigger value="policies"><BookCheck className="w-4 h-4 mr-1.5" />Policies</TabsTrigger>
-              </TabsHighlightItem>
-            )}
-            <TabsHighlightItem value="suppressions">
-              <TabsTrigger value="suppressions"><EyeOff className="w-4 h-4 mr-1.5" />Suppressions</TabsTrigger>
-            </TabsHighlightItem>
-            <TabsHighlightItem value="history">
-              <TabsTrigger value="history"><HistoryIcon className="w-4 h-4 mr-1.5" />History</TabsTrigger>
-            </TabsHighlightItem>
-            <TabsHighlightItem value="scanner">
-              <TabsTrigger value="scanner"><Wrench className="w-4 h-4 mr-1.5" />Scanner setup</TabsTrigger>
-            </TabsHighlightItem>
-          </TabsHighlight>
-        </TabsList>
-        )}
-
+  // The tab panels are identical on desktop and mobile; only the masthead and
+  // the tab strip differ, so the panels are shared between both layouts.
+  const tabPanels = (
+    <>
         <TabsContent value="overview">
           <OverviewTab
             overview={overview}
@@ -317,17 +284,101 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
         <TabsContent value="scanner">
           <ScannerSetupTab />
         </TabsContent>
+    </>
+  );
+
+  const scanSheet = (
+    <VulnerabilityScanSheet
+      scanId={inspectScanId}
+      initialTab={inspectInitialTab}
+      onClose={() => setInspectScanId(null)}
+      canGenerateSbom={isAdmin}
+      canExportSarif={isPaid && isAdmin}
+      canCompare
+      canManageSuppressions={isAdmin}
+    />
+  );
+
+  // Mobile: a bespoke masthead-led screen (no TopBar). The masthead leads with
+  // the notifications + more-menu cluster in its right slot, the tab strip is a
+  // horizontal scroller, and the active panel scrolls below.
+  if (isMobile) {
+    const mobileTone = MOBILE_MASTHEAD_TONE[tone];
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <Masthead
+          kicker="security"
+          state={state}
+          stateTone={mobileTone.dot}
+          stateClassName={mobileTone.word}
+          live={mobileTone.pulse}
+          meta={subtitle}
+          right={headerActions}
+        />
+        <SecurityMobileTabs tabs={mobileTabs} active={activeTab} onSelect={onTabChange} />
+        <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden p-4">
+          <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
+            {tabPanels}
+          </Tabs>
+        </div>
+        {scanSheet}
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-auto p-6">
+      <PageMasthead
+        kicker="SECURITY"
+        state={state}
+        tone={tone}
+        pulsing={pulsing}
+        size="hero"
+        className="rounded-lg mb-4"
+        subtitle={subtitle}
+        metadata={overview ? [
+          { label: 'CRITICAL', value: String(overview.critical), tone: overview.critical > 0 ? 'error' : 'value' },
+          { label: 'HIGH', value: String(overview.high), tone: overview.high > 0 ? 'warn' : 'value' },
+          { label: 'LAST SCAN', value: overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never', tone: 'subtitle' },
+        ] : undefined}
+      />
+
+      <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
+        <TabsList className="mb-4">
+          <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+            <TabsHighlightItem value="overview">
+              <TabsTrigger value="overview"><LayoutDashboard className="w-4 h-4 mr-1.5" />Overview</TabsTrigger>
+            </TabsHighlightItem>
+            <TabsHighlightItem value="images">
+              <TabsTrigger value="images"><Boxes className="w-4 h-4 mr-1.5" />Images</TabsTrigger>
+            </TabsHighlightItem>
+            <TabsHighlightItem value="compose">
+              <TabsTrigger value="compose"><FileWarning className="w-4 h-4 mr-1.5" />Compose risks</TabsTrigger>
+            </TabsHighlightItem>
+            <TabsHighlightItem value="secrets">
+              <TabsTrigger value="secrets"><KeyRound className="w-4 h-4 mr-1.5" />Secrets</TabsTrigger>
+            </TabsHighlightItem>
+            <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
+            {isPaid && (
+              <TabsHighlightItem value="policies">
+                <TabsTrigger value="policies"><BookCheck className="w-4 h-4 mr-1.5" />Policies</TabsTrigger>
+              </TabsHighlightItem>
+            )}
+            <TabsHighlightItem value="suppressions">
+              <TabsTrigger value="suppressions"><EyeOff className="w-4 h-4 mr-1.5" />Suppressions</TabsTrigger>
+            </TabsHighlightItem>
+            <TabsHighlightItem value="history">
+              <TabsTrigger value="history"><HistoryIcon className="w-4 h-4 mr-1.5" />History</TabsTrigger>
+            </TabsHighlightItem>
+            <TabsHighlightItem value="scanner">
+              <TabsTrigger value="scanner"><Wrench className="w-4 h-4 mr-1.5" />Scanner setup</TabsTrigger>
+            </TabsHighlightItem>
+          </TabsHighlight>
+        </TabsList>
+        {tabPanels}
       </Tabs>
 
-      <VulnerabilityScanSheet
-        scanId={inspectScanId}
-        initialTab={inspectInitialTab}
-        onClose={() => setInspectScanId(null)}
-        canGenerateSbom={isAdmin}
-        canExportSarif={isPaid && isAdmin}
-        canCompare
-        canManageSuppressions={isAdmin}
-      />
+      {scanSheet}
     </div>
   );
 }
