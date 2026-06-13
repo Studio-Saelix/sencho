@@ -114,8 +114,9 @@ describe('settings dirty reconcile on save', () => {
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
         // Still dirty, still enabled, masthead still pending: the operator can retry.
+        // Wait for the save to settle so the assertion does not race the isSaving reset.
+        await waitFor(() => expect(save).not.toBeDisabled());
         expect(lastDirty(onDirty)).toBe(true);
-        expect(save).not.toBeDisabled();
         expect(masthead.last?.[0]).toMatchObject({ label: 'EDITED', value: '1 pending', tone: 'warn' });
     });
 
