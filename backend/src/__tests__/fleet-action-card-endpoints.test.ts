@@ -86,6 +86,9 @@ beforeEach(() => {
   activeBulkActions.clear();
   db.getDb().prepare('DELETE FROM stack_label_assignments').run();
   db.getDb().prepare('DELETE FROM stack_labels').run();
+  // Suggestion tests seed node labels to prove they are excluded; clear them so
+  // those rows do not leak into later assertions.
+  db.getDb().prepare('DELETE FROM node_labels').run();
 });
 
 async function createAssignedLabel(name: string, stacks: string[]) {
@@ -160,6 +163,102 @@ describe('POST /api/fleet/labels/match-preview', () => {
     expect(res.status).toBe(200);
     expect(res.body.matchedNodes).toBe(0);
     expect(res.body.matchedStacks).toBe(0);
+  });
+});
+
+describe('GET /api/fleet/labels/suggestions', () => {
+  it('returns 401 without auth', async () => {
+    const res = await request(app).get('/api/fleet/labels/suggestions');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 403 for a non-admin (viewer) user', async () => {
+    const viewerName = `viewer-sugg-${++labelCounter}`;
+    db.addUser({ username: viewerName, password_hash: 'x', role: 'viewer' });
+    const viewerAuth = `Bearer ${jwt.sign({ username: viewerName }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
+    const res = await request(app)
+      .get('/api/fleet/labels/suggestions')
+      .set('Authorization', viewerAuth);
+    expect(res.status).toBe(403);
+  });
+
+  it('is reachable on community tier for admins (no PAID_REQUIRED)', async () => {
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+    const res = await request(app)
+      .get('/api/fleet/labels/suggestions')
+      .set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.code).not.toBe('PAID_REQUIRED');
+    expect(Array.isArray(res.body.suggestions)).toBe(true);
+  });
+
+  it('aggregates stack labels across nodes, includes unassigned ones, and excludes node labels', async () => {
+    const localId = db.getNodes().find(n => n.is_default)!.id;
+    const remoteId = db.addNode({
+      name: 'sugg-remote', type: 'remote', api_url: 'http://sugg.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      // Same-named stack label on both nodes, each with one assigned stack.
+      const local = db.createLabel(localId, 'shared-prod', 'teal');
+      db.setStackLabels('alpha', localId, [local.id]);
+      const remote = db.createLabel(remoteId, 'shared-prod', 'teal');
+      db.setStackLabels('beta', remoteId, [remote.id]);
+      // A stack label with no assignments still belongs to the picker.
+      db.createLabel(localId, 'unused-stack-label', 'sky');
+      // A node-only label that must never surface as a stop target.
+      db.addNodeLabel(remoteId, 'edge-only');
+
+      const res = await request(app)
+        .get('/api/fleet/labels/suggestions')
+        .set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+
+      const names = res.body.suggestions.map((s: { name: string }) => s.name);
+      expect(names).toContain('shared-prod');
+      expect(names).toContain('unused-stack-label');
+      expect(names).not.toContain('edge-only');
+      // Sorted by name.
+      expect(names).toEqual([...names].sort((a: string, b: string) => a.localeCompare(b)));
+
+      const shared = res.body.suggestions.find((s: { name: string }) => s.name === 'shared-prod');
+      expect(shared.scope).toBe('stack');
+      expect(shared.nodeCount).toBe(2);
+      expect(shared.stackCount).toBe(2);
+
+      const unused = res.body.suggestions.find((s: { name: string }) => s.name === 'unused-stack-label');
+      expect(unused.nodeCount).toBe(1);
+      expect(unused.stackCount).toBe(0);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('counts only the stack-label side when a node label shares the name', async () => {
+    const localId = db.getNodes().find(n => n.is_default)!.id;
+    const remoteId = db.addNode({
+      name: 'collision-remote', type: 'remote', api_url: 'http://collision.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      // A stack label 'prod' lives on the local node only...
+      const stackLabel = db.createLabel(localId, 'prod', 'teal');
+      db.setStackLabels('alpha', localId, [stackLabel.id]);
+      // ...while a node label of the same name lives on the remote node.
+      db.addNodeLabel(remoteId, 'prod');
+
+      const res = await request(app)
+        .get('/api/fleet/labels/suggestions')
+        .set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+
+      const prod = res.body.suggestions.find((s: { name: string }) => s.name === 'prod');
+      // The node label must not inflate the counts: only the local stack label counts.
+      expect(prod.nodeCount).toBe(1);
+      expect(prod.stackCount).toBe(1);
+    } finally {
+      db.deleteNode(remoteId);
+    }
   });
 });
 

@@ -3,11 +3,9 @@ import { ConfirmModal } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { FleetActionCard } from '@/components/ui/fleet-action-card';
 import { SheetSection } from '@/components/ui/system-sheet';
-import { apiFetch, fetchForNode } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
-import type { FleetNode } from '@/components/FleetView/types';
-import type { Label } from '@/components/label-types';
 import { ResultsList, type ResultRow } from '../ResultsList';
 
 interface NodeStackResult { stackName: string; success: boolean; error?: string; dryRun?: boolean }
@@ -18,6 +16,11 @@ interface FleetStopNodeResult {
   stackResults: NodeStackResult[];
 }
 
+// Stop-by-label targets stack labels only. The `scope: 'stack'` tag keeps node
+// labels (a separate namespace) from ever being fed into this destructive card,
+// and the counts make the stack scope tangible in the picker.
+interface FleetStopLabelSuggestion { name: string; scope: 'stack'; nodeCount: number; stackCount: number }
+
 interface MatchPreviewNode { nodeId: number; nodeName: string; stackCount: number; stackNames: string[] }
 interface MatchPreviewResponse { matchedNodes: number; matchedStacks: number; perNode: MatchPreviewNode[] }
 
@@ -27,42 +30,45 @@ type PreviewState =
   | { kind: 'unavailable' }
   | { kind: 'ready'; data: MatchPreviewResponse };
 
-interface Props {
-  nodes: FleetNode[];
-}
-
 const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
 const PREVIEW_ROW_LIMIT = 6;
 
-export function LabelFleetStopCard({ nodes }: Props) {
+function isSuggestion(value: unknown): value is FleetStopLabelSuggestion {
+  if (typeof value !== 'object' || value === null) return false;
+  const s = value as Record<string, unknown>;
+  return typeof s.name === 'string' && s.scope === 'stack'
+    && typeof s.nodeCount === 'number' && typeof s.stackCount === 'number';
+}
+
+export function LabelFleetStopCard() {
   const [labelName, setLabelName] = useState('');
-  const [knownLabelNames, setKnownLabelNames] = useState<string[]>([]);
+  const [suggestions, setSuggestions] = useState<FleetStopLabelSuggestion[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
   const [preview, setPreview] = useState<PreviewState>({ kind: 'idle' });
 
-  // Aggregate label names across reachable nodes for autocomplete.
+  // Stack-label suggestions for the target picker. The fleet endpoint aggregates
+  // the stack_labels rows across every configured node (central DB), so node
+  // labels can never appear here. A non-ok or malformed response leaves the list
+  // empty rather than crashing: the Actions tab renders without an admin gate
+  // while the endpoint is admin-only, so a viewer simply gets no suggestions and
+  // can still type a name by hand.
   useEffect(() => {
     let cancelled = false;
     async function loadSuggestions() {
-      const names = new Set<string>();
-      const reachable = nodes.filter(n => n.status === 'online');
-      await Promise.all(reachable.map(async (node) => {
-        try {
-          const res = await fetchForNode('/labels', node.id);
-          if (!res.ok) return;
-          const list = (await res.json()) as Label[];
-          for (const l of list) names.add(l.name);
-        } catch {
-          /* unreachable node, not user-facing */
-        }
-      }));
-      if (!cancelled) setKnownLabelNames(Array.from(names).sort());
+      try {
+        const res = await apiFetch('/fleet/labels/suggestions');
+        const data = res.ok ? await res.json().catch(() => null) : null;
+        const list = Array.isArray(data?.suggestions) ? data.suggestions.filter(isSuggestion) : [];
+        if (!cancelled) setSuggestions(list);
+      } catch {
+        if (!cancelled) setSuggestions([]);
+      }
     }
     loadSuggestions();
     return () => { cancelled = true; };
-  }, [nodes]);
+  }, []);
 
   // Debounced live preview. The blast-radius readout and the preview section
   // both read from the same state.
@@ -107,7 +113,7 @@ export function LabelFleetStopCard({ nodes }: Props) {
     if (preview.kind === 'unavailable') return 'preview unavailable';
     if (preview.kind === 'ready') {
       const { matchedNodes, matchedStacks } = preview.data;
-      if (matchedStacks === 0 || matchedNodes === 0) return '0 nodes match';
+      if (matchedStacks === 0 || matchedNodes === 0) return '0 matching stacks';
       return `${matchedStacks} stacks · ${matchedNodes} nodes`;
     }
     return 'awaiting target';
@@ -119,7 +125,7 @@ export function LabelFleetStopCard({ nodes }: Props) {
     const trimmed = labelName.trim();
     if (!trimmed) return;
     const verb = opts.dryRun ? 'Dry-running' : 'Stopping';
-    const toastId = toast.loading(`${verb} stacks labeled "${trimmed}" across the fleet…`);
+    const toastId = toast.loading(`${verb} stacks with the stack label "${trimmed}" across the fleet…`);
     setRunning(true);
     setResults([]);
     try {
@@ -138,9 +144,9 @@ export function LabelFleetStopCard({ nodes }: Props) {
         key: `node-${node.nodeId}`,
         label: node.matched
           ? `${node.nodeName} · ${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}${opts.dryRun ? ' (dry run)' : ''}`
-          : `${node.nodeName} (no matching label)`,
+          : `${node.nodeName} (no matching stack label)`,
         success: node.matched && node.stackResults.every(s => s.success),
-        error: node.matched ? undefined : 'Label not present',
+        error: node.matched ? undefined : 'Stack label not present',
         sub: node.stackResults.map((s, i) => ({
           key: `${node.nodeId}-${s.stackName}-${i}`,
           label: s.stackName,
@@ -153,10 +159,10 @@ export function LabelFleetStopCard({ nodes }: Props) {
       const stacksTouched = apiResults.flatMap(n => n.stackResults);
       const ok = stacksTouched.filter(s => s.success).length;
       const failed = stacksTouched.length - ok;
-      if (matchedNodes === 0) toast.info('No nodes have a label by that name.');
+      if (matchedNodes === 0) toast.info('No node carries a stack label by that name.');
       else if (opts.dryRun) toast.success(`Dry run: would stop ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
       else if (failed === 0 && ok > 0) toast.success(`Stopped ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
-      else if (ok === 0 && failed === 0) toast.info('Label matched but no stacks were assigned to it.');
+      else if (ok === 0 && failed === 0) toast.info('Stack label matched but no stacks were assigned to it.');
       else toast.warning(`${ok} stopped, ${failed} failed. See results below.`);
     } catch (err) {
       toast.dismiss(toastId);
@@ -198,13 +204,16 @@ export function LabelFleetStopCard({ nodes }: Props) {
         footerContext={footerContext}
       >
         <SheetSection
-          title="Label · target"
-          meta={`auto-suggested · ${knownLabelNames.length} known`}
+          title="Stack label · target"
+          meta={`stack labels · ${suggestions.length}`}
         >
+          <p className={cn(KICKER, 'text-stat-subtitle mb-2 normal-case tracking-normal text-[11px]')}>
+            Stops stacks assigned to this stack label across matching nodes. Node labels are not used by this action.
+          </p>
           <LabelAutocomplete
             value={labelName}
             onChange={setLabelName}
-            suggestions={knownLabelNames}
+            suggestions={suggestions}
             disabled={running}
             placeholder="e.g. production"
           />
@@ -224,8 +233,8 @@ export function LabelFleetStopCard({ nodes }: Props) {
         onOpenChange={(open) => { if (!open) setConfirmOpen(false); }}
         variant="destructive"
         kicker="Fleet stop"
-        title={`Stop all stacks labeled "${trimmed}"?`}
-        description="Sencho will stop every stack on every node that has a label with this name. Services will be unavailable until restarted."
+        title={`Stop all stacks with the stack label "${trimmed}"?`}
+        description="Sencho will stop every stack assigned this stack label on every node. Node labels are not used by this action. Services will be unavailable until restarted."
         confirmLabel="Stop fleet"
         confirming={running}
         onConfirm={() => run({ dryRun: false })}
@@ -239,7 +248,7 @@ function renderPreviewSection(preview: PreviewState, trimmed: string) {
   if (preview.kind === 'loading') {
     return (
       <SheetSection title="Preview" meta="resolving…">
-        <div className={cn(KICKER, 'text-stat-icon')}>looking up label across the fleet</div>
+        <div className={cn(KICKER, 'text-stat-icon')}>looking up stack label across the fleet</div>
       </SheetSection>
     );
   }
@@ -255,7 +264,7 @@ function renderPreviewSection(preview: PreviewState, trimmed: string) {
     if (matchedStacks === 0) {
       return (
         <SheetSection title="Preview" meta="0 stacks">
-          <div className={cn(KICKER, 'text-stat-icon')}>no node has a label by that name</div>
+          <div className={cn(KICKER, 'text-stat-icon')}>No stacks are assigned to this stack label</div>
         </SheetSection>
       );
     }
@@ -307,16 +316,17 @@ function PreviewWell({ perNode }: PreviewWellProps) {
 interface LabelAutocompleteProps {
   value: string;
   onChange: (next: string) => void;
-  suggestions: string[];
+  suggestions: FleetStopLabelSuggestion[];
   disabled?: boolean;
   placeholder?: string;
 }
 
 // Free-form text input with a Sencho-styled suggestion popover. Replaces the
 // browser-native <datalist> so the dropdown matches the rest of the kit (same
-// surface tokens as <Combobox>). The operator can still type a label name
-// that was not in the suggestions list; the server-side match-preview will
-// resolve it or report 0 nodes match.
+// surface tokens as <Combobox>). Each suggestion is a stack label and carries
+// its stack/node counts so the scope is unmistakable. The operator can still
+// type a name that was not suggested; the server-side match-preview resolves it
+// or reports 0 matching stacks.
 function LabelAutocomplete({ value, onChange, suggestions, disabled, placeholder }: LabelAutocompleteProps) {
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -324,7 +334,7 @@ function LabelAutocomplete({ value, onChange, suggestions, disabled, placeholder
   const filtered = useMemo(() => {
     const q = value.trim().toLowerCase();
     if (q.length === 0) return suggestions;
-    return suggestions.filter(s => s.toLowerCase().includes(q));
+    return suggestions.filter(s => s.name.toLowerCase().includes(q));
   }, [value, suggestions]);
 
   useEffect(() => {
@@ -373,15 +383,18 @@ function LabelAutocomplete({ value, onChange, suggestions, disabled, placeholder
         <div className="absolute left-0 top-full mt-1 z-50 w-full rounded-md border border-glass-border bg-popover text-popover-foreground shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
           <ul className="max-h-[200px] overflow-y-auto overflow-x-hidden p-1">
             {filtered.map((s) => (
-              <li key={s}>
+              <li key={s.name}>
                 <button
                   type="button"
                   // mousedown + preventDefault keeps the input focused so the
                   // selection registers before any blur-driven close fires.
-                  onMouseDown={(e) => { e.preventDefault(); handleSelect(s); }}
-                  className="flex w-full items-center rounded-sm px-2 py-1.5 font-mono text-xs text-stat-value hover:bg-accent hover:text-accent-foreground"
+                  onMouseDown={(e) => { e.preventDefault(); handleSelect(s.name); }}
+                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 font-mono text-xs text-stat-value hover:bg-accent hover:text-accent-foreground"
                 >
-                  {s}
+                  <span className="flex-1 min-w-0 truncate text-left">{s.name}</span>
+                  <span className="shrink-0 text-[10px] text-stat-subtitle">
+                    {s.stackCount} stack{s.stackCount === 1 ? '' : 's'} · {s.nodeCount} node{s.nodeCount === 1 ? '' : 's'}
+                  </span>
                 </button>
               </li>
             ))}
