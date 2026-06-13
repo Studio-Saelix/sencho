@@ -21,7 +21,6 @@ import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab } from './security/OverviewTab';
 import { ImagesTab } from './security/ImagesTab';
 import { FindingsTab } from './security/FindingsTab';
-import { PolicyPacksTab } from './security/PolicyPacksTab';
 import { ScanPolicyManager } from './security/ScanPolicyManager';
 import { ScannerSetupTab } from './security/ScannerSetupTab';
 import { HistoryTab } from './security/HistoryTab';
@@ -163,6 +162,12 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
     return () => { cancelled = true; };
   }, [isRemote, activeNode?.id]);
 
+  // The Policies tab hosts only the paid enforcement manager, so it is hidden for
+  // Community; redirect off it if a deep-link lands a Community user there.
+  useEffect(() => {
+    if (!isPaid && activeTab === 'policies') onTabChange('overview');
+  }, [isPaid, activeTab, onTabChange]);
+
   const { state, tone } = deriveMasthead(overview, overviewLoadError !== null);
   const pulsing = tone === 'live' && !!overview?.scanner.available;
 
@@ -201,9 +206,11 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
               <TabsTrigger value="secrets"><KeyRound className="w-4 h-4 mr-1.5" />Secrets</TabsTrigger>
             </TabsHighlightItem>
             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-            <TabsHighlightItem value="policies">
-              <TabsTrigger value="policies"><BookCheck className="w-4 h-4 mr-1.5" />Policies</TabsTrigger>
-            </TabsHighlightItem>
+            {isPaid && (
+              <TabsHighlightItem value="policies">
+                <TabsTrigger value="policies"><BookCheck className="w-4 h-4 mr-1.5" />Policies</TabsTrigger>
+              </TabsHighlightItem>
+            )}
             <TabsHighlightItem value="suppressions">
               <TabsTrigger value="suppressions"><EyeOff className="w-4 h-4 mr-1.5" />Suppressions</TabsTrigger>
             </TabsHighlightItem>
@@ -226,6 +233,7 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
             onInspect={onInspect}
             canScan={canScan}
             onScanComplete={() => setReloadToken((t) => t + 1)}
+            isPaid={isPaid}
           />
         </TabsContent>
 
@@ -255,12 +263,11 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
           </CapabilityGate>
         </TabsContent>
 
-        <TabsContent value="policies">
-          <div className="space-y-8">
+        {isPaid && (
+          <TabsContent value="policies">
             <ScanPolicyManager />
-            <PolicyPacksTab />
-          </div>
-        </TabsContent>
+          </TabsContent>
+        )}
 
         <TabsContent value="suppressions">
           {isRemote ? (
