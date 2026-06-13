@@ -1,6 +1,6 @@
 ---
 title: "Security"
-description: "The command center for your fleet's security posture: an overview dashboard, image and Compose findings, secrets, scan history, suppressions, policy packs, and scanner setup, all in one place."
+description: "The command center for your fleet's security posture: an overview dashboard, image and Compose findings, secrets, scan history, suppressions, and scanner setup, all in one place."
 ---
 
 Security is a primary surface in Sencho. The **Security** page in the top navigation brings the
@@ -30,32 +30,23 @@ SBOM.
 
 ## Compose risks
 
-Compose risks surface misconfigurations in your stack definitions rather than image CVEs: privileged
-containers, Docker socket mounts, host networking, broad host bind mounts, missing healthchecks, public
-database ports, containers running as root, unpinned image tags, and missing restart policies. Each
-entry opens its scan report with the specific findings and how to fix them. The [Policy packs](#policy-packs)
-tab explains each category in depth.
+Compose risks surface the security misconfigurations Trivy finds in your stack definitions rather than
+image CVEs: privileged containers, Docker socket mounts, host networking, broad host bind mounts, public
+database ports, and containers running as root. Each entry opens its scan report with the specific
+findings and how to fix them. This is a security audit of the Compose file; for deploy-readiness checks
+(port conflicts, missing bind paths, unset variables, no healthcheck), use
+[Compose Doctor](/features/compose-doctor) from the stack page instead.
 
 ## Secrets
 
 The secrets tab lists images where Trivy detected exposed credentials or keys, and opens straight to
 the secret findings for a scan.
 
-## Policy packs
+## Policies
 
-Policy packs are curated bundles of security expectations for a deployment posture. Sencho ships five
-defaults:
-
-- **Homelab baseline**: gentle defaults for a single-operator homelab.
-- **Production hardening**: sensible hardening for services that face real traffic.
-- **Strict production**: a zero-tolerance posture for critical workloads.
-- **Public edge service**: focused on services exposed to the public internet.
-- **Internal service**: least-privilege defaults for east-west internal services.
-
-Each pack lists its rules with the severity, what the rule checks, why it matters, and how to fix it.
-Every rule is marked **warning** or **enforceable**. In Community, packs are advisory: they explain
-what good looks like. Block-on-deploy enforcement is an Admiral capability, configured under
-[scan policies](/features/vulnerability-scanning#scan-policies).
+The Policies tab manages deploy-enforcement scan policies: severity thresholds that block or warn on a
+deploy, scoped by stack pattern. Enforcement is an Admiral capability; see
+[scan policies](/features/vulnerability-scanning#scan-policies) for the full configuration.
 
 ## Suppressions
 

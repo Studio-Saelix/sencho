@@ -243,8 +243,9 @@ export function ScanPolicyManager() {
     }
   };
 
-  // Enforcement management is a paid governance surface; Community sees only the
-  // policy-pack catalog above it.
+  // Enforcement management is a paid governance surface; the Policies tab is
+  // hidden for Community entirely (gated in SecurityView), so this is a
+  // defensive guard.
   if (!isPaid) return null;
 
   return (
