@@ -1385,22 +1385,36 @@ export class FileSystemService {
     await fsPromises.mkdir(safePath, { recursive: true });
   }
 
+  /**
+   * Renames or moves an entry within a stack. The source and destination may sit
+   * in different directories (a cross-directory move), since fs.rename relocates
+   * natively. Both paths resolve through the leaf helper so a symlink source is
+   * moved as the link entry itself rather than followed to its target, matching
+   * the delete/chmod policy. fs.rename fails with EXDEV across a filesystem
+   * boundary (e.g. a bind-mounted subdirectory); the route surfaces that as a 409.
+   */
   async renameStackPath(stackName: string, fromRel: string, toRel: string): Promise<void> {
     if (isProtectedRelPath(fromRel)) throw protectedFileError(fromRel);
     if (isProtectedRelPath(toRel)) throw protectedFileError(toRel);
-    const fromPath = await this.resolveSafeStackPath(stackName, fromRel);
-    // toRel must resolve to the same parent directory (rename only, no cross-dir move).
-    const toPath = await this.resolveSafeStackPath(stackName, toRel);
-    if (path.dirname(fromPath) !== path.dirname(toPath)) {
-      throw Object.assign(new Error('Cross-directory rename is not supported'), { code: 'INVALID_PATH' });
-    }
+    const fromPath = await this.resolveSafeStackLeafPath(stackName, fromRel);
+    const toPath = await this.resolveSafeStackLeafPath(stackName, toRel);
     const toName = path.basename(toPath);
     if (!toName || toName === '.' || toName === '..') {
       throw Object.assign(new Error('Invalid destination name'), { code: 'INVALID_PATH' });
     }
-    // Prevent overwriting an existing path.
+    // Block moving a directory into itself or one of its own descendants; fs.rename
+    // would otherwise fail with an opaque EINVAL.
+    const fromStat = await fsPromises.lstat(fromPath);
+    if (fromStat.isDirectory()) {
+      const fromWithSep = fromPath.endsWith(path.sep) ? fromPath : fromPath + path.sep;
+      if (toPath === fromPath || toPath.startsWith(fromWithSep)) {
+        throw Object.assign(new Error('Cannot move a folder into itself'), { code: 'INVALID_PATH' });
+      }
+    }
+    // Prevent overwriting an existing path. lstat (not access) so a dangling
+    // symlink already at the destination still counts as occupied.
     try {
-      await fsPromises.access(toPath);
+      await fsPromises.lstat(toPath);
       throw Object.assign(new Error('A file or folder with that name already exists'), { code: 'EEXIST' });
     } catch (e: unknown) {
       const fe = e as NodeJS.ErrnoException;

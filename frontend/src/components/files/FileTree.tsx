@@ -1,12 +1,17 @@
 import { useState, useEffect, useRef, Fragment } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, DragEvent } from 'react';
 import { Search, X } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
-import type { FileEntry } from '@/lib/stackFilesApi';
+import {
+  readFileEntryDragPayload,
+  relPathParentDir,
+  type FileEntry,
+} from '@/lib/stackFilesApi';
 import { FileTreeNode } from './FileTreeNode';
+import { cn } from '@/lib/utils';
 
 interface FileTreeProps {
   /** Loads directory contents at `relPath` (use '' for the tree root). */
@@ -21,10 +26,13 @@ interface FileTreeProps {
   // Context menu wiring
   canEdit?: boolean;
   onContextMenuRename?: (relPath: string) => void;
+  onContextMenuMove?: (relPath: string, entry: FileEntry) => void;
   onContextMenuNewFile?: (dirRelPath: string) => void;
   onContextMenuNewFolder?: (dirRelPath: string) => void;
   onContextMenuDelete?: (relPath: string, entry: FileEntry) => void;
   onContextMenuPermissions?: (relPath: string, entry: FileEntry) => void;
+  /** Relocate `fromRel` into `destDir` (''=stack root) via drag-and-drop. */
+  onMove?: (fromRel: string, entryName: string, destDir: string) => void;
 }
 
 const COMPOSE_NAMES = new Set(['compose.yaml', 'compose.yml']);
@@ -44,10 +52,12 @@ export function FileTree({
   onNavigateToEnv,
   canEdit = false,
   onContextMenuRename = () => undefined,
+  onContextMenuMove = () => undefined,
   onContextMenuNewFile = () => undefined,
   onContextMenuNewFolder = () => undefined,
   onContextMenuDelete = () => undefined,
   onContextMenuPermissions = () => undefined,
+  onMove = () => undefined,
 }: FileTreeProps) {
   const [rootEntries, setRootEntries] = useState<FileEntry[] | null>(null);
   const [rootLoading, setRootLoading] = useState(true);
@@ -56,6 +66,28 @@ export function FileTree({
   const [dirContents, setDirContents] = useState<Map<string, FileEntry[]>>(new Map());
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState('');
+  const [isRootDropTarget, setIsRootDropTarget] = useState(false);
+
+  // The scroll area is the stack-root drop target. Folder nodes stop propagation
+  // on their own drops, so an event only reaches here when it lands on a file
+  // row or empty space. A root-level entry dropped here is a no-op and ignored.
+  function handleRootDragOver(e: DragEvent) {
+    if (!canEdit) return;
+    const payload = readFileEntryDragPayload(e.dataTransfer);
+    if (!payload || relPathParentDir(payload.relPath) === '') return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (!isRootDropTarget) setIsRootDropTarget(true);
+  }
+
+  function handleRootDrop(e: DragEvent) {
+    if (!canEdit) return;
+    const payload = readFileEntryDragPayload(e.dataTransfer);
+    setIsRootDropTarget(false);
+    if (!payload || relPathParentDir(payload.relPath) === '') return;
+    e.preventDefault();
+    onMove(payload.relPath, payload.name, '');
+  }
   const sourceKeyRef = useRef(sourceKey);
   const loadDirRef = useRef(loadDir);
 
@@ -214,10 +246,12 @@ export function FileTree({
                 }}
                 canEdit={canEdit}
                 onContextMenuRename={onContextMenuRename}
+                onContextMenuMove={onContextMenuMove}
                 onContextMenuNewFile={onContextMenuNewFile}
                 onContextMenuNewFolder={onContextMenuNewFolder}
                 onContextMenuDelete={onContextMenuDelete}
                 onContextMenuPermissions={onContextMenuPermissions}
+                onMove={onMove}
               />
               {isDir && isExpanded && children !== undefined && (
                 children.length === 0
@@ -295,7 +329,13 @@ export function FileTree({
         )}
       </div>
       <ScrollArea type="hover" className="flex-1 min-h-0">
-        <div className="py-1">
+        <div
+          data-testid="file-tree-root-dropzone"
+          className={cn('py-1 min-h-full', isRootDropTarget && 'bg-accent/20')}
+          onDragOver={handleRootDragOver}
+          onDragLeave={() => setIsRootDropTarget(false)}
+          onDrop={handleRootDrop}
+        >
           {renderEntries(rootEntries, '', 0)}
         </div>
       </ScrollArea>
