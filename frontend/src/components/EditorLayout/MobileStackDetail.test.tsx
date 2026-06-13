@@ -248,4 +248,42 @@ describe('MobileStackDetail mobile editing', () => {
         fireEvent.click(screen.getByTestId('mobile-editor-save-deploy'));
         expect(requestSaveAndDeploy).toHaveBeenCalledTimes(1);
     });
+
+    it('normalizes a files tab to compose so the visible edit saves to the visible file', () => {
+        // Desktop can hand off activeTab='files' when it crosses into the mobile
+        // breakpoint; the editor shows compose, so the shared tab must follow or
+        // saveFile silently no-ops on 'files'.
+        const setActiveTab = vi.fn();
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, activeTab: 'files', setActiveTab })} />);
+        expect(setActiveTab).toHaveBeenCalledWith('compose');
+    });
+
+    it('normalizes an env tab to compose when the stack has no env file', () => {
+        const setActiveTab = vi.fn();
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, activeTab: 'env', envExists: false, setActiveTab })} />);
+        expect(setActiveTab).toHaveBeenCalledWith('compose');
+    });
+
+    it('blocks textarea edits while an env-file load is in flight', () => {
+        const setContent = vi.fn();
+        const setEnvContent = vi.fn();
+        render(
+            <MobileStackDetail
+                {...makeProps({
+                    editingCompose: true,
+                    activeTab: 'env',
+                    envExists: true,
+                    envFiles: ['.env'],
+                    isFileLoading: true,
+                    setContent,
+                    setEnvContent,
+                })}
+            />,
+        );
+        const editor = screen.getByTestId('mobile-compose-editor');
+        expect(editor).toHaveAttribute('readonly');
+        fireEvent.change(editor, { target: { value: 'late-edit' } });
+        expect(setEnvContent).not.toHaveBeenCalled();
+        expect(setContent).not.toHaveBeenCalled();
+    });
 });

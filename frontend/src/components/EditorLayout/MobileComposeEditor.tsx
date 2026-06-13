@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { ChevronLeft, Save, Rocket } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '../ui/button';
@@ -57,8 +58,19 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
         hasUnsavedChanges,
     } = props;
 
-    // 'files' never opens on mobile; fall back to compose so the textarea always
-    // shows an editable buffer the save handlers can target.
+    // The save handlers (saveFile) key off the shared editorState.activeTab, so the
+    // displayed buffer must match it. The desktop editor can hand off a 'files' tab
+    // (or 'env' with no env file) when it crosses into the mobile breakpoint; left
+    // alone the textarea would show compose while a save silently no-ops on 'files'.
+    // Normalize to 'compose' so the visible edit always saves to the visible file.
+    useEffect(() => {
+        if (activeTab === 'files' || (activeTab === 'env' && !envExists)) {
+            setActiveTab('compose');
+        }
+    }, [activeTab, envExists, setActiveTab]);
+
+    // Mirror of the normalization above for this render: 'env' only when an env
+    // file exists, else 'compose'. The effect makes the shared activeTab follow.
     const tab: 'compose' | 'env' = activeTab === 'env' && envExists ? 'env' : 'compose';
     const value = tab === 'compose' ? content || '' : envContent || '';
     // Switching the env file refetches and overwrites the env buffer, so block it
@@ -66,6 +78,9 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
     // mid-edit). The compose <-> .env toggle stays free: both buffers persist.
     const envSwitchDisabled = hasUnsavedChanges() || isFileLoading;
     const actionsDisabled = isFileLoading || loadingAction === 'deploy';
+    // Read-only while an env-file fetch is in flight: changeEnvFile overwrites the
+    // buffer when it resolves, so edits typed during the load would be silently lost.
+    const editorReadOnly = !canEdit || isFileLoading;
 
     return (
         <div className="flex h-full min-h-0 flex-col">
@@ -138,11 +153,11 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                     data-testid="mobile-compose-editor"
                     value={value}
                     onChange={e => {
-                        if (!canEdit) return;
+                        if (editorReadOnly) return;
                         if (tab === 'compose') setContent(e.target.value);
                         else setEnvContent(e.target.value);
                     }}
-                    readOnly={!canEdit}
+                    readOnly={editorReadOnly}
                     spellCheck={false}
                     autoCapitalize="off"
                     autoCorrect="off"
