@@ -50,12 +50,15 @@ import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
 import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
+import { CapabilityGate } from './CapabilityGate';
+import { HubOnlyGate } from './HubOnlyGate';
 import type { SectionId } from './settings/types';
 
-// The Security page is heavy (charts, scan sheets) and already code-split on the
-// desktop content path, so the bespoke phone screen reuses the same lazy chunk
-// rather than pulling SecurityView into the main shell bundle.
+// These bespoke phone screens reuse the desktop view's component (with a mobile
+// branch), code-split exactly like the desktop content path so the heavy chunks
+// stay out of the main shell bundle.
 const SecurityView = lazy(() => import('./SecurityView').then(m => ({ default: m.SecurityView })));
+const AutoUpdateReadinessView = lazy(() => import('./AutoUpdateReadinessView'));
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -778,6 +781,24 @@ export default function EditorLayout() {
                   headerActions={mobileMastheadActions}
                 />
               </Suspense>
+            );
+          case 'auto-updates':
+            // Same gates as the desktop content path (ViewRouter): hub-only +
+            // the auto-updates capability, preserved on the phone surface.
+            return (
+              <HubOnlyGate>
+                <CapabilityGate capability="auto-updates" featureName="Auto-Update Readiness">
+                  <Suspense
+                    fallback={(
+                      <div className="flex h-full items-center justify-center">
+                        <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
+                      </div>
+                    )}
+                  >
+                    <AutoUpdateReadinessView headerActions={mobileMastheadActions} onBack={goToMobileList} />
+                  </Suspense>
+                </CapabilityGate>
+              </HubOnlyGate>
             );
           default:
             return workspaceEl;

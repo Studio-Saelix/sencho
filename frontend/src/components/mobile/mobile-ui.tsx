@@ -187,25 +187,32 @@ export function Masthead({
 }
 
 // Page header for a pushed full-screen secondary view (Resources, App Store,
-// Updates, Audit): 3px cyan left rail, a back chip + muted mono crumb, and a
-// serif-italic title with an optional right slot (e.g. a Recheck button).
-export function PageHead({ back, crumb, title, right, onBack }: {
+// Updates, Audit): 3px cyan left rail, a back chip, the rehomed global chrome
+// (notifications + more-menu) top-right since these screens drop the TopBar, a
+// muted mono crumb kicker, and a serif-italic title with an optional right slot
+// (e.g. a Recheck button).
+export function PageHead({ back, crumb, title, right, headerActions, onBack }: {
   back: string;
   crumb?: ReactNode;
   title: ReactNode;
   right?: ReactNode;
+  /** Notifications + more-menu cluster, rehomed from the dropped TopBar. */
+  headerActions?: ReactNode;
   onBack?: () => void;
 }) {
   return (
     <div className="relative shrink-0 border-b border-hairline px-4 pb-[13px] pt-1">
-      <span aria-hidden className="absolute left-0 top-[30px] bottom-[13px] w-[3px] bg-brand" />
-      <div className="flex items-center justify-between">
+      <span aria-hidden className="absolute left-0 top-[42px] bottom-[13px] w-[3px] bg-brand" />
+      <div className="flex items-center justify-between gap-2">
         <BackChip label={back} onClick={onBack} />
-        {crumb ? <span className="font-mono text-[10px] text-stat-icon">{crumb}</span> : null}
+        {headerActions}
       </div>
-      <div className="ml-0.5 mt-0.5 flex items-end justify-between gap-3">
-        <div className="min-w-0 truncate font-display italic text-[32px] leading-[34px] tracking-[-0.01em] text-stat-value">
-          {title}
+      <div className="ml-0.5 mt-1 flex items-end justify-between gap-3">
+        <div className="min-w-0">
+          {crumb ? <div className="mb-0.5"><Kicker>{crumb}</Kicker></div> : null}
+          <div className="truncate font-display italic text-[32px] leading-[34px] tracking-[-0.01em] text-stat-value">
+            {title}
+          </div>
         </div>
         {right}
       </div>
