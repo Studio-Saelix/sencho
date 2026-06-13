@@ -13,6 +13,8 @@ import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useImageScan } from '@/hooks/useImageScan';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import type { SecurityTab } from '@/lib/events';
 import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, FleetRole } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
@@ -47,6 +49,7 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
   const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
   const { activeNode } = useNodes();
+  const isMobile = useIsMobile();
   const isRemote = activeNode?.type === 'remote';
 
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
@@ -171,8 +174,21 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
   const { state, tone } = deriveMasthead(overview, overviewLoadError !== null);
   const pulsing = tone === 'live' && !!overview?.scanner.available;
 
+  // The mobile tab strip mirrors the desktop tab IA, including the paid-only
+  // Policies tab when licensed, so every section stays reachable by scroll.
+  const mobileTabs: SecurityMobileTab[] = [
+    { value: 'overview', label: 'Overview' },
+    { value: 'images', label: 'Images' },
+    { value: 'compose', label: 'Compose risks' },
+    { value: 'secrets', label: 'Secrets' },
+    ...(isPaid ? [{ value: 'policies', label: 'Policies' } as const] : []),
+    { value: 'suppressions', label: 'Suppressions' },
+    { value: 'history', label: 'History' },
+    { value: 'scanner', label: 'Scanner setup' },
+  ];
+
   return (
-    <div className="h-full overflow-auto p-6">
+    <div className="h-full overflow-auto p-6 max-md:p-4">
       <PageMasthead
         kicker="SECURITY"
         state={state}
@@ -191,7 +207,10 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
       />
 
       <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
-        <TabsList className="mb-4 max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
+        {isMobile ? (
+          <SecurityMobileTabs tabs={mobileTabs} active={activeTab} onSelect={onTabChange} />
+        ) : (
+        <TabsList className="mb-4">
           <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
             <TabsHighlightItem value="overview">
               <TabsTrigger value="overview"><LayoutDashboard className="w-4 h-4 mr-1.5" />Overview</TabsTrigger>
@@ -222,6 +241,7 @@ export function SecurityView({ activeTab, onTabChange }: SecurityViewProps) {
             </TabsHighlightItem>
           </TabsHighlight>
         </TabsList>
+        )}
 
         <TabsContent value="overview">
           <OverviewTab

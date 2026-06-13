@@ -8,10 +8,22 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
-import { getSeverityKey, type SeverityKey } from '@/lib/severityStyles';
+import { getSeverityKey, type SeverityKey, type ImageFilterValue } from '@/lib/severityStyles';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { cn } from '@/lib/utils';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { ImageScanRow, ImageFilterChips, type ImageFilterChip } from './SecurityMobile';
 import type { ScanSummary, ScanDetailTab, ScannerKind } from '@/types/security';
+
+// Mobile severity chips. 'FIXABLE' is a phone-only pseudo-filter (the desktop
+// Combobox never emits it), so the shared filter logic treats it specially.
+const MOBILE_FILTER_CHIPS: ImageFilterChip[] = [
+  { value: 'all', label: 'All' },
+  { value: 'CRITICAL', label: 'Critical' },
+  { value: 'HIGH', label: 'High' },
+  { value: 'FIXABLE', label: 'Fixable' },
+  { value: 'CLEAN', label: 'Clean' },
+];
 
 const PAGE_SIZE = 12;
 
@@ -67,8 +79,9 @@ interface ImagesTabProps {
 
 /** Latest-scan index for real images (stack/config scans live in Compose risks). */
 export function ImagesTab({ summaries, loading, error, onInspect, canScan, scanningRef, onScan }: ImagesTabProps) {
+  const isMobile = useIsMobile();
   const [search, setSearch] = useState('');
-  const [severity, setSeverity] = useState('all');
+  const [severity, setSeverity] = useState<ImageFilterValue>('all');
   const [sortKey, setSortKey] = useState<SortKey>('scanned_at');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(0);
@@ -78,7 +91,11 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
     return Object.values(summaries)
       .filter((s) => !s.image_ref.startsWith('stack:'))
       .filter((s) => (term ? s.image_ref.toLowerCase().includes(term) : true))
-      .filter((s) => (severity === 'all' ? true : getSeverityKey(s) === severity));
+      .filter((s) => {
+        if (severity === 'all') return true;
+        if (severity === 'FIXABLE') return s.fixable > 0;
+        return getSeverityKey(s) === severity;
+      });
   }, [summaries, search, severity]);
 
   const sorted = useMemo(() => {
@@ -136,6 +153,37 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
 
   return (
     <div className="space-y-4">
+      {isMobile ? (
+        <>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
+            <Input
+              placeholder="Filter images…"
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+              className="pl-8"
+            />
+          </div>
+          <ImageFilterChips
+            chips={MOBILE_FILTER_CHIPS}
+            active={severity}
+            onSelect={(v) => { setSeverity(v); setPage(0); }}
+          />
+          <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+            <div className="px-4">
+              {pageItems.map((s) => (
+                <ImageScanRow key={s.image_ref} summary={s} onInspect={onInspect} />
+              ))}
+            </div>
+            {pageItems.length === 0 && (
+              <div className="py-12 text-center text-sm text-muted-foreground">
+                No images match your search or filter.
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
@@ -149,7 +197,7 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
         <Combobox
           options={FILTER_OPTIONS}
           value={severity}
-          onValueChange={(v) => { setSeverity(v || 'all'); setPage(0); }}
+          onValueChange={(v) => { setSeverity((v || 'all') as ImageFilterValue); setPage(0); }}
           className="w-[180px]"
         />
       </div>
@@ -233,6 +281,8 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
           )}
         </ScrollArea>
       </div>
+        </>
+      )}
 
       {sorted.length > PAGE_SIZE && (
         <div className="flex items-center justify-end gap-1">

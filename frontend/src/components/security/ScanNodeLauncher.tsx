@@ -13,6 +13,8 @@ interface ScanNodeLauncherProps {
   canScan: boolean;
   /** Fired after a scan finishes so the caller can refresh the overview. */
   onComplete?: () => void;
+  /** Stretch the trigger to fill its row (the mobile Overview lead action). */
+  fullWidth?: boolean;
 }
 
 const TYPES = [
@@ -29,7 +31,7 @@ type TypeKey = (typeof TYPES)[number]['key'];
  * captured once so the request and the progress stream stay bound to it even if
  * the active node changes mid-scan.
  */
-export function ScanNodeLauncher({ canScan, onComplete }: ScanNodeLauncherProps) {
+export function ScanNodeLauncher({ canScan, onComplete, fullWidth = false }: ScanNodeLauncherProps) {
   const { runWithLog } = useDeployFeedback();
   const { activeNode } = useNodes();
   const [open, setOpen] = useState(false);
@@ -79,7 +81,7 @@ export function ScanNodeLauncher({ canScan, onComplete }: ScanNodeLauncherProps)
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button size="sm" disabled={running}>
+        <Button size="sm" disabled={running} className={fullWidth ? 'w-full' : undefined}>
           {running
             ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
             : <ShieldCheck className="w-4 h-4 mr-1.5" strokeWidth={1.5} />}

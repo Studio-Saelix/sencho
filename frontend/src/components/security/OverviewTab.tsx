@@ -3,6 +3,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
 import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
 import type { SecurityOverview, ScanSummary, SecurityRiskTrendPoint } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
 import {
@@ -55,6 +57,8 @@ function ChartCard({ title, className, children }: { title: string; className?: 
 }
 
 export function OverviewTab({ overview, loadError, summaries, trend, onNavigate, onInspect, canScan, onScanComplete, isPaid }: OverviewTabProps) {
+  const isMobile = useIsMobile();
+
   if (loadError === 'unsupported') {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -106,15 +110,22 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
   return (
     <div className="space-y-6">
       {canScan && (
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-stat-subtitle">
-            {overview.scannedImages === 0
-              ? 'No images scanned on this node yet.'
-              : `${overview.scannedImages} image${overview.scannedImages === 1 ? '' : 's'} scanned.`}
-          </p>
-          <ScanNodeLauncher canScan={canScan} onComplete={onScanComplete} />
-        </div>
+        isMobile ? (
+          <ScanNodeLauncher canScan={canScan} onComplete={onScanComplete} fullWidth />
+        ) : (
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-stat-subtitle">
+              {overview.scannedImages === 0
+                ? 'No images scanned on this node yet.'
+                : `${overview.scannedImages} image${overview.scannedImages === 1 ? '' : 's'} scanned.`}
+            </p>
+            <ScanNodeLauncher canScan={canScan} onComplete={onScanComplete} />
+          </div>
+        )
       )}
+
+      {/* The masthead hides its stat cluster on a phone; restate it here. */}
+      {isMobile && <SecuritySevStrip overview={overview} />}
 
       {/* Charts lead the dashboard. */}
       <div className="grid gap-4 lg:grid-cols-3">
@@ -136,11 +147,15 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
       </div>
 
       {/* Supporting counts + posture, secondary to the charts above. */}
-      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden max-md:overflow-x-auto">
-        <div className="min-w-[640px]">
-          <SignalRail tiles={tiles} className="border-b-0" />
+      {isMobile ? (
+        <SecurityTotalsGrid overview={overview} />
+      ) : (
+        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+          <div className="min-w-[640px]">
+            <SignalRail tiles={tiles} className="border-b-0" />
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2">
         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4">
@@ -182,6 +197,8 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
           </p>
         </div>
       </div>
+
+      {isMobile && <SecurityFooterBand overview={overview} />}
     </div>
   );
 }
