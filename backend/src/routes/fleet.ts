@@ -1570,6 +1570,38 @@ fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, r
   }
 });
 
+// Stack-label suggestions for the Stop-by-label target picker. Aggregates the
+// per-node stack-label rows (the `stack_labels` table, via getLabels) into one
+// name-keyed list with stack/node counts. This is the only source the card's
+// autocomplete consumes; node labels (the separate `/api/node-labels`
+// namespace) are deliberately never folded in, because fleet-stop targets stack
+// labels only. The `scope: 'stack'` tag and the counts make that explicit at the
+// type level and in the UI. Central-DB only, same as match-preview, so it covers
+// every configured node including offline remotes.
+fleetRouter.get('/labels/suggestions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const db = DatabaseService.getInstance();
+    const agg = new Map<string, { nodeCount: number; stackCount: number }>();
+    for (const node of db.getNodes()) {
+      for (const label of db.getLabels(node.id)) {
+        const stackCount = db.getStacksForLabel(label.id, node.id).length;
+        const entry = agg.get(label.name) ?? { nodeCount: 0, stackCount: 0 };
+        entry.nodeCount += 1;
+        entry.stackCount += stackCount;
+        agg.set(label.name, entry);
+      }
+    }
+    const suggestions = Array.from(agg.entries())
+      .map(([name, counts]) => ({ name, scope: 'stack' as const, nodeCount: counts.nodeCount, stackCount: counts.stackCount }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ suggestions });
+  } catch (error) {
+    console.error('[Fleet] label-suggestions error:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to load stack-label suggestions') });
+  }
+});
+
 // Fleet-wide prune size estimate. Local node uses the controller estimate
 // helper; remote nodes hit `/api/system/prune/estimate` per target. Same
 // fan-out shape as `/labels/fleet-prune` minus the locks (estimation is read
