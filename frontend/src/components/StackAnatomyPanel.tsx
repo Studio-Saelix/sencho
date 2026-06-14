@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen, ChevronLeft, ChevronRight } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
 import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
+import { ScrollableTabRow } from './ui/ScrollableTabRow';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput } from '@/lib/anatomyMarkdown';
@@ -114,36 +115,6 @@ export default function StackAnatomyPanel({
     })();
     return () => { cancelled = true; };
   }, [stackName, activeNode?.id, doctorEnabled]);
-
-  // The tab row scrolls horizontally when its tabs overflow the panel width.
-  // Clickable arrows appear only while there is more to scroll in that direction
-  // (a wide panel that fits every tab looks unchanged), and a vertical mouse
-  // wheel over the row is translated into horizontal scroll.
-  const tabScrollRef = useRef<HTMLDivElement>(null);
-  const [tabEdges, setTabEdges] = useState({ left: false, right: false });
-  const measureTabEdges = useCallback((el: HTMLElement) => {
-    setTabEdges({ left: el.scrollLeft > 1, right: Math.ceil(el.scrollLeft + el.clientWidth) < el.scrollWidth });
-  }, []);
-  const scrollTabs = useCallback((direction: -1 | 1) => {
-    const el = tabScrollRef.current;
-    if (el) el.scrollBy({ left: direction * Math.max(96, el.clientWidth * 0.7), behavior: 'smooth' });
-  }, []);
-  useEffect(() => {
-    const el = tabScrollRef.current;
-    if (!el) return;
-    measureTabEdges(el);
-    // Non-passive so preventDefault works: turn a vertical wheel into horizontal
-    // scroll only when the row overflows (trackpads already scroll horizontally).
-    const onWheel = (e: WheelEvent) => {
-      if (el.scrollWidth <= el.clientWidth || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-      el.scrollLeft += e.deltaY;
-      e.preventDefault();
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => measureTabEdges(el)) : null;
-    ro?.observe(el);
-    return () => { el.removeEventListener('wheel', onWheel); ro?.disconnect(); };
-  }, [measureTabEdges, doctorEnabled, preflightSeverity]);
 
   useEffect(() => {
     let cancelled = false;
@@ -310,59 +281,30 @@ export default function StackAnatomyPanel({
     <div className="flex h-full min-h-0 flex-col rounded-xl border border-muted bg-card/40">
       <Tabs defaultValue="anatomy" className="flex flex-col h-full min-h-0">
       <div className="flex items-center justify-between border-b border-muted px-3 py-1.5 gap-2">
-        <div className="relative min-w-0 flex-1">
-          <div
-            ref={tabScrollRef}
-            onScroll={e => measureTabEdges(e.currentTarget)}
-            className="overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-          >
-            <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">
-              <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
-              <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
-              <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
-              <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
-              {networkingEnabled && (
-                <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
-              )}
-              {doctorEnabled && (
-                <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">
-                  <span className="inline-flex items-center gap-1">
-                    Doctor
-                    {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && (
-                      <span
-                        data-testid="doctor-tab-dot"
-                        className={cn('h-1.5 w-1.5 rounded-full', preflightSeverity === 'blocker' ? 'bg-destructive' : 'bg-warning')}
-                      />
-                    )}
-                  </span>
-                </TabsTrigger>
-              )}
-            </TabsList>
-          </div>
-          {/* Clickable arrows over a fade: shown only when the row overflows that edge. */}
-          {tabEdges.left && (
-            <button
-              type="button"
-              aria-label="Scroll tabs left"
-              data-testid="tab-scroll-left"
-              onClick={() => scrollTabs(-1)}
-              className="absolute inset-y-0 left-0 flex w-7 items-center justify-start bg-gradient-to-r from-card via-card/90 to-transparent text-stat-subtitle hover:text-brand transition-colors"
-            >
-              <ChevronLeft className="h-4 w-4" strokeWidth={1.5} />
-            </button>
-          )}
-          {tabEdges.right && (
-            <button
-              type="button"
-              aria-label="Scroll tabs right"
-              data-testid="tab-scroll-right"
-              onClick={() => scrollTabs(1)}
-              className="absolute inset-y-0 right-0 flex w-7 items-center justify-end bg-gradient-to-l from-card via-card/90 to-transparent text-stat-subtitle hover:text-brand transition-colors"
-            >
-              <ChevronRight className="h-4 w-4" strokeWidth={1.5} />
-            </button>
-          )}
-        </div>
+        <ScrollableTabRow surface="card" wrapperClassName="min-w-0 flex-1">
+          <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">
+            <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
+            <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
+            <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
+            <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
+            {networkingEnabled && (
+              <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
+            )}
+            {doctorEnabled && (
+              <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">
+                <span className="inline-flex items-center gap-1">
+                  Doctor
+                  {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && (
+                    <span
+                      data-testid="doctor-tab-dot"
+                      className={cn('h-1.5 w-1.5 rounded-full', preflightSeverity === 'blocker' ? 'bg-destructive' : 'bg-warning')}
+                    />
+                  )}
+                </span>
+              </TabsTrigger>
+            )}
+          </TabsList>
+        </ScrollableTabRow>
         <div className="flex items-center gap-3 shrink-0">
           {onOpenFiles && (
             <button

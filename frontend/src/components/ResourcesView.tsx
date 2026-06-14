@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { PageHead } from '@/components/mobile/mobile-ui';
+import { PageHead, MobileSubTabs } from '@/components/mobile/mobile-ui';
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from "@/components/ui/tabs";
 import { springs } from '@/lib/motion';
@@ -311,6 +311,7 @@ interface ResourcesViewProps {
 
 export default function ResourcesView({ headerActions, onBack }: ResourcesViewProps = {}) {
     const isMobile = useIsMobile();
+    const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'networks' | 'unmanaged'>('images');
     const { isAdmin } = useAuth();
     const { activeNode } = useNodes();
     const { isPaid } = useLicense();
@@ -819,9 +820,23 @@ export default function ResourcesView({ headerActions, onBack }: ResourcesViewPr
 
             {/* Resource Tabs */}
             <Tabs
-                defaultValue="images"
+                value={resourceTab}
+                onValueChange={(v) => setResourceTab(v as typeof resourceTab)}
                 className="flex-1 flex flex-col w-full rounded-lg border bg-card shadow-card-bevel overflow-hidden min-h-[400px] animate-in fade-in-0 slide-in-from-bottom-2 duration-300 delay-150"
             >
+                {isMobile ? (
+                    <MobileSubTabs
+                        ariaLabel="Resource sections"
+                        active={resourceTab}
+                        onSelect={setResourceTab}
+                        tabs={[
+                            { value: 'images', label: 'Images', count: images.length },
+                            { value: 'volumes', label: 'Volumes', count: volumes.length },
+                            { value: 'networks', label: 'Networks', count: networks.length },
+                            { value: 'unmanaged', label: 'Unmanaged', count: totalOrphansCount },
+                        ]}
+                    />
+                ) : (
                 <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3">
                     <TabsList className="grid grid-cols-4 w-full md:w-[680px] h-9 gap-1 p-0">
                         <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
@@ -862,6 +877,7 @@ export default function ResourcesView({ headerActions, onBack }: ResourcesViewPr
                         </Button>
                     )}
                 </div>
+                )}
 
                 <ScrollArea className="flex-1 bg-background relative text-sm">
 

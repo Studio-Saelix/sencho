@@ -4,6 +4,7 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import { Sparkline } from '@/components/ui/sparkline';
+import { ScrollableTabRow } from '@/components/ui/ScrollableTabRow';
 
 export type Tone = 'success' | 'warning' | 'destructive' | 'brand';
 
@@ -227,9 +228,9 @@ export interface MobileSubTab<T extends string = string> {
   count?: number;
 }
 
-// Horizontal mono tab scroller with a cyan underline on the active tab and an
-// edge mask-fade so the overflow reads as scrollable. Shared by the Security
-// page and the Audit Log page. Tap targets are >=44px.
+// Horizontal mono tab scroller with a cyan underline on the active tab. When
+// the row overflows it gets the shared fade + arrow affordance (ScrollableTabRow).
+// Shared by the Security page and the Audit Log page. Tap targets are >=44px.
 export function MobileSubTabs<T extends string>({ tabs, active, onSelect, ariaLabel }: {
   tabs: MobileSubTab<T>[];
   active: T;
@@ -237,35 +238,29 @@ export function MobileSubTabs<T extends string>({ tabs, active, onSelect, ariaLa
   ariaLabel: string;
 }) {
   return (
-    <div
-      role="tablist"
-      aria-label={ariaLabel}
-      className="flex shrink-0 overflow-x-auto border-b border-hairline [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      style={{
-        maskImage: 'linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%)',
-        WebkitMaskImage: 'linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%)',
-      }}
-    >
-      {tabs.map((tab) => {
-        const on = tab.value === active;
-        return (
-          <button
-            key={tab.value}
-            type="button"
-            role="tab"
-            aria-selected={on}
-            onClick={() => onSelect(tab.value)}
-            className={cn(
-              'min-h-11 shrink-0 whitespace-nowrap px-3 py-[13px] font-mono text-[12px] tracking-[0.04em] transition-colors',
-              on ? 'text-brand shadow-[inset_0_-2px_0_0_var(--brand)]' : 'text-stat-subtitle',
-            )}
-          >
-            {tab.label}
-            {tab.count != null && <span className="ml-1.5 opacity-60">{tab.count}</span>}
-          </button>
-        );
-      })}
-    </div>
+    <ScrollableTabRow surface="background" wrapperClassName="shrink-0" className="border-b border-hairline">
+      <div role="tablist" aria-label={ariaLabel} className="flex">
+        {tabs.map((tab) => {
+          const on = tab.value === active;
+          return (
+            <button
+              key={tab.value}
+              type="button"
+              role="tab"
+              aria-selected={on}
+              onClick={() => onSelect(tab.value)}
+              className={cn(
+                'min-h-11 shrink-0 whitespace-nowrap px-3 py-[13px] font-mono text-[12px] tracking-[0.04em] transition-colors',
+                on ? 'text-brand shadow-[inset_0_-2px_0_0_var(--brand)]' : 'text-stat-subtitle',
+              )}
+            >
+              {tab.label}
+              {tab.count != null && <span className="ml-1.5 opacity-60">{tab.count}</span>}
+            </button>
+          );
+        })}
+      </div>
+    </ScrollableTabRow>
   );
 }
 
