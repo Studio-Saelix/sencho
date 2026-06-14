@@ -229,7 +229,7 @@ export interface MobileSubTab<T extends string = string> {
 
 // Horizontal mono tab scroller with a cyan underline on the active tab and an
 // edge mask-fade so the overflow reads as scrollable. Shared by the Security
-// page and the Tier 3 pages (Resources, Audit). Tap targets are >=44px.
+// page and the Audit Log page. Tap targets are >=44px.
 export function MobileSubTabs<T extends string>({ tabs, active, onSelect, ariaLabel }: {
   tabs: MobileSubTab<T>[];
   active: T;
@@ -276,9 +276,8 @@ export interface MobileChip<T extends string = string> {
   count?: number;
 }
 
-// Horizontal filter-chip scroller; active chip is cyan-filled. Shared by the
-// Security Images filter and the Tier 3 pages (Resources, App Store). Tap
-// targets are >=44px.
+// Horizontal filter-chip scroller; active chip is cyan-filled. Used by the
+// Security Images severity filter. Tap targets are >=44px.
 export function MobileChipRow<T extends string>({ chips, active, onSelect, className }: {
   chips: MobileChip<T>[];
   active: T;

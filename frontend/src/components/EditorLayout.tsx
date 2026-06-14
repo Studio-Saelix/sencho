@@ -746,6 +746,12 @@ export default function EditorLayout() {
       // dropped and the screen renders its own masthead (with notifications +
       // more-menu rehomed into the right slot).
       const bespokeContent = mobileSurface === 'content' && BESPOKE_MOBILE_VIEWS.has(activeView);
+      // Shared lazy-chunk fallback for the code-split bespoke phone screens.
+      const lazyFallback = (
+        <div className="flex h-full items-center justify-center">
+          <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
+        </div>
+      );
       const renderMobileBespoke = () => {
         switch (activeView) {
           case 'dashboard':
@@ -791,13 +797,7 @@ export default function EditorLayout() {
             return (
               <HubOnlyGate>
                 <CapabilityGate capability="auto-updates" featureName="Auto-Update Readiness">
-                  <Suspense
-                    fallback={(
-                      <div className="flex h-full items-center justify-center">
-                        <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
-                      </div>
-                    )}
-                  >
+                  <Suspense fallback={lazyFallback}>
                     <AutoUpdateReadinessView headerActions={mobileMastheadActions} onBack={goToMobileList} />
                   </Suspense>
                 </CapabilityGate>
@@ -805,13 +805,7 @@ export default function EditorLayout() {
             );
           case 'templates':
             return (
-              <Suspense
-                fallback={(
-                  <div className="flex h-full items-center justify-center">
-                    <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
-                  </div>
-                )}
-              >
+              <Suspense fallback={lazyFallback}>
                 <AppStoreView
                   onDeploySuccess={(sName) => { refreshStacks(); void stackActions.loadFile(sName); }}
                   headerActions={mobileMastheadActions}
@@ -823,13 +817,7 @@ export default function EditorLayout() {
             return (
               <HubOnlyGate>
                 <CapabilityGate capability="audit-log" featureName="Audit Log">
-                  <Suspense
-                    fallback={(
-                      <div className="flex h-full items-center justify-center">
-                        <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
-                      </div>
-                    )}
-                  >
+                  <Suspense fallback={lazyFallback}>
                     <AuditLogView headerActions={mobileMastheadActions} onBack={goToMobileList} />
                   </Suspense>
                 </CapabilityGate>
@@ -837,13 +825,7 @@ export default function EditorLayout() {
             );
           case 'resources':
             return (
-              <Suspense
-                fallback={(
-                  <div className="flex h-full items-center justify-center">
-                    <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
-                  </div>
-                )}
-              >
+              <Suspense fallback={lazyFallback}>
                 <ResourcesView headerActions={mobileMastheadActions} onBack={goToMobileList} />
               </Suspense>
             );

@@ -61,7 +61,7 @@ it('disables Apply when the update is blocked (major bump)', () => {
   expect(apply()).toBeDisabled();
 });
 
-it('disables Apply when no schedule covers the stack', () => {
+it('disables Apply when auto-update is off for the stack', () => {
   render(<MobileReadinessCard card={card({ autoUpdateEnabled: false })} onApply={vi.fn()} />);
   expect(apply()).toBeDisabled();
 });

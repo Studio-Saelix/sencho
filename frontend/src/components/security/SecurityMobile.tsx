@@ -16,8 +16,8 @@ export interface SecurityMobileTab {
   label: string;
 }
 
-/** The Security tab strip is the shared mono sub-tab scroller; all eight
- *  sections stay reachable by horizontal scroll, matching the desktop IA. */
+/** The Security tab strip is the shared mono sub-tab scroller; every section
+ *  stays reachable by horizontal scroll, matching the desktop IA. */
 export function SecurityMobileTabs({ tabs, active, onSelect }: {
   tabs: SecurityMobileTab[];
   active: SecurityTab;

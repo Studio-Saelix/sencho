@@ -1,7 +1,8 @@
 /**
- * Shared mobile chrome: the chip row (App Store categories, Resources filters)
- * and the sub-tab scroller (Resources tabs, Audit Stream/Table). Both render a
- * value/label[/count] list, mark the active item, and report selection.
+ * Shared mobile chrome: the chip row (the Security Images severity filter) and
+ * the sub-tab scroller (the Security sections, the Audit Stream/Table views).
+ * Both render a value/label[/count] list, mark the active item, and report
+ * selection.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';

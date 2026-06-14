@@ -487,7 +487,7 @@ function MobileNodeSection({ group, onApply }: { group: NodeGroup; onApply: (sta
 }
 
 interface AutoUpdateReadinessProps {
-  /** Notifications + more-menu cluster for the mobile masthead right slot. */
+  /** Notifications + more-menu cluster for the PageHead, rehomed from the dropped TopBar. */
   headerActions?: ReactNode;
   /** Back affordance for the mobile pushed view. */
   onBack?: () => void;
