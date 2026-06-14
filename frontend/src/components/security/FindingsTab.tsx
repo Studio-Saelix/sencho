@@ -35,8 +35,8 @@ const COPY: Record<FindingsKind, {
     detailTab: 'misconfigs',
     countField: 'misconfig_count',
     emptyTitle: 'No Compose risks found',
-    emptyBody: 'Scan a stack from Resources to surface misconfigurations like privileged containers, host mounts, or missing healthchecks.',
-    intro: 'Compose risks are misconfigurations in your stack definitions, such as privileged containers, Docker socket mounts, host networking, broad bind mounts, or missing healthchecks. Open a result for the specific findings and how to fix them; the Policy packs tab explains each category.',
+    emptyBody: 'Run a node scan or a per-stack config scan to surface security misconfigurations like privileged containers, Docker socket mounts, or host networking.',
+    intro: 'Compose risks are the security misconfigurations Trivy finds in your stack definitions: privileged containers, Docker socket mounts, host networking, or broad capabilities. This is a security audit of the compose file. For deploy-readiness checks like port conflicts, missing bind paths, unset variables, or no healthcheck, run Compose Doctor from the stack page instead. Open a result for the specific findings and how to fix them.',
   },
 };
 
@@ -109,7 +109,7 @@ export function FindingsTab({ kind, summaries, loading, error, onInspect }: Find
                     </td>
                     <td className="px-4 py-2.5 text-right font-mono tabular-nums text-xs text-stat-value">{count}</td>
                     <td className="px-4 py-2.5 text-right max-md:hidden">
-                      <SeverityBadge summary={s} onClick={() => onInspect(s.scan_id, copy.detailTab)} />
+                      <SeverityBadge summary={s} tooltip={false} onClick={() => onInspect(s.scan_id, copy.detailTab)} />
                     </td>
                   </tr>
                 );

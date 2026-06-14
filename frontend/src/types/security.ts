@@ -214,23 +214,3 @@ export interface SecurityRiskTrendPoint {
   critical: number;
   high: number;
 }
-
-export type PolicyRuleEnforcement = 'warning' | 'enforceable';
-
-export interface PolicyPackRule {
-  id: string;
-  name: string;
-  severity: Exclude<VulnSeverity, 'UNKNOWN'>;
-  whatItChecks: string;
-  why: string;
-  howToFix: string;
-  enforcement: PolicyRuleEnforcement;
-}
-
-export interface PolicyPack {
-  id: string;
-  name: string;
-  tagline: string;
-  tierCopy: string;
-  rules: PolicyPackRule[];
-}
