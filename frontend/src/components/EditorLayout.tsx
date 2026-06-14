@@ -62,6 +62,7 @@ const AutoUpdateReadinessView = lazy(() => import('./AutoUpdateReadinessView'));
 const AppStoreView = lazy(() => import('./AppStoreView').then(m => ({ default: m.AppStoreView })));
 const AuditLogView = lazy(() => import('./AuditLogView').then(m => ({ default: m.AuditLogView })));
 const ResourcesView = lazy(() => import('./ResourcesView'));
+const GlobalObservabilityView = lazy(() => import('./GlobalObservabilityView').then(m => ({ default: m.GlobalObservabilityView })));
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -828,6 +829,15 @@ export default function EditorLayout() {
               <Suspense fallback={lazyFallback}>
                 <ResourcesView headerActions={mobileMastheadActions} onBack={goToMobileList} />
               </Suspense>
+            );
+          case 'global-observability':
+            // Hub-only, like the desktop content path (ViewRouter); no capability gate.
+            return (
+              <HubOnlyGate>
+                <Suspense fallback={lazyFallback}>
+                  <GlobalObservabilityView headerActions={mobileMastheadActions} onBack={goToMobileList} />
+                </Suspense>
+              </HubOnlyGate>
             );
           default:
             return workspaceEl;

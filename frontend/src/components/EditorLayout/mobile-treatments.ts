@@ -24,7 +24,7 @@ export const MOBILE_TREATMENTS: Record<ActiveView, MobileTreatment> = {
   resources: 'bespoke',
   security: 'bespoke',
   templates: 'bespoke',
-  'global-observability': 'responsive',
+  'global-observability': 'bespoke',
   'auto-updates': 'bespoke',
   'audit-log': 'bespoke',
   'host-console': 'desktop-only',
