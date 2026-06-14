@@ -154,35 +154,44 @@ export function BackChip({ label, onClick }: { label: string; onClick?: () => vo
 // right slot for the rehomed global chrome (notifications + more-menu).
 //
 // This is the standard set by Home, Fleet, and Security, and EVERY bespoke
-// mobile page uses it (Resources, App Store, Updates, Audit, Logs; the Schedule
-// page is the one exception). DO NOT introduce a second header style (a
-// title-led header, a back chip / "< Stacks" link, etc.) for these pages -
-// navigation back is via the bottom tab bar and the more-menu. Derive a status
-// word per page (e.g. "Up to date" / "4 pending", "Streaming", "Healthy"), not
-// a bare page title.
-export function Masthead({
-  kicker,
-  state,
-  stateTone = 'success',
-  meta,
-  right,
-  live = true,
-  stateClassName,
-}: {
-  kicker: ReactNode;
+// mobile page uses it (the Stacks list, Resources, App Store, Updates, Audit,
+// Logs; the Schedule page is the one exception). DO NOT introduce a second
+// header style (a title-led header, a back chip / "< Stacks" link, etc.) for
+// these pages - navigation back is via the bottom tab bar and the more-menu.
+// Derive a status word per page (e.g. "Up to date" / "4 pending", "Streaming",
+// "Healthy"), not a bare page title.
+//
+// The kicker has exactly one source: `kicker` (wrapped in the styled Kicker) or
+// `kickerSlot` (raw content, e.g. the Stacks node chip). The union forbids both
+// and neither.
+type MastheadProps = {
   state: ReactNode;
   stateTone?: Tone;
   meta?: ReactNode;
   right?: ReactNode;
   live?: boolean;
   stateClassName?: string;
-}) {
+} & (
+  | { kicker: ReactNode; kickerSlot?: never }
+  | { kickerSlot: ReactNode; kicker?: never }
+);
+
+export function Masthead({
+  kicker,
+  kickerSlot,
+  state,
+  stateTone = 'success',
+  meta,
+  right,
+  live = true,
+  stateClassName,
+}: MastheadProps) {
   return (
     <div className="relative border-b border-hairline px-4 pb-[15px] pt-2">
       <span aria-hidden className="absolute left-0 top-2 bottom-[15px] w-[3px] bg-brand" />
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="mb-1"><Kicker>{kicker}</Kicker></div>
+          <div className="mb-1">{kickerSlot ?? <Kicker>{kicker}</Kicker>}</div>
           <div className="flex items-center gap-[11px]">
             <StateDot tone={stateTone} size={11} pulse={live} />
             <span className={cn('font-display italic text-[38px] leading-[40px] text-stat-value', stateClassName)}>{state}</span>

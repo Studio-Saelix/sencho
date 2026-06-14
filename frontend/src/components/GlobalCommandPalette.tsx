@@ -67,7 +67,8 @@ export function GlobalCommandPaletteProvider({ children }: { children: ReactNode
     return <PaletteContext.Provider value={value}>{children}</PaletteContext.Provider>;
 }
 
-function usePaletteState(): PaletteState {
+// eslint-disable-next-line react-refresh/only-export-components
+export function usePaletteState(): PaletteState {
     const ctx = useContext(PaletteContext);
     if (!ctx) throw new Error('usePaletteState must be used within GlobalCommandPaletteProvider');
     return ctx;

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { Home, Radar, Boxes, ShieldCheck } from 'lucide-react';
 import { MobileMoreMenu } from './MobileMoreMenu';
+import { GlobalCommandPaletteProvider, usePaletteState } from './GlobalCommandPalette';
 import type { NavItem } from './EditorLayout/hooks/useViewNavigationState';
 
 // Includes a bottom-tab primary (dashboard) and secondary destinations; the
@@ -20,7 +21,13 @@ function open(over: Partial<React.ComponentProps<typeof MobileMoreMenu>> = {}) {
     onNavigate: vi.fn(),
     ...over,
   };
-  render(<MobileMoreMenu {...props} />);
+  // The Search item reaches the command palette via usePaletteState, so the
+  // menu must render inside the palette provider.
+  render(
+    <GlobalCommandPaletteProvider>
+      <MobileMoreMenu {...props} />
+    </GlobalCommandPaletteProvider>,
+  );
   // The destination list lives inside a Sheet that is closed until the trigger
   // is clicked, so open it before querying the nav buttons.
   fireEvent.click(screen.getByRole('button', { name: 'More destinations' }));
@@ -45,5 +52,24 @@ describe('MobileMoreMenu', () => {
     open({ activeView: 'security' });
     expect(screen.getByRole('button', { name: 'Security' }).className).toContain('bg-glass-highlight');
     expect(screen.getByRole('button', { name: 'Resources' }).className).not.toContain('font-medium');
+  });
+
+  it('opens the command palette from the Search item', () => {
+    // The Stacks list drops the TopBar's search, so the menu's Search item is
+    // the way back to the palette: clicking it flips the shared palette state.
+    function PaletteProbe() {
+      const { open: paletteOpen } = usePaletteState();
+      return <span data-testid="palette-open">{String(paletteOpen)}</span>;
+    }
+    render(
+      <GlobalCommandPaletteProvider>
+        <PaletteProbe />
+        <MobileMoreMenu navItems={navItems} activeView="security" onNavigate={vi.fn()} />
+      </GlobalCommandPaletteProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'More destinations' }));
+    expect(screen.getByTestId('palette-open').textContent).toBe('false');
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(screen.getByTestId('palette-open').textContent).toBe('true');
   });
 });

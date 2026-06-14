@@ -13,6 +13,9 @@ import { isValidVersion } from '@/lib/version';
 
 interface NodeSwitcherProps {
     onManageNodes: () => void;
+    /** One-line chip for the mobile Stacks masthead kicker (node name + chevron),
+     *  instead of the full bordered card. */
+    compact?: boolean;
 }
 
 function dotClass(status: Node['status']): string {
@@ -29,7 +32,7 @@ function typeLabel(type: Node['type'], mode: NodeMode | undefined): string {
     return 'Remote';
 }
 
-export function NodeSwitcher({ onManageNodes }: NodeSwitcherProps) {
+export function NodeSwitcher({ onManageNodes, compact = false }: NodeSwitcherProps) {
     const { nodes, activeNode, setActiveNode, nodeMeta, isLoading } = useNodes();
     const [open, setOpen] = useState(false);
 
@@ -79,15 +82,25 @@ export function NodeSwitcher({ onManageNodes }: NodeSwitcherProps) {
         </div>
     );
 
+    const compactTrigger = (
+        <span className="inline-flex max-w-[55vw] items-center gap-1.5">
+            <span className="truncate font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
+                {activeNode?.name ?? (isLoading ? '…' : 'No node')}
+            </span>
+            {hasMultiple ? <ChevronsUpDown className="h-3 w-3 flex-shrink-0 text-stat-icon" strokeWidth={1.5} aria-hidden /> : null}
+        </span>
+    );
+    const trigger = compact ? compactTrigger : triggerContent;
+
     if (!hasMultiple) {
-        return triggerContent;
+        return trigger;
     }
 
     return (
         <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger asChild>
-                <button type="button" className="w-full" aria-label="Switch node">
-                    {triggerContent}
+                <button type="button" className={compact ? 'text-left' : 'w-full'} aria-label="Switch node">
+                    {trigger}
                 </button>
             </PopoverTrigger>
             <PopoverContent

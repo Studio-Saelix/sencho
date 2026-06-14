@@ -44,6 +44,7 @@ import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
 import { MobileMoreMenu } from './MobileMoreMenu';
+import { Masthead, type Tone } from './mobile/mobile-ui';
 import { MobileDashboard } from './mobile/MobileDashboard';
 import { MobileFleet } from './mobile/MobileFleet';
 import { MobileSchedules } from './mobile/MobileSchedules';
@@ -843,13 +844,44 @@ export default function EditorLayout() {
         }
       };
 
+      // The mobile Stacks list leads with the status masthead (no TopBar): the
+      // node switcher is its kicker chip, the serif word summarizes stack
+      // health, and notifications + the more-menu sit in the right slot.
+      const { all: stacksAll, up: stacksUp, down: stacksDown, updates: stacksUpdates } = filterCounts;
+      let stacksState = 'All running';
+      let stacksTone: Tone = 'success';
+      if (stacksAll === 0) {
+        stacksState = 'No stacks';
+      } else if (stacksDown > 0) {
+        stacksState = `${stacksDown} down`;
+        stacksTone = 'destructive';
+      } else if (stacksUpdates > 0) {
+        stacksState = `${stacksUpdates} update${stacksUpdates === 1 ? '' : 's'}`;
+        stacksTone = 'warning';
+      }
+      const stacksMasthead = (
+        <Masthead
+          kickerSlot={<NodeSwitcher compact onManageNodes={() => openSettings('nodes')} />}
+          state={stacksState}
+          stateTone={stacksTone}
+          live={stacksDown > 0}
+          meta={`${stacksAll} ${stacksAll === 1 ? 'stack' : 'stacks'} · ${stacksUp} up · ${stacksDown} down`}
+          right={mobileMastheadActions}
+        />
+      );
+
       if (isMobile) {
         return (
           <div className="flex h-screen w-screen flex-col overflow-hidden app-canvas text-foreground">
             {commandPaletteEl}
-            {mobileSurface !== 'detail' && !bespokeContent && topBarEl}
+            {mobileSurface === 'content' && !bespokeContent && topBarEl}
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-              {mobileSurface === 'list' && sidebarEl}
+              {mobileSurface === 'list' && (
+                <>
+                  {stacksMasthead}
+                  {sidebarEl}
+                </>
+              )}
               {mobileSurface === 'content' && (bespokeContent ? renderMobileBespoke() : workspaceEl)}
               {mobileSurface === 'detail' && (
                 detailReady ? (
