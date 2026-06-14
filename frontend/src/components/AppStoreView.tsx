@@ -14,7 +14,7 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { PageHead, MobileChipRow } from '@/components/mobile/mobile-ui';
+import { PageHead } from '@/components/mobile/mobile-ui';
 import { CategorySidebar } from '@/components/appstore/CategorySidebar';
 import { FeaturedHero } from '@/components/appstore/FeaturedHero';
 import { TemplateTile } from '@/components/appstore/TemplateTile';
@@ -341,8 +341,36 @@ export function AppStoreView({ onDeploySuccess, headerActions, onBack }: AppStor
         </div>
     );
 
-    // The desktop sidebar becomes a horizontal chip scroller on a phone; the
-    // featured hero + tile grid (already single-column below md) are shared.
+    // The phone view is search + a single-column list of every matching app:
+    // no featured hero and no category chips (the featured app is folded into
+    // the list so it is not dropped).
+    const mobileContent = loading ? (
+        <div className="flex items-center justify-center h-48">
+            <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+        </div>
+    ) : filtered.length > 0 ? (
+        <div className="flex flex-col gap-3 pb-8">
+            {filtered.map((t, idx) => (
+                <TemplateTile
+                    key={`${t.title}-${idx}`}
+                    template={t}
+                    onSelect={handleSelectTemplate}
+                    imgError={!!t.logo && !!imgErrors[t.logo]}
+                    onImgError={() => t.logo && setImgErrors(prev => ({ ...prev, [t.logo!]: true }))}
+                />
+            ))}
+        </div>
+    ) : (
+        <div className="py-12 text-center text-muted-foreground">
+            <Info className="w-8 h-8 mx-auto mb-2 opacity-50" />
+            {templates.length === 0 ? (
+                <p>Registry returned no templates. Check your registry URL in Settings.</p>
+            ) : (
+                <p>No apps found matching "{searchQuery}"</p>
+            )}
+        </div>
+    );
+
     const layout = isMobile ? (
         <div className="flex h-full min-h-0 flex-col">
             <PageHead
@@ -353,16 +381,7 @@ export function AppStoreView({ onDeploySuccess, headerActions, onBack }: AppStor
                 onBack={onBack}
             />
             <div className="shrink-0 px-4 pt-3">{searchInput}</div>
-            {!loading && categoryEntries.length > 1 && (
-                <div className="shrink-0 px-4 pt-3">
-                    <MobileChipRow
-                        chips={categoryEntries.map(c => ({ value: c.name, label: c.name, count: c.count }))}
-                        active={selectedCategory}
-                        onSelect={setSelectedCategory}
-                    />
-                </div>
-            )}
-            <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3">{contentBody}</div>
+            <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3">{mobileContent}</div>
         </div>
     ) : (
         <div className="flex flex-col h-full gap-5">
