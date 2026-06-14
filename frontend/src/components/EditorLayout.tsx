@@ -847,6 +847,9 @@ export default function EditorLayout() {
       // The mobile Stacks list leads with the status masthead (no TopBar): the
       // node switcher is its kicker chip, the serif word summarizes stack
       // health, and notifications + the more-menu sit in the right slot.
+      // up counts 'running' and down counts 'exited'; any other status (or the
+      // window before statuses load) is neither, so "All running" must require
+      // every stack to be up rather than just no stack being down.
       const { all: stacksAll, up: stacksUp, down: stacksDown, updates: stacksUpdates } = filterCounts;
       let stacksState = 'All running';
       let stacksTone: Tone = 'success';
@@ -858,6 +861,9 @@ export default function EditorLayout() {
       } else if (stacksUpdates > 0) {
         stacksState = `${stacksUpdates} update${stacksUpdates === 1 ? '' : 's'}`;
         stacksTone = 'warning';
+      } else if (stacksUp !== stacksAll) {
+        stacksState = `${stacksUp}/${stacksAll} up`;
+        stacksTone = 'brand';
       }
       const stacksMasthead = (
         <Masthead
