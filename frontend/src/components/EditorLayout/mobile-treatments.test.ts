@@ -32,7 +32,7 @@ describe('mobile treatments', () => {
     // components/mobile/, or a masthead-led mobile branch of the desktop view as
     // Security does).
     expect([...BESPOKE_MOBILE_VIEWS].sort()).toEqual(
-      ['auto-updates', 'dashboard', 'fleet', 'scheduled-ops', 'security', 'settings'],
+      ['auto-updates', 'dashboard', 'fleet', 'scheduled-ops', 'security', 'settings', 'templates'],
     );
   });
 });

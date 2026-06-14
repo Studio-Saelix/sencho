@@ -59,6 +59,7 @@ import type { SectionId } from './settings/types';
 // stay out of the main shell bundle.
 const SecurityView = lazy(() => import('./SecurityView').then(m => ({ default: m.SecurityView })));
 const AutoUpdateReadinessView = lazy(() => import('./AutoUpdateReadinessView'));
+const AppStoreView = lazy(() => import('./AppStoreView').then(m => ({ default: m.AppStoreView })));
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -799,6 +800,22 @@ export default function EditorLayout() {
                   </Suspense>
                 </CapabilityGate>
               </HubOnlyGate>
+            );
+          case 'templates':
+            return (
+              <Suspense
+                fallback={(
+                  <div className="flex h-full items-center justify-center">
+                    <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
+                  </div>
+                )}
+              >
+                <AppStoreView
+                  onDeploySuccess={(sName) => { refreshStacks(); void stackActions.loadFile(sName); }}
+                  headerActions={mobileMastheadActions}
+                  onBack={goToMobileList}
+                />
+              </Suspense>
             );
           default:
             return workspaceEl;
