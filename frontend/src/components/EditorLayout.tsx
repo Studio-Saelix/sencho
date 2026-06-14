@@ -60,6 +60,7 @@ import type { SectionId } from './settings/types';
 const SecurityView = lazy(() => import('./SecurityView').then(m => ({ default: m.SecurityView })));
 const AutoUpdateReadinessView = lazy(() => import('./AutoUpdateReadinessView'));
 const AppStoreView = lazy(() => import('./AppStoreView').then(m => ({ default: m.AppStoreView })));
+const AuditLogView = lazy(() => import('./AuditLogView').then(m => ({ default: m.AuditLogView })));
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -816,6 +817,22 @@ export default function EditorLayout() {
                   onBack={goToMobileList}
                 />
               </Suspense>
+            );
+          case 'audit-log':
+            return (
+              <HubOnlyGate>
+                <CapabilityGate capability="audit-log" featureName="Audit Log">
+                  <Suspense
+                    fallback={(
+                      <div className="flex h-full items-center justify-center">
+                        <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
+                      </div>
+                    )}
+                  >
+                    <AuditLogView headerActions={mobileMastheadActions} onBack={goToMobileList} />
+                  </Suspense>
+                </CapabilityGate>
+              </HubOnlyGate>
             );
           default:
             return workspaceEl;

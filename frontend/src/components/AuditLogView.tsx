@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, Fragment, useMemo } from 'react';
+import { useState, useEffect, useCallback, Fragment, useMemo, type ReactNode } from 'react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,6 +12,8 @@ import { ChevronLeft, ChevronRight, Search, ScrollText, RefreshCw, Download, Che
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useLicense } from '@/context/LicenseContext';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { PageHead, MobileSubTabs } from '@/components/mobile/mobile-ui';
 
 type AnomalyFlag = 'unusual_hour' | 'new_ip' | 'first_seen_actor';
 
@@ -109,7 +111,15 @@ function isExpiredSession(err: unknown): boolean {
     return err instanceof Error && err.message === 'Unauthorized';
 }
 
-export function AuditLogView() {
+interface AuditLogViewProps {
+    /** Notifications + more-menu cluster for the mobile masthead right slot. */
+    headerActions?: ReactNode;
+    /** Back affordance for the mobile pushed view. */
+    onBack?: () => void;
+}
+
+export function AuditLogView({ headerActions, onBack }: AuditLogViewProps = {}) {
+    const isMobile = useIsMobile();
     // Community gets the recent-activity stream; CSV/JSON export, the stat
     // tiles, and per-row anomaly annotation are paid. The backend clamps the
     // list to a 14-day window for unpaid tiers, so this flag only governs the
@@ -259,6 +269,59 @@ export function AuditLogView() {
         }
         return groups;
     }, [entries]);
+
+    if (isMobile) {
+        return (
+            <div className="flex h-full min-h-0 flex-col">
+                <PageHead
+                    back="Stacks"
+                    title="Audit Log"
+                    crumb={total > 0 ? `${total} entries` : 'activity'}
+                    headerActions={headerActions}
+                    onBack={onBack}
+                    right={(
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5"
+                            onClick={() => { fetchLogs(); if (view === 'stream' && isPaid) fetchStats(); }}
+                            disabled={loading}
+                        >
+                            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
+                            Refresh
+                        </Button>
+                    )}
+                />
+                <MobileSubTabs
+                    tabs={[{ value: 'stream' as const, label: 'Stream' }, { value: 'table' as const, label: 'Table' }]}
+                    active={view}
+                    onSelect={setView}
+                    ariaLabel="Audit views"
+                />
+                <div className="flex-1 min-h-0 overflow-y-auto p-4">
+                    {view === 'stream' ? (
+                        <StreamView
+                            stats={stats}
+                            showStats={isPaid}
+                            loading={loading && entries.length === 0}
+                            groups={groupedEntries}
+                            now={now}
+                            totalPages={totalPages}
+                            page={page}
+                            onPage={setPage}
+                        />
+                    ) : (
+                        <div className="py-16 text-center">
+                            <p className="font-display italic text-xl text-stat-value">Table view</p>
+                            <p className="mx-auto mt-2 max-w-[260px] font-mono text-[11px] leading-[17px] text-stat-subtitle">
+                                The columnar table reads best on a larger screen. The Stream tab shows the same activity, reflowed for mobile.
+                            </p>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="flex-1 flex flex-col gap-4 p-6 overflow-auto">
@@ -488,7 +551,7 @@ function StreamView({ stats, showStats, loading, groups, now, page, totalPages, 
     return (
         <div className="space-y-5">
             {showStats && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0 rounded-md border border-card-border bg-card/40 overflow-hidden">
+            <div className="grid grid-cols-1 max-md:grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-0 rounded-md border border-card-border bg-card/40 overflow-hidden">
                 {tiles.length === 0 ? (
                     Array.from({ length: 4 }).map((_, i) => (
                         <div key={i} className="px-4 py-3 border-r last:border-r-0 border-card-border">
