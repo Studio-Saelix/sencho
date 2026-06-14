@@ -13,7 +13,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useLicense } from '@/context/LicenseContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { PageHead, MobileSubTabs } from '@/components/mobile/mobile-ui';
+import { Masthead, MobileSubTabs } from '@/components/mobile/mobile-ui';
 
 type AnomalyFlag = 'unusual_hour' | 'new_ip' | 'first_seen_actor';
 
@@ -112,13 +112,11 @@ function isExpiredSession(err: unknown): boolean {
 }
 
 interface AuditLogViewProps {
-    /** Notifications + more-menu cluster for the PageHead, rehomed from the dropped TopBar. */
+    /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
     headerActions?: ReactNode;
-    /** Back affordance for the mobile pushed view. */
-    onBack?: () => void;
 }
 
-export function AuditLogView({ headerActions, onBack }: AuditLogViewProps = {}) {
+export function AuditLogView({ headerActions }: AuditLogViewProps = {}) {
     const isMobile = useIsMobile();
     // Community gets the recent-activity stream; CSV/JSON export, the stat
     // tiles, and per-row anomaly annotation are paid. The backend clamps the
@@ -271,15 +269,29 @@ export function AuditLogView({ headerActions, onBack }: AuditLogViewProps = {}) 
     }, [entries]);
 
     if (isMobile) {
+        // Derive a health-style state word from the (paid) failure-rate signal,
+        // matching the Home/Fleet/Security masthead standard.
+        const auditSeverity = isPaid ? stats?.failure_rate.severity : undefined;
+        const auditState = !auditSeverity ? 'Activity' : auditSeverity === 'alert' ? 'Alerts' : auditSeverity === 'warn' ? 'Review' : 'Healthy';
+        const auditTone = auditSeverity === 'alert' ? 'destructive' : auditSeverity === 'warn' ? 'warning' : auditSeverity === 'ok' ? 'success' : 'brand';
         return (
             <div className="flex h-full min-h-0 flex-col">
-                <PageHead
-                    back="Stacks"
-                    title="Audit Log"
-                    crumb={total > 0 ? `${total} entries` : 'activity'}
-                    headerActions={headerActions}
-                    onBack={onBack}
-                    right={(
+                <Masthead
+                    kicker="audit · 24h"
+                    state={auditState}
+                    stateTone={auditTone}
+                    live={auditSeverity === 'alert' || auditSeverity === 'warn'}
+                    meta={`${total} ${total === 1 ? 'entry' : 'entries'}${isPaid && stats ? ` · ${stats.actors_24h.value} actors` : ''}`}
+                    right={headerActions}
+                />
+                <MobileSubTabs
+                    tabs={[{ value: 'stream' as const, label: 'Stream' }, { value: 'table' as const, label: 'Table' }]}
+                    active={view}
+                    onSelect={setView}
+                    ariaLabel="Audit views"
+                />
+                <div className="flex-1 min-h-0 overflow-y-auto p-4">
+                    <div className="mb-3 flex justify-end">
                         <Button
                             variant="outline"
                             size="sm"
@@ -290,15 +302,7 @@ export function AuditLogView({ headerActions, onBack }: AuditLogViewProps = {}) 
                             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
                             Refresh
                         </Button>
-                    )}
-                />
-                <MobileSubTabs
-                    tabs={[{ value: 'stream' as const, label: 'Stream' }, { value: 'table' as const, label: 'Table' }]}
-                    active={view}
-                    onSelect={setView}
-                    ariaLabel="Audit views"
-                />
-                <div className="flex-1 min-h-0 overflow-y-auto p-4">
+                    </div>
                     {view === 'stream' ? (
                         <StreamView
                             stats={stats}

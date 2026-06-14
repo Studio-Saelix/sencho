@@ -7,7 +7,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { PageHead, Kicker } from '@/components/mobile/mobile-ui';
+import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
 import { ImageSourceMenu } from './ImageSourceMenu';
 import type { ScheduledTask } from '@/types/scheduling';
 
@@ -371,35 +371,6 @@ function NodeGroupSection({
 
 // --- mobile (<md) bespoke pieces ---------------------------------------------
 
-/** Brand-tinted readiness hero for the phone screen (§9.4). Recheck lives in
- *  the PageHead, so the hero carries only the count + ready ratio. */
-function MobileReadinessHero({ total, ready }: { total: number; ready: number }) {
-  const headline = total === 0 ? 'Up to date' : total === 1 ? '1 update pending' : `${total} updates pending`;
-  return (
-    <div className="relative overflow-hidden rounded-lg border border-brand/25 border-t-brand/35 bg-card shadow-card-bevel">
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-brand/[0.10] via-brand/[0.02] to-transparent" />
-      <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-brand" />
-      <div className="relative flex items-center justify-between gap-3 px-4 py-[14px]">
-        <div className="min-w-0 flex-1">
-          <Kicker className="text-brand">fleet readiness</Kicker>
-          <div className="mt-[3px] font-display italic text-[25px] leading-[27px] text-stat-value">{headline}</div>
-          {total > 0 && (
-            <div className="mt-[5px] font-mono text-[11px] text-stat-subtitle">
-              {ready} ready · {total - ready} in review
-            </div>
-          )}
-        </div>
-        {total > 0 && (
-          <div className="shrink-0 text-right">
-            <div className="font-mono text-2xl tabular-nums text-stat-value">{ready}<span className="text-stat-icon"> / {total}</span></div>
-            <Kicker>ready</Kicker>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /** One-up readiness card for the phone screen. Reuses RiskBadge + VersionDiff
  *  and the same apply/disabled logic as the desktop card. Exported for tests. */
 export function MobileReadinessCard({ card, onApply }: { card: StackCard; onApply: (stack: string, nodeId: number) => void }) {
@@ -487,13 +458,11 @@ function MobileNodeSection({ group, onApply }: { group: NodeGroup; onApply: (sta
 }
 
 interface AutoUpdateReadinessProps {
-  /** Notifications + more-menu cluster for the PageHead, rehomed from the dropped TopBar. */
+  /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
   headerActions?: ReactNode;
-  /** Back affordance for the mobile pushed view. */
-  onBack?: () => void;
 }
 
-function AutoUpdateReadinessContent({ headerActions, onBack }: AutoUpdateReadinessProps) {
+function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps) {
   const isMobile = useIsMobile();
   const { nodes } = useNodes();
   const [groups, setGroups] = useState<NodeGroup[]>([]);
@@ -748,21 +717,21 @@ function AutoUpdateReadinessContent({ headerActions, onBack }: AutoUpdateReadine
   if (isMobile) {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <PageHead
-          back="Stacks"
-          crumb="fleet readiness"
-          title="Updates"
-          onBack={onBack}
-          headerActions={headerActions}
-          right={(
+        <Masthead
+          kicker="fleet · updates"
+          state={total === 0 ? 'Up to date' : `${total} pending`}
+          stateTone={total === 0 ? 'success' : 'warning'}
+          live={total > 0}
+          meta={total > 0 ? `${ready} ready · ${total - ready} in review` : 'all stacks current'}
+          right={headerActions}
+        />
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
+          <div className="flex justify-end">
             <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing} aria-label="Recheck registries" className="gap-1.5">
               <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} aria-hidden="true" />
               Recheck
             </Button>
-          )}
-        />
-        <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
-          <MobileReadinessHero total={total} ready={ready} />
+          </div>
           {showPartialBanner && (
             <div className="font-mono text-[11px] text-stat-subtitle">
               {reachableNodeCount} of {onlineNodeCount} nodes reachable. Unreachable nodes are not shown.

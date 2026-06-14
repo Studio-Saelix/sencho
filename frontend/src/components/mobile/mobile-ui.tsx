@@ -149,9 +149,17 @@ export function BackChip({ label, onClick }: { label: string; onClick?: () => vo
   );
 }
 
-// Status masthead for the bespoke mobile content leads (Home and Fleet today;
-// Schedules as it is re-skinned): 3px cyan left rail, kicker, serif-italic
-// state word, meta, optional right slot.
+// Status masthead: the ONE bespoke-mobile header. 3px cyan left rail, kicker,
+// serif-italic state word + tone-colored pulsing dot, mono meta line, and a
+// right slot for the rehomed global chrome (notifications + more-menu).
+//
+// This is the standard set by Home, Fleet, and Security, and EVERY bespoke
+// mobile page uses it (Resources, App Store, Updates, Audit, Logs; the Schedule
+// page is the one exception). DO NOT introduce a second header style (a
+// title-led header, a back chip / "< Stacks" link, etc.) for these pages -
+// navigation back is via the bottom tab bar and the more-menu. Derive a status
+// word per page (e.g. "Up to date" / "4 pending", "Streaming", "Healthy"), not
+// a bare page title.
 export function Masthead({
   kicker,
   state,
@@ -183,40 +191,6 @@ export function Masthead({
         {right ? <div className="shrink-0 text-right">{right}</div> : null}
       </div>
       {meta ? <div className="mt-[7px] font-mono text-[12px] text-stat-subtitle">{meta}</div> : null}
-    </div>
-  );
-}
-
-// Page header for a pushed full-screen secondary view (Resources, App Store,
-// Updates, Audit): 3px cyan left rail, a back chip, the rehomed global chrome
-// (notifications + more-menu) top-right since these screens drop the TopBar, a
-// muted mono crumb kicker, and a serif-italic title with an optional right slot
-// (e.g. a Recheck button).
-export function PageHead({ back, crumb, title, right, headerActions, onBack }: {
-  back: string;
-  crumb?: ReactNode;
-  title: ReactNode;
-  right?: ReactNode;
-  /** Notifications + more-menu cluster, rehomed from the dropped TopBar. */
-  headerActions?: ReactNode;
-  onBack?: () => void;
-}) {
-  return (
-    <div className="relative shrink-0 border-b border-hairline px-4 pb-[13px] pt-1">
-      <span aria-hidden className="absolute left-0 top-[42px] bottom-[13px] w-[3px] bg-brand" />
-      <div className="flex items-center justify-between gap-2">
-        <BackChip label={back} onClick={onBack} />
-        {headerActions}
-      </div>
-      <div className="ml-0.5 mt-1 flex items-end justify-between gap-3">
-        <div className="min-w-0">
-          {crumb ? <div className="mb-0.5"><Kicker>{crumb}</Kicker></div> : null}
-          <div className="truncate font-display italic text-[32px] leading-[34px] tracking-[-0.01em] text-stat-value">
-            {title}
-          </div>
-        </div>
-        {right}
-      </div>
     </div>
   );
 }

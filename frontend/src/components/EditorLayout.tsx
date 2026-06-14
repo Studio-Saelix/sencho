@@ -799,7 +799,7 @@ export default function EditorLayout() {
               <HubOnlyGate>
                 <CapabilityGate capability="auto-updates" featureName="Auto-Update Readiness">
                   <Suspense fallback={lazyFallback}>
-                    <AutoUpdateReadinessView headerActions={mobileMastheadActions} onBack={goToMobileList} />
+                    <AutoUpdateReadinessView headerActions={mobileMastheadActions} />
                   </Suspense>
                 </CapabilityGate>
               </HubOnlyGate>
@@ -810,7 +810,6 @@ export default function EditorLayout() {
                 <AppStoreView
                   onDeploySuccess={(sName) => { refreshStacks(); void stackActions.loadFile(sName); }}
                   headerActions={mobileMastheadActions}
-                  onBack={goToMobileList}
                 />
               </Suspense>
             );
@@ -819,7 +818,7 @@ export default function EditorLayout() {
               <HubOnlyGate>
                 <CapabilityGate capability="audit-log" featureName="Audit Log">
                   <Suspense fallback={lazyFallback}>
-                    <AuditLogView headerActions={mobileMastheadActions} onBack={goToMobileList} />
+                    <AuditLogView headerActions={mobileMastheadActions} />
                   </Suspense>
                 </CapabilityGate>
               </HubOnlyGate>
@@ -827,7 +826,7 @@ export default function EditorLayout() {
           case 'resources':
             return (
               <Suspense fallback={lazyFallback}>
-                <ResourcesView headerActions={mobileMastheadActions} onBack={goToMobileList} />
+                <ResourcesView headerActions={mobileMastheadActions} />
               </Suspense>
             );
           case 'global-observability':
@@ -835,7 +834,7 @@ export default function EditorLayout() {
             return (
               <HubOnlyGate>
                 <Suspense fallback={lazyFallback}>
-                  <GlobalObservabilityView headerActions={mobileMastheadActions} onBack={goToMobileList} />
+                  <GlobalObservabilityView headerActions={mobileMastheadActions} />
                 </Suspense>
               </HubOnlyGate>
             );

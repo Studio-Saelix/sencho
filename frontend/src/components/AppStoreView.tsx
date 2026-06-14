@@ -14,7 +14,7 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { PageHead } from '@/components/mobile/mobile-ui';
+import { Masthead } from '@/components/mobile/mobile-ui';
 import { CategorySidebar } from '@/components/appstore/CategorySidebar';
 import { FeaturedHero } from '@/components/appstore/FeaturedHero';
 import { TemplateTile } from '@/components/appstore/TemplateTile';
@@ -33,13 +33,11 @@ interface PortInUseInfo {
 
 interface AppStoreViewProps {
     onDeploySuccess: (stackName: string) => void;
-    /** Notifications + more-menu cluster for the PageHead, rehomed from the dropped TopBar. */
+    /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
     headerActions?: ReactNode;
-    /** Back affordance for the mobile pushed view. */
-    onBack?: () => void;
 }
 
-export function AppStoreView({ onDeploySuccess, headerActions, onBack }: AppStoreViewProps) {
+export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewProps) {
     const isMobile = useIsMobile();
     const { can } = useAuth();
     const { activeNode } = useNodes();
@@ -373,12 +371,13 @@ export function AppStoreView({ onDeploySuccess, headerActions, onBack }: AppStor
 
     const layout = isMobile ? (
         <div className="flex h-full min-h-0 flex-col">
-            <PageHead
-                back="Stacks"
-                title="App Store"
-                crumb={`${filtered.length} app${filtered.length !== 1 ? 's' : ''}`}
-                headerActions={headerActions}
-                onBack={onBack}
+            <Masthead
+                kicker="app store"
+                state={`${filtered.length} app${filtered.length !== 1 ? 's' : ''}`}
+                stateTone="brand"
+                live={false}
+                meta={categoryEntries.length > 1 ? `${categoryEntries.length - 1} categories` : 'self-hosted templates'}
+                right={headerActions}
             />
             <div className="shrink-0 px-4 pt-3">{searchInput}</div>
             <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3">{mobileContent}</div>

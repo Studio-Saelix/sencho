@@ -11,7 +11,7 @@ import { Download, Trash2, Search, Filter, AlertCircle, Pause, Play, SlidersHori
 import { apiFetch } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { PageHead } from '@/components/mobile/mobile-ui';
+import { Masthead } from '@/components/mobile/mobile-ui';
 import { cn } from '@/lib/utils';
 
 const MAX_LOG_ENTRIES = 2000;
@@ -81,13 +81,11 @@ const LEVEL_OPTIONS: SegmentedControlOption<LevelFilter>[] = [
 ];
 
 interface GlobalObservabilityViewProps {
-    /** Notifications + more-menu cluster for the PageHead, rehomed from the dropped TopBar. */
+    /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
     headerActions?: ReactNode;
-    /** Back affordance for the mobile pushed view. */
-    onBack?: () => void;
 }
 
-export function GlobalObservabilityView({ headerActions, onBack }: GlobalObservabilityViewProps = {}) {
+export function GlobalObservabilityView({ headerActions }: GlobalObservabilityViewProps = {}) {
     const isMobile = useIsMobile();
     const [searchOpen, setSearchOpen] = useState(false);
     const [fabOpen, setFabOpen] = useState(false);
@@ -373,7 +371,14 @@ export function GlobalObservabilityView({ headerActions, onBack }: GlobalObserva
     return (
         <div className="relative flex h-full w-full flex-col bg-background text-foreground">
             {isMobile ? (
-                <PageHead back="Stacks" title="Logs" crumb={kicker} headerActions={headerActions} onBack={onBack} />
+                <Masthead
+                    kicker="logs · local"
+                    state={stateWord}
+                    stateTone={fetchError ? 'destructive' : masterTone === 'live' ? 'success' : 'brand'}
+                    live={masterTone === 'live'}
+                    meta={`${buckets.reduce((a, b) => a + b, 0)}/min · ${counts.errors} err · ${counts.containers} containers`}
+                    right={headerActions}
+                />
             ) : (
                 <>
                     <PageMasthead

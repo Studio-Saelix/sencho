@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { PageHead, MobileSubTabs } from '@/components/mobile/mobile-ui';
+import { Masthead, MobileSubTabs } from '@/components/mobile/mobile-ui';
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from "@/components/ui/tabs";
 import { springs } from '@/lib/motion';
@@ -303,13 +303,11 @@ function TableSkeleton({ cols, rows = 5 }: { cols: number; rows?: number }) {
 // ── Main Component ─────────────────────────────────────────────────────────────
 
 interface ResourcesViewProps {
-    /** Notifications + more-menu cluster for the PageHead, rehomed from the dropped TopBar. */
+    /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
     headerActions?: ReactNode;
-    /** Back affordance for the mobile pushed view. */
-    onBack?: () => void;
 }
 
-export default function ResourcesView({ headerActions, onBack }: ResourcesViewProps = {}) {
+export default function ResourcesView({ headerActions }: ResourcesViewProps = {}) {
     const isMobile = useIsMobile();
     const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'networks' | 'unmanaged'>('images');
     const { isAdmin } = useAuth();
@@ -1509,14 +1507,15 @@ export default function ResourcesView({ headerActions, onBack }: ResourcesViewPr
     if (isMobile) {
         return (
             <div className="flex h-full min-h-0 flex-col">
-                <PageHead
-                    back="Stacks"
-                    title="Resources"
-                    crumb="docker · resources"
-                    headerActions={headerActions}
-                    onBack={onBack}
+                <Masthead
+                    kicker="resources · docker"
+                    state={totalReclaimableBytes > 0 ? 'Reclaimable' : 'Tidy'}
+                    stateTone={totalReclaimableBytes > 0 ? 'warning' : 'success'}
+                    live={false}
+                    meta={`${images.length} images · ${volumes.length} volumes · ${networks.length} networks`}
+                    right={headerActions}
                 />
-                <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4 [&_table]:min-w-[560px] [&_[data-radix-scroll-area-viewport]>div]:!min-w-0">
+                <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4 [&_[data-radix-scroll-area-viewport]>div]:!block [&_table]:min-w-[640px]">
                     {mainContent}
                 </div>
                 {overlays}
