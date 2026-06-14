@@ -1,5 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { PageHead } from '@/components/mobile/mobile-ui';
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from "@/components/ui/tabs";
 import { springs } from '@/lib/motion';
@@ -300,7 +302,15 @@ function TableSkeleton({ cols, rows = 5 }: { cols: number; rows?: number }) {
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
-export default function ResourcesView() {
+interface ResourcesViewProps {
+    /** Notifications + more-menu cluster for the mobile masthead right slot. */
+    headerActions?: ReactNode;
+    /** Back affordance for the mobile pushed view. */
+    onBack?: () => void;
+}
+
+export default function ResourcesView({ headerActions, onBack }: ResourcesViewProps = {}) {
+    const isMobile = useIsMobile();
     const { isAdmin } = useAuth();
     const { activeNode } = useNodes();
     const { isPaid } = useLicense();
@@ -715,9 +725,8 @@ export default function ResourcesView() {
         }
     };
 
-    return (
-        <div className="p-6 h-full overflow-auto text-foreground flex flex-col gap-6 animate-in fade-in-0 duration-300">
-
+    const mainContent = (
+        <>
             {/* Reclaim hero */}
             {heroVisible && usage && (
                 <ReclaimHero
@@ -1264,7 +1273,11 @@ export default function ResourcesView() {
                     </TabsContent>
                 </ScrollArea>
             </Tabs>
+        </>
+    );
 
+    const overlays = (
+        <>
             {/* ── Dialogs ── */}
 
             {/* Prune Confirm */}
@@ -1474,6 +1487,31 @@ export default function ResourcesView() {
                 canCompare
                 canManageSuppressions={isAdmin}
             />
+        </>
+    );
+
+    if (isMobile) {
+        return (
+            <div className="flex h-full min-h-0 flex-col">
+                <PageHead
+                    back="Stacks"
+                    title="Resources"
+                    crumb="docker · resources"
+                    headerActions={headerActions}
+                    onBack={onBack}
+                />
+                <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4 [&_table]:min-w-[560px] [&_[data-radix-scroll-area-viewport]>div]:!min-w-0">
+                    {mainContent}
+                </div>
+                {overlays}
+            </div>
+        );
+    }
+
+    return (
+        <div className="p-6 h-full overflow-auto text-foreground flex flex-col gap-6 animate-in fade-in-0 duration-300">
+            {mainContent}
+            {overlays}
         </div>
     );
 }

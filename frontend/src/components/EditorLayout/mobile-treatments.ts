@@ -21,7 +21,7 @@ export const MOBILE_TREATMENTS: Record<ActiveView, MobileTreatment> = {
   'scheduled-ops': 'bespoke',
   settings: 'bespoke',
   editor: 'detail',
-  resources: 'responsive',
+  resources: 'bespoke',
   security: 'bespoke',
   templates: 'bespoke',
   'global-observability': 'responsive',

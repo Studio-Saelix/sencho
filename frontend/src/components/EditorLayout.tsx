@@ -61,6 +61,7 @@ const SecurityView = lazy(() => import('./SecurityView').then(m => ({ default: m
 const AutoUpdateReadinessView = lazy(() => import('./AutoUpdateReadinessView'));
 const AppStoreView = lazy(() => import('./AppStoreView').then(m => ({ default: m.AppStoreView })));
 const AuditLogView = lazy(() => import('./AuditLogView').then(m => ({ default: m.AuditLogView })));
+const ResourcesView = lazy(() => import('./ResourcesView'));
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -833,6 +834,18 @@ export default function EditorLayout() {
                   </Suspense>
                 </CapabilityGate>
               </HubOnlyGate>
+            );
+          case 'resources':
+            return (
+              <Suspense
+                fallback={(
+                  <div className="flex h-full items-center justify-center">
+                    <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
+                  </div>
+                )}
+              >
+                <ResourcesView headerActions={mobileMastheadActions} onBack={goToMobileList} />
+              </Suspense>
             );
           default:
             return workspaceEl;
