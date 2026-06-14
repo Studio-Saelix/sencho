@@ -880,7 +880,9 @@ export default function EditorLayout() {
 
       if (isMobile) {
         return (
-          <div className="flex h-screen w-screen flex-col overflow-hidden app-canvas text-foreground">
+          // h-dvh tracks the visible viewport as the address bar shows and hides, so
+          // the bottom tab bar stays on screen (100vh would push it behind the bar).
+          <div className="flex h-dvh w-screen flex-col overflow-hidden app-canvas text-foreground">
             {commandPaletteEl}
             {mobileSurface === 'content' && !bespokeContent && topBarEl}
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
