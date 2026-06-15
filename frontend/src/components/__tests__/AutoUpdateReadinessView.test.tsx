@@ -4,9 +4,9 @@
  * while in flight, or when no schedule covers the stack; enabled only when a
  * covering schedule exists and the preview loaded without a block.
  */
-import { it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import { MobileReadinessCard, type StackCard } from '../AutoUpdateReadinessView';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, act } from '@testing-library/react';
+import { MobileReadinessCard, CadenceStrip, type StackCard } from '../AutoUpdateReadinessView';
 
 function card(over: Partial<StackCard> = {}): StackCard {
   return {
@@ -64,4 +64,61 @@ it('disables Apply when the update is blocked (major bump)', () => {
 it('disables Apply when auto-update is off for the stack', () => {
   render(<MobileReadinessCard card={card({ autoUpdateEnabled: false })} onApply={vi.fn()} />);
   expect(apply()).toBeDisabled();
+});
+
+/**
+ * CadenceStrip surfaces the control instance's detection cadence by the
+ * readiness card: a past last-check must read as an "ago" value (not the
+ * future-oriented "due now"), null timestamps read as never/not-scheduled, and
+ * the manual-recheck cooldown ticks down to "Recheck ready".
+ */
+describe('CadenceStrip', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('renders a past last-check as an "ago" value, not "due now"', () => {
+    const cadence = {
+      checking: false,
+      intervalMinutes: 120,
+      lastCheckedAt: Date.now() - 10 * 60 * 1000,
+      nextCheckAt: Date.now() + 110 * 60 * 1000,
+      manualCooldownMinutes: 2,
+      manualCooldownRemainingMs: 0,
+    };
+    render(<CadenceStrip cadence={cadence} />);
+    expect(screen.getByText(/Last checked 10m ago/)).toBeInTheDocument();
+    expect(screen.queryByText(/due now/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Recheck ready/)).toBeInTheDocument();
+  });
+
+  it('renders null timestamps as never / not scheduled', () => {
+    const cadence = {
+      checking: false,
+      intervalMinutes: 120,
+      lastCheckedAt: null,
+      nextCheckAt: null,
+      manualCooldownMinutes: 2,
+      manualCooldownRemainingMs: 0,
+    };
+    render(<CadenceStrip cadence={cadence} />);
+    expect(screen.getByText(/Last checked never/)).toBeInTheDocument();
+    expect(screen.getByText(/Next check not scheduled/)).toBeInTheDocument();
+  });
+
+  it('counts the manual-recheck cooldown down to "Recheck ready"', () => {
+    vi.useFakeTimers();
+    const cadence = {
+      checking: false,
+      intervalMinutes: 120,
+      lastCheckedAt: Date.now(),
+      nextCheckAt: Date.now() + 7_200_000,
+      manualCooldownMinutes: 2,
+      manualCooldownRemainingMs: 3000,
+    };
+    render(<CadenceStrip cadence={cadence} />);
+    expect(screen.getByText(/Recheck available in 3s/)).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(3000); });
+    expect(screen.getByText(/Recheck ready/)).toBeInTheDocument();
+  });
 });

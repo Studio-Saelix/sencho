@@ -213,6 +213,15 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     },
     // Automation
     {
+        id: 'image-updates',
+        group: 'automation',
+        label: 'Image update checks',
+        description: 'How often this node polls registries to detect available image updates and raise notifications.',
+        keywords: ['image', 'update', 'registry', 'check', 'interval', 'cadence', 'poll', 'auto-update', 'detection', 'recheck'],
+        tier: null,
+        scope: 'node',
+    },
+    {
         id: 'webhooks',
         group: 'automation',
         label: 'Webhooks',

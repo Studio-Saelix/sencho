@@ -60,6 +60,16 @@ describe('settings registry', () => {
         expect(dataRetention?.group).toBe('operations');
     });
 
+    it('registers the Image update checks section under Automation, viewer-visible and node-scoped', () => {
+        const item = SETTINGS_ITEMS.find(i => i.id === 'image-updates');
+        expect(item?.group).toBe('automation');
+        expect(item?.scope).toBe('node');
+        expect(item?.tier).toBeNull();
+        // No adminOnly: viewers see the section read-only (the control disables
+        // itself); the backend PUT is the authoritative admin guard.
+        expect(item?.adminOnly).toBeUndefined();
+    });
+
     it('applies the renamed section labels', () => {
         const byId = new Map(SETTINGS_ITEMS.map(i => [i.id, i]));
         expect(byId.get('notifications')?.label).toBe('Channels');
