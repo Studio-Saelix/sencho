@@ -13,6 +13,7 @@ import {
     DeveloperSection,
     DataRetentionSection,
     AppStoreSection,
+    StacksSection,
     SupportSection,
     AboutSection,
     RecoverySection,
@@ -34,9 +35,6 @@ const UsersSection = lazy(() =>
 );
 const WebhooksSection = lazy(() =>
     import('./WebhooksSection').then(m => ({ default: m.WebhooksSection })),
-);
-const SecuritySection = lazy(() =>
-    import('./SecuritySection').then(m => ({ default: m.SecuritySection })),
 );
 const LabelsSection = lazy(() =>
     import('./LabelsSection').then(m => ({ default: m.LabelsSection })),
@@ -71,7 +69,6 @@ function SectionSkeleton() {
 
 function renderSection(
     sectionId: SectionId,
-    isPaid: boolean,
     onDirtyChange: (section: SectionId, dirty: boolean) => void,
 ) {
     switch (sectionId) {
@@ -89,12 +86,12 @@ function renderSection(
         case 'notifications': return <NotificationsSection />;
         case 'notification-routing': return <NotificationRoutingSection />;
         case 'webhooks': return <WebhooksSection />;
-        case 'security': return <SecuritySection isPaid={isPaid} />;
         case 'cloud-backup': return <CloudBackupSection />;
         case 'developer': return <DeveloperSection onDirtyChange={(d) => onDirtyChange('developer', d)} />;
         case 'data-retention': return <DataRetentionSection onDirtyChange={(d) => onDirtyChange('data-retention', d)} />;
         case 'nodes': return <NodeManager />;
         case 'app-store': return <AppStoreSection />;
+        case 'stacks': return <StacksSection />;
         case 'recovery': return <RecoverySection />;
         case 'support': return <SupportSection />;
         case 'about': return <AboutSection />;
@@ -105,7 +102,6 @@ function renderSection(
 
 interface SettingsSectionContentProps {
     sectionId: SectionId;
-    isPaid: boolean;
     onDirtyChange: (section: SectionId, dirty: boolean) => void;
     /** Render the section's lead description paragraph above the content. */
     showDescription?: boolean;
@@ -117,14 +113,14 @@ interface SettingsSectionContentProps {
  * the desktop SettingsPage and the mobile settings screen so the section switch,
  * lazy splitting, and gating live in exactly one place.
  */
-export function SettingsSectionContent({ sectionId, isPaid, onDirtyChange, showDescription }: SettingsSectionContentProps) {
+export function SettingsSectionContent({ sectionId, onDirtyChange, showDescription }: SettingsSectionContentProps) {
     const item = getSettingsItem(sectionId);
     // Memoize the section element so unrelated re-renders of the host page (the
     // command palette opening, a dirty-flag toggle) do not re-render the active
     // section. onDirtyChange is stable from both call sites.
     const element = useMemo(
-        () => renderSection(sectionId, isPaid, onDirtyChange),
-        [sectionId, isPaid, onDirtyChange],
+        () => renderSection(sectionId, onDirtyChange),
+        [sectionId, onDirtyChange],
     );
     return (
         <>

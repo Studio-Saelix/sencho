@@ -13,7 +13,8 @@ import type { PreflightContext, PreflightFinding } from '../services/preflight/t
 function svc(over: Partial<EffService> = {}): EffService {
   return {
     name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [],
-    privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [], ...over,
+    privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [],
+    networks: [], extraHosts: [], labelKeys: [], ...over,
   };
 }
 
@@ -27,7 +28,8 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     stackName: 'proj', platform: 'linux', model: m, renderable: true, renderError: null, unsetEnvVars: [],
     sourceServiceNames: m ? m.services.map(s => s.name) : [], sourceReadable: true,
     nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
-    existingContainers: [], bindChecks: [], ...over,
+    existingContainers: [], bindChecks: [],
+    stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false, ...over,
   };
 }
 
@@ -178,18 +180,18 @@ describe('hygiene rules', () => {
 
 describe('network / volume rules', () => {
   it('blocks a missing external network and volume', () => {
-    const m = model([svc()], { networks: { ext: { name: 'shared', external: true } }, volumes: { v: { name: 'data', external: true } } });
+    const m = model([svc()], { networks: { ext: { name: 'shared', external: true, internal: false } }, volumes: { v: { name: 'data', external: true, internal: false } } });
     const f = runRules(ctx({ model: m }));
     expect(ids(f, 'external-network-missing')).toHaveLength(1);
     expect(ids(f, 'external-volume-missing')).toHaveLength(1);
   });
   it('does not block an external resource that exists', () => {
-    const m = model([svc()], { networks: { ext: { name: 'shared', external: true } } });
+    const m = model([svc()], { networks: { ext: { name: 'shared', external: true, internal: false } } });
     const f = runRules(ctx({ model: m, existingNetworkNames: new Set(['shared']) }));
     expect(ids(f, 'external-network-missing')).toHaveLength(0);
   });
   it('reports a new network/volume as info when absent on the node', () => {
-    const m = model([svc()], { networks: { backend: { name: 'backend', external: false } }, volumes: { data: { name: 'data', external: false } } });
+    const m = model([svc()], { networks: { backend: { name: 'backend', external: false, internal: false } }, volumes: { data: { name: 'data', external: false, internal: false } } });
     const f = runRules(ctx({ model: m }));
     expect(ids(f, 'new-network')[0].severity).toBe('info');
     expect(ids(f, 'new-volume')[0].message).toContain('proj_data');
@@ -231,6 +233,93 @@ describe('effective-model-expanded', () => {
   });
 });
 
+describe('exposure-intent rules', () => {
+  const withPort = (hostIp = '0.0.0.0', over: Partial<EffService> = {}) =>
+    model([svc({ name: 'web', ports: [{ startPort: 8080, endPort: 8080, hostIp, protocol: 'tcp' }], ...over })]);
+
+  it('flags a service classified internal that publishes a host port', () => {
+    const f = runRules(ctx({ model: withPort(), stackIntent: 'internal' }));
+    expect(ids(f, 'exposure-internal-published')).toHaveLength(1);
+    expect(ids(f, 'exposure-internal-published')[0].severity).toBe('high');
+  });
+  it('lets same-node tolerate a loopback bind but not a broad one', () => {
+    expect(ids(runRules(ctx({ model: withPort('127.0.0.1'), stackIntent: 'same-node' })), 'exposure-internal-published')).toHaveLength(0);
+    expect(ids(runRules(ctx({ model: withPort('0.0.0.0'), stackIntent: 'same-node' })), 'exposure-internal-published')).toHaveLength(1);
+  });
+  it('lets a per-service intent override the stack intent', () => {
+    // Stack is internal, but the service is reclassified public, so no finding.
+    const f = runRules(ctx({ model: withPort(), stackIntent: 'internal', serviceIntents: { web: 'public' } }));
+    expect(ids(f, 'exposure-internal-published')).toHaveLength(0);
+  });
+  it('same-node lists only the broad port when a service binds both loopback and broad', () => {
+    const m = model([svc({ name: 'web', ports: [
+      { startPort: 9000, endPort: 9000, hostIp: '127.0.0.1', protocol: 'tcp' },
+      { startPort: 8080, endPort: 8080, hostIp: '0.0.0.0', protocol: 'tcp' },
+    ] })]);
+    const f = ids(runRules(ctx({ model: m, stackIntent: 'same-node' })), 'exposure-internal-published');
+    expect(f).toHaveLength(1);
+    expect(f[0].message).toContain('8080');
+    expect(f[0].message).not.toContain('9000');
+  });
+  it('warns when a port-publishing stack has no exposure intent', () => {
+    expect(ids(runRules(ctx({ model: withPort(), stackIntent: null })), 'exposure-unclassified')).toHaveLength(1);
+    expect(ids(runRules(ctx({ model: withPort(), stackIntent: 'unknown' })), 'exposure-unclassified')).toHaveLength(1);
+    expect(ids(runRules(ctx({ model: withPort(), stackIntent: 'lan' })), 'exposure-unclassified')).toHaveLength(0);
+  });
+  it('lets a service-level intent suppress the unclassified warning even when the stack is unset', () => {
+    // web is the only publishing service; classifying it removes the gap.
+    expect(ids(runRules(ctx({ model: withPort(), stackIntent: null, serviceIntents: { web: 'public' } })), 'exposure-unclassified')).toHaveLength(0);
+  });
+  it('still warns when a publishing service is explicitly unknown over a classified stack', () => {
+    expect(ids(runRules(ctx({ model: withPort(), stackIntent: 'public', serviceIntents: { web: 'unknown' } })), 'exposure-unclassified')).toHaveLength(1);
+  });
+  it('does not warn unclassified when no port is published', () => {
+    expect(ids(runRules(ctx({ model: model([svc()]), stackIntent: null })), 'exposure-unclassified')).toHaveLength(0);
+  });
+  it('flags a published port absent from the documented access URLs', () => {
+    const f = runRules(ctx({ model: withPort(), hasAccessUrls: true, accessUrlPorts: new Set([443]) }));
+    expect(ids(f, 'exposure-port-vs-dossier')).toHaveLength(1);
+    // No finding once the port is documented.
+    expect(ids(runRules(ctx({ model: withPort(), hasAccessUrls: true, accessUrlPorts: new Set([8080]) })), 'exposure-port-vs-dossier')).toHaveLength(0);
+    // Gated off when the dossier records no access URL.
+    expect(ids(runRules(ctx({ model: withPort(), hasAccessUrls: false })), 'exposure-port-vs-dossier')).toHaveLength(0);
+  });
+  it('flags a published port absent from the documented access URLs, listing all undocumented ports', () => {
+    const m = model([svc({ name: 'web', ports: [
+      { startPort: 8080, endPort: 8080, hostIp: '0.0.0.0', protocol: 'tcp' },
+      { startPort: 9090, endPort: 9090, hostIp: '0.0.0.0', protocol: 'tcp' },
+    ] })]);
+    const f = ids(runRules(ctx({ model: m, hasAccessUrls: true, accessUrlPorts: new Set([8080]) })), 'exposure-port-vs-dossier');
+    expect(f).toHaveLength(1);
+    expect(f[0].message).toContain('9090');
+    expect(f[0].message).not.toContain('8080');
+  });
+  it('flags reverse-proxy labels with no documented URL or intent', () => {
+    const m = model([svc({ name: 'web', labelKeys: ['traefik.enable', 'traefik.http.routers.web.rule'] })]);
+    expect(ids(runRules(ctx({ model: m })), 'reverse-proxy-undocumented')).toHaveLength(1);
+    // A caddy-docker-proxy label also trips it.
+    const caddy = model([svc({ name: 'web', labelKeys: ['caddy', 'caddy.reverse_proxy'] })]);
+    expect(ids(runRules(ctx({ model: caddy })), 'reverse-proxy-undocumented')).toHaveLength(1);
+    // An unrelated vendor label that merely contains "caddy" does not.
+    const vendor = model([svc({ name: 'web', labelKeys: ['com.caddyserver.unrelated'] })]);
+    expect(ids(runRules(ctx({ model: vendor })), 'reverse-proxy-undocumented')).toHaveLength(0);
+    // Silenced once documented, stack-intent reverse-proxy, or service-intent reverse-proxy.
+    expect(ids(runRules(ctx({ model: m, hasAccessUrls: true })), 'reverse-proxy-undocumented')).toHaveLength(0);
+    expect(ids(runRules(ctx({ model: m, stackIntent: 'reverse-proxy' })), 'reverse-proxy-undocumented')).toHaveLength(0);
+    expect(ids(runRules(ctx({ model: m, serviceIntents: { web: 'reverse-proxy' } })), 'reverse-proxy-undocumented')).toHaveLength(0);
+  });
+  it('flags a sensitive image exposed on all interfaces', () => {
+    const m = model([svc({ name: 'db', image: 'postgres:16', ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
+    expect(ids(runRules(ctx({ model: m })), 'sensitive-service-broad-exposure')[0].severity).toBe('high');
+    // A loopback bind of the same image does not flag.
+    const loop = model([svc({ name: 'db', image: 'postgres:16', ports: [{ startPort: 5432, endPort: 5432, hostIp: '127.0.0.1', protocol: 'tcp' }] })]);
+    expect(ids(runRules(ctx({ model: loop })), 'sensitive-service-broad-exposure')).toHaveLength(0);
+    // A build-only service with no image is not matched, even on a broad bind.
+    const build = model([svc({ name: 'postgres-ish', image: undefined, ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
+    expect(ids(runRules(ctx({ model: build })), 'sensitive-service-broad-exposure')).toHaveLength(0);
+  });
+});
+
 describe('rule registry completeness', () => {
   // The canonical rule set. Adding or removing a rule must update this list,
   // which forces a deliberate pass over the docs and the frontend severity map.
@@ -239,7 +328,9 @@ describe('rule registry completeness', () => {
     'bind-path-missing', 'bind-path-permission', 'docker-socket-mount', 'privileged', 'network-mode-host',
     'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck', 'deploy-swarm-only',
     'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume',
-    'container-name-internal-dup', 'container-name-collision', 'effective-model-expanded',
+    'container-name-internal-dup', 'container-name-collision',
+    'exposure-internal-published', 'sensitive-service-broad-exposure', 'exposure-unclassified',
+    'exposure-port-vs-dossier', 'reverse-proxy-undocumented', 'effective-model-expanded',
   ];
   it('the registry contains exactly the expected rules', () => {
     expect([...RULE_IDS].sort()).toEqual([...EXPECTED_RULE_IDS].sort());

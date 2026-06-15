@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -6,6 +6,8 @@ import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
 import { ImageSourceMenu } from './ImageSourceMenu';
 import type { ScheduledTask } from '@/types/scheduling';
 
@@ -39,7 +41,7 @@ interface UpdatePreview {
   changelog: string | null;
 }
 
-interface StackCard {
+export interface StackCard {
   stack: string;
   nodeId: number;
   preview: UpdatePreview | null;
@@ -367,7 +369,101 @@ function NodeGroupSection({
   );
 }
 
-function AutoUpdateReadinessContent() {
+// --- mobile (<md) bespoke pieces ---------------------------------------------
+
+/** One-up readiness card for the phone screen. Reuses RiskBadge + VersionDiff
+ *  and the same apply/disabled logic as the desktop card. Exported for tests. */
+export function MobileReadinessCard({ card, onApply }: { card: StackCard; onApply: (stack: string, nodeId: number) => void }) {
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, autoUpdateEnabled } = card;
+  const failed = previewLoaded && preview === null;
+  const blocked = preview?.summary.blocked ?? false;
+  const bump = preview?.summary.semver_bump ?? 'none';
+  const nextRun = scheduledTask?.next_run_at ?? null;
+  const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
+  const dot = changelog.indexOf('.');
+  const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
+  const rest = dot > 0 ? changelog.slice(dot + 1) : changelog;
+
+  return (
+    <div className="flex flex-col gap-[10px] rounded-xl border border-card-border border-t-card-border-top bg-card p-[14px] shadow-card-bevel">
+      <div className="flex items-start justify-between gap-[10px]">
+        <div className="min-w-0 flex-1">
+          <Kicker>stack</Kicker>
+          <div className="mt-px truncate font-display italic text-[23px] leading-[26px] text-stat-value">{stack}</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {!autoUpdateEnabled && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-card-border px-2 py-[3px] font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle">
+              <CircleSlash className="h-3 w-3" strokeWidth={1.5} />Auto: Off
+            </span>
+          )}
+          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} />}
+        </div>
+      </div>
+
+      {!previewLoaded ? (
+        <div className="font-mono text-xs text-stat-subtitle/80">Checking registry...</div>
+      ) : failed ? (
+        <div className="font-mono text-xs text-destructive/80">Preview failed. Registry may be unreachable.</div>
+      ) : (
+        <>
+          {preview!.summary.update_kind === 'digest' ? (
+            <div className="flex items-baseline gap-2 font-mono text-[13px]">
+              <span className="text-stat-subtitle">{preview!.summary.current_tag}</span>
+              <span className="text-[10px] uppercase tracking-[0.12em] text-brand">Rebuild available</span>
+            </div>
+          ) : (
+            <VersionDiff current={preview!.summary.current_tag} next={preview!.summary.next_tag} />
+          )}
+          <div className="truncate font-mono text-[11px] text-stat-subtitle">{preview!.summary.primary_image ?? '-'}</div>
+          <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
+            {lead && <b className="text-stat-title">{lead}</b>}{rest}
+          </div>
+          <div className="flex items-center justify-between gap-[10px] pt-0.5">
+            <span className={`font-mono text-[11px] ${blocked ? 'text-destructive' : 'text-stat-subtitle'}`}>
+              {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked ? 'Held for review' : 'No schedule')}
+            </span>
+            <Button
+              size="sm"
+              variant={blocked || !autoUpdateEnabled ? 'outline' : 'default'}
+              onClick={() => onApply(stack, nodeId)}
+              disabled={blocked || applying || !autoUpdateEnabled}
+              className="gap-1.5"
+            >
+              <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+              {applying ? 'Applying...' : 'Apply now'}
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MobileNodeSection({ group, onApply }: { group: NodeGroup; onApply: (stack: string, nodeId: number) => void }) {
+  return (
+    <section>
+      <div className="mb-[13px] flex items-baseline gap-2 border-b border-hairline pb-2">
+        <span className="truncate font-display italic text-[19px] leading-tight text-stat-value">{group.nodeName}</span>
+        <span className="shrink-0 rounded-[5px] border border-card-border px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle">{group.nodeType}</span>
+        <span className="shrink-0 font-mono text-[11px] text-stat-icon">{group.cards.length} {group.cards.length === 1 ? 'stack' : 'stacks'}</span>
+      </div>
+      <div className="flex flex-col gap-3">
+        {group.cards.map(card => (
+          <MobileReadinessCard key={`${card.nodeId}::${card.stack}`} card={card} onApply={onApply} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+interface AutoUpdateReadinessProps {
+  /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
+  headerActions?: ReactNode;
+}
+
+function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps) {
+  const isMobile = useIsMobile();
   const { nodes } = useNodes();
   const [groups, setGroups] = useState<NodeGroup[]>([]);
   const [reachableNodeCount, setReachableNodeCount] = useState<number | null>(null);
@@ -618,6 +714,45 @@ function AutoUpdateReadinessContent() {
     && onlineNodeCount > 0
     && reachableNodeCount < onlineNodeCount;
 
+  if (isMobile) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <Masthead
+          kicker="fleet · updates"
+          state={total === 0 ? 'Up to date' : `${total} pending`}
+          stateTone={total === 0 ? 'success' : 'warning'}
+          live={total > 0}
+          meta={total > 0 ? `${ready} ready · ${total - ready} in review` : 'all stacks current'}
+          right={headerActions}
+        />
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
+          <div className="flex justify-end">
+            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing} aria-label="Recheck registries" className="gap-1.5">
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} aria-hidden="true" />
+              Recheck
+            </Button>
+          </div>
+          {showPartialBanner && (
+            <div className="font-mono text-[11px] text-stat-subtitle">
+              {reachableNodeCount} of {onlineNodeCount} nodes reachable. Unreachable nodes are not shown.
+            </div>
+          )}
+          {loading && groups.length === 0 ? (
+            <div className="flex items-center justify-center py-16 font-mono text-xs text-stat-subtitle">Loading readiness...</div>
+          ) : groups.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
+              <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
+              <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
+              <div className="font-mono text-[11px] text-stat-subtitle">Sencho rechecks on the scheduler interval.</div>
+            </div>
+          ) : (
+            groups.map(group => <MobileNodeSection key={group.nodeId} group={group} onApply={handleApply} />)
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6 p-6 max-w-[1600px] mx-auto w-full">
       <ReadinessHero
@@ -657,6 +792,6 @@ function AutoUpdateReadinessContent() {
   );
 }
 
-export default function AutoUpdateReadinessView() {
-  return <AutoUpdateReadinessContent />;
+export default function AutoUpdateReadinessView(props: AutoUpdateReadinessProps = {}) {
+  return <AutoUpdateReadinessContent {...props} />;
 }

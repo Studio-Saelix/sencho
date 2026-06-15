@@ -11,20 +11,20 @@ Fleet Sync replicates three resources today, all over the same channel and with 
 - **CVE suppressions** ([CVE Suppressions](/features/cve-suppressions)).
 - **Misconfig acknowledgements**.
 
-Fleet Sync lives under **Settings → Security → Vulnerability Scanning** on both the control (where you author rules) and the replica (where you see them, read-only).
+Fleet Sync lives on the **Security** page (the **Policies** and **Suppressions** tabs) on both the control (where you author rules) and the replica (where you see them, read-only).
 
 <Frame>
-  <img src="/images/fleet-sync/control-security.png" alt="Settings → Security → Vulnerability Scanning on the control. The Vulnerability Scanner card shows Trivy installed with Auto-update Trivy turned on. Below it, the empty 'No scan policies configured' state and the CVE Suppressions section listing two active suppressions against github.com/docker/docker, each annotated 'by admin · expires Never'." />
+  <img src="/images/fleet-sync/control-security.png" alt="The Security page on the control. The Scanner setup tab shows Trivy installed with Auto-update Trivy turned on. The Policies tab shows the empty 'No scan policies configured' state, and the Suppressions tab lists two active suppressions against github.com/docker/docker, each annotated 'by admin · expires Never'." />
 </Frame>
 
 ## Control and replica roles
 
-Every Sencho instance carries a `fleet_role` flag that is either `control` or `replica`. The flag is consulted on every write path for the replicated resources and by the **Settings → Security → Vulnerability Scanning** UI when it decides whether to render the edit controls.
+Every Sencho instance carries a `fleet_role` flag that is either `control` or `replica`. The flag is consulted on every write path for the replicated resources and by the **Security** page UI when it decides whether to render the edit controls.
 
 | Role | Behaviour |
 |---|---|
 | **Control** | The default for any fresh install and for the instance whose **Settings → Nodes** lists the rest of the fleet. Accepts create, edit, and delete on scan policies, CVE suppressions, and misconfig acknowledgements. Pushes the full current state of each resource to every reachable remote on every write. |
-| **Replica** | An instance that has received at least one Fleet Sync push. Renders replicated rules as read-only with a "Managed by control node" banner above the policy editor on **Settings → Security → Vulnerability Scanning**. Returns `403 Forbidden` for any direct write attempt against the replicated tables. |
+| **Replica** | An instance that has received at least one Fleet Sync push. Renders replicated rules as read-only with a "Managed by control node" banner above the policy editor on the **Security** page → **Policies** tab. Returns `403 Forbidden` for any direct write attempt against the replicated tables. |
 
 The transition from control to replica happens automatically the first time a replica accepts a push: the apply transaction sets `fleet_role = 'replica'` atomically with the row replacement, so the role flip and the new rows land together or not at all. Going the other way is explicit: an admin clicks **Demote to control** on the replica (see [Demote a replica](#demote-a-replica) below).
 
@@ -38,7 +38,7 @@ What does *not* replicate:
 - **Trivy itself.** The scanner binary is installed independently on each instance. The Security panel on a remote shows a "Scanner is per-node" callout in place of the full editor, since the scanner lifecycle is a node concern, not a fleet concern.
 
 <Frame>
-  <img src="/images/fleet-sync/remote-security-via-proxy.png" alt="Settings → Security → Vulnerability Scanning on a remote, opened via the control's node switcher. The Vulnerability Scanner card shows 'Not installed' with an Install Trivy button; below it, a 'Scanner is per-node' status callout reads 'Trivy is installed independently on each Sencho instance. Scan policies and CVE suppressions are managed on the control node.'" />
+  <img src="/images/fleet-sync/remote-security-via-proxy.png" alt="The Security page Scanner setup tab on a remote, opened via the control's node switcher. The Vulnerability Scanner card shows 'Not installed' with an Install Trivy button; below it, a 'Scanner is per-node' status callout reads 'Trivy is installed independently on each Sencho instance. Scan policies and CVE suppressions are managed on the control node.'" />
 </Frame>
 - **Everything outside the three resources above.** API tokens, audit logs, blueprints, secrets, alert rules, users, SSO config, and general settings stay per-instance.
 - **Pilot-agent nodes.** Sync over the [pilot tunnel](/features/pilot-agent) is not part of v1; the control logs a one-time warning per pilot node and skips it during fanout. The pilot node's local rules are unaffected.
@@ -95,7 +95,7 @@ Stale pushes (`409 STALE_SYNC_PUSH`) are not counted as failures, since a newer 
 
 ## Demote a replica
 
-An admin on a replica can take the instance back to a standalone control from **Settings → Security → Vulnerability Scanning**. The button is "Demote to control" and sits inside the "Managed by control node" callout. The exact modal copy:
+An admin on a replica can take the instance back to a standalone control from the **Security** page → **Policies** tab. The button is "Demote to control" and sits inside the "Managed by control node" callout. The exact modal copy:
 
 > **Demote replica to control**
 >
@@ -159,7 +159,7 @@ Fleet Sync v1 ships the three replicated resources and the control mechanics des
     Misconfig acknowledgements ride the same channel as scan policies and CVE suppressions; if one resource replicates and another does not, it is almost always a per-resource watermark race. Re-save the acknowledgement on the control to produce a fresh `pushedAt`, then the next push catches the remote up. If the symptom persists, check the control's server logs for the `[FleetSync]` push outcome on that remote.
   </Accordion>
   <Accordion title="I want this replica to be a standalone control again">
-    Open **Settings → Security → Vulnerability Scanning** on the replica and click **Demote to control** in the "Managed by control node" callout. The action requires confirmation and drops every replicated row from this instance. Local rules authored directly on this instance are kept. The control loses this remote as a replica; remove it from the control's **Settings → Nodes** as well if you no longer want the control to push to it.
+    Open the **Security** page → **Policies** tab on the replica and click **Demote to control** in the "Managed by control node" callout. The action requires confirmation and drops every replicated row from this instance. Local rules authored directly on this instance are kept. The control loses this remote as a replica; remove it from the control's **Settings → Nodes** as well if you no longer want the control to push to it.
   </Accordion>
 </AccordionGroup>
 

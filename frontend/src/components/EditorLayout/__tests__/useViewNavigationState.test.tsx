@@ -58,7 +58,6 @@ describe('useViewNavigationState', () => {
     const { result } = renderHook(() => useViewNavigationState());
     expect(result.current.activeView).toBe('dashboard');
     expect(result.current.settingsSection).toBe('appearance');
-    expect(result.current.securityHistoryOpen).toBe(false);
     expect(result.current.filterNodeId).toBeNull();
     expect(result.current.schedulePrefill).toBeNull();
     expect(result.current.mobileNavOpen).toBe(false);
@@ -156,18 +155,6 @@ describe('useViewNavigationState', () => {
     expect(result.current.filterNodeId).toBe(5);
   });
 
-  it('SENCHO_NAVIGATE_EVENT with security-history opens the sheet without changing activeView', () => {
-    const { result } = renderHook(() => useViewNavigationState());
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security-history', nodeId: 3 } }),
-      );
-    });
-    expect(result.current.securityHistoryOpen).toBe(true);
-    expect(result.current.filterNodeId).toBe(3);
-    expect(result.current.activeView).toBe('dashboard');
-  });
-
   it('SENCHO_NAVIGATE_EVENT with no nodeId sets filterNodeId to null', () => {
     const { result } = renderHook(() => useViewNavigationState());
     act(() => {
@@ -217,7 +204,7 @@ describe('useViewNavigationState', () => {
     expect(result.current.navItems.map(i => i.value)).toContain('global-observability');
   });
 
-  it('shows Auto-Update and Schedules for a community admin (now free) but hides paid Console and Audit', () => {
+  it('shows Update and Schedules for a community admin (now free) but hides paid Console and Audit', () => {
     mockCommunityAdmin();
     const { result } = renderHook(() => useViewNavigationState());
     const values = result.current.navItems.map(i => i.value);
@@ -225,6 +212,8 @@ describe('useViewNavigationState', () => {
     expect(values).toContain('scheduled-ops');
     expect(values).not.toContain('host-console');
     expect(values).not.toContain('audit-log');
+    // The auto-updates nav item surfaces under the short label "Update".
+    expect(result.current.navItems.find(i => i.value === 'auto-updates')?.label).toBe('Update');
   });
 
   it('redirects a non-admin off the Logs view when reached via a deep-link event', () => {
@@ -331,5 +320,47 @@ describe('useViewNavigationState', () => {
 
     expect(result.current.activeView).toBe('resources');
     expect(onNavigateToDashboard).not.toHaveBeenCalled();
+  });
+
+  // ── Security view: node-scoped, deep-linkable tab ──────────────────────────
+
+  it('includes the Security nav item for a community user', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.navItems.map(i => i.value)).toContain('security');
+  });
+
+  it('keeps Security visible on a remote node (node-scoped, not hub-only)', () => {
+    mockActiveNode('remote');
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.navItems.map(i => i.value)).toContain('security');
+  });
+
+  it('defaults securityTab to overview', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.securityTab).toBe('overview');
+  });
+
+  it('navigate to security with a tab sets securityTab then activeView (deep-link, no race)', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security', tab: 'history', nodeId: 4 } }),
+      );
+    });
+    expect(result.current.activeView).toBe('security');
+    expect(result.current.securityTab).toBe('history');
+    expect(result.current.filterNodeId).toBe(4);
+  });
+
+  it('navigate to security without a tab defaults securityTab to overview', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    act(() => result.current.setSecurityTab('history'));
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('security');
+    expect(result.current.securityTab).toBe('overview');
   });
 });

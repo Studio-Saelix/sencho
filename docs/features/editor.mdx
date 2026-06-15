@@ -127,7 +127,7 @@ The same controls apply to the `compose.yaml` and `.env` editors.
 
 ## Diff preview before save
 
-When **Diff preview before save** is enabled in **Settings → Appearance**, clicking **Save & Deploy** or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
+When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy** or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
 
 <Frame>
   <img src="/images/compose-diff-preview/diff-modal.png" alt="Diff preview modal showing side-by-side YAML diff with the unsaved version on the right and an ON DISK to UNSAVED legend in the footer" />
@@ -139,6 +139,18 @@ Review the diff, then:
 - Click **Cancel** to return to the editor without saving.
 
 If there are no unsaved changes the modal is skipped and the save proceeds directly. The toggle is off by default and stored per browser, so each device remembers its own setting.
+
+## On a phone
+
+On a narrow screen the stack opens as a full-screen detail with **Health**, **Logs**, and **Compose** segments instead of the two-column cockpit. The **Compose** segment shows the read-only Anatomy summary; tap **edit** to open a full-screen editor for small, safe changes.
+
+<Frame>
+  <img src="/images/editor/editor-mobile.png" alt="Mobile compose editor with a Cancel button, the compose.yaml label, a monospace text field showing the compose file, a small-edits note, and Save and Save and Deploy buttons" />
+</Frame>
+
+The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The **.env** toggle appears only when the stack has an env file, and the file picker is locked while you have unsaved edits so switching files cannot drop them. The footer carries the same **Save** and **Save & Deploy** actions, and every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
+
+A note at the bottom of the editor is a reminder that mobile editing is meant for small corrections such as bumping an image tag or fixing a value. For large compose rewrites, open the stack on a desktop. Editing requires the `stack:edit` permission.
 
 ## Logs
 
@@ -188,6 +200,9 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   </Accordion>
   <Accordion title="The .env tab is greyed out">
     The stack has no env file to edit. Add an `env_file:` entry to a service in `compose.yaml` and save, or create a `.env` file in the stack directory through the **Files** tab.
+  </Accordion>
+  <Accordion title="I can't edit compose from my phone">
+    Open the **Compose** segment in the stack detail and tap **edit**. If the **edit** affordance is missing, your role lacks the `stack:edit` permission; ask an admin to grant it. The phone editor is intended for small corrections; for large compose rewrites, open the stack on a desktop.
   </Accordion>
   <Accordion title='"Container is not running" error when opening a bash session'>
     The container stopped between clicking the button and the exec starting. Start the container from the action bar (or the row's **Start service** option) and try again.

@@ -8,7 +8,6 @@ export type SettingsGroupId =
     | 'notifications'
     | 'automation'
     | 'organization'
-    | 'security'
     | 'operations'
     | 'help';
 
@@ -27,13 +26,12 @@ export const SETTINGS_GROUPS: readonly SettingsGroupMeta[] = [
     { id: 'notifications', label: 'Notifications', glyph: '\u25C7' },
     { id: 'automation', label: 'Automation', glyph: '\u25C7' },
     { id: 'organization', label: 'Organization', glyph: '\u25C7' },
-    { id: 'security', label: 'Security', glyph: '\u25C6' },
     { id: 'operations', label: 'Operations', glyph: '\u25C7' },
     { id: 'help', label: 'Help', glyph: '\u25C7' },
 ];
 
 export type TierGate = 'paid' | null;
-export type Scope = 'global' | 'node';
+export type Scope = 'global' | 'node' | 'browser';
 
 export interface SettingsItemMeta {
     id: SectionId;
@@ -66,7 +64,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         description: 'Theme, accent, density, and display preferences saved to this browser.',
         keywords: ['theme', 'dim', 'oled', 'light', 'dark', 'accent', 'color', 'glow', 'border', 'contrast', 'density', 'comfortable', 'compact', 'spacing', 'display'],
         tier: null,
-        scope: 'global',
+        scope: 'browser',
     },
     // Access
     {
@@ -164,6 +162,15 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         tier: null,
         scope: 'node',
     },
+    {
+        id: 'stacks',
+        group: 'infrastructure',
+        label: 'Stacks',
+        description: 'Stack editor and lifecycle workflow preferences saved to this browser.',
+        keywords: ['stack', 'compose', 'deploy', 'progress', 'modal', 'inline', 'diff', 'preview', 'save', 'editor', 'workflow'],
+        tier: null,
+        scope: 'browser',
+    },
     // Monitoring
     {
         id: 'host-alerts',
@@ -224,17 +231,6 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['labels', 'tags', 'palette', 'organisation'],
         tier: null,
         scope: 'node',
-    },
-    // Security
-    {
-        id: 'security',
-        group: 'security',
-        label: 'Vulnerability Scanning',
-        description: 'Image scanning, suppressions, and posture defaults.',
-        keywords: ['scan', 'cve', 'trivy', 'suppressions', 'hardening', 'vulnerability', 'misconfig'],
-        tier: null,
-        scope: 'node',
-        adminOnly: true,
     },
     // Operations
     {
@@ -309,4 +305,18 @@ export function isItemVisible(item: SettingsItemMeta, ctx: VisibilityContext): b
 
 export function isItemLocked(item: SettingsItemMeta, ctx: VisibilityContext): boolean {
     return item.tier === 'paid' ? !ctx.isPaid : false;
+}
+
+/**
+ * The masthead SCOPE value for a non-node section. Browser-local sections
+ * (Appearance, Stacks) persist to this browser's localStorage and read as
+ * browser regardless of their group; the signed-in Account is operator-scoped;
+ * Access sections (license, users, sso, api-tokens) are instance-global, so
+ * they read as global like every other non-node group. Node-scoped sections
+ * render a NODE pill instead and never reach here.
+ */
+export function scopeLabel(item: SettingsItemMeta): string {
+    if (item.scope === 'browser') return 'browser';
+    if (item.group === 'personal') return 'operator';
+    return 'global';
 }

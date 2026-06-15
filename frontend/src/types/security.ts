@@ -136,6 +136,8 @@ export interface ScanSummary {
   low: number;
   unknown: number;
   fixable: number;
+  secret_count: number;
+  misconfig_count: number;
 }
 
 export interface ScanPolicy {
@@ -174,4 +176,41 @@ export interface ScanCompareResult {
   unchanged: ScanCompareVulnerability[];
   truncated?: boolean;
   row_limit?: number;
+}
+
+/** Node-scoped security posture rollup for the Security page Overview. */
+export interface SecurityOverview {
+  scannedImages: number;
+  critical: number;
+  high: number;
+  fixable: number;
+  secrets: number;
+  misconfigs: number;
+  staleScans: number;
+  failedScans: number;
+  lastSuccessfulScanAt: number | null;
+  scanner: {
+    available: boolean;
+    version: string | null;
+    source: TrivySource;
+    autoUpdate: boolean;
+  };
+  deployEnforcement: {
+    honorSuppressionsOnDeploy: boolean;
+    /** Approximate count of enabled block-on-deploy policies eligible for this node. */
+    eligibleBlockPolicies: number;
+  };
+}
+
+/** Which detail tab the scan sheet opens on. Matches VulnerabilityScanSheet's tabs. */
+export type ScanDetailTab = 'vulns' | 'secrets' | 'misconfigs';
+
+/** Scanner kinds a scan request can run. Mirrors the backend's accepted set. */
+export type ScannerKind = 'vuln' | 'secret';
+
+/** One day's Critical/High totals for the Security overview risk-trend chart. */
+export interface SecurityRiskTrendPoint {
+  date: string;
+  critical: number;
+  high: number;
 }

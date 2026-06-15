@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { RefreshCw } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
@@ -11,6 +11,7 @@ import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { useSettingsDirty } from './useSettingsDirty';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { NumberChip } from './SystemControls';
 
@@ -45,25 +46,9 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
     const { activeNode } = useNodes();
     const { isAdmin } = useAuth();
     const readOnly = !isAdmin;
-    const [settings, setSettings] = useState<HostAlertFields>({ ...DEFAULT_HOST_ALERTS });
-    const serverSettingsRef = useRef<HostAlertFields>({ ...DEFAULT_HOST_ALERTS });
+    const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<HostAlertFields>({ ...DEFAULT_HOST_ALERTS });
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-
-    const dirtyCount = useMemo(() => {
-        const baseline = serverSettingsRef.current;
-        let n = 0;
-        if (settings.host_cpu_limit !== baseline.host_cpu_limit) n++;
-        if (settings.host_ram_limit !== baseline.host_ram_limit) n++;
-        if (settings.host_disk_limit !== baseline.host_disk_limit) n++;
-        if (settings.host_alert_suppression_mins !== baseline.host_alert_suppression_mins) n++;
-        if (settings.global_crash !== baseline.global_crash) n++;
-        if (settings.health_gate_enabled !== baseline.health_gate_enabled) n++;
-        if (settings.health_gate_window_seconds !== baseline.health_gate_window_seconds) n++;
-        return n;
-    }, [settings]);
-
-    const hasChanges = dirtyCount > 0;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -96,8 +81,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                     health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
                     health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
                 };
-                setSettings(safe);
-                serverSettingsRef.current = { ...safe };
+                reset(safe);
             } catch (e) {
                 console.error('Failed to fetch host alert settings', e);
             } finally {
@@ -113,18 +97,19 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
     };
 
     const saveSettings = async () => {
+        const submitted = { ...settings };
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
-                body: JSON.stringify(settings),
+                body: JSON.stringify(submitted),
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
                 return;
             }
-            serverSettingsRef.current = { ...settings };
+            markSaved(submitted);
             toast.success('Host alerts saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');

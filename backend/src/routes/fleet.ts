@@ -8,6 +8,7 @@ import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } fr
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPDATE_TIMEOUT_MS, UPDATE_TIMEOUT_MSG, TERMINAL_TTL_MS } from '../services/FleetUpdateTrackerService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
@@ -699,6 +700,75 @@ fleetRouter.get('/dependency-map', authMiddleware, async (_req: Request, res: Re
   } catch (error) {
     console.error('[Fleet] Dependency map error:', error);
     res.status(500).json({ error: 'Failed to build fleet dependency map' });
+  }
+});
+
+interface FleetNetworkingSummaryNode {
+  nodeId: number;
+  nodeName: string;
+  status: 'ok' | 'error';
+  summary: NodeNetworkingSummary | null;
+  error: string | null;
+}
+
+function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (['exposed', 'unknownExposure', 'networkDrift'] as const).every(k => {
+    const b = o[k] as { count?: unknown; stacks?: unknown } | undefined;
+    return !!b && typeof b.count === 'number' && Array.isArray(b.stacks);
+  });
+}
+
+/**
+ * Fleet-wide networking summary for the overview filter. Auth-only (read-only,
+ * Community). Hub-exempt under /api/fleet, so it is never proxied: it builds the
+ * hub's summary in-process and reaches each remote through its node-local
+ * /api/networking/summary route. A remote on an older version (no route) returns
+ * 404 and degrades to a skip, so one unreachable or unsupported node never fails
+ * the filter for the rest.
+ */
+fleetRouter.get('/networking-summary', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+
+    const results = await Promise.allSettled(
+      nodes.map(async (node: Node): Promise<FleetNetworkingSummaryNode> => {
+        if (node.type === 'local') {
+          const summary = await computeNodeNetworkingSummary(node.id);
+          return { nodeId: node.id, nodeName: node.name, status: 'ok', summary, error: null };
+        }
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) {
+          return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: formatNoTargetError(node) };
+        }
+        const resp = await fetch(
+          `${target.apiUrl.replace(/\/$/, '')}/api/networking/summary`,
+          { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: AbortSignal.timeout(15000) },
+        );
+        if (!resp.ok) {
+          return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: `Remote returned ${resp.status}` };
+        }
+        const summary = await resp.json().catch(() => null);
+        if (!isNodeNetworkingSummary(summary)) {
+          console.error(`[Fleet] Networking summary: node ${sanitizeForLog(node.name)} returned an unexpected payload (status ${resp.status})`);
+          return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: 'Remote returned an unexpected summary payload' };
+        }
+        return { nodeId: node.id, nodeName: node.name, status: 'ok', summary, error: null };
+      }),
+    );
+
+    const perNode: FleetNetworkingSummaryNode[] = results.map((result, i) => {
+      if (result.status === 'fulfilled') return result.value;
+      console.error(`[Fleet] Networking summary fetch failed for node ${nodes[i].name}:`, result.reason);
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', summary: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+    });
+
+    res.json({ nodes: perNode });
+  } catch (error) {
+    console.error('[Fleet] Networking summary error:', error);
+    res.status(500).json({ error: 'Failed to build fleet networking summary' });
   }
 });
 
@@ -1497,6 +1567,38 @@ fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, r
   } catch (error) {
     console.error('[Fleet] match-preview error:', error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to compute match preview') });
+  }
+});
+
+// Stack-label suggestions for the Stop-by-label target picker. Aggregates the
+// per-node stack-label rows (the `stack_labels` table, via getLabels) into one
+// name-keyed list with stack/node counts. This is the only source the card's
+// autocomplete consumes; node labels (the separate `/api/node-labels`
+// namespace) are deliberately never folded in, because fleet-stop targets stack
+// labels only. The `scope: 'stack'` tag and the counts make that explicit at the
+// type level and in the UI. Central-DB only, same as match-preview, so it covers
+// every configured node including offline remotes.
+fleetRouter.get('/labels/suggestions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const db = DatabaseService.getInstance();
+    const agg = new Map<string, { nodeCount: number; stackCount: number }>();
+    for (const node of db.getNodes()) {
+      for (const label of db.getLabels(node.id)) {
+        const stackCount = db.getStacksForLabel(label.id, node.id).length;
+        const entry = agg.get(label.name) ?? { nodeCount: 0, stackCount: 0 };
+        entry.nodeCount += 1;
+        entry.stackCount += stackCount;
+        agg.set(label.name, entry);
+      }
+    }
+    const suggestions = Array.from(agg.entries())
+      .map(([name, counts]) => ({ name, scope: 'stack' as const, nodeCount: counts.nodeCount, stackCount: counts.stackCount }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ suggestions });
+  } catch (error) {
+    console.error('[Fleet] label-suggestions error:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to load stack-label suggestions') });
   }
 });
 

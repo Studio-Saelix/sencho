@@ -9,7 +9,7 @@ vi.mock('../../fleet/FleetTopology', () => ({ FleetTopology: () => <div data-tes
 import { OverviewTab } from '../OverviewTab';
 import type { FleetNode, FleetPreferences } from '../types';
 
-const PREFS: FleetPreferences = { sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false };
+const PREFS: FleetPreferences = { sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all' };
 
 function node(id: number, name: string): FleetNode {
   return { id, name, type: 'remote', status: 'online', stats: null, systemStats: null, stacks: null, cordoned: false, cordoned_at: null, cordoned_reason: null };

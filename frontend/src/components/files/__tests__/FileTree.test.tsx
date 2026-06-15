@@ -6,9 +6,9 @@
  * re-expanded from cache (no second fetch) on third click.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { FileEntry } from '@/lib/stackFilesApi';
+import { FILE_ENTRY_DND_MIME, type FileEntry, type FileEntryDragPayload } from '@/lib/stackFilesApi';
 
 vi.mock('@/components/ui/toast-store', () => ({
   toast: {
@@ -248,5 +248,120 @@ describe('FileTree', () => {
     expect(screen.queryByText('src')).not.toBeInTheDocument();
     expect(screen.queryByText('README.md')).not.toBeInTheDocument();
     expect(screen.getByText(/no entries match/i)).toBeInTheDocument();
+  });
+});
+
+// ── drag-and-drop move ──────────────────────────────────────────────────────
+
+/** A minimal DataTransfer stand-in carrying our custom move payload (or an OS file drag). */
+function makeDataTransfer(payload: FileEntryDragPayload | null): DataTransfer {
+  const types = payload ? [FILE_ENTRY_DND_MIME] : ['Files'];
+  return {
+    types,
+    getData: (type: string) => (payload && type === FILE_ENTRY_DND_MIME ? JSON.stringify(payload) : ''),
+    setData: () => undefined,
+    dropEffect: 'none',
+    effectAllowed: 'all',
+  } as unknown as DataTransfer;
+}
+
+function rowFor(name: string): HTMLElement {
+  const el = screen.getByText(name).closest('[role="button"]');
+  if (!el) throw new Error(`no row for ${name}`);
+  return el as HTMLElement;
+}
+
+describe('FileTree drag-and-drop move', () => {
+  it('calls onMove when an entry is dropped on a folder node', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    const onMove = vi.fn();
+
+    render(<FileTree {...defaultProps()} canEdit onMove={onMove} />);
+    await screen.findByText('src');
+
+    const payload: FileEntryDragPayload = { relPath: 'README.md', name: 'README.md', type: 'file' };
+    fireEvent.drop(rowFor('src'), { dataTransfer: makeDataTransfer(payload) });
+
+    expect(onMove).toHaveBeenCalledWith('README.md', 'README.md', 'src');
+  });
+
+  it('ignores an OS file drag (dataTransfer carries Files, not our payload)', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    const onMove = vi.fn();
+
+    render(<FileTree {...defaultProps()} canEdit onMove={onMove} />);
+    await screen.findByText('src');
+
+    fireEvent.drop(rowFor('src'), { dataTransfer: makeDataTransfer(null) });
+
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it('moves a nested entry to the stack root when dropped on the root area', async () => {
+    mockLoadDir
+      .mockReturnValueOnce(fakeOk(ROOT_ENTRIES))
+      .mockReturnValueOnce(fakeOk(SRC_ENTRIES));
+    const onMove = vi.fn();
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} canEdit onMove={onMove} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('index.ts');
+
+    const rootZone = screen.getByTestId('file-tree-root-dropzone');
+    const payload: FileEntryDragPayload = { relPath: 'src/index.ts', name: 'index.ts', type: 'file' };
+    fireEvent.dragOver(rootZone, { dataTransfer: makeDataTransfer(payload) });
+    fireEvent.drop(rootZone, { dataTransfer: makeDataTransfer(payload) });
+
+    expect(onMove).toHaveBeenCalledWith('src/index.ts', 'index.ts', '');
+  });
+
+  it('ignores a drop of a folder onto one of its own descendants', async () => {
+    mockLoadDir
+      .mockReturnValueOnce(fakeOk([makeDir('src'), makeFile('README.md')]))
+      .mockReturnValueOnce(fakeOk([makeDir('lib'), makeFile('index.ts')]));
+    const onMove = vi.fn();
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} canEdit onMove={onMove} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('lib');
+
+    // Drop the `src` folder onto `src/lib`, its own descendant.
+    const payload: FileEntryDragPayload = { relPath: 'src', name: 'src', type: 'directory' };
+    fireEvent.drop(rowFor('lib'), { dataTransfer: makeDataTransfer(payload) });
+
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it('ignores a drop onto the entry\'s current parent (no-op)', async () => {
+    mockLoadDir
+      .mockReturnValueOnce(fakeOk([makeDir('src'), makeFile('README.md')]))
+      .mockReturnValueOnce(fakeOk([makeFile('index.ts')]));
+    const onMove = vi.fn();
+    const user = userEvent.setup();
+
+    render(<FileTree {...defaultProps()} canEdit onMove={onMove} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('index.ts');
+
+    // Drop `src/index.ts` back onto `src`, where it already lives.
+    const payload: FileEntryDragPayload = { relPath: 'src/index.ts', name: 'index.ts', type: 'file' };
+    fireEvent.drop(rowFor('src'), { dataTransfer: makeDataTransfer(payload) });
+
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it('makes ordinary entries draggable but not protected root files', async () => {
+    mockLoadDir.mockReturnValue(fakeOk([makeFile('compose.yaml'), makeFile('README.md')]));
+
+    render(<FileTree {...defaultProps()} canEdit onMove={vi.fn()} />);
+    await screen.findByText('README.md');
+
+    expect(rowFor('README.md').draggable).toBe(true);
+    expect(rowFor('compose.yaml').draggable).toBe(false);
   });
 });

@@ -88,14 +88,14 @@ A stack can carry multiple labels and will then appear under each label's group 
 Two cards in the **Fleet · Actions** tab use labels to drive cross-node operations. See [Fleet Actions](/features/fleet-actions) for the full reference.
 
 <Frame>
-  <img src="/images/stack-labels/fleet-actions.png" alt="Fleet Actions tab with two cards side by side. Left card 'Stop fleet by label' (rose accent rail) has a Label name combobox containing 'Media' and a Stop matching stacks button beneath. Right card 'Bulk label assign' (purple accent rail) has a node selector reading Local (local), a stacks checklist showing plex and radarr ticked, a Labels row with a highlighted Media pill plus inactive Network and Utilities, and an Apply to 3 stacks button." />
+  <img src="/images/stack-labels/fleet-actions.png" alt="Fleet Actions tab with two cards side by side. Left card 'Stop fleet by label' (rose accent rail) has a Stack label combobox containing 'Media' and a Stop fleet button beneath. Right card 'Bulk label assign' (purple accent rail) has a node selector reading Local (local), a stacks checklist showing plex and radarr ticked, a Labels row with a highlighted Media pill plus inactive Network and Utilities, and an Apply to 3 stacks button." />
 </Frame>
 
 ### Stop fleet by label
 
-Type a label name; Sencho fans the request out to every online node and stops every stack on that node that carries a label with the same name. The card autocompletes the input from the union of label names on every reachable node, so you do not need to remember whose label rows exist where. The result list shows a per-node breakdown with success and failure counts, and the warning callout under the input restates the fleet-wide semantics: `Different nodes can have their own label rows. Stops are dispatched per node and report per-stack results below.` A confirmation modal titled `Stop all stacks labeled "<name>"?` with the **Stop fleet** primary action runs the action.
+Type a stack label name; Sencho fans the request out to every node and stops every stack on that node assigned a stack label with the same name. This action targets stack labels only, never node labels. The picker suggests stack labels from across the fleet, read from the control instance so labels on offline nodes appear too, each with its stack and node counts so the scope is unmistakable. The result list shows a per-node breakdown with success and failure counts, and the helper line under the input states the scope: `Stops stacks assigned to this stack label across matching nodes. Node labels are not used by this action.` A confirmation modal titled `Stop all stacks with the stack label "<name>"?` with the **Stop fleet** primary action runs the action.
 
-Offline nodes are skipped during autocomplete loading and are reported as failures during the actual run, so a partial-fleet stop is observable rather than silent.
+A node with no stack label by that name is reported as a failure during the run, so a partial-fleet stop is observable rather than silent.
 
 ### Bulk label assign
 
@@ -128,8 +128,8 @@ The **Bulk label assign** card is per-node only by design. To re-tag stacks on a
   <Accordion title="The Tags filter does not list a label I just created">
     The Tags filter aggregates labels across every node in the fleet by name. If the new label only exists on one node and that node was offline at the moment the page loaded, the dropdown may not include it. Refresh **Fleet · Overview** with the **Refresh** button in the toolbar to repull node state.
   </Accordion>
-  <Accordion title="`Stop fleet by label` reports `No nodes have a label by that name`">
-    Labels are per-node, so the fleet-stop matches by name across nodes. If the label you typed only exists on the active node and you typed the wrong case (`prod` versus `Prod`), no node will match. The combobox autocompletes from the union of label names on reachable nodes; pick from the suggestion list rather than typing freehand to avoid case mistakes.
+  <Accordion title="`Stop fleet by label` reports `No node carries a stack label by that name`">
+    Stack labels are per-node, so the fleet-stop matches by name across nodes. If the stack label you typed only exists on one node and you typed the wrong case (`prod` versus `Prod`), no node will match. The picker suggests stack labels read from the control instance across every configured node, including offline ones; node labels never appear there. Pick from the suggestion list rather than typing freehand to avoid case mistakes.
   </Accordion>
   <Accordion title="`Bulk label assign` cleared every label on my stacks unexpectedly">
     The card replaces, it does not merge. Selecting no labels and clicking **Apply to N stack(s)** is the documented way to clear assignments, and the confirmation copy on the **Bulk label assign** modal restates this: `No labels selected, this will clear existing assignments on the selected stacks.` Re-pick the labels you want and run the action again to restore them.

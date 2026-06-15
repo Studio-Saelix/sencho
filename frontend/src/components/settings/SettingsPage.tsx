@@ -21,6 +21,7 @@ import {
     getSettingsGroup,
     isItemVisible,
     isItemLocked,
+    scopeLabel,
 } from './index';
 import type { SectionId, SettingsItemMeta, VisibilityContext } from './index';
 import { SettingsSidebar } from './SettingsSidebar';
@@ -194,7 +195,6 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
                         <div className="px-7 pt-6 pb-8 flex flex-col gap-6 min-w-0">
                             <SettingsSectionContent
                                 sectionId={safeSection}
-                                isPaid={isPaid}
                                 onDirtyChange={handleDirtyChange}
                                 showDescription
                             />
@@ -227,14 +227,6 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
             </CommandDialog>
         </div>
     );
-}
-
-function scopeLabel(item: SettingsItemMeta): string {
-    // Personal sections (account, appearance) apply to the signed-in operator or
-    // this browser. Access sections (license, users, sso, api-tokens) are
-    // instance-global, so they read as global like every other non-node group.
-    if (item.group === 'personal') return 'operator';
-    return 'global';
 }
 
 function SettingsCommandItem({

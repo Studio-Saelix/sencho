@@ -3,6 +3,7 @@ import { Bell, Zap, Shield, HardDrive, ChevronRight } from 'lucide-react';
 import { formatCount } from '@/lib/utils';
 import { useConfigurationStatus } from './useConfigurationStatus';
 import type { SectionId } from '@/components/settings/types';
+import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 
 interface ConfigurationStatusProps {
   onOpenSection?: (section: SectionId) => void;
@@ -191,7 +192,9 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
             <Row
               label="Vulnerability scanning"
               value={formatCount(security.scanPolicies.enabled, 'policy')}
-              onClick={open('security')}
+              onClick={() => window.dispatchEvent(
+                new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security', tab: 'policies' } }),
+              )}
             />
           )}
 

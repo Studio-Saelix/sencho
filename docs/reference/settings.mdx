@@ -15,16 +15,17 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 |-------|----------------|
 | **Personal** | Account, Appearance |
 | **Access** | License, Users, SSO, API Tokens |
-| **Infrastructure** | Nodes, Fleet Mesh, Registries, Cloud Backup, App Store |
+| **Infrastructure** | Nodes, Fleet Mesh, Registries, Cloud Backup, App Store, Stacks |
 | **Monitoring** | Host Alerts, Docker & Storage |
 | **Notifications** | Channels, Notification Routing |
 | **Automation** | Webhooks |
 | **Organization** | Labels |
-| **Security** | Vulnerability Scanning |
 | **Operations** | Data Retention, Developer Diagnostics, Recovery |
 | **Help** | Support, About |
 
-Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Fleet Mesh, Registries, Cloud Backup, Notification Routing, Vulnerability Scanning) stay hidden for non-admin operators.
+Vulnerability scanning is no longer a Settings section: scanner setup, scan policies, suppressions, and acknowledgements now live on the dedicated [Security page](/features/security).
+
+Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Fleet Mesh, Registries, Cloud Backup, Notification Routing) stay hidden for non-admin operators.
 
 ### Page chrome
 
@@ -32,14 +33,14 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 
 | Pill | Meaning |
 |------|---------|
-| **SCOPE** `operator` / `global` | Setting applies to your account or this browser (Personal sections) or to the whole instance (every other non-node group) |
+| **SCOPE** `operator` / `browser` / `global` | Setting applies to your account (`operator`), to this browser only (`browser`, for browser-local sections such as Appearance and Stacks), or to the whole instance (`global`, every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
-| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `TRIVY managed`/`host`/`missing` and `POLICIES` (Vulnerability Scanning); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer Diagnostics) |
+| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer Diagnostics) |
 
 ### Quick search
 
-Click **Filter** at the top of the sidebar, or press `Ctrl+K` / `⌘K` while the hub is open, to open the command palette. Type any section name, keyword, or synonym (for example, `saml` finds SSO and `trivy` finds Security) and press Enter to jump to it.
+Click **Filter** at the top of the sidebar, or press `Ctrl+K` / `⌘K` while the hub is open, to open the command palette. Type any section name, keyword, or synonym (for example, `saml` finds SSO) and press Enter to jump to it.
 
 <Frame>
   <img src="/images/settings/settings-search.png" alt="Settings command palette filtered to a webhook query" />
@@ -99,7 +100,7 @@ See [Two-Factor Authentication](/features/two-factor-authentication) for the enr
 Control how dense and how interactive the workspace feels. Each browser remembers its own choices so a compact laptop setup does not force the same rhythm on a larger desktop.
 
 <Frame>
-  <img src="/images/settings/appearance-density.png" alt="Appearance settings showing the Density selector, the Deploy progress toggle, and the Diff preview toggle" />
+  <img src="/images/settings/appearance-density.png" alt="Appearance settings showing the Density selector" />
 </Frame>
 
 ### Density
@@ -111,25 +112,7 @@ Control how dense and how interactive the workspace feels. Each browser remember
 
 Density affects the dashboard stack table, the resource gauge strip, the Settings Hub sidebar, the Schedules and Audit Log tables, and every other data table in Sencho. Typography, color, and layout structure stay the same; only vertical padding compresses.
 
-### Deploy progress
-
-Sencho streams live output whenever you deploy, restart, update, install, or run a Git operation. It is on by default; turn it off to run operations without it. When it is on, **Progress style** chooses how it appears: **Modal** (a centered overlay that closes automatically on success or stays open on failure) or **Inline** (a quiet status band on the stack detail). See [Deploy Progress](/features/deploy-progress) for the full reference.
-
-| Value | Behavior |
-|-------|----------|
-| **Enabled** (default) | A progress surface (the Modal overlay or the Inline band, per Progress style) shows for every long-running operation |
-| **Disabled** | Operations run without it; results surface via toast notifications, and a failed operation still shows recovery actions on the stack page |
-
-### Diff preview before save
-
-When enabled, clicking **Save & Deploy** or **Save Only** in the compose or env editor opens a side-by-side diff modal before writing anything to disk. The left pane shows the current on-disk content; the right pane shows your unsaved edits, with additions highlighted green and removals highlighted red.
-
-| Value | Behavior |
-|-------|----------|
-| **Enabled** | Diff modal opens on every save that has unsaved changes |
-| **Disabled** (default) | File is saved directly without a review step |
-
-If there are no unsaved changes the modal is skipped and the save proceeds immediately. See [Diff preview before save](/features/editor#diff-preview-before-save) in the Editor guide for the full workflow.
+Deploy-progress behavior and the diff-preview-before-save step are stack workflow preferences and live in their own [Stacks](#stacks) section under Infrastructure.
 
 ---
 
@@ -432,44 +415,6 @@ See [Stack Labels](/features/stack-labels) for the full walkthrough.
 
 ---
 
-## Vulnerability Scanning
-
-<Note>
-  Vulnerability Scanning is admin-only. The Trivy installer, the **Auto-update Trivy** toggle (which also requires a managed Trivy binary), and CVE/misconfig suppressions are available on all tiers; scan policies require an Admiral license.
-</Note>
-
-**Scope:** Per-node
-
-Manage the Trivy scanner, scan policies, suppressions, and acknowledgements that power [vulnerability scanning](/features/vulnerability-scanning) across the fleet. The masthead publishes a **TRIVY** pill (`managed` / `host` / `missing`) and a **POLICIES** pill with the active rule count.
-
-<Frame>
-  <img src="/images/settings/settings-security.png" alt="Security section showing the Trivy installer card and the empty scan-policy state" />
-</Frame>
-
-### Trivy scanner
-
-| Element | Description |
-|---------|-------------|
-| **Status** | `Installed (managed)` when Sencho manages the binary, `Installed (host)` when an existing host binary is being reused, or empty when nothing is detected. |
-| **Version** | The current Trivy version, when installed. |
-| **Install / Update / Uninstall** | Lifecycle actions for the managed binary. Uninstall asks for confirmation. |
-| **Auto-update Trivy** toggle | When on, Sencho checks daily and installs newer Trivy releases automatically. Requires a managed Trivy binary. |
-
-### Scan policies
-
-A scan policy enforces a severity threshold on a set of stacks. Each policy carries a severity level (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`), a stack pattern (regex), a **Block on deploy** toggle, and an **Enabled** toggle. Use **Add policy** to create one.
-
-### CVE Suppressions and Misconfig Acknowledgements
-
-- **CVE Suppressions** are fleet-wide accepted CVEs. They apply at read time across every instance and never modify stored scan data. See [CVE Suppressions](/features/cve-suppressions).
-- **Misconfig Acknowledgements** are fleet-wide accepted misconfigurations, with the same read-time semantics.
-
-### Fleet role
-
-Sencho instances on the Admiral tier can act as a security control plane for the fleet or as a replica. When this instance is a replica, the section shows a **Managed by control node** banner and a **Demote to control** button that converts the replica back into a standalone control.
-
----
-
 ## Data Retention
 
 **Scope:** Per-node
@@ -515,6 +460,34 @@ Configure the template source used by the App Store.
 | **Save & refresh** | Saves the URL and immediately refreshes the cached template list. |
 
 See [App Store](/features/app-store#custom-template-registry) for more on custom registries.
+
+---
+
+## Stacks
+
+**Scope:** This browser (preferences are saved to local storage)
+
+Stack editor and lifecycle workflow preferences. Each browser remembers its own choices, so they follow you across tabs but never change what other operators see. The masthead reads `SCOPE browser`.
+
+### Deploy progress
+
+Sencho streams live output whenever you deploy, restart, update, install, or run a Git operation. It is on by default; turn it off to run operations without it. When it is on, **Progress style** chooses how it appears: **Modal** (a centered overlay that closes automatically on success or stays open on failure) or **Inline** (a quiet status band on the stack detail). See [Deploy Progress](/features/deploy-progress) for the full reference.
+
+| Value | Behavior |
+|-------|----------|
+| **Enabled** (default) | A progress surface (the Modal overlay or the Inline band, per Progress style) shows for every long-running operation |
+| **Disabled** | Operations run without it; results surface via toast notifications, and a failed operation still shows recovery actions on the stack page |
+
+### Diff preview before save
+
+When enabled, clicking **Save & Deploy** or **Save Only** in the compose or env editor opens a side-by-side diff modal before writing anything to disk. The left pane shows the current on-disk content; the right pane shows your unsaved edits, with additions highlighted green and removals highlighted red.
+
+| Value | Behavior |
+|-------|----------|
+| **Enabled** | Diff modal opens on every save that has unsaved changes |
+| **Disabled** (default) | File is saved directly without a review step |
+
+If there are no unsaved changes the modal is skipped and the save proceeds immediately. See [Diff preview before save](/features/editor#diff-preview-before-save) in the Editor guide for the full workflow.
 
 ---
 

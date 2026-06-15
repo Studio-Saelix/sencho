@@ -6,7 +6,12 @@
  * client before it would otherwise be caught by the server.
  */
 import { describe, it, expect } from 'vitest';
-import { isClientSafeRelPath } from '../stackFilesApi';
+import {
+  isClientSafeRelPath,
+  isProtectedRootRelPath,
+  isSameOrDescendantPath,
+  relPathParentDir,
+} from '../stackFilesApi';
 
 describe('isClientSafeRelPath', () => {
   it('accepts the empty string (means the stack root)', () => {
@@ -63,5 +68,50 @@ describe('isClientSafeRelPath', () => {
     expect(isClientSafeRelPath(undefined as unknown as string)).toBe(false);
     expect(isClientSafeRelPath(null as unknown as string)).toBe(false);
     expect(isClientSafeRelPath(42 as unknown as string)).toBe(false);
+  });
+});
+
+describe('isProtectedRootRelPath', () => {
+  it('flags compose and env files at the stack root', () => {
+    expect(isProtectedRootRelPath('compose.yaml')).toBe(true);
+    expect(isProtectedRootRelPath('compose.yml')).toBe(true);
+    expect(isProtectedRootRelPath('docker-compose.yaml')).toBe(true);
+    expect(isProtectedRootRelPath('docker-compose.yml')).toBe(true);
+    expect(isProtectedRootRelPath('.env')).toBe(true);
+  });
+
+  it('does not flag the same names nested in a subdirectory', () => {
+    expect(isProtectedRootRelPath('configs/.env')).toBe(false);
+    expect(isProtectedRootRelPath('nested/compose.yaml')).toBe(false);
+  });
+
+  it('does not flag ordinary files or the empty string', () => {
+    expect(isProtectedRootRelPath('app.conf')).toBe(false);
+    expect(isProtectedRootRelPath('')).toBe(false);
+  });
+});
+
+describe('isSameOrDescendantPath', () => {
+  it('is true for the path itself', () => {
+    expect(isSameOrDescendantPath('src', 'src')).toBe(true);
+  });
+
+  it('is true for a nested descendant', () => {
+    expect(isSameOrDescendantPath('src', 'src/lib/util.ts')).toBe(true);
+  });
+
+  it('is false for a sibling sharing a name prefix', () => {
+    expect(isSameOrDescendantPath('src', 'src-extra')).toBe(false);
+    expect(isSameOrDescendantPath('src', 'other')).toBe(false);
+  });
+});
+
+describe('relPathParentDir', () => {
+  it('returns the empty string for a root-level entry', () => {
+    expect(relPathParentDir('app.conf')).toBe('');
+  });
+
+  it('returns the directory portion for a nested entry', () => {
+    expect(relPathParentDir('configs/redis/redis.conf')).toBe('configs/redis');
   });
 });

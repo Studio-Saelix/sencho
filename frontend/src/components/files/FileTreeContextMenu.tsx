@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { FilePlus, FolderPlus, Pencil, Lock, Trash2 } from 'lucide-react';
+import { FilePlus, FolderPlus, Pencil, FolderInput, Lock, Trash2 } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -7,13 +7,14 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import type { FileEntry } from '@/lib/stackFilesApi';
+import { isProtectedRootRelPath, type FileEntry } from '@/lib/stackFilesApi';
 
 interface FileTreeContextMenuProps {
   entry: FileEntry;
   relPath: string;
   canEdit: boolean;
   onRequestRename: (relPath: string) => void;
+  onRequestMove: (relPath: string, entry: FileEntry) => void;
   onRequestNewFile: (dirRelPath: string) => void;
   onRequestNewFolder: (dirRelPath: string) => void;
   onRequestDelete: (relPath: string, entry: FileEntry) => void;
@@ -26,6 +27,7 @@ export function FileTreeContextMenu({
   relPath,
   canEdit,
   onRequestRename,
+  onRequestMove,
   onRequestNewFile,
   onRequestNewFolder,
   onRequestDelete,
@@ -34,6 +36,15 @@ export function FileTreeContextMenu({
 }: FileTreeContextMenuProps) {
   const isDir = entry.type === 'directory';
   const canWrite = canEdit;
+  // Protected root files (compose/.env) can never leave the stack root, so they
+  // are not offered as move sources.
+  const canMove = canWrite && !isProtectedRootRelPath(relPath);
+  const moveItem = canMove && (
+    <ContextMenuItem onSelect={() => onRequestMove(relPath, entry)}>
+      <FolderInput className="h-4 w-4 mr-2" strokeWidth={1.5} />
+      <span>Move to…</span>
+    </ContextMenuItem>
+  );
 
   return (
     <ContextMenu>
@@ -64,6 +75,7 @@ export function FileTreeContextMenu({
                 <span>Rename</span>
               </ContextMenuItem>
             )}
+            {moveItem}
             {canWrite && (
               <>
                 <ContextMenuSeparator />
@@ -85,6 +97,7 @@ export function FileTreeContextMenu({
                 <span>Rename</span>
               </ContextMenuItem>
             )}
+            {moveItem}
             <ContextMenuItem onSelect={() => onRequestPermissions(relPath, entry)}>
               <Lock className="h-4 w-4 mr-2" strokeWidth={1.5} />
               <span>Permissions</span>

@@ -1,5 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { Masthead, MobileSubTabs } from '@/components/mobile/mobile-ui';
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from "@/components/ui/tabs";
 import { springs } from '@/lib/motion';
@@ -16,11 +18,11 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen } from 'lucide-react';
-import { CursorProvider, CursorContainer, Cursor, CursorFollow } from '@/components/animate-ui/primitives/animate/cursor';
+import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from './NodeManager';
-import type { ScanSummary, VulnSeverity } from '@/types/security';
+import type { ScanSummary } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
@@ -28,7 +30,8 @@ import { CapabilityGate } from './CapabilityGate';
 import LazyBoundary from './LazyBoundary';
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
-import { SENCHO_OPEN_LOGS_EVENT } from '@/lib/events';
+import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
+import type { SenchoOpenStackDetail } from '@/lib/events';
 import type { SenchoOpenLogsDetail } from '@/lib/events';
 import { lazy, Suspense } from 'react';
 import { ReclaimHero } from './resources/ReclaimHero';
@@ -173,17 +176,23 @@ function FilterToggle({ value, onChange, counts }: FilterToggleProps) {
 
 // ── Managed Status Badge ───────────────────────────────────────────────────────
 
-function ManagedBadge({ status, managedBy }: {
+function ManagedBadge({ status, managedBy, onOpenStack }: {
     status: 'managed' | 'unmanaged' | 'unused' | 'system';
     managedBy: string | null;
+    /** When provided on a managed resource, the owning-stack badge becomes a link to that stack. */
+    onOpenStack?: (stack: string) => void;
 }) {
     if (status === 'managed') {
-        return (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium">
-                <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
-                {managedBy}
-            </span>
-        );
+        const cls = "inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium";
+        const inner = (<><span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />{managedBy}</>);
+        if (onOpenStack && managedBy) {
+            return (
+                <button type="button" className={`${cls} hover:bg-success/15 transition-colors`} title={`Open stack ${managedBy}`} onClick={() => onOpenStack(managedBy)}>
+                    {inner}
+                </button>
+            );
+        }
+        return <span className={cls}>{inner}</span>;
     }
     if (status === 'unmanaged') {
         return (
@@ -219,84 +228,6 @@ function SenchoBadge() {
 }
 
 // ── Severity Badge ─────────────────────────────────────────────────────────────
-
-const SEVERITY_BADGE_CLASSES: Record<VulnSeverity | 'CLEAN', string> = {
-    CRITICAL: 'border-destructive/25 bg-destructive/8 text-destructive',
-    HIGH: 'border-warning/25 bg-warning/8 text-warning',
-    MEDIUM: 'border-warning/25 bg-warning/8 text-warning',
-    LOW: 'border-border bg-muted/30 text-muted-foreground',
-    UNKNOWN: 'border-border bg-muted/20 text-muted-foreground',
-    CLEAN: 'border-success/25 bg-success/8 text-success',
-};
-
-const SEVERITY_DOT_CLASSES: Record<VulnSeverity | 'CLEAN', string> = {
-    CRITICAL: 'bg-destructive',
-    HIGH: 'bg-warning',
-    MEDIUM: 'bg-warning',
-    LOW: 'bg-muted-foreground/60',
-    UNKNOWN: 'bg-muted-foreground/40',
-    CLEAN: 'bg-success',
-};
-
-function SeverityBadge({ summary, onClick }: { summary: ScanSummary; onClick: () => void }) {
-    const key: VulnSeverity | 'CLEAN' = summary.highest_severity ?? 'CLEAN';
-    const label = key === 'CLEAN' ? 'Clean' : key;
-    const [relative, setRelative] = useState<string>('');
-    useEffect(() => {
-        const compute = () => {
-            const scanAge = Math.round((Date.now() - summary.scanned_at) / 60000);
-            setRelative(
-                scanAge < 1 ? 'just now'
-                    : scanAge < 60 ? `${scanAge}m ago`
-                    : scanAge < 1440 ? `${Math.round(scanAge / 60)}h ago`
-                    : `${Math.round(scanAge / 1440)}d ago`,
-            );
-        };
-        compute();
-        const id = setInterval(compute, 60000);
-        return () => clearInterval(id);
-    }, [summary.scanned_at]);
-
-    return (
-        <CursorProvider>
-            <CursorContainer className="inline-flex">
-                <button
-                    type="button"
-                    onClick={onClick}
-                    className={cn(
-                        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium cursor-pointer hover:brightness-110 transition',
-                        SEVERITY_BADGE_CLASSES[key],
-                    )}
-                >
-                    <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', SEVERITY_DOT_CLASSES[key])} />
-                    {label}
-                </button>
-            </CursorContainer>
-            <Cursor>
-                <div className="h-2 w-2 rounded-full bg-brand" />
-            </Cursor>
-            <CursorFollow side="bottom" align="end" sideOffset={8}>
-                <div className="bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] border border-card-border shadow-md rounded-md px-3 py-2">
-                    <div className="font-mono tabular-nums text-xs space-y-1">
-                        <div className="text-stat-subtitle uppercase tracking-wide">Last scanned</div>
-                        <div className="text-stat-value">{relative}</div>
-                        {summary.total > 0 && (
-                            <div className="flex gap-3 mt-1">
-                                {summary.critical > 0 && <span className="text-destructive">{summary.critical}C</span>}
-                                {summary.high > 0 && <span className="text-warning">{summary.high}H</span>}
-                                {summary.medium > 0 && <span className="text-warning">{summary.medium}M</span>}
-                                {summary.low > 0 && <span className="text-muted-foreground">{summary.low}L</span>}
-                            </div>
-                        )}
-                        {summary.total === 0 && (
-                            <div className="text-success">No vulnerabilities</div>
-                        )}
-                    </div>
-                </div>
-            </CursorFollow>
-        </CursorProvider>
-    );
-}
 
 // ── Quick Clean Prune Button ───────────────────────────────────────────────────
 
@@ -371,7 +302,14 @@ function TableSkeleton({ cols, rows = 5 }: { cols: number; rows?: number }) {
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
-export default function ResourcesView() {
+interface ResourcesViewProps {
+    /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
+    headerActions?: ReactNode;
+}
+
+export default function ResourcesView({ headerActions }: ResourcesViewProps = {}) {
+    const isMobile = useIsMobile();
+    const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'networks' | 'unmanaged'>('images');
     const { isAdmin } = useAuth();
     const { activeNode } = useNodes();
     const { isPaid } = useLicense();
@@ -786,9 +724,8 @@ export default function ResourcesView() {
         }
     };
 
-    return (
-        <div className="p-6 h-full overflow-auto text-foreground flex flex-col gap-6 animate-in fade-in-0 duration-300">
-
+    const mainContent = (
+        <>
             {/* Reclaim hero */}
             {heroVisible && usage && (
                 <ReclaimHero
@@ -881,9 +818,23 @@ export default function ResourcesView() {
 
             {/* Resource Tabs */}
             <Tabs
-                defaultValue="images"
+                value={resourceTab}
+                onValueChange={(v) => setResourceTab(v as typeof resourceTab)}
                 className="flex-1 flex flex-col w-full rounded-lg border bg-card shadow-card-bevel overflow-hidden min-h-[400px] animate-in fade-in-0 slide-in-from-bottom-2 duration-300 delay-150"
             >
+                {isMobile ? (
+                    <MobileSubTabs
+                        ariaLabel="Resource sections"
+                        active={resourceTab}
+                        onSelect={setResourceTab}
+                        tabs={[
+                            { value: 'images', label: 'Images', count: images.length },
+                            { value: 'volumes', label: 'Volumes', count: volumes.length },
+                            { value: 'networks', label: 'Networks', count: networks.length },
+                            { value: 'unmanaged', label: 'Unmanaged', count: totalOrphansCount },
+                        ]}
+                    />
+                ) : (
                 <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3">
                     <TabsList className="grid grid-cols-4 w-full md:w-[680px] h-9 gap-1 p-0">
                         <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
@@ -913,7 +864,7 @@ export default function ResourcesView() {
                             className="border-border"
                             onClick={() => {
                                 window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
-                                    detail: { view: 'security-history' },
+                                    detail: { view: 'security', tab: 'history' },
                                 }));
                             }}
                             title="View completed vulnerability scans and compare them"
@@ -924,6 +875,7 @@ export default function ResourcesView() {
                         </Button>
                     )}
                 </div>
+                )}
 
                 <ScrollArea className="flex-1 bg-background relative text-sm">
 
@@ -1209,7 +1161,13 @@ export default function ResourcesView() {
                                             <TableCell><Badge variant="outline" className="text-[10px] h-5">{net.Scope}</Badge></TableCell>
                                             <TableCell>
                                                 <div className="flex items-center gap-1.5 flex-wrap">
-                                                    <ManagedBadge status={net.managedStatus} managedBy={net.managedBy} />
+                                                    <ManagedBadge
+                                                        status={net.managedStatus}
+                                                        managedBy={net.managedBy}
+                                                        onOpenStack={activeNode ? (stack) => window.dispatchEvent(
+                                                            new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, { detail: { nodeId: activeNode.id, stackName: stack } }),
+                                                        ) : undefined}
+                                                    />
                                                     {net.isSencho && <SenchoBadge />}
                                                 </div>
                                             </TableCell>
@@ -1329,7 +1287,11 @@ export default function ResourcesView() {
                     </TabsContent>
                 </ScrollArea>
             </Tabs>
+        </>
+    );
 
+    const overlays = (
+        <>
             {/* ── Dialogs ── */}
 
             {/* Prune Confirm */}
@@ -1539,6 +1501,32 @@ export default function ResourcesView() {
                 canCompare
                 canManageSuppressions={isAdmin}
             />
+        </>
+    );
+
+    if (isMobile) {
+        return (
+            <div className="flex h-full min-h-0 flex-col">
+                <Masthead
+                    kicker="resources · docker"
+                    state={totalReclaimableBytes > 0 ? 'Reclaimable' : 'Tidy'}
+                    stateTone={totalReclaimableBytes > 0 ? 'warning' : 'success'}
+                    live={false}
+                    meta={`${images.length} images · ${volumes.length} volumes · ${networks.length} networks`}
+                    right={headerActions}
+                />
+                <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4 [&_[data-radix-scroll-area-viewport]>div]:!block [&_table]:min-w-[640px]">
+                    {mainContent}
+                </div>
+                {overlays}
+            </div>
+        );
+    }
+
+    return (
+        <div className="p-6 h-full overflow-auto text-foreground flex flex-col gap-6 animate-in fade-in-0 duration-300">
+            {mainContent}
+            {overlays}
         </div>
     );
 }

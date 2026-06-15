@@ -5,9 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/toast-store';
-import { renameStackPath } from '@/lib/stackFilesApi';
-
-const PROTECTED_NAMES = new Set(['compose.yaml', 'compose.yml', '.env']);
+import { renameStackPath, isProtectedRootRelPath } from '@/lib/stackFilesApi';
 
 function isValidName(name: string): boolean {
   if (!name || name === '.' || name === '..') return false;
@@ -75,7 +73,7 @@ export function RenameDialog({
     }
   };
 
-  const isProtected = PROTECTED_NAMES.has(currentName);
+  const isProtected = isProtectedRootRelPath(relPath);
 
   return (
     <Modal open={open} onOpenChange={handleClose} size="sm">

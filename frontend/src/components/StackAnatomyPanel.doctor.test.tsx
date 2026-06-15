@@ -70,4 +70,10 @@ describe('StackAnatomyPanel Doctor tab (capability on)', () => {
     await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.some(([u]) => String(u).includes('/preflight'))).toBe(true));
     expect(screen.queryByTestId('doctor-tab-dot')).not.toBeInTheDocument();
   });
+
+  it('renders the Networking tab when the capability is present', async () => {
+    badgeSeverity = 'warning';
+    render(panel());
+    expect(await screen.findByTestId('networking-tab')).toBeInTheDocument();
+  });
 });

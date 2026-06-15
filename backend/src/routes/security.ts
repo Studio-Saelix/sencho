@@ -17,6 +17,8 @@ import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
 import { validateStackPatternForRedos } from './fleet';
 import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
+import { DEFAULT_POLICY_PACKS } from '../services/policy-packs';
+import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 // Trivy emits misconfig rule ids in two shapes that Sencho persists verbatim:
@@ -111,6 +113,28 @@ function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 
 } {
   const { policy_evaluation, ...rest } = scan;
   return { ...rest, policy_evaluation: parsePolicyEvaluation(policy_evaluation) };
+}
+
+// A completed scan whose latest run is older than this is considered "stale" in
+// the Security overview. Named so the route and its tests share one value.
+export const STALE_SCAN_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Shape of the /overview response. Mirrors the frontend `SecurityOverview` type
+// (frontend/src/types/security.ts); annotating the response below makes a
+// renamed or dropped field a compile error here instead of an undefined read in
+// the UI. Keep the two in sync.
+interface SecurityOverviewResponse {
+  scannedImages: number;
+  critical: number;
+  high: number;
+  fixable: number;
+  secrets: number;
+  misconfigs: number;
+  staleScans: number;
+  failedScans: number;
+  lastSuccessfulScanAt: number | null;
+  scanner: { available: boolean; version: string | null; source: 'managed' | 'host' | 'none'; autoUpdate: boolean };
+  deployEnforcement: { honorSuppressionsOnDeploy: boolean; eligibleBlockPolicies: number };
 }
 
 export const securityRouter = Router();
@@ -306,6 +330,73 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
   }
 });
 
+// On-demand node-wide scan: images for the selected scanners (vuln/secret) and,
+// when requested, every stack's compose config for misconfigurations. Streams
+// sanitized progress to the deploy-feedback terminal when the client opened one.
+securityRouter.post('/scan-node', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const svc = TrivyService.getInstance();
+  if (!svc.isTrivyAvailable()) {
+    res.status(503).json({ error: 'Trivy is not available on this host' });
+    return;
+  }
+  const body = req.body ?? {};
+  if (![body.vulns, body.secrets, body.misconfig].every((v) => v === undefined || typeof v === 'boolean')) {
+    res.status(400).json({ error: 'vulns, secrets and misconfig must be booleans' });
+    return;
+  }
+  const vulns = body.vulns === true;
+  const secrets = body.secrets === true;
+  const misconfig = body.misconfig === true;
+  if (!vulns && !secrets && !misconfig) {
+    res.status(400).json({ error: 'Select at least one scan type' });
+    return;
+  }
+  const nodeId = req.nodeId;
+
+  // Stream progress to the deploy-feedback terminal only when the client supplied
+  // a session id: a bare getTerminalWs(undefined) falls back to the most recent
+  // terminal and could cross-stream this scan into an unrelated deploy. scanNode
+  // emits only counts and rule ids, never raw secret values; the wrapper here
+  // additionally strips CR/LF and caps line length before sending.
+  const sessionId = req.get(DEPLOY_SESSION_HEADER);
+  const ws = sessionId ? getTerminalWs(sessionId) : undefined;
+  const onProgress = ws
+    ? (line: string): void => {
+        try { ws.send(line.replace(/[\r\n]+/g, ' ').slice(0, 2000) + '\r\n'); }
+        catch { /* socket closed mid-scan; the scan still runs to completion */ }
+      }
+    : undefined;
+
+  try {
+    DatabaseService.getInstance().insertAuditLog({
+      timestamp: Date.now(),
+      username: req.user?.username ?? 'unknown',
+      method: req.method,
+      path: req.originalUrl || req.url,
+      status_code: 200,
+      node_id: nodeId,
+      ip_address: req.ip ?? '',
+      summary: `node-wide scan triggered (vulns=${vulns} secrets=${secrets} misconfig=${misconfig})`,
+    });
+  } catch (auditErr) {
+    console.warn('[Security] failed to record node-scan audit log:', getErrorMessage(auditErr, 'unknown'));
+  }
+
+  try {
+    const result = await svc.scanNode(nodeId, { vulns, secrets, misconfig }, 'manual', onProgress);
+    res.status(200).json(result);
+  } catch (err) {
+    const message = getErrorMessage(err, 'Failed to run node scan');
+    if (message === 'Already scanning this node') {
+      res.status(409).json({ error: message });
+      return;
+    }
+    console.error('[Security] node-wide scan failed:', sanitizeForLog(message));
+    res.status(500).json({ error: 'Failed to run node scan' });
+  }
+});
+
 securityRouter.get('/scans', authMiddleware, (req: Request, res: Response) => {
   try {
     const imageRef = typeof req.query.imageRef === 'string' ? req.query.imageRef : undefined;
@@ -435,6 +526,99 @@ securityRouter.get('/image-summaries', authMiddleware, (req: Request, res: Respo
     console.error('[Security] Failed to fetch image summaries:', error);
     res.status(500).json({ error: 'Failed to fetch image summaries' });
   }
+});
+
+// Node-scoped security posture rollup for the Security page Overview. Read-only,
+// auth-only (Community). Counts derive from the latest-completed-scan-per-image
+// summaries plus two precise helpers; the deploy-enforcement block is this
+// node's read-only posture, not policy management.
+securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): void => {
+  try {
+    const db = DatabaseService.getInstance();
+    const summaries = Object.values(db.getImageScanSummaries(req.nodeId));
+    const settings = db.getGlobalSettings();
+    const svc = TrivyService.getInstance();
+
+    const now = Date.now();
+    let scannedImages = 0;
+    let critical = 0;
+    let high = 0;
+    let fixable = 0;
+    let secrets = 0;
+    let misconfigs = 0;
+    let staleScans = 0;
+    let lastSuccessfulScanAt: number | null = null;
+
+    for (const s of summaries) {
+      // Severity, secret, and misconfig totals are summed across every summary
+      // (real images and stack/config scans alike). Only scannedImages excludes
+      // the stack/config rows (stored under a "stack:" image_ref), since those
+      // are stacks, not images.
+      if (!s.image_ref.startsWith('stack:')) scannedImages += 1;
+      critical += s.critical;
+      high += s.high;
+      fixable += s.fixable;
+      secrets += s.secret_count;
+      misconfigs += s.misconfig_count;
+      if (now - s.scanned_at > STALE_SCAN_THRESHOLD_MS) staleScans += 1;
+      if (lastSuccessfulScanAt === null || s.scanned_at > lastSuccessfulScanAt) {
+        lastSuccessfulScanAt = s.scanned_at;
+      }
+    }
+
+    const overview: SecurityOverviewResponse = {
+      scannedImages,
+      critical,
+      high,
+      fixable,
+      secrets,
+      misconfigs,
+      staleScans,
+      failedScans: db.countScansByStatus(req.nodeId, 'failed'),
+      lastSuccessfulScanAt,
+      scanner: {
+        available: svc.isTrivyAvailable(),
+        version: svc.getVersion(),
+        source: svc.getSource(),
+        autoUpdate: settings.trivy_auto_update === '1',
+      },
+      deployEnforcement: {
+        honorSuppressionsOnDeploy: settings.deploy_block_honor_suppressions === '1',
+        eligibleBlockPolicies: db.countEligibleBlockPolicies(
+          req.nodeId,
+          FleetSyncService.getRole(),
+          FleetSyncService.getSelfIdentity(),
+        ),
+      },
+    };
+    res.json(overview);
+  } catch (error) {
+    console.error('[Security] Failed to build overview:', error);
+    res.status(500).json({ error: 'Failed to build security overview' });
+  }
+});
+
+// Daily Critical/High risk trend for the Security overview chart. Auth-only
+// (Community), node-scoped. ?days clamps to 1..365 in the DB layer.
+securityRouter.get('/overview/trend', authMiddleware, (req: Request, res: Response): void => {
+  try {
+    const days = req.query.days ? Number(req.query.days) : 30;
+    const trend = DatabaseService.getInstance().getDailyRiskTrend(
+      req.nodeId,
+      Number.isFinite(days) ? days : 30,
+    );
+    res.json(trend);
+  } catch (error) {
+    console.error('[Security] Failed to build risk trend:', error);
+    res.status(500).json({ error: 'Failed to build risk trend' });
+  }
+});
+
+// Static, read-only policy-pack catalog. Auth-only (Community), no DB, no
+// enforcement. The frontend fetches this with localOnly so the global catalog
+// is available regardless of which node is active.
+securityRouter.get('/policy-packs', authMiddleware, (_req: Request, res: Response): void => {
+  res.json(DEFAULT_POLICY_PACKS);
 });
 
 securityRouter.post('/sbom', authMiddleware, async (req: Request, res: Response): Promise<void> => {

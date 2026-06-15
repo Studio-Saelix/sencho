@@ -7,7 +7,8 @@
  * Data Retention, and the renamed labels are applied.
  */
 import { describe, it, expect } from 'vitest';
-import { SETTINGS_GROUPS, SETTINGS_ITEMS } from '../registry';
+import { SETTINGS_GROUPS, SETTINGS_ITEMS, scopeLabel } from '../registry';
+import type { SettingsItemMeta } from '../registry';
 
 describe('settings registry', () => {
     it('points every item at a defined group', () => {
@@ -63,12 +64,49 @@ describe('settings registry', () => {
         const byId = new Map(SETTINGS_ITEMS.map(i => [i.id, i]));
         expect(byId.get('notifications')?.label).toBe('Channels');
         expect(byId.get('notification-routing')?.label).toBe('Notification Routing');
-        expect(byId.get('security')?.label).toBe('Vulnerability Scanning');
+    });
+
+    it('no longer registers the standalone Vulnerability Scanning section (moved to the Security page)', () => {
+        expect(SETTINGS_ITEMS.some(i => (i.id as string) === 'security')).toBe(false);
     });
 
     it('opens Registries to Community while keeping it admin-only', () => {
         const registries = SETTINGS_ITEMS.find(i => i.id === 'registries');
         expect(registries?.tier).toBeNull();
         expect(registries?.adminOnly).toBe(true);
+    });
+
+    it('registers the Stacks section under Infrastructure with searchable workflow keywords', () => {
+        const stacks = SETTINGS_ITEMS.find(i => i.id === 'stacks');
+        expect(stacks?.group).toBe('infrastructure');
+        expect(stacks?.tier).toBeNull();
+        for (const term of ['stack', 'deploy', 'progress', 'diff', 'save']) {
+            expect(stacks?.keywords, `keyword ${term}`).toContain(term);
+        }
+    });
+
+    it('scopes the browser-local sections (Appearance, Stacks) to the browser', () => {
+        expect(SETTINGS_ITEMS.find(i => i.id === 'appearance')?.scope).toBe('browser');
+        expect(SETTINGS_ITEMS.find(i => i.id === 'stacks')?.scope).toBe('browser');
+    });
+});
+
+describe('scopeLabel', () => {
+    const item = (over: Partial<SettingsItemMeta>): SettingsItemMeta => ({
+        id: 'stacks', group: 'infrastructure', label: 'X', description: '',
+        keywords: [], tier: null, scope: 'global', ...over,
+    });
+
+    it('reads browser for browser-scoped sections regardless of their group', () => {
+        expect(scopeLabel(item({ scope: 'browser', group: 'personal' }))).toBe('browser');
+        expect(scopeLabel(item({ scope: 'browser', group: 'infrastructure' }))).toBe('browser');
+    });
+
+    it('reads operator for the signed-in Account (personal group)', () => {
+        expect(scopeLabel(item({ scope: 'global', group: 'personal' }))).toBe('operator');
+    });
+
+    it('reads global for other non-node, non-browser groups', () => {
+        expect(scopeLabel(item({ scope: 'global', group: 'access' }))).toBe('global');
     });
 });

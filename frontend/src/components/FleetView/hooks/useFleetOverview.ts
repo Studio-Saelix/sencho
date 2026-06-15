@@ -31,10 +31,31 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
     const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
     const [viewMode, setViewMode] = useState<ViewMode>('grid');
     const [labelFilters, setLabelFilters] = useState<Set<string>>(new Set());
+    // Per-node networking signals (which nodes have an exposed / unknown-exposure
+    // / network-drift stack), for the networking filter. Loaded fail-soft.
+    const [networkingByNode, setNetworkingByNode] = useState<Map<number, { exposed: boolean; unknown: boolean; drift: boolean }>>(new Map());
     const abortRef = useRef<AbortController | null>(null);
 
     const { fleetPalette, fleetStackLabelMap } = useFleetLabels({ nodes });
     const { labelsByNodeId, distinctLabels } = useNodeLabels({ nodes });
+
+    // The networking summary fans out to every remote (each with its own
+    // timeout), so it is loaded detached: it must never gate the overview's
+    // loading state, and a failure just leaves the networking filter empty.
+    const loadNetworkingSummary = useCallback(async (signal: AbortSignal) => {
+        try {
+            const res = await apiFetch('/fleet/networking-summary', { localOnly: true, signal });
+            if (!res.ok) return;
+            const data = await res.json() as { nodes?: { nodeId: number; summary: { exposed: { count: number }; unknownExposure: { count: number }; networkDrift: { count: number } } | null }[] };
+            const map = new Map<number, { exposed: boolean; unknown: boolean; drift: boolean }>();
+            for (const n of data.nodes ?? []) {
+                if (n.summary) map.set(n.nodeId, { exposed: n.summary.exposed.count > 0, unknown: n.summary.unknownExposure.count > 0, drift: n.summary.networkDrift.count > 0 });
+            }
+            setNetworkingByNode(map);
+        } catch (error) {
+            if (!(error instanceof DOMException && error.name === 'AbortError')) console.warn('Failed to fetch fleet networking summary:', error);
+        }
+    }, []);
 
     const fetchOverview = useCallback(async (showRefresh = false) => {
         abortRef.current?.abort();
@@ -48,6 +69,8 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
                 setNodes(await res.json());
                 setLastSyncAt(Date.now());
             }
+            // Detached: it must never gate the loading state cleared in `finally`.
+            void loadNetworkingSummary(controller.signal);
         } catch (error) {
             if (error instanceof DOMException && error.name === 'AbortError') return;
             console.error('Failed to fetch fleet overview:', error);
@@ -55,7 +78,7 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
             setLoading(false);
             setRefreshing(false);
         }
-    }, []);
+    }, [loadNetworkingSummary]);
 
     const onlineNodes = useMemo(() => nodes.filter(n => n.status === 'online'), [nodes]);
 
@@ -110,6 +133,19 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         if (prefs.filterType === 'remote') filtered = filtered.filter(n => n.type !== 'local');
         if (prefs.filterCritical) filtered = filtered.filter(isCritical);
 
+        if (prefs.filterNetworking !== 'all') {
+            const signal = prefs.filterNetworking;
+            filtered = filtered.filter(n => {
+                const s = networkingByNode.get(n.id);
+                if (!s) return false;
+                switch (signal) {
+                    case 'exposed': return s.exposed;
+                    case 'unknown': return s.unknown;
+                    case 'drift': return s.drift;
+                }
+            });
+        }
+
         if (labelFilters.size > 0) {
             filtered = filtered.filter(n => {
                 const nodeStackLabels = fleetStackLabelMap[n.id] ?? {};
@@ -143,7 +179,7 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         });
 
         return filtered;
-    }, [nodes, searchQuery, prefs, labelFilters, fleetStackLabelMap]);
+    }, [nodes, searchQuery, prefs, labelFilters, fleetStackLabelMap, networkingByNode]);
 
     const localNode = useMemo(
         () => processedNodes.find(n => n.type === 'local') ?? null,
@@ -184,12 +220,13 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         if (prefs.filterStatus !== 'all') count++;
         if (prefs.filterType !== 'all') count++;
         if (prefs.filterCritical) count++;
+        if (prefs.filterNetworking !== 'all') count++;
         count += labelFilters.size;
         return count;
     }, [prefs, labelFilters]);
 
     const clearFilters = useCallback(() => {
-        updatePrefs({ filterStatus: 'all', filterType: 'all', filterCritical: false });
+        updatePrefs({ filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all' });
         setLabelFilters(new Set());
     }, [updatePrefs]);
 

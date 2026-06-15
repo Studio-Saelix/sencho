@@ -10,11 +10,12 @@ export { NotificationsSection } from './NotificationsSection';
 export { DeveloperSection } from './DeveloperSection';
 export { DataRetentionSection } from './DataRetentionSection';
 export { AppStoreSection } from './AppStoreSection';
+export { StacksSection } from './StacksSection';
 export { SupportSection } from './SupportSection';
 export { AboutSection } from './AboutSection';
 export { RecoverySection } from './RecoverySection';
 
-// Paid-tier sections (UsersSection, WebhooksSection, SecuritySection,
+// Paid-tier sections (UsersSection, WebhooksSection,
 // LabelsSection, CloudBackupSection, NotificationRoutingSection) are NOT
 // re-exported from this barrel. They are dynamically imported with
 // React.lazy in SettingsPage.tsx so their JSX, copy, and prop shapes do not
@@ -30,6 +31,7 @@ export {
     getSettingsGroup,
     isItemVisible,
     isItemLocked,
+    scopeLabel,
 } from './registry';
 export type {
     SettingsGroupId,

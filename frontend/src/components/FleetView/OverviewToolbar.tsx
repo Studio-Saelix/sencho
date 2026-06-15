@@ -12,7 +12,7 @@ import { MultiSelectCombobox } from '@/components/ui/multi-select-combobox';
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control';
 import { LabelDot } from '../LabelPill';
 import type { LabelColor } from '../label-types';
-import type { ViewMode, SortField, FilterStatus, FilterType, FleetPreferences, FleetPaletteEntry } from './types';
+import type { ViewMode, SortField, FilterStatus, FilterType, FilterNetworking, FleetPreferences, FleetPaletteEntry } from './types';
 
 const FILTER_SECTION_LABEL_CLASS = 'text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-stat-subtitle';
 
@@ -74,6 +74,7 @@ export function OverviewToolbar({
         (prefs.filterStatus !== 'all' ? 1 : 0) +
         (prefs.filterType !== 'all' ? 1 : 0) +
         (prefs.filterCritical ? 1 : 0) +
+        (prefs.filterNetworking !== 'all' ? 1 : 0) +
         (labelFilters.size > 0 ? 1 : 0);
 
     const paletteOptions = useMemo(
@@ -202,6 +203,22 @@ export function OverviewToolbar({
                                     <AlertTriangle className="w-3 h-3 mr-1" />
                                     Critical Only
                                 </Button>
+                            </div>
+                            <div className="space-y-1.5">
+                                <label className={FILTER_SECTION_LABEL_CLASS}>Networking</label>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                    {([['all', 'All'], ['exposed', 'Exposed'], ['unknown', 'Unknown'], ['drift', 'Drift']] as [FilterNetworking, string][]).map(([value, label]) => (
+                                        <Button
+                                            key={value}
+                                            variant={prefs.filterNetworking === value ? 'default' : 'outline'}
+                                            size="sm"
+                                            className="h-7 text-xs px-2.5"
+                                            onClick={() => onPrefsChange({ filterNetworking: value })}
+                                        >
+                                            {label}
+                                        </Button>
+                                    ))}
+                                </div>
                             </div>
                             {fleetPalette.length > 0 && (
                                 <div className="space-y-1.5">

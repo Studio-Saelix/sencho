@@ -1,4 +1,5 @@
 import type { EffectiveModel } from './effectiveModel';
+import type { ExposureIntent } from '../network/types';
 
 /** Graded severity of a single preflight finding. */
 export type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
@@ -92,4 +93,12 @@ export interface PreflightContext {
   existingVolumeNames: Set<string>;
   existingContainers: { name: string; stack: string | null }[];
   bindChecks: BindCheck[];
+  /** Stack-level exposure classification, or null when unset. */
+  stackIntent: ExposureIntent | null;
+  /** Per-service exposure overrides (a service falls back to stackIntent when absent). */
+  serviceIntents: Record<string, ExposureIntent>;
+  /** Host ports referenced by the dossier's documented access URLs. */
+  accessUrlPorts: Set<number>;
+  /** Whether the dossier records any access URL (gates the port-vs-documented rule). */
+  hasAccessUrls: boolean;
 }

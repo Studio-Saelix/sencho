@@ -4,6 +4,7 @@ import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
 import type { AuditStatsInput } from './AuditAnomalyService';
+import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -150,6 +151,17 @@ export interface StackDriftFindingRow {
     actual_json: string | null;
     detected_at: number;
     resolved_at: number | null;
+}
+
+export interface StackExposureIntentRow {
+    id: number;
+    node_id: number;
+    stack_name: string;
+    /** '' = the stack-level classification; otherwise a service name. */
+    service: string;
+    intent: ExposureIntent;
+    updated_at: number;
+    updated_by: string | null;
 }
 
 export interface Node {
@@ -691,6 +703,8 @@ export interface ScanSummary {
     low: number;
     unknown: number;
     fixable: number;
+    secret_count: number;
+    misconfig_count: number;
     scanned_at: number;
     scan_id: number;
 }
@@ -1260,6 +1274,19 @@ export class DatabaseService {
       );
       CREATE INDEX IF NOT EXISTS idx_stack_drift_findings_open
         ON stack_drift_findings(node_id, stack_name, resolved_at);
+
+      CREATE TABLE IF NOT EXISTS stack_exposure_intent (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        service TEXT NOT NULL DEFAULT '',
+        intent TEXT NOT NULL CHECK(intent IN (${EXPOSURE_INTENTS.map(i => `'${i}'`).join(', ')})),
+        updated_at INTEGER NOT NULL,
+        updated_by TEXT,
+        UNIQUE(node_id, stack_name, service)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stack_exposure_intent_stack
+        ON stack_exposure_intent(node_id, stack_name);
 
       CREATE TABLE IF NOT EXISTS preflight_runs (
         id TEXT PRIMARY KEY,
@@ -2298,6 +2325,37 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
+    // --- Stack Exposure Intent (per-stack and per-service exposure classification) ---
+
+    /** All intent rows for a stack: the stack-level row (service '') and any per-service rows. */
+    public getStackExposureIntents(nodeId: number, stackName: string): StackExposureIntentRow[] {
+        return this.db.prepare(
+            'SELECT * FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ? ORDER BY service ASC'
+        ).all(nodeId, stackName) as StackExposureIntentRow[];
+    }
+
+    /** Upsert one intent row. `service` is '' for the stack-level classification. */
+    public setStackExposureIntent(nodeId: number, stackName: string, service: string, intent: ExposureIntent, updatedBy: string | null): void {
+        this.db.prepare(
+            `INSERT INTO stack_exposure_intent (node_id, stack_name, service, intent, updated_at, updated_by)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, stack_name, service) DO UPDATE SET
+                intent = excluded.intent,
+                updated_at = excluded.updated_at,
+                updated_by = excluded.updated_by`
+        ).run(nodeId, stackName, service, intent, Date.now(), updatedBy);
+    }
+
+    /** Clear one intent row, leaving that scope unset; consumers treat a service with no row as inheriting the stack intent. */
+    public deleteStackExposureIntent(nodeId: number, stackName: string, service: string): void {
+        this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ? AND service = ?').run(nodeId, stackName, service);
+    }
+
+    /** Clear every intent row for a stack (used when the stack is deleted). */
+    public deleteStackExposureIntents(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    }
+
     // --- Compose Doctor / Preflight ---
 
     /** Store a run and its findings, replacing any prior run for this (node, stack). */
@@ -2730,6 +2788,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_labels WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_dossiers WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_drift_findings WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
@@ -4394,7 +4453,7 @@ export class DatabaseService {
             .prepare(
                 `SELECT vs.image_ref, vs.id as scan_id, vs.highest_severity, vs.total_vulnerabilities,
                     vs.critical_count, vs.high_count, vs.medium_count, vs.low_count,
-                    vs.unknown_count, vs.fixable_count, vs.scanned_at
+                    vs.unknown_count, vs.fixable_count, vs.secret_count, vs.misconfig_count, vs.scanned_at
                  FROM vulnerability_scans vs
                  INNER JOIN (
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
@@ -4415,6 +4474,8 @@ export class DatabaseService {
                 low_count: number;
                 unknown_count: number;
                 fixable_count: number;
+                secret_count: number;
+                misconfig_count: number;
                 scanned_at: number;
             }>;
         const out: Record<string, ScanSummary> = {};
@@ -4429,11 +4490,90 @@ export class DatabaseService {
                 low: r.low_count,
                 unknown: r.unknown_count,
                 fixable: r.fixable_count,
+                secret_count: r.secret_count,
+                misconfig_count: r.misconfig_count,
                 scanned_at: r.scanned_at,
                 scan_id: r.scan_id,
             };
         }
         return out;
+    }
+
+    /**
+     * Uncapped count of scans in a given status for a node. Unlike
+     * `getVulnerabilityScans`, this never applies the per-image history cap, so
+     * the Security overview reports the true number of (for example) failed
+     * scans rather than a capped grouped total.
+     */
+    public countScansByStatus(nodeId: number, status: VulnScanStatus): number {
+        return (
+            this.db
+                .prepare(
+                    'SELECT COUNT(*) AS cnt FROM vulnerability_scans WHERE node_id = ? AND status = ?',
+                )
+                .get(nodeId, status) as { cnt: number }
+        ).cnt;
+    }
+
+    /**
+     * Daily Critical/High totals for the node over the last `days` days, for the
+     * Security overview risk-trend chart. For each calendar day with scans, takes
+     * the latest completed scan per image (so a re-scan replaces, not adds) and
+     * sums the critical and high counts across images. Days with no scans are
+     * omitted from the result.
+     */
+    public getDailyRiskTrend(
+        nodeId: number,
+        days = 30,
+    ): Array<{ date: string; critical: number; high: number }> {
+        const window = Math.max(1, Math.min(days, 365));
+        const cutoffMs = Date.now() - window * 24 * 60 * 60 * 1000;
+        const rows = this.db
+            .prepare(
+                `WITH daily_latest AS (
+                   SELECT
+                     DATE(scanned_at / 1000, 'unixepoch') AS day,
+                     image_ref,
+                     critical_count,
+                     high_count,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY DATE(scanned_at / 1000, 'unixepoch'), image_ref
+                       ORDER BY scanned_at DESC
+                     ) AS rn
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed' AND scanned_at >= ?
+                 )
+                 SELECT day,
+                        SUM(critical_count) AS critical,
+                        SUM(high_count) AS high
+                 FROM daily_latest
+                 WHERE rn = 1
+                 GROUP BY day
+                 ORDER BY day ASC`,
+            )
+            .all(nodeId, cutoffMs) as Array<{ day: string; critical: number; high: number }>;
+        return rows.map((r) => ({ date: r.day, critical: r.critical ?? 0, high: r.high ?? 0 }));
+    }
+
+    /**
+     * Count of enabled block-on-deploy policies that are eligible to apply to
+     * this node: fleet-wide (node_id IS NULL) or scoped to this node. Built on
+     * `getScanPoliciesForUi` so a replica never counts policies scoped to a
+     * sibling node's identity. Stack-pattern applicability is not evaluated
+     * (there is no concrete stack name at overview scope), so this is an
+     * approximate "is this node enforcing" indicator, not a per-stack guarantee.
+     */
+    public countEligibleBlockPolicies(
+        nodeId: number,
+        role: 'control' | 'replica',
+        selfIdentity: string,
+    ): number {
+        return this.getScanPoliciesForUi(role, selfIdentity).filter(
+            (p) =>
+                p.enabled === 1 &&
+                p.block_on_deploy === 1 &&
+                (p.node_id === null || p.node_id === nodeId),
+        ).length;
     }
 
     // --- Scan Policies ---

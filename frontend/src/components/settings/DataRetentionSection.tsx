@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { RefreshCw } from 'lucide-react';
@@ -15,6 +15,7 @@ import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { useSettingsDirty } from './useSettingsDirty';
 
 interface DataRetentionSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
@@ -44,22 +45,9 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
     const { isPaid } = useLicense();
     const { activeNode } = useNodes();
     const readOnly = !isAdmin;
-    const [settings, setSettings] = useState<DataRetentionFields>({ ...DEFAULT_DATA_RETENTION });
-    const serverSettingsRef = useRef<DataRetentionFields>({ ...DEFAULT_DATA_RETENTION });
+    const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<DataRetentionFields>({ ...DEFAULT_DATA_RETENTION });
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-
-    const dirtyCount = useMemo(() => {
-        const baseline = serverSettingsRef.current;
-        let n = 0;
-        if (settings.metrics_retention_hours !== baseline.metrics_retention_hours) n++;
-        if (settings.log_retention_days !== baseline.log_retention_days) n++;
-        if (settings.audit_retention_days !== baseline.audit_retention_days) n++;
-        if (settings.scan_history_per_image_limit !== baseline.scan_history_per_image_limit) n++;
-        return n;
-    }, [settings]);
-
-    const hasChanges = dirtyCount > 0;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -89,8 +77,7 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
                     audit_retention_days: nodeData.audit_retention_days ?? DEFAULT_SETTINGS.audit_retention_days,
                     scan_history_per_image_limit: nodeData.scan_history_per_image_limit ?? DEFAULT_SETTINGS.scan_history_per_image_limit,
                 };
-                setSettings(safe);
-                serverSettingsRef.current = { ...safe };
+                reset(safe);
             } catch (e) {
                 console.error('Failed to fetch data retention settings', e);
             } finally {
@@ -106,17 +93,18 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
     };
 
     const saveSettings = async () => {
+        const submitted = { ...settings };
         const payload: DataRetentionFields = {
-            metrics_retention_hours: settings.metrics_retention_hours,
-            log_retention_days: settings.log_retention_days,
-            scan_history_per_image_limit: settings.scan_history_per_image_limit,
+            metrics_retention_hours: submitted.metrics_retention_hours,
+            log_retention_days: submitted.log_retention_days,
+            scan_history_per_image_limit: submitted.scan_history_per_image_limit,
         };
         // audit_retention_days is a paid-only key the backend rejects from a
         // Community operator. The field renders only when isPaid, so include it
         // in the save only then; otherwise a Community save would 403 on a key
         // the operator cannot edit and never sees.
         if (isPaid) {
-            payload.audit_retention_days = settings.audit_retention_days;
+            payload.audit_retention_days = submitted.audit_retention_days;
         }
         setIsSaving(true);
         try {
@@ -129,7 +117,7 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
                 return;
             }
-            serverSettingsRef.current = { ...settings };
+            markSaved(submitted);
             toast.success('Data retention saved.');
             window.dispatchEvent(new CustomEvent<SenchoSettingsChangedDetail>(SENCHO_SETTINGS_CHANGED, {
                 detail: { changedKeys: Object.keys(payload) },

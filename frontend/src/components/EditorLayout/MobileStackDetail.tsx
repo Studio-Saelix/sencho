@@ -3,6 +3,7 @@ import { ChevronLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import ErrorBoundary from '../ErrorBoundary';
 import StackAnatomyPanel from '../StackAnatomyPanel';
+import { MobileComposeEditor } from './MobileComposeEditor';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
 import { RecoveryPanel } from './RecoveryPanel';
 import { StackOperationBanner } from './StackOperationBanner';
@@ -21,7 +22,8 @@ type Segment = (typeof SEGMENTS)[number]['id'];
 // two-pane grid does not fit a phone, so the same identity header, container
 // health, logs, and anatomy are reorganized into a tracked-mono segmented
 // control. Logs is the default segment (first-read, without copying Dockge's
-// layout). Compose is read-only on mobile: full file editing stays on desktop.
+// layout). From the Compose segment, an editor with stack:edit can open the
+// full-screen MobileComposeEditor for small, safe compose/.env edits.
 export function MobileStackDetail(props: EditorViewProps) {
     const {
         stackName,
@@ -31,7 +33,10 @@ export function MobileStackDetail(props: EditorViewProps) {
         containerStatsError,
         content,
         envContent,
+        envExists,
+        envFiles,
         selectedEnvFile,
+        isFileLoading,
         gitSourcePendingMap,
         notifications,
         copiedDigest,
@@ -42,6 +47,8 @@ export function MobileStackDetail(props: EditorViewProps) {
         trivy,
         backupInfo,
         logsMode,
+        activeTab,
+        editingCompose,
         copiedDigestTimerRef,
         deployStack,
         restartStack,
@@ -49,14 +56,23 @@ export function MobileStackDetail(props: EditorViewProps) {
         updateStack,
         rollbackStack,
         scanStackConfig,
+        requestSave,
+        requestSaveAndDeploy,
+        setContent,
+        setEnvContent,
+        changeEnvFile,
         openLogViewer,
         openBashModal,
         serviceAction,
         setLogsMode,
+        setActiveTab,
+        setEditingCompose,
         setGitSourceOpen,
         setCopiedDigest,
         requestDeleteStack,
         onMobileBack,
+        onCloseEditor,
+        hasUnsavedChanges,
         headerActions,
         recoveryResult,
         onRefreshState,
@@ -69,6 +85,34 @@ export function MobileStackDetail(props: EditorViewProps) {
     const safeContainers = containers || [];
     const isRunning = safeContainers.some(c => c.State === 'running');
     const canEditStack = can('stack:edit', 'stack', stackName);
+
+    // The writable editor layer renders only for an editor; a stale editingCompose
+    // while the user lacks stack:edit falls back to the read-only Compose segment.
+    if (editingCompose && canEditStack) {
+        return (
+            <ErrorBoundary>
+                <MobileComposeEditor
+                    content={content}
+                    envContent={envContent}
+                    setContent={setContent}
+                    setEnvContent={setEnvContent}
+                    activeTab={activeTab}
+                    setActiveTab={setActiveTab}
+                    envExists={envExists}
+                    envFiles={envFiles}
+                    selectedEnvFile={selectedEnvFile}
+                    changeEnvFile={changeEnvFile}
+                    isFileLoading={isFileLoading}
+                    loadingAction={loadingAction}
+                    canEdit={canEditStack}
+                    requestSave={requestSave}
+                    requestSaveAndDeploy={requestSaveAndDeploy}
+                    onClose={onCloseEditor}
+                    hasUnsavedChanges={hasUnsavedChanges}
+                />
+            </ErrorBoundary>
+        );
+    }
 
     return (
         <ErrorBoundary>
@@ -186,27 +230,20 @@ export function MobileStackDetail(props: EditorViewProps) {
                         <StackLogsSection stackName={stackName} logsMode={logsMode} setLogsMode={setLogsMode} />
                     )}
                     {segment === 'compose' && (
-                        <div className="flex min-h-0 flex-1 flex-col gap-3">
-                            <div className="min-h-0 flex-1">
-                                <StackAnatomyPanel
-                                    stackName={stackName}
-                                    content={content}
-                                    envContent={envContent}
-                                    selectedEnvFile={selectedEnvFile}
-                                    gitSourcePending={Boolean(gitSourcePendingMap[stackName])}
-                                    onEditCompose={() => {}}
-                                    onOpenGitSource={() => setGitSourceOpen(true)}
-                                    onApplyUpdate={() => { void updateStack(); }}
-                                    applying={loadingAction === 'update'}
-                                    canEdit={false}
-                                    notifications={notifications}
-                                />
-                            </div>
-                            {canEditStack && (
-                                <div className="shrink-0 rounded-lg border border-card-border bg-card px-3 py-2.5 font-mono text-[11px] text-stat-subtitle">
-                                    Editing compose is available on a larger screen. Open this stack on desktop to edit the file.
-                                </div>
-                            )}
+                        <div className="min-h-0 flex-1">
+                            <StackAnatomyPanel
+                                stackName={stackName}
+                                content={content}
+                                envContent={envContent}
+                                selectedEnvFile={selectedEnvFile}
+                                gitSourcePending={Boolean(gitSourcePendingMap[stackName])}
+                                onEditCompose={() => { setActiveTab('compose'); setEditingCompose(true); }}
+                                onOpenGitSource={() => setGitSourceOpen(true)}
+                                onApplyUpdate={() => { void updateStack(); }}
+                                applying={loadingAction === 'update'}
+                                canEdit={canEditStack}
+                                notifications={notifications}
+                            />
                         </div>
                     )}
                 </div>

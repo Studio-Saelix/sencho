@@ -30,7 +30,7 @@ const NODES: FleetNode[] = [
   { id: 3, name: 'Charlie', type: 'remote', status: 'offline', stats: null, systemStats: null, stacks: null, cordoned: false, cordoned_at: null, cordoned_reason: null },
 ];
 
-const DEFAULT_PREFS: FleetPreferences = { sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false };
+const DEFAULT_PREFS: FleetPreferences = { sortBy: 'name', sortDir: 'asc', filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all' };
 
 function setup(prefs: Partial<FleetPreferences> = {}) {
   const updatePrefs = vi.fn();
@@ -47,6 +47,13 @@ beforeEach(() => {
   fetchForNodeMock.mockReset();
   apiFetchMock.mockImplementation((path: string) => {
     if (path === '/fleet/overview') return Promise.resolve(okJson(NODES));
+    if (path === '/fleet/networking-summary') return Promise.resolve(okJson({
+      nodes: [
+        // Alpha (1) is exposed only; Bravo (2) has a summary but is unknown + drift, not exposed.
+        { nodeId: 1, summary: { exposed: { count: 1, stacks: ['web'] }, unknownExposure: { count: 0, stacks: [] }, networkDrift: { count: 0, stacks: [] } } },
+        { nodeId: 2, summary: { exposed: { count: 0, stacks: [] }, unknownExposure: { count: 1, stacks: ['db'] }, networkDrift: { count: 1, stacks: ['db'] } } },
+      ],
+    }));
     if (path === '/node-labels') return Promise.resolve(okJson({}));
     return Promise.resolve(okJson({}));
   });
@@ -108,6 +115,37 @@ describe('useFleetOverview', () => {
     const { result, updatePrefs } = setup({ filterStatus: 'online' });
     await act(async () => { await result.current.fetchOverview(); });
     act(() => result.current.clearFilters());
-    expect(updatePrefs).toHaveBeenCalledWith({ filterStatus: 'all', filterType: 'all', filterCritical: false });
+    expect(updatePrefs).toHaveBeenCalledWith({ filterStatus: 'all', filterType: 'all', filterCritical: false, filterNetworking: 'all' });
+  });
+
+  it('narrows to nodes with an exposed stack when the networking filter is set', async () => {
+    const { result } = setup({ filterNetworking: 'exposed' });
+    await act(async () => { await result.current.fetchOverview(); });
+    // Bravo has a summary but exposed.count is 0, so it is excluded, proving the
+    // filter checks the signal rather than just presence of a summary.
+    await waitFor(() => expect(result.current.processedNodes.map(n => n.name)).toEqual(['Alpha']));
+  });
+
+  it('narrows by the unknown-exposure and network-drift signals', async () => {
+    const unknown = setup({ filterNetworking: 'unknown' });
+    await act(async () => { await unknown.result.current.fetchOverview(); });
+    await waitFor(() => expect(unknown.result.current.processedNodes.map(n => n.name)).toEqual(['Bravo']));
+
+    const drift = setup({ filterNetworking: 'drift' });
+    await act(async () => { await drift.result.current.fetchOverview(); });
+    await waitFor(() => expect(drift.result.current.processedNodes.map(n => n.name)).toEqual(['Bravo']));
+  });
+
+  it('keeps the overview loaded when the networking summary fetch fails', async () => {
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/fleet/overview') return Promise.resolve(okJson(NODES));
+      if (path === '/fleet/networking-summary') return Promise.reject(new Error('summary down'));
+      return Promise.resolve(okJson({}));
+    });
+    // With no networking filter active, the overview must render all nodes even
+    // though the summary fetch threw (fail-soft, detached from the load path).
+    const { result } = setup({ filterNetworking: 'all' });
+    await act(async () => { await result.current.fetchOverview(); });
+    expect(result.current.processedNodes.length).toBe(3);
   });
 });
