@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from './ui/button';
 import { Plus, Loader2, ChevronLeft } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
@@ -51,6 +51,11 @@ import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
 import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
 import type { SectionId } from './settings/types';
+
+// The Security page is heavy (charts, scan sheets) and already code-split on the
+// desktop content path, so the bespoke phone screen reuses the same lazy chunk
+// rather than pulling SecurityView into the main shell bundle.
+const SecurityView = lazy(() => import('./SecurityView').then(m => ({ default: m.SecurityView })));
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -453,6 +458,8 @@ export default function EditorLayout() {
       onDismissRecovery={() => { if (selectedFile) dismissActionResult(selectedFile); }}
       panelStartedAt={panelStartedAt}
       onMobileBack={goToMobileList}
+      onCloseEditor={() => stackActions.attemptLeaveEditor(() => setEditingCompose(false))}
+      hasUnsavedChanges={stackActions.hasUnsavedChanges}
     />
   );
 
@@ -758,6 +765,22 @@ export default function EditorLayout() {
             return <MobileSchedules headerActions={mobileMastheadActions} />;
           case 'settings':
             return <MobileSettings headerActions={mobileMastheadActions} />;
+          case 'security':
+            return (
+              <Suspense
+                fallback={(
+                  <div className="flex h-full items-center justify-center">
+                    <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
+                  </div>
+                )}
+              >
+                <SecurityView
+                  activeTab={securityTab}
+                  onTabChange={setSecurityTab}
+                  headerActions={mobileMastheadActions}
+                />
+              </Suspense>
+            );
           default:
             return workspaceEl;
         }

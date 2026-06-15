@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/context/AuthContext';
@@ -14,6 +14,7 @@ import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { useSettingsDirty } from './useSettingsDirty';
 
 interface DeveloperSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
@@ -37,12 +38,9 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
     const { isAdmin } = useAuth();
     const { activeNode } = useNodes();
     const readOnly = !isAdmin;
-    const [settings, setSettings] = useState<DeveloperFields>({ ...DEFAULT_DEVELOPER });
-    const serverSettingsRef = useRef<DeveloperFields>({ ...DEFAULT_DEVELOPER });
+    const { settings, setSettings, hasChanges, reset, markSaved } = useSettingsDirty<DeveloperFields>({ ...DEFAULT_DEVELOPER });
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-
-    const hasChanges = settings.developer_mode !== serverSettingsRef.current.developer_mode;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -69,8 +67,7 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
                 const safe: DeveloperFields = {
                     developer_mode: (nodeData.developer_mode as '0' | '1') ?? DEFAULT_SETTINGS.developer_mode,
                 };
-                setSettings(safe);
-                serverSettingsRef.current = { ...safe };
+                reset(safe);
             } catch (e) {
                 console.error('Failed to fetch developer settings', e);
             } finally {
@@ -86,8 +83,9 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
     };
 
     const saveSettings = async () => {
+        const submitted = { ...settings };
         const payload = {
-            developer_mode: settings.developer_mode,
+            developer_mode: submitted.developer_mode,
         };
         setIsSaving(true);
         try {
@@ -100,7 +98,7 @@ export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
                 return;
             }
-            serverSettingsRef.current = { ...settings };
+            markSaved(submitted);
             toast.success('Developer settings saved.');
             window.dispatchEvent(new CustomEvent<SenchoSettingsChangedDetail>(SENCHO_SETTINGS_CHANGED, {
                 detail: { changedKeys: Object.keys(payload) },

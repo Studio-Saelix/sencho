@@ -13,8 +13,8 @@ describe('mobile treatments', () => {
     }
   });
 
-  it('treats the Security view as responsive (reflowed, not bespoke or desktop-only)', () => {
-    expect(MOBILE_TREATMENTS.security).toBe('responsive');
+  it('treats the Security view as a bespoke masthead-led phone screen', () => {
+    expect(MOBILE_TREATMENTS.security).toBe('bespoke');
   });
 
   it('keeps BESPOKE_MOBILE_VIEWS in lockstep with the bespoke treatments', () => {
@@ -27,10 +27,12 @@ describe('mobile treatments', () => {
 
   it('pins the set of bespoke phone screens (update deliberately when adding one)', () => {
     // A change here means a top-level view gained or lost a bespoke phone screen.
-    // Updating this list should go hand in hand with adding the screen under
-    // components/mobile/ and wiring its case in EditorLayout's renderMobileBespoke.
+    // Updating this list should go hand in hand with wiring the screen's case in
+    // EditorLayout's renderMobileBespoke (a dedicated component under
+    // components/mobile/, or a masthead-led mobile branch of the desktop view as
+    // Security does).
     expect([...BESPOKE_MOBILE_VIEWS].sort()).toEqual(
-      ['dashboard', 'fleet', 'scheduled-ops', 'settings'],
+      ['dashboard', 'fleet', 'scheduled-ops', 'security', 'settings'],
     );
   });
 });

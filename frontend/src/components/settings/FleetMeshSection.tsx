@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { RefreshCw } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
@@ -11,6 +11,7 @@ import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { useSettingsDirty } from './useSettingsDirty';
 import { TogglePill } from '@/components/ui/toggle-pill';
 
 interface FleetMeshSectionProps {
@@ -36,20 +37,9 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
     const { activeNode } = useNodes();
     const { isAdmin } = useAuth();
     const readOnly = !isAdmin;
-    const [settings, setSettings] = useState<FleetMeshFields>({ ...DEFAULT_FLEET_MESH });
-    const serverSettingsRef = useRef<FleetMeshFields>({ ...DEFAULT_FLEET_MESH });
+    const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<FleetMeshFields>({ ...DEFAULT_FLEET_MESH });
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-
-    const dirtyCount = useMemo(() => {
-        const baseline = serverSettingsRef.current;
-        let n = 0;
-        if (settings.mesh_auto_recreate !== baseline.mesh_auto_recreate) n++;
-        if (settings.snapshot_documentation !== baseline.snapshot_documentation) n++;
-        return n;
-    }, [settings]);
-
-    const hasChanges = dirtyCount > 0;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -77,8 +67,7 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
                     mesh_auto_recreate: (nodeData.mesh_auto_recreate as '0' | '1') ?? DEFAULT_SETTINGS.mesh_auto_recreate,
                     snapshot_documentation: (nodeData.snapshot_documentation as '0' | '1') ?? DEFAULT_SETTINGS.snapshot_documentation,
                 };
-                setSettings(safe);
-                serverSettingsRef.current = { ...safe };
+                reset(safe);
             } catch (e) {
                 console.error('Failed to fetch fleet mesh settings', e);
             } finally {
@@ -94,18 +83,19 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
     };
 
     const saveSettings = async () => {
+        const submitted = { ...settings };
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
-                body: JSON.stringify(settings),
+                body: JSON.stringify(submitted),
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
                 return;
             }
-            serverSettingsRef.current = { ...settings };
+            markSaved(submitted);
             toast.success('Fleet settings saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');

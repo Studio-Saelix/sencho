@@ -2,6 +2,10 @@ import type { ScanSummary, VulnSeverity } from '@/types/security';
 
 export type SeverityKey = VulnSeverity | 'CLEAN' | 'FINDINGS';
 
+/** Image-list filter value: any severity key, the "all" sentinel, or the
+ *  phone-only FIXABLE pseudo-filter (images with at least one fixable finding). */
+export type ImageFilterValue = 'all' | SeverityKey | 'FIXABLE';
+
 /**
  * The display "key" for a scan summary: its highest vulnerability severity, or
  * `FINDINGS` when the scan has only secrets/misconfigurations (stored
