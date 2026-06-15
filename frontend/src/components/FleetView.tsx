@@ -1,5 +1,5 @@
 import {
-    RefreshCw, RefreshCcwDot, Camera, FileDown,
+    RefreshCw, Camera, FileDown,
     Network, SlidersHorizontal,
     Send, KeyRound, ArrowLeftRight, Wrench, Workflow,
 } from 'lucide-react';
@@ -136,15 +136,6 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         <Button
                             variant="outline"
                             size="sm"
-                            onClick={updateStatus.checkUpdates}
-                            className="gap-2"
-                        >
-                            <RefreshCcwDot className="w-4 h-4" />
-                            Check Updates
-                        </Button>
-                        <Button
-                            variant="outline"
-                            size="sm"
                             onClick={() => overview.fetchOverview(true)}
                             disabled={refreshing}
                             className="gap-2"
@@ -195,6 +186,8 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                         onEditNode={isAdmin ? openEdit : undefined}
                         onDeleteNode={isAdmin ? openDelete : undefined}
                         onAddNode={isAdmin ? openCreate : undefined}
+                        onCheckUpdates={updateStatus.checkUpdates}
+                        checkingUpdates={updateStatus.checkingUpdates}
                         topologyMode={topology.prefs.mode}
                         onTopologyModeChange={topology.setMode}
                         topologyPositions={topology.prefs.positions}

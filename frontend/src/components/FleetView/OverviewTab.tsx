@@ -40,6 +40,8 @@ interface OverviewTabProps {
     topologyPositions: SavedPositions;
     onTopologyPositionsChange: (positions: SavedPositions) => void;
     onAddNode?: () => void;
+    onCheckUpdates?: () => void;
+    checkingUpdates?: boolean;
 }
 
 export function OverviewTab({
@@ -73,6 +75,8 @@ export function OverviewTab({
     topologyPositions,
     onTopologyPositionsChange,
     onAddNode,
+    onCheckUpdates,
+    checkingUpdates,
 }: OverviewTabProps) {
     return (
         <>
@@ -116,6 +120,8 @@ export function OverviewTab({
                         onLabelFiltersChange={onLabelFiltersChange}
                         onClearFilters={onClearFilters}
                         onAddNode={onAddNode}
+                        onCheckUpdates={onCheckUpdates}
+                        checkingUpdates={checkingUpdates}
                     />
 
                     {viewMode === 'topology' && processedNodes.length > 0 ? (
