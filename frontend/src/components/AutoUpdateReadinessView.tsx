@@ -515,6 +515,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Monotonic token guards against stale setGroups from older fetches.
   const loadTokenRef = useRef(0);
+  // Separate token for the cadence fetch: a slow initial /status must not
+  // overwrite the fresher status a Recheck just loaded, and neither may set
+  // state after unmount.
+  const cadenceTokenRef = useRef(0);
   // Holds the latest nodes array so loadReadiness can reference it without
   // re-firing every time NodeContext rebuilds the array on a meta refresh.
   const nodesRef = useRef(nodes);
@@ -659,9 +663,14 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   // list is fleet-wide, but the cadence shown by the card is this instance's own
   // scanner, configured in Settings. Each node runs its own scanner.
   const loadCadence = useCallback(async () => {
+    const token = ++cadenceTokenRef.current;
     try {
       const res = await apiFetch('/image-updates/status', { localOnly: true });
-      if (res.ok) setCadence(await res.json() as ImageUpdateStatus);
+      if (!res.ok) return;
+      const data = await res.json() as ImageUpdateStatus;
+      // Drop the result if a newer cadence load started, or the view unmounted,
+      // while this one was in flight.
+      if (token === cadenceTokenRef.current) setCadence(data);
     } catch (e) {
       console.error('[AutoUpdate] failed to load image-update cadence status', e);
     }
@@ -674,6 +683,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     return () => {
       // Invalidate any in-flight fetch and cancel pending refresh timers on unmount.
       loadTokenRef.current++;
+      cadenceTokenRef.current++;
       if (refreshTimerRef.current) {
         clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = null;

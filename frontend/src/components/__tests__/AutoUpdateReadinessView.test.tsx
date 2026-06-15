@@ -5,8 +5,19 @@
  * covering schedule exists and the preview loaded without a block.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
-import { MobileReadinessCard, CadenceStrip, type StackCard } from '../AutoUpdateReadinessView';
+import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
+
+vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
+vi.mock('@/components/ui/toast-store', () => ({
+  toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
+}));
+vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({ nodes: [{ id: 1, name: 'Local', type: 'local', status: 'online' }] }),
+}));
+
+import { apiFetch } from '@/lib/api';
+import AutoUpdateReadinessView, { MobileReadinessCard, CadenceStrip, type StackCard } from '../AutoUpdateReadinessView';
 
 function card(over: Partial<StackCard> = {}): StackCard {
   return {
@@ -120,5 +131,77 @@ describe('CadenceStrip', () => {
     expect(screen.getByText(/Recheck available in 3s/)).toBeInTheDocument();
     act(() => { vi.advanceTimersByTime(3000); });
     expect(screen.getByText(/Recheck ready/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * The cadence fetch runs on mount AND after a Recheck. A slow initial /status
+ * response that resolves after the recheck-triggered one must not overwrite the
+ * fresh cooldown the recheck just loaded.
+ */
+describe('AutoUpdateReadinessView cadence fetch race', () => {
+  const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function statusDeferred() {
+    let resolveWith!: (manualCooldownRemainingMs: number) => void;
+    const promise = new Promise<{ ok: true; json: () => Promise<unknown> }>((resolve) => {
+      resolveWith = (manualCooldownRemainingMs: number) =>
+        resolve({
+          ok: true,
+          json: async () => ({
+            checking: false,
+            intervalMinutes: 120,
+            lastCheckedAt: Date.now() - 60_000,
+            nextCheckAt: Date.now() + 3_600_000,
+            manualCooldownMinutes: 2,
+            manualCooldownRemainingMs,
+          }),
+        });
+    });
+    return { promise, resolveWith };
+  }
+
+  it('drops a stale /status response so a recheck cooldown is not overwritten', async () => {
+    const statusCalls: ReturnType<typeof statusDeferred>[] = [];
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => ({}) });
+      if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
+      if (url === '/image-updates/fleet/refresh') {
+        return Promise.resolve({ ok: true, json: async () => ({ triggered: [1], rateLimited: [], failed: [] }) });
+      }
+      if (url === '/image-updates/status') {
+        const d = statusDeferred();
+        statusCalls.push(d);
+        return d.promise;
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    // Mount fired the first /status (A); it stays pending. The hero renders once
+    // the readiness load settles.
+    const recheck = await screen.findByRole('button', { name: /recheck registries/i });
+    expect(statusCalls).toHaveLength(1);
+
+    // Recheck fires a second /status (B); resolve it with an active cooldown.
+    await act(async () => { fireEvent.click(recheck); });
+    await waitFor(() => expect(statusCalls).toHaveLength(2));
+    await act(async () => { statusCalls[1].resolveWith(120_000); });
+    await screen.findByText(/Recheck available in/);
+
+    // The slow initial load (A) resolves last with no cooldown. The token guard
+    // must drop it so the strip keeps showing the recheck cooldown.
+    await act(async () => {
+      statusCalls[0].resolveWith(0);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText(/Recheck ready/)).toBeNull();
+    expect(screen.getByText(/Recheck available in/)).toBeInTheDocument();
   });
 });
