@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import semver from 'semver';
+import { DatabaseService } from './DatabaseService';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,6 +16,11 @@ const GITHUB_API_TIMEOUT_MS = 15 * 1000;
 const VERIFY_TIMEOUT_MS = 10 * 1000;
 const LATEST_VERSION_TTL_MS = 60 * 60 * 1000;
 const MIN_TRIVY_VERSION = '0.50.0';
+// Managed installs pin to a known-good release by default so the scanner binary
+// is reproducible and supply-chain stable rather than whatever "latest" resolves
+// to at install time. Opting into auto-update (trivy_auto_update) tracks the
+// newest release instead. Keep this at or above MIN_TRIVY_VERSION.
+const PINNED_TRIVY_VERSION = '0.70.0';
 
 export type TrivySource = 'managed' | 'host' | 'none';
 
@@ -142,14 +148,26 @@ class TrivyInstaller {
     }
 
     public async install(): Promise<{ version: string }> {
-        return this.acquire(async () => this.doInstall());
+        const version = await this.resolveInstallVersion();
+        return this.acquire(async () => this.doInstall(version));
     }
 
     public async update(): Promise<{ version: string }> {
         if (!this.isManagedInstalled()) {
             throw new Error('No managed Trivy install to update');
         }
-        return this.acquire(async () => this.doInstall());
+        // An explicit update always pulls the newest release, regardless of the
+        // auto-update setting; that is the whole point of the action.
+        const version = await this.fetchLatestVersion(true);
+        return this.acquire(async () => this.doInstall(version));
+    }
+
+    // Fresh installs pin by default for reproducibility; when the operator has
+    // opted into auto-update, a fresh install tracks the latest release so it
+    // matches the cadence the scheduler will keep it on.
+    private async resolveInstallVersion(): Promise<string> {
+        const autoUpdate = DatabaseService.getInstance().getGlobalSettings().trivy_auto_update === '1';
+        return autoUpdate ? this.fetchLatestVersion(true) : PINNED_TRIVY_VERSION;
     }
 
     public async uninstall(): Promise<void> {
@@ -176,10 +194,9 @@ class TrivyInstaller {
         }
     }
 
-    private async doInstall(): Promise<{ version: string }> {
-        const version = await this.fetchLatestVersion(true);
+    private async doInstall(version: string): Promise<{ version: string }> {
         if (semver.lt(version, MIN_TRIVY_VERSION)) {
-            throw new Error(`Fetched Trivy version ${version} is below minimum ${MIN_TRIVY_VERSION}`);
+            throw new Error(`Trivy version ${version} is below minimum ${MIN_TRIVY_VERSION}`);
         }
         const archTag = archAssetTag();
         const assetName = `trivy_${version}_Linux-${archTag}.tar.gz`;

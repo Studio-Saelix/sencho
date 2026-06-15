@@ -69,6 +69,7 @@ describe('GET /api/settings', () => {
         db.updateGlobalSetting(k, '');
       }
       db.updateGlobalSetting('trivy_auto_update', '0');
+      db.updateGlobalSetting('pre_deploy_scan_advisory', '0');
       db.updateGlobalSetting('mesh_auto_recreate', '0');
     });
 
@@ -83,6 +84,9 @@ describe('GET /api/settings', () => {
       db.updateGlobalSetting('cloud_backup_endpoint', 'https://s3.example.com');
       db.updateGlobalSetting('cloud_backup_bucket', 'private-bucket');
       db.updateGlobalSetting('trivy_auto_update', '1');
+      // Scanner toggles live under /api/security/*, never the generic settings
+      // allowlist, so the advisory key must not surface here either.
+      db.updateGlobalSetting('pre_deploy_scan_advisory', '1');
       // A key that is neither allowlisted nor obviously sensitive: the allowlist
       // must still exclude it. This locks the fail-closed contract that is the
       // reason the GET uses an allowlist rather than a denylist.
@@ -97,6 +101,7 @@ describe('GET /api/settings', () => {
       expect(res.body.cloud_backup_endpoint).toBeUndefined();
       expect(res.body.cloud_backup_bucket).toBeUndefined();
       expect(res.body.trivy_auto_update).toBeUndefined();
+      expect(res.body.pre_deploy_scan_advisory).toBeUndefined();
       expect(res.body.some_future_setting).toBeUndefined();
       // Allowlisted keys still come through. Two structurally different keys (a
       // numeric and an enum-shaped one) prove the projection passes the whole

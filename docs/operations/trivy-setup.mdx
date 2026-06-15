@@ -36,6 +36,7 @@ Behind the scenes:
 - The Trivy binary is downloaded into Sencho's existing data volume at `/app/data/bin/trivy`. No host filesystem changes.
 - The vulnerability database cache defaults to `/app/data/trivy-cache` so it persists across container restarts.
 - Downloads are verified against the official Trivy checksum file before the binary is put in place.
+- By default the managed install pins to a known-good Trivy version, so a fresh install is reproducible rather than tracking whatever "latest" happens to be. Turn on **Auto-update Trivy** to track the newest release instead; an explicit **Update** always pulls the latest regardless of the toggle.
 - The installed version survives Sencho image upgrades because it lives on the mounted data volume.
 
 ### Updating the managed install

@@ -588,6 +588,13 @@ export interface VulnerabilityScan {
     policy_evaluation: string | null;
 }
 
+// Fail-closed allowlist of the scanners_used values that ran the vulnerability
+// scanner. Image scans store vuln/secret joins from normalizeScanners (TrivyService),
+// while compose scans store 'config' directly; listing only the vuln-bearing sets
+// means any other value (secret-only, config, or a future literal) is excluded, so
+// a clean vuln read can never be a secret-only or config scan in disguise.
+export const VULN_BEARING_SCANNER_SETS = ['vuln', 'vuln,secret'] as const;
+
 export function parsePolicyEvaluation(raw: string | null | undefined): PolicyEvaluation | null {
     if (!raw) return null;
     try {
@@ -1458,6 +1465,7 @@ export class DatabaseService {
         stmt.run('trivy_auto_update', '0');
         stmt.run('trivy_last_notified_version', '');
         stmt.run('deploy_block_honor_suppressions', '0');
+        stmt.run('pre_deploy_scan_advisory', '0');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
         stmt.run('reclaim_hero', '1');
@@ -4222,6 +4230,26 @@ export class DatabaseService {
                     "SELECT * FROM vulnerability_scans WHERE image_digest = ? AND status = 'completed' ORDER BY scanned_at DESC LIMIT 1",
                 )
                 .get(digest) as VulnerabilityScan | undefined) ?? null
+        );
+    }
+
+    /**
+     * Latest completed vulnerability-bearing scan for a digest ON A SPECIFIC NODE.
+     *
+     * Unlike getLatestScanByDigest, this filters by node_id so a read-only
+     * response never surfaces a scan (or scan id) produced on another node, and
+     * it restricts to scanner sets that actually ran the vulnerability scanner so
+     * a secret-only or config scan is not mistaken for a clean vuln scan.
+     */
+    public getLatestVulnScanByDigestForNode(digest: string, nodeId: number): VulnerabilityScan | null {
+        if (!digest) return null;
+        const placeholders = VULN_BEARING_SCANNER_SETS.map(() => '?').join(', ');
+        return (
+            (this.db
+                .prepare(
+                    `SELECT * FROM vulnerability_scans WHERE image_digest = ? AND node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders}) ORDER BY scanned_at DESC LIMIT 1`,
+                )
+                .get(digest, nodeId, ...VULN_BEARING_SCANNER_SETS) as VulnerabilityScan | undefined) ?? null
         );
     }
 

@@ -1,5 +1,6 @@
 import BashExecModal from '../BashExecModal';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
+import { PreDeployScanDialog } from '../stack/PreDeployScanDialog';
 import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
 import { DeleteStackDialog } from './DeleteStackDialog';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
@@ -43,6 +44,7 @@ export function ShellOverlays({
     stackMonitor, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing,
     updateReadiness, setUpdateReadiness,
+    preDeployAdvisory, setPreDeployAdvisory,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
@@ -96,6 +98,15 @@ export function ShellOverlays({
         stackName={updateReadiness?.stackName ?? ''}
         onCancel={() => setUpdateReadiness(null)}
         onProceed={() => updateReadiness?.proceed()}
+      />
+
+      {/* Pre-deploy scan advisory (visibility only; never blocks) */}
+      <PreDeployScanDialog
+        open={preDeployAdvisory !== null}
+        stackName={preDeployAdvisory?.stackName ?? ''}
+        images={preDeployAdvisory?.images ?? []}
+        onCancel={() => setPreDeployAdvisory(null)}
+        onDeploy={() => preDeployAdvisory?.proceed()}
       />
 
       {/* Pre-deploy policy block */}

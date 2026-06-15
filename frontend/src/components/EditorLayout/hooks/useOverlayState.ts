@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { SENCHO_OPEN_LOGS_EVENT } from '@/lib/events';
 import type { SenchoOpenLogsDetail } from '@/lib/events';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
+import type { PreDeployScanImage } from '@/types/security';
 import type { Node } from '@/context/NodeContext';
 
 type DiffPreview = {
@@ -96,6 +97,16 @@ export function useOverlayState() {
     proceed: () => void;
   } | null>(null);
 
+  // Pre-deploy scan advisory dialog. `proceed` runs the actual deploy when the
+  // user confirms; opened by useStackActions.deployStack when the advisory
+  // setting is on. Callback continuation (like updateReadiness), so cancel /
+  // close / unmount simply discards it with no pending action to leak.
+  const [preDeployAdvisory, setPreDeployAdvisory] = useState<{
+    stackName: string;
+    images: PreDeployScanImage[];
+    proceed: () => void;
+  } | null>(null);
+
   const [stackMisconfigScanId, setStackMisconfigScanId] = useState<number | null>(null);
 
   const [diffPreview, setDiffPreview] = useState<DiffPreview | null>(null);
@@ -112,6 +123,7 @@ export function useOverlayState() {
     stackMonitor, openAlertSheet, openAutoHeal, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing, setPolicyBypassing,
     updateReadiness, setUpdateReadiness,
+    preDeployAdvisory, setPreDeployAdvisory,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } as const;

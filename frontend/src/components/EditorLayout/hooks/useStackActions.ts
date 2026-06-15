@@ -11,6 +11,7 @@ import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
 import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
+import type { PreDeployScanImage } from '@/types/security';
 
 interface RunResult {
   ok: boolean;
@@ -117,6 +118,38 @@ interface UseStackActionsOptions {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
+
+const PRE_DEPLOY_SUMMARY_TIMEOUT_MS = 5000;
+
+/**
+ * Fetch the pre-deploy scan advisory for a manual deploy. Returns the image
+ * list when the advisory is enabled and the backend answers in time, or null to
+ * mean "no advisory, deploy normally" for every other case (setting off,
+ * timeout, an older node without the route, or any error). Failing open is
+ * deliberate: the advisory is visibility, it must never block a deploy. Bound to
+ * the captured node so it targets the same node the deploy will hit.
+ */
+export async function fetchPreDeployAdvisory(
+  stackName: string,
+  opNodeId: number | null,
+): Promise<PreDeployScanImage[] | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PRE_DEPLOY_SUMMARY_TIMEOUT_MS);
+  try {
+    const res = await apiFetch(
+      `/security/stacks/${encodeURIComponent(stackName)}/pre-deploy-summary`,
+      { nodeId: opNodeId, signal: controller.signal },
+    );
+    if (!res.ok) return null;
+    const data: unknown = await res.json();
+    if (!isRecord(data) || data.enabled !== true || !Array.isArray(data.images)) return null;
+    return data.images as PreDeployScanImage[];
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const parseStackOpInProgress = (rawBody: string): StackOpInProgressInfo | null => {
   try {
@@ -727,18 +760,43 @@ export function useStackActions(options: UseStackActionsOptions) {
       return;
     const stackFile = stackListState.selectedFile;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
-    stackListState.setStackAction(stackFile, 'deploy');
-    // Snapshot the node once so the request stays bound to it even if the active
-    // node changes while the operation is in flight.
+    // Snapshot the node once so the advisory fetch and the deploy stay bound to
+    // it even if the active node changes while the advisory dialog is open.
     const opNodeId = activeNode?.id ?? null;
-    try {
-      await runWithLog({ stackName, action: 'deploy', nodeId: opNodeId }, (started, ds) =>
-        runDeploy(stackName, stackFile, false, started, ds, opNodeId),
-      );
-    } finally {
-      stackListState.clearStackAction(stackFile);
-      stackListState.refreshStacks(true);
+
+    // The actual deploy, pulled out so the optional pre-deploy advisory can gate
+    // it without duplicating the action lifecycle. The stack action is set here
+    // (not before the advisory) so cancelling the advisory leaves no stuck state.
+    const runDeployFlow = async () => {
+      stackListState.setStackAction(stackFile, 'deploy');
+      try {
+        await runWithLog({ stackName, action: 'deploy', nodeId: opNodeId }, (started, ds) =>
+          runDeploy(stackName, stackFile, false, started, ds, opNodeId),
+        );
+      } finally {
+        stackListState.clearStackAction(stackFile);
+        stackListState.refreshStacks(true);
+      }
+    };
+
+    // Advisory runs before the deploy log opens (fails open: a null result means
+    // setting off / timeout / older node / error, so the deploy proceeds).
+    const advisoryImages = await fetchPreDeployAdvisory(stackName, opNodeId);
+    if (advisoryImages && advisoryImages.length > 0) {
+      let fired = false;
+      overlayState.setPreDeployAdvisory({
+        stackName,
+        images: advisoryImages,
+        proceed: () => {
+          if (fired) return;
+          fired = true;
+          overlayState.setPreDeployAdvisory(null);
+          void runDeployFlow();
+        },
+      });
+      return;
     }
+    await runDeployFlow();
   };
 
   const handleSaveAndDeploy = async (e: React.MouseEvent) => {

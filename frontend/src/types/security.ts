@@ -17,7 +17,23 @@ export interface TrivyStatus {
   source: TrivySource;
   autoUpdate: boolean;
   honorSuppressionsOnDeploy: boolean;
+  preDeployScanAdvisory: boolean;
   busy: boolean;
+}
+
+/** One image's latest cached scan, shown in the pre-deploy advisory dialog. */
+export interface PreDeployScanImageScan {
+  criticalCount: number;
+  highCount: number;
+  mediumCount: number;
+  lowCount: number;
+  highestSeverity: VulnSeverity | null;
+  scannedAt: number;
+}
+
+export interface PreDeployScanImage {
+  imageRef: string;
+  scan: PreDeployScanImageScan | null;
 }
 
 export interface TrivyUpdateCheck {
