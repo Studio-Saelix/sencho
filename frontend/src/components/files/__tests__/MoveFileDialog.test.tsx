@@ -8,7 +8,7 @@
  * logic under test runs for real.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileEntry } from '@/lib/stackFilesApi';
 
@@ -44,15 +44,16 @@ beforeEach(() => {
 });
 
 describe('MoveFileDialog', () => {
-  it('disables the current parent and confirms a valid destination', async () => {
+  it('disables the current parent and confirms a valid destination, closing on success', async () => {
     listMock.mockResolvedValue([dir('configs'), dir('services'), dir('logs')]);
-    const onMove = vi.fn();
+    const onMove = vi.fn().mockResolvedValue(true);
+    const onOpenChange = vi.fn();
     const user = userEvent.setup();
 
     render(
       <MoveFileDialog
         open
-        onOpenChange={vi.fn()}
+        onOpenChange={onOpenChange}
         stackName="my-stack"
         relPath="configs/app.conf"
         entry={file('app.conf')}
@@ -76,6 +77,33 @@ describe('MoveFileDialog', () => {
 
     await user.click(moveBtn);
     expect(onMove).toHaveBeenCalledWith('configs/app.conf', 'app.conf', 'services');
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it('stays open when the move is blocked or fails', async () => {
+    listMock.mockResolvedValue([dir('services')]);
+    const onMove = vi.fn().mockResolvedValue(false);
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <MoveFileDialog
+        open
+        onOpenChange={onOpenChange}
+        stackName="my-stack"
+        relPath="configs/app.conf"
+        entry={file('app.conf')}
+        onMove={onMove}
+      />,
+    );
+
+    await screen.findByText('services');
+    await user.click(labelButton('services'));
+    await user.click(screen.getByRole('button', { name: /^move$/i }));
+
+    expect(onMove).toHaveBeenCalledWith('configs/app.conf', 'app.conf', 'services');
+    // A falsy result must not dismiss the picker.
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
   it('disables the stack root when the entry name is reserved there', async () => {

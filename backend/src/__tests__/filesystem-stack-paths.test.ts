@@ -512,6 +512,29 @@ describe('FileSystemService stack methods', () => {
         code: 'PROTECTED_FILE',
       });
     });
+
+    // On a case-insensitive filesystem a differently-cased request resolves to the
+    // real protected file, so the gate must fold case. These only reproduce the
+    // bypass on Windows/macOS; on Linux the cased name is a distinct, unprotected
+    // file and the scenario does not arise.
+    it.skipIf(!isWindows)('rejects moving a protected root file referenced by a different case', async () => {
+      await fs.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+      await fs.mkdir(path.join(stackDir, 'sub'));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'COMPOSE.YAML', 'sub/COMPOSE.YAML')).rejects.toMatchObject({
+        code: 'PROTECTED_FILE',
+      });
+    });
+
+    it.skipIf(!isWindows)('rejects moving a directory into its own descendant when the source case differs', async () => {
+      await fs.mkdir(path.join(stackDir, 'parent', 'child'), { recursive: true });
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'Parent', 'parent/child/x')).rejects.toMatchObject({
+        code: 'INVALID_PATH',
+      });
+    });
   });
 
   // ── path traversal ──────────────────────────────────────────────────────

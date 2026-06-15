@@ -133,23 +133,27 @@ export function StackFileExplorer({
   // Shared move handler for both the "Move to…" dialog and tree drag-and-drop.
   // Relocates `fromRel` into `destDir` (''=stack root). Blocks the move when it
   // would discard unsaved edits to the open file, and deselects when the open
-  // file (or a folder containing it) is the thing being moved.
-  const handleMove = useCallback(async (fromRel: string, entryName: string, destDir: string) => {
+  // file (or a folder containing it) is the thing being moved. Returns true only
+  // when the entry actually moved, so the dialog closes on success and stays open
+  // when the move was a no-op, blocked, or failed.
+  const handleMove = useCallback(async (fromRel: string, entryName: string, destDir: string): Promise<boolean> => {
     const toRel = destDir ? `${destDir}/${entryName}` : entryName;
-    if (toRel === fromRel) return;
+    if (toRel === fromRel) return false;
     const affectsOpen = selectedPath === fromRel
       || (selectedPath !== null && selectedPath.startsWith(`${fromRel}/`));
     if (affectsOpen && isViewerDirty) {
       toast.error('Save or discard your changes before moving this file.');
-      return;
+      return false;
     }
     try {
       await renameStackPath(stackName, fromRel, toRel);
       toast.success('Moved successfully.');
       if (affectsOpen) handleDeleted();
       else refresh();
+      return true;
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Move failed.');
+      return false;
     }
   }, [stackName, selectedPath, isViewerDirty, handleDeleted, refresh]);
 

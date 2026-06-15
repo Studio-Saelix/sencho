@@ -77,6 +77,14 @@ function stripTrailingSlash(s: string): string {
   return s.endsWith('/') ? s.slice(0, -1) : s;
 }
 
+// On a case-insensitive filesystem (Windows, default macOS) two paths that differ
+// only in case point at the same entry, so comparisons that gate filesystem
+// mutations must fold case to stay authoritative. On Linux (where Sencho runs in
+// production) paths are case-sensitive and this returns the input unchanged.
+function fsCaseKey(s: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? s.toLowerCase() : s;
+}
+
 function isProtectedRelPath(relPath: string): boolean {
   if (!relPath) return false;
   const normalized = stripTrailingSlash(relPath);
@@ -84,7 +92,9 @@ function isProtectedRelPath(relPath: string): boolean {
   // the stack directory itself, so a subdirectory entry named compose.yaml is just
   // an arbitrary file and the user may want to delete it.
   if (normalized.includes('/')) return false;
-  return PROTECTED_STACK_FILES.has(normalized);
+  // Fold case so e.g. a request for COMPOSE.YAML cannot dodge the gate on a
+  // case-insensitive filesystem where it resolves to the real compose.yaml.
+  return PROTECTED_STACK_FILES.has(fsCaseKey(normalized));
 }
 
 function protectedFileError(relPath: string): Error & { code: string } {
@@ -1403,11 +1413,15 @@ export class FileSystemService {
       throw Object.assign(new Error('Invalid destination name'), { code: 'INVALID_PATH' });
     }
     // Block moving a directory into itself or one of its own descendants; fs.rename
-    // would otherwise fail with an opaque EINVAL.
+    // would otherwise fail with an opaque EINVAL/EPERM. Compare case-folded so the
+    // guard stays authoritative when the source is supplied with non-disk casing on
+    // a case-insensitive filesystem.
     const fromStat = await fsPromises.lstat(fromPath);
     if (fromStat.isDirectory()) {
-      const fromWithSep = fromPath.endsWith(path.sep) ? fromPath : fromPath + path.sep;
-      if (toPath === fromPath || toPath.startsWith(fromWithSep)) {
+      const fromKey = fsCaseKey(fromPath);
+      const fromKeyWithSep = fromKey.endsWith(path.sep) ? fromKey : fromKey + path.sep;
+      const toKey = fsCaseKey(toPath);
+      if (toKey === fromKey || toKey.startsWith(fromKeyWithSep)) {
         throw Object.assign(new Error('Cannot move a folder into itself'), { code: 'INVALID_PATH' });
       }
     }

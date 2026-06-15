@@ -21,8 +21,9 @@ interface MoveFileDialogProps {
   relPath: string;
   /** The entry being moved (null until a source is chosen). */
   entry: FileEntry | null;
-  /** Relocate `fromRel` into `destDir` (''=stack root). */
-  onMove: (fromRel: string, entryName: string, destDir: string) => void | Promise<void>;
+  /** Relocate `fromRel` into `destDir` (''=stack root). Resolves true only when
+   *  the entry actually moved, so the dialog stays open on a blocked/failed move. */
+  onMove: (fromRel: string, entryName: string, destDir: string) => boolean | Promise<boolean>;
 }
 
 export function MoveFileDialog({
@@ -122,8 +123,9 @@ export function MoveFileDialog({
     if (!entry || selectedDest === null || !isValidDest(selectedDest)) return;
     setMoving(true);
     try {
-      await onMove(relPath, entry.name, selectedDest);
-      onOpenChange(false);
+      // Close only when the move actually succeeded; a blocked or failed move
+      // (handled and toasted upstream) leaves the picker open to retry.
+      if (await onMove(relPath, entry.name, selectedDest)) onOpenChange(false);
     } finally {
       setMoving(false);
     }
