@@ -93,4 +93,21 @@ describe('OverviewToolbar', () => {
     render(<OverviewToolbar {...props()} />);
     expect(screen.queryByRole('button', { name: 'Add node' })).not.toBeInTheDocument();
   });
+
+  it('renders the Check Updates button and fires onCheckUpdates when provided', () => {
+    const onCheckUpdates = vi.fn();
+    render(<OverviewToolbar {...props({ onCheckUpdates })} />);
+    fireEvent.click(screen.getByRole('button', { name: /Check Updates/ }));
+    expect(onCheckUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the Check Updates button when onCheckUpdates is not provided', () => {
+    render(<OverviewToolbar {...props()} />);
+    expect(screen.queryByRole('button', { name: /Check Updates/ })).not.toBeInTheDocument();
+  });
+
+  it('disables the Check Updates button while a check is in flight', () => {
+    render(<OverviewToolbar {...props({ onCheckUpdates: vi.fn(), checkingUpdates: true })} />);
+    expect(screen.getByRole('button', { name: /Check Updates/ })).toBeDisabled();
+  });
 });

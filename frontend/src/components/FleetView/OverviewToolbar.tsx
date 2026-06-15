@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search, ArrowUpDown, AlertTriangle, Play, Square,
-    LayoutGrid, Network, SlidersHorizontal, Plus,
+    LayoutGrid, Network, SlidersHorizontal, Plus, RefreshCcwDot,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -50,6 +50,8 @@ interface OverviewToolbarProps {
     onLabelFiltersChange: (filters: Set<string>) => void;
     onClearFilters: () => void;
     onAddNode?: () => void;
+    onCheckUpdates?: () => void;
+    checkingUpdates?: boolean;
 }
 
 export function OverviewToolbar({
@@ -64,6 +66,8 @@ export function OverviewToolbar({
     onLabelFiltersChange,
     onClearFilters,
     onAddNode,
+    onCheckUpdates,
+    checkingUpdates,
 }: OverviewToolbarProps) {
     const showGridControls = viewMode === 'grid';
     const activeFilterCount =
@@ -255,6 +259,19 @@ export function OverviewToolbar({
                 <Button size="sm" className="gap-1.5 shrink-0 h-9" onClick={onAddNode}>
                     <Plus className="w-4 h-4" strokeWidth={1.5} />
                     Add node
+                </Button>
+            )}
+
+            {onCheckUpdates && (
+                <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-2 shrink-0 h-9"
+                    onClick={onCheckUpdates}
+                    disabled={checkingUpdates}
+                >
+                    <RefreshCcwDot className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`} />
+                    Check Updates
                 </Button>
             )}
         </div>
