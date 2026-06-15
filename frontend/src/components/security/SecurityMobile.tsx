@@ -5,7 +5,7 @@
 import type { ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Kicker } from '@/components/mobile/mobile-ui';
+import { Kicker, MobileSubTabs, MobileChipRow } from '@/components/mobile/mobile-ui';
 import { getSeverityKey, SEVERITY_DOT_CLASSES, type ImageFilterValue } from '@/lib/severityStyles';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { SecurityTab } from '@/lib/events';
@@ -16,44 +16,14 @@ export interface SecurityMobileTab {
   label: string;
 }
 
-/** Horizontal mono tab scroller with a cyan underline on the active tab and an
- *  edge mask-fade so the overflow reads as scrollable. Keeps all tabs reachable
- *  by scroll, matching the desktop tab IA. */
+/** The Security tab strip is the shared mono sub-tab scroller; every section
+ *  stays reachable by horizontal scroll, matching the desktop IA. */
 export function SecurityMobileTabs({ tabs, active, onSelect }: {
   tabs: SecurityMobileTab[];
   active: SecurityTab;
   onSelect: (tab: SecurityTab) => void;
 }) {
-  return (
-    <div
-      role="tablist"
-      aria-label="Security sections"
-      className="flex shrink-0 overflow-x-auto border-b border-hairline [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      style={{
-        maskImage: 'linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%)',
-        WebkitMaskImage: 'linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 22px), transparent 100%)',
-      }}
-    >
-      {tabs.map((tab) => {
-        const on = tab.value === active;
-        return (
-          <button
-            key={tab.value}
-            type="button"
-            role="tab"
-            aria-selected={on}
-            onClick={() => onSelect(tab.value)}
-            className={cn(
-              'min-h-11 shrink-0 whitespace-nowrap px-3 py-[13px] font-mono text-[12px] tracking-[0.04em] transition-colors',
-              on ? 'text-brand shadow-[inset_0_-2px_0_0_var(--brand)]' : 'text-stat-subtitle',
-            )}
-          >
-            {tab.label}
-          </button>
-        );
-      })}
-    </div>
-  );
+  return <MobileSubTabs tabs={tabs} active={active} onSelect={onSelect} ariaLabel="Security sections" />;
 }
 
 function StripCell({ kicker, value, valueClass, last }: {
@@ -185,32 +155,11 @@ export interface ImageFilterChip {
   label: string;
 }
 
-/** Horizontal severity filter chips for the mobile Images list. */
+/** The Images severity filter is the shared mobile chip row. */
 export function ImageFilterChips({ chips, active, onSelect }: {
   chips: ImageFilterChip[];
   active: ImageFilterValue;
   onSelect: (value: ImageFilterValue) => void;
 }) {
-  return (
-    <div className="flex gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-      {chips.map((chip) => {
-        const on = chip.value === active;
-        return (
-          <button
-            key={chip.value}
-            type="button"
-            onClick={() => onSelect(chip.value)}
-            className={cn(
-              'min-h-11 shrink-0 whitespace-nowrap rounded-[7px] border px-[11px] font-mono text-[11px] tracking-[0.04em] transition-colors',
-              on
-                ? 'border-brand bg-brand text-brand-foreground'
-                : 'border-card-border bg-card text-stat-subtitle',
-            )}
-          >
-            {chip.label}
-          </button>
-        );
-      })}
-    </div>
-  );
+  return <MobileChipRow chips={chips} active={active} onSelect={onSelect} />;
 }

@@ -2,14 +2,16 @@ import { useEffect, useState, useMemo, useRef, useCallback, useLayoutEffect, mem
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { PageMasthead } from '@/components/ui/PageMasthead';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control';
-import { Download, Trash2, Search, Filter, AlertCircle, Pause, Play } from 'lucide-react';
+import { Download, Trash2, Search, Filter, AlertCircle, Pause, Play, SlidersHorizontal, X } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { Masthead } from '@/components/mobile/mobile-ui';
 import { cn } from '@/lib/utils';
 
 const MAX_LOG_ENTRIES = 2000;
@@ -78,7 +80,15 @@ const LEVEL_OPTIONS: SegmentedControlOption<LevelFilter>[] = [
     { value: 'ERROR', label: 'Error' },
 ];
 
-export function GlobalObservabilityView() {
+interface GlobalObservabilityViewProps {
+    /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
+    headerActions?: ReactNode;
+}
+
+export function GlobalObservabilityView({ headerActions }: GlobalObservabilityViewProps = {}) {
+    const isMobile = useIsMobile();
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [fabOpen, setFabOpen] = useState(false);
     const { activeNode } = useNodes();
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [allStacks, setAllStacks] = useState<string[]>([]);
@@ -360,16 +370,96 @@ export function GlobalObservabilityView() {
 
     return (
         <div className="relative flex h-full w-full flex-col bg-background text-foreground">
-            <PageMasthead
-                kicker={kicker}
-                state={stateWord}
-                tone={masterTone}
-                pulsing={masterTone === 'live'}
-                metadata={mastheadMetadata}
-            />
+            {isMobile ? (
+                <Masthead
+                    kicker="logs · local"
+                    state={stateWord}
+                    stateTone={fetchError ? 'destructive' : masterTone === 'live' ? 'success' : 'brand'}
+                    live={masterTone === 'live'}
+                    meta={`${buckets.reduce((a, b) => a + b, 0)}/min · ${counts.errors} err · ${counts.containers} containers`}
+                    right={headerActions}
+                />
+            ) : (
+                <>
+                    <PageMasthead
+                        kicker={kicker}
+                        state={stateWord}
+                        tone={masterTone}
+                        pulsing={masterTone === 'live'}
+                        metadata={mastheadMetadata}
+                    />
+                    <SignalRail tiles={signals} />
+                </>
+            )}
 
-            <SignalRail tiles={signals} />
-
+            {isMobile ? (
+                <div className="flex shrink-0 items-center gap-2 border-b border-card-border bg-card px-4 py-2">
+                    {searchOpen ? (
+                        <div className="relative flex-1">
+                            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stat-icon" strokeWidth={1.5} />
+                            <Input
+                                autoFocus
+                                placeholder="Search logs..."
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                onBlur={() => { if (!searchQuery) setSearchOpen(false); }}
+                                className="h-9 w-full bg-transparent pl-8 text-sm focus-visible:ring-brand/50"
+                            />
+                        </div>
+                    ) : (
+                        <Button variant="outline" size="icon" className="h-9 w-9 shrink-0" aria-label="Search logs" onClick={() => setSearchOpen(true)}>
+                            <Search className="h-4 w-4" strokeWidth={1.5} />
+                        </Button>
+                    )}
+                    {!searchOpen && (
+                        <>
+                            <DropdownMenu modal={false}>
+                                <DropdownMenuTrigger asChild>
+                                    <Button variant="outline" size="sm" className="h-9 gap-2">
+                                        <Filter className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                        <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+                                            Stacks · {selectedStacks.length === 0 ? 'All' : selectedStacks.length}
+                                        </span>
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="start" className="w-52">
+                                    {allStacks.map(stack => (
+                                        <DropdownMenuCheckboxItem key={stack} checked={selectedStacks.includes(stack)} onCheckedChange={() => handleStackToggle(stack)}>
+                                            {stack}
+                                        </DropdownMenuCheckboxItem>
+                                    ))}
+                                    {allStacks.length === 0 && (
+                                        <div className="px-2 py-1.5 text-sm text-stat-subtitle">No stacks found</div>
+                                    )}
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                            <DropdownMenu modal={false}>
+                                <DropdownMenuTrigger asChild>
+                                    <Button variant="outline" size="sm" className="h-9 gap-2">
+                                        <SlidersHorizontal className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                        <span className="font-mono text-[10px] uppercase tracking-[0.18em]">Filters</span>
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="w-44">
+                                    <DropdownMenuLabel className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Stream</DropdownMenuLabel>
+                                    {STREAM_OPTIONS.map(o => (
+                                        <DropdownMenuCheckboxItem key={o.value} checked={streamFilter === o.value} onCheckedChange={() => setStreamFilter(o.value)}>
+                                            {o.label}
+                                        </DropdownMenuCheckboxItem>
+                                    ))}
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuLabel className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Level</DropdownMenuLabel>
+                                    {LEVEL_OPTIONS.map(o => (
+                                        <DropdownMenuCheckboxItem key={o.value} checked={levelFilter === o.value} onCheckedChange={() => setLevelFilter(o.value)}>
+                                            {o.label}
+                                        </DropdownMenuCheckboxItem>
+                                    ))}
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                        </>
+                    )}
+                </div>
+            ) : (
             <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-card-border bg-card px-[var(--density-row-x)] py-[var(--density-cell-y)]">
                 <div className="relative flex items-center">
                     <Search className="absolute left-2.5 h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} />
@@ -419,6 +509,7 @@ export function GlobalObservabilityView() {
                     ariaLabel="Level filter"
                 />
             </div>
+            )}
 
             {fetchError && (
                 <div className="flex shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/[0.06] px-[var(--density-row-x)] py-1.5 text-xs text-destructive">
@@ -456,6 +547,44 @@ export function GlobalObservabilityView() {
                 </div>
             </ScrollArea>
 
+            {isMobile ? (
+                <div className="pointer-events-none absolute bottom-4 right-4 z-10 flex flex-col items-end gap-2">
+                    {isPaused && pendingCount > 0 && (
+                        <button
+                            type="button"
+                            onClick={handleResume}
+                            className="pointer-events-auto rounded-full border border-brand/40 bg-brand/15 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-brand shadow-btn-glow"
+                        >
+                            {pendingCount} new · resume
+                        </button>
+                    )}
+                    {fabOpen ? (
+                        <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-glass-border bg-popover/95 p-1 shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
+                            <Button variant="ghost" size="icon" className="h-10 w-10" onClick={() => { setIsPaused(p => !p); setFabOpen(false); }} aria-label={isPaused ? 'Resume stream' : 'Pause stream'}>
+                                {isPaused ? <Play className="h-4 w-4" strokeWidth={1.5} /> : <Pause className="h-4 w-4" strokeWidth={1.5} />}
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-10 w-10 text-stat-subtitle hover:text-stat-value" onClick={() => { handleClearLogs(); setFabOpen(false); }} aria-label="Clear log buffer">
+                                <Trash2 className="h-4 w-4" strokeWidth={1.5} />
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-10 w-10 text-stat-subtitle hover:text-stat-value disabled:opacity-40" disabled={filteredLogs.length === 0} onClick={() => { handleDownload(); setFabOpen(false); }} aria-label="Download logs">
+                                <Download className="h-4 w-4" strokeWidth={1.5} />
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-10 w-10 text-stat-subtitle" onClick={() => setFabOpen(false)} aria-label="Close actions">
+                                <X className="h-4 w-4" strokeWidth={1.5} />
+                            </Button>
+                        </div>
+                    ) : (
+                        <button
+                            type="button"
+                            onClick={() => setFabOpen(true)}
+                            aria-label="Log actions"
+                            className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full border border-glass-border bg-popover/95 text-stat-value shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]"
+                        >
+                            {isPaused ? <Play className="h-5 w-5" strokeWidth={1.5} /> : <SlidersHorizontal className="h-5 w-5" strokeWidth={1.5} />}
+                        </button>
+                    )}
+                </div>
+            ) : (
             <div className="pointer-events-none absolute bottom-4 right-6 z-10 flex items-center gap-2">
                 {isPaused && pendingCount > 0 && (
                     <button
@@ -505,6 +634,7 @@ export function GlobalObservabilityView() {
                     </Button>
                 </div>
             </div>
+            )}
         </div>
     );
 }

@@ -4,6 +4,7 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import { Sparkline } from '@/components/ui/sparkline';
+import { ScrollableTabRow } from '@/components/ui/ScrollableTabRow';
 
 export type Tone = 'success' | 'warning' | 'destructive' | 'brand';
 
@@ -148,32 +149,49 @@ export function BackChip({ label, onClick }: { label: string; onClick?: () => vo
   );
 }
 
-// Status masthead for the bespoke mobile content leads (Home and Fleet today;
-// Schedules as it is re-skinned): 3px cyan left rail, kicker, serif-italic
-// state word, meta, optional right slot.
-export function Masthead({
-  kicker,
-  state,
-  stateTone = 'success',
-  meta,
-  right,
-  live = true,
-  stateClassName,
-}: {
-  kicker: ReactNode;
+// Status masthead: the ONE bespoke-mobile header. 3px cyan left rail, kicker,
+// serif-italic state word + tone-colored pulsing dot, mono meta line, and a
+// right slot for the rehomed global chrome (notifications + more-menu).
+//
+// This is the standard set by Home, Fleet, and Security, and EVERY bespoke
+// mobile page uses it (the Stacks list, Resources, App Store, Updates, Audit,
+// Logs; the Schedule page is the one exception). DO NOT introduce a second
+// header style (a title-led header, a back chip / "< Stacks" link, etc.) for
+// these pages - navigation back is via the bottom tab bar and the more-menu.
+// Derive a status word per page (e.g. "Up to date" / "4 pending", "Streaming",
+// "Healthy"), not a bare page title.
+//
+// The kicker has exactly one source: `kicker` (wrapped in the styled Kicker) or
+// `kickerSlot` (raw content, e.g. the Stacks node chip). The union forbids both
+// and neither.
+type MastheadProps = {
   state: ReactNode;
   stateTone?: Tone;
   meta?: ReactNode;
   right?: ReactNode;
   live?: boolean;
   stateClassName?: string;
-}) {
+} & (
+  | { kicker: ReactNode; kickerSlot?: never }
+  | { kickerSlot: ReactNode; kicker?: never }
+);
+
+export function Masthead({
+  kicker,
+  kickerSlot,
+  state,
+  stateTone = 'success',
+  meta,
+  right,
+  live = true,
+  stateClassName,
+}: MastheadProps) {
   return (
     <div className="relative border-b border-hairline px-4 pb-[15px] pt-2">
       <span aria-hidden className="absolute left-0 top-2 bottom-[15px] w-[3px] bg-brand" />
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="mb-1"><Kicker>{kicker}</Kicker></div>
+          <div className="mb-1">{kickerSlot ?? <Kicker>{kicker}</Kicker>}</div>
           <div className="flex items-center gap-[11px]">
             <StateDot tone={stateTone} size={11} pulse={live} />
             <span className={cn('font-display italic text-[38px] leading-[40px] text-stat-value', stateClassName)}>{state}</span>
@@ -182,6 +200,87 @@ export function Masthead({
         {right ? <div className="shrink-0 text-right">{right}</div> : null}
       </div>
       {meta ? <div className="mt-[7px] font-mono text-[12px] text-stat-subtitle">{meta}</div> : null}
+    </div>
+  );
+}
+
+export interface MobileSubTab<T extends string = string> {
+  value: T;
+  label: string;
+  /** Optional trailing count badge (dimmed). */
+  count?: number;
+}
+
+// Horizontal mono tab scroller with a cyan underline on the active tab. When
+// the row overflows it gets the shared fade + arrow affordance (ScrollableTabRow).
+// Shared by the Security page and the Audit Log page. Tap targets are >=44px.
+export function MobileSubTabs<T extends string>({ tabs, active, onSelect, ariaLabel }: {
+  tabs: MobileSubTab<T>[];
+  active: T;
+  onSelect: (value: T) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <ScrollableTabRow surface="background" wrapperClassName="shrink-0" className="border-b border-hairline">
+      <div role="tablist" aria-label={ariaLabel} className="flex">
+        {tabs.map((tab) => {
+          const on = tab.value === active;
+          return (
+            <button
+              key={tab.value}
+              type="button"
+              role="tab"
+              aria-selected={on}
+              onClick={() => onSelect(tab.value)}
+              className={cn(
+                'min-h-11 shrink-0 whitespace-nowrap px-3 py-[13px] font-mono text-[12px] tracking-[0.04em] transition-colors',
+                on ? 'text-brand shadow-[inset_0_-2px_0_0_var(--brand)]' : 'text-stat-subtitle',
+              )}
+            >
+              {tab.label}
+              {tab.count != null && <span className="ml-1.5 opacity-60">{tab.count}</span>}
+            </button>
+          );
+        })}
+      </div>
+    </ScrollableTabRow>
+  );
+}
+
+export interface MobileChip<T extends string = string> {
+  value: T;
+  label: string;
+  /** Optional trailing count badge (dimmed). */
+  count?: number;
+}
+
+// Horizontal filter-chip scroller; active chip is cyan-filled. Used by the
+// Security Images severity filter. Tap targets are >=44px.
+export function MobileChipRow<T extends string>({ chips, active, onSelect, className }: {
+  chips: MobileChip<T>[];
+  active: T;
+  onSelect: (value: T) => void;
+  className?: string;
+}) {
+  return (
+    <div className={cn('flex gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden', className)}>
+      {chips.map((chip) => {
+        const on = chip.value === active;
+        return (
+          <button
+            key={chip.value}
+            type="button"
+            onClick={() => onSelect(chip.value)}
+            className={cn(
+              'min-h-11 shrink-0 whitespace-nowrap rounded-[7px] border px-[11px] font-mono text-[11px] tracking-[0.04em] transition-colors',
+              on ? 'border-brand bg-brand text-brand-foreground' : 'border-card-border bg-card text-stat-subtitle',
+            )}
+          >
+            {chip.label}
+            {chip.count != null && <span className="ml-1.5 opacity-60">{chip.count}</span>}
+          </button>
+        );
+      })}
     </div>
   );
 }

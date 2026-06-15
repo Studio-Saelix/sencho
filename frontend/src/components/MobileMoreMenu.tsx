@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from 'react';
-import { Menu } from 'lucide-react';
+import { Menu, Search } from 'lucide-react';
 import { Button } from './ui/button';
 import { Sheet, SheetContent, SheetTrigger } from './ui/sheet';
 import { cn } from '@/lib/utils';
+import { usePaletteState } from './GlobalCommandPalette';
 import type { NavItem, ActiveView } from './EditorLayout/hooks/useViewNavigationState';
 
 interface MobileMoreMenuProps {
@@ -23,6 +24,9 @@ interface MobileMoreMenuProps {
  */
 export function MobileMoreMenu({ navItems, activeView, onNavigate, footer }: MobileMoreMenuProps) {
   const [open, setOpen] = useState(false);
+  // The Stacks list drops the TopBar (which hosted the global search), so the
+  // command palette is reachable here instead.
+  const { setOpen: setPaletteOpen } = usePaletteState();
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
@@ -41,6 +45,14 @@ export function MobileMoreMenu({ navItems, activeView, onNavigate, footer }: Mob
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Navigate</p>
         </div>
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
+          <button
+            type="button"
+            onClick={() => { setPaletteOpen(true); setOpen(false); }}
+            className="flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm text-muted-foreground transition-colors hover:bg-glass-highlight hover:text-foreground"
+          >
+            <Search className="h-4 w-4" strokeWidth={1.5} />
+            Search
+          </button>
           {navItems.map(({ value, label, icon: Icon }) => (
             <button
               key={value}

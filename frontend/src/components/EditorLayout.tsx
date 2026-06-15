@@ -44,18 +44,26 @@ import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
 import { MobileMoreMenu } from './MobileMoreMenu';
+import { Masthead, type Tone } from './mobile/mobile-ui';
 import { MobileDashboard } from './mobile/MobileDashboard';
 import { MobileFleet } from './mobile/MobileFleet';
 import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
 import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
+import { CapabilityGate } from './CapabilityGate';
+import { HubOnlyGate } from './HubOnlyGate';
 import type { SectionId } from './settings/types';
 
-// The Security page is heavy (charts, scan sheets) and already code-split on the
-// desktop content path, so the bespoke phone screen reuses the same lazy chunk
-// rather than pulling SecurityView into the main shell bundle.
+// These bespoke phone screens reuse the desktop view's component (with a mobile
+// branch), code-split exactly like the desktop content path so the heavy chunks
+// stay out of the main shell bundle.
 const SecurityView = lazy(() => import('./SecurityView').then(m => ({ default: m.SecurityView })));
+const AutoUpdateReadinessView = lazy(() => import('./AutoUpdateReadinessView'));
+const AppStoreView = lazy(() => import('./AppStoreView').then(m => ({ default: m.AppStoreView })));
+const AuditLogView = lazy(() => import('./AuditLogView').then(m => ({ default: m.AuditLogView })));
+const ResourcesView = lazy(() => import('./ResourcesView'));
+const GlobalObservabilityView = lazy(() => import('./GlobalObservabilityView').then(m => ({ default: m.GlobalObservabilityView })));
 
 export default function EditorLayout() {
   const { isAdmin, can } = useAuth();
@@ -742,6 +750,12 @@ export default function EditorLayout() {
       // dropped and the screen renders its own masthead (with notifications +
       // more-menu rehomed into the right slot).
       const bespokeContent = mobileSurface === 'content' && BESPOKE_MOBILE_VIEWS.has(activeView);
+      // Shared lazy-chunk fallback for the code-split bespoke phone screens.
+      const lazyFallback = (
+        <div className="flex h-full items-center justify-center">
+          <Loader2 className="h-5 w-5 animate-spin text-stat-subtitle" strokeWidth={1.5} />
+        </div>
+      );
       const renderMobileBespoke = () => {
         switch (activeView) {
           case 'dashboard':
@@ -781,18 +795,101 @@ export default function EditorLayout() {
                 />
               </Suspense>
             );
+          case 'auto-updates':
+            // Same gates as the desktop content path (ViewRouter): hub-only +
+            // the auto-updates capability, preserved on the phone surface.
+            return (
+              <HubOnlyGate>
+                <CapabilityGate capability="auto-updates" featureName="Auto-Update Readiness">
+                  <Suspense fallback={lazyFallback}>
+                    <AutoUpdateReadinessView headerActions={mobileMastheadActions} />
+                  </Suspense>
+                </CapabilityGate>
+              </HubOnlyGate>
+            );
+          case 'templates':
+            return (
+              <Suspense fallback={lazyFallback}>
+                <AppStoreView
+                  onDeploySuccess={(sName) => { refreshStacks(); void stackActions.loadFile(sName); }}
+                  headerActions={mobileMastheadActions}
+                />
+              </Suspense>
+            );
+          case 'audit-log':
+            return (
+              <HubOnlyGate>
+                <CapabilityGate capability="audit-log" featureName="Audit Log">
+                  <Suspense fallback={lazyFallback}>
+                    <AuditLogView headerActions={mobileMastheadActions} />
+                  </Suspense>
+                </CapabilityGate>
+              </HubOnlyGate>
+            );
+          case 'resources':
+            return (
+              <Suspense fallback={lazyFallback}>
+                <ResourcesView headerActions={mobileMastheadActions} />
+              </Suspense>
+            );
+          case 'global-observability':
+            // Hub-only, like the desktop content path (ViewRouter); no capability gate.
+            return (
+              <HubOnlyGate>
+                <Suspense fallback={lazyFallback}>
+                  <GlobalObservabilityView headerActions={mobileMastheadActions} />
+                </Suspense>
+              </HubOnlyGate>
+            );
           default:
             return workspaceEl;
         }
       };
 
+      // The mobile Stacks list leads with the status masthead (no TopBar): the
+      // node switcher is its kicker chip, the serif word summarizes stack
+      // health, and notifications + the more-menu sit in the right slot.
+      // up counts 'running' and down counts 'exited'; any other status (or the
+      // window before statuses load) is neither, so "All running" must require
+      // every stack to be up rather than just no stack being down.
+      const { all: stacksAll, up: stacksUp, down: stacksDown, updates: stacksUpdates } = filterCounts;
+      let stacksState = 'All running';
+      let stacksTone: Tone = 'success';
+      if (stacksAll === 0) {
+        stacksState = 'No stacks';
+      } else if (stacksDown > 0) {
+        stacksState = `${stacksDown} down`;
+        stacksTone = 'destructive';
+      } else if (stacksUpdates > 0) {
+        stacksState = `${stacksUpdates} update${stacksUpdates === 1 ? '' : 's'}`;
+        stacksTone = 'warning';
+      } else if (stacksUp !== stacksAll) {
+        stacksState = `${stacksUp}/${stacksAll} up`;
+        stacksTone = 'brand';
+      }
+      const stacksMasthead = (
+        <Masthead
+          kickerSlot={<NodeSwitcher compact onManageNodes={() => openSettings('nodes')} />}
+          state={stacksState}
+          stateTone={stacksTone}
+          live={stacksDown > 0}
+          meta={`${stacksAll} ${stacksAll === 1 ? 'stack' : 'stacks'} · ${stacksUp} up · ${stacksDown} down`}
+          right={mobileMastheadActions}
+        />
+      );
+
       if (isMobile) {
         return (
           <div className="flex h-screen w-screen flex-col overflow-hidden app-canvas text-foreground">
             {commandPaletteEl}
-            {mobileSurface !== 'detail' && !bespokeContent && topBarEl}
+            {mobileSurface === 'content' && !bespokeContent && topBarEl}
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-              {mobileSurface === 'list' && sidebarEl}
+              {mobileSurface === 'list' && (
+                <>
+                  {stacksMasthead}
+                  {sidebarEl}
+                </>
+              )}
               {mobileSurface === 'content' && (bespokeContent ? renderMobileBespoke() : workspaceEl)}
               {mobileSurface === 'detail' && (
                 detailReady ? (

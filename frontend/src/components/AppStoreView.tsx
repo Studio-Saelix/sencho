@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,6 +13,8 @@ import { apiFetch, withDeploySession } from '@/lib/api';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
+import { useIsMobile } from '@/hooks/use-is-mobile';
+import { Masthead } from '@/components/mobile/mobile-ui';
 import { CategorySidebar } from '@/components/appstore/CategorySidebar';
 import { FeaturedHero } from '@/components/appstore/FeaturedHero';
 import { TemplateTile } from '@/components/appstore/TemplateTile';
@@ -31,9 +33,12 @@ interface PortInUseInfo {
 
 interface AppStoreViewProps {
     onDeploySuccess: (stackName: string) => void;
+    /** Notifications + more-menu cluster for the mobile masthead, rehomed from the dropped TopBar. */
+    headerActions?: ReactNode;
 }
 
-export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
+export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewProps) {
+    const isMobile = useIsMobile();
     const { can } = useAuth();
     const { activeNode } = useNodes();
     const { runWithLog } = useDeployFeedback();
@@ -280,19 +285,107 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
         return conflicts;
     }, [selectedTemplate, portVars, portsInUse]);
 
-    return (
+    const searchInput = (
+        <div className="relative flex-1">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+                type="search"
+                placeholder="Search App Store..."
+                className="pl-8"
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); }}
+            />
+        </div>
+    );
+
+    const contentBody = loading ? (
+        <div className="flex items-center justify-center h-48">
+            <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+        </div>
+    ) : (
+        <div className="flex flex-col gap-5 pb-8 pr-4">
+            {featuredTemplate && (
+                <FeaturedHero
+                    template={featuredTemplate}
+                    category={selectedCategory !== 'All' ? selectedCategory : undefined}
+                    onOpen={handleSelectTemplate}
+                    imgError={!!featuredTemplate.logo && !!imgErrors[featuredTemplate.logo]}
+                    onImgError={() => featuredTemplate.logo && setImgErrors(prev => ({ ...prev, [featuredTemplate.logo!]: true }))}
+                />
+            )}
+
+            {gridTemplates.length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                    {gridTemplates.map((t, idx) => (
+                        <TemplateTile
+                            key={`${t.title}-${idx}`}
+                            template={t}
+                            onSelect={handleSelectTemplate}
+                            imgError={!!t.logo && !!imgErrors[t.logo]}
+                            onImgError={() => t.logo && setImgErrors(prev => ({ ...prev, [t.logo!]: true }))}
+                        />
+                    ))}
+                </div>
+            ) : !featuredTemplate ? (
+                <div className="py-12 text-center text-muted-foreground">
+                    <Info className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                    {templates.length === 0 ? (
+                        <p>Registry returned no templates. Check your registry URL in Settings.</p>
+                    ) : (
+                        <p>No apps found matching "{searchQuery}"</p>
+                    )}
+                </div>
+            ) : null}
+        </div>
+    );
+
+    // The phone view is search + a single-column list of every matching app:
+    // no featured hero and no category chips (the featured app is folded into
+    // the list so it is not dropped).
+    const mobileContent = loading ? (
+        <div className="flex items-center justify-center h-48">
+            <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+        </div>
+    ) : filtered.length > 0 ? (
+        <div className="flex flex-col gap-3 pb-8">
+            {filtered.map((t, idx) => (
+                <TemplateTile
+                    key={`${t.title}-${idx}`}
+                    template={t}
+                    onSelect={handleSelectTemplate}
+                    imgError={!!t.logo && !!imgErrors[t.logo]}
+                    onImgError={() => t.logo && setImgErrors(prev => ({ ...prev, [t.logo!]: true }))}
+                />
+            ))}
+        </div>
+    ) : (
+        <div className="py-12 text-center text-muted-foreground">
+            <Info className="w-8 h-8 mx-auto mb-2 opacity-50" />
+            {templates.length === 0 ? (
+                <p>Registry returned no templates. Check your registry URL in Settings.</p>
+            ) : (
+                <p>No apps found matching "{searchQuery}"</p>
+            )}
+        </div>
+    );
+
+    const layout = isMobile ? (
+        <div className="flex h-full min-h-0 flex-col">
+            <Masthead
+                kicker="app store"
+                state={`${filtered.length} app${filtered.length !== 1 ? 's' : ''}`}
+                stateTone="brand"
+                live={false}
+                meta={categoryEntries.length > 1 ? `${categoryEntries.length - 1} categories` : 'self-hosted templates'}
+                right={headerActions}
+            />
+            <div className="shrink-0 px-4 pt-3">{searchInput}</div>
+            <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3">{mobileContent}</div>
+        </div>
+    ) : (
         <div className="flex flex-col h-full gap-5">
             <div className="flex items-center gap-3">
-                <div className="relative flex-1">
-                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                    <Input
-                        type="search"
-                        placeholder="Search App Store..."
-                        className="pl-8"
-                        value={searchQuery}
-                        onChange={(e) => { setSearchQuery(e.target.value); }}
-                    />
-                </div>
+                {searchInput}
                 <span className="text-xs text-stat-subtitle font-mono tabular-nums shrink-0">
                     {filtered.length} app{filtered.length !== 1 ? 's' : ''}
                 </span>
@@ -307,49 +400,14 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
                     />
                 )}
 
-                <ScrollArea className="flex-1">
-                    {loading ? (
-                        <div className="flex items-center justify-center h-48">
-                            <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-                        </div>
-                    ) : (
-                        <div className="flex flex-col gap-5 pb-8 pr-4">
-                            {featuredTemplate && (
-                                <FeaturedHero
-                                    template={featuredTemplate}
-                                    category={selectedCategory !== 'All' ? selectedCategory : undefined}
-                                    onOpen={handleSelectTemplate}
-                                    imgError={!!featuredTemplate.logo && !!imgErrors[featuredTemplate.logo]}
-                                    onImgError={() => featuredTemplate.logo && setImgErrors(prev => ({ ...prev, [featuredTemplate.logo!]: true }))}
-                                />
-                            )}
-
-                            {gridTemplates.length > 0 ? (
-                                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                                    {gridTemplates.map((t, idx) => (
-                                        <TemplateTile
-                                            key={`${t.title}-${idx}`}
-                                            template={t}
-                                            onSelect={handleSelectTemplate}
-                                            imgError={!!t.logo && !!imgErrors[t.logo]}
-                                            onImgError={() => t.logo && setImgErrors(prev => ({ ...prev, [t.logo!]: true }))}
-                                        />
-                                    ))}
-                                </div>
-                            ) : !featuredTemplate ? (
-                                <div className="py-12 text-center text-muted-foreground">
-                                    <Info className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                    {templates.length === 0 ? (
-                                        <p>Registry returned no templates. Check your registry URL in Settings.</p>
-                                    ) : (
-                                        <p>No apps found matching "{searchQuery}"</p>
-                                    )}
-                                </div>
-                            ) : null}
-                        </div>
-                    )}
-                </ScrollArea>
+                <ScrollArea className="flex-1">{contentBody}</ScrollArea>
             </div>
+        </div>
+    );
+
+    return (
+        <>
+            {layout}
 
             <SystemSheet
                 open={isSheetOpen}
@@ -612,6 +670,6 @@ export function AppStoreView({ onDeploySuccess }: AppStoreViewProps) {
                     </>
                 )}
             </SystemSheet>
-        </div>
+        </>
     );
 }
