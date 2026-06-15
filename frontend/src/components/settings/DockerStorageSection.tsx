@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { RefreshCw } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
@@ -11,6 +11,7 @@ import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { useSettingsDirty } from './useSettingsDirty';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { NumberChip } from './SystemControls';
 
@@ -40,21 +41,9 @@ export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProp
     const { activeNode } = useNodes();
     const { isAdmin } = useAuth();
     const readOnly = !isAdmin;
-    const [settings, setSettings] = useState<DockerStorageFields>({ ...DEFAULT_DOCKER_STORAGE });
-    const serverSettingsRef = useRef<DockerStorageFields>({ ...DEFAULT_DOCKER_STORAGE });
+    const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<DockerStorageFields>({ ...DEFAULT_DOCKER_STORAGE });
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-
-    const dirtyCount = useMemo(() => {
-        const baseline = serverSettingsRef.current;
-        let n = 0;
-        if (settings.docker_janitor_gb !== baseline.docker_janitor_gb) n++;
-        if (settings.prune_on_update !== baseline.prune_on_update) n++;
-        if (settings.reclaim_hero !== baseline.reclaim_hero) n++;
-        return n;
-    }, [settings]);
-
-    const hasChanges = dirtyCount > 0;
 
     useEffect(() => {
         onDirtyChange?.(hasChanges);
@@ -83,8 +72,7 @@ export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProp
                     prune_on_update: (nodeData.prune_on_update as '0' | '1') ?? DEFAULT_SETTINGS.prune_on_update,
                     reclaim_hero: (nodeData.reclaim_hero as '0' | '1') ?? DEFAULT_SETTINGS.reclaim_hero,
                 };
-                setSettings(safe);
-                serverSettingsRef.current = { ...safe };
+                reset(safe);
             } catch (e) {
                 console.error('Failed to fetch Docker & storage settings', e);
             } finally {
@@ -100,18 +88,19 @@ export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProp
     };
 
     const saveSettings = async () => {
+        const submitted = { ...settings };
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
-                body: JSON.stringify(settings),
+                body: JSON.stringify(submitted),
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
                 return;
             }
-            serverSettingsRef.current = { ...settings };
+            markSaved(submitted);
             toast.success('Docker & storage settings saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
