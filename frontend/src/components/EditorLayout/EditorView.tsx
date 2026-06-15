@@ -199,6 +199,16 @@ export interface EditorViewProps {
 
     // Mobile-only: back affordance in the detail header returns to the stack list.
     onMobileBack?: () => void;
+    // Mobile-only (always supplied by renderEditor): close the full-screen
+    // compose/.env editor, routed through the unsaved-changes guard so a dirty
+    // close prompts before discarding. Required, not optional, because the
+    // fallback would silently discard edits; the desktop EditorView ignores it.
+    onCloseEditor: () => void;
+    // Mobile-only (always supplied by renderEditor): true when the compose or env
+    // buffer differs from disk; gates the env-file selector so switching files
+    // cannot drop unsaved edits. Required so a wiring gap is a compile error
+    // rather than a silently-disabled data-loss guard.
+    hasUnsavedChanges: () => boolean;
     // Mobile-only: notifications + more-menu cluster for the detail header right
     // slot (the global TopBar is dropped on the full-screen detail surface).
     headerActions?: React.ReactNode;

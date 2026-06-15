@@ -416,6 +416,127 @@ describe('FileSystemService stack methods', () => {
     });
   });
 
+  // ── renameStackPath (rename + cross-directory move) ──────────────────────
+
+  describe('renameStackPath', () => {
+    it('moves a file from the stack root into a subdirectory', async () => {
+      await fs.writeFile(path.join(stackDir, 'app.conf'), 'data');
+      await fs.mkdir(path.join(stackDir, 'configs'));
+
+      const service = FileSystemService.getInstance();
+      await service.renameStackPath(STACK, 'app.conf', 'configs/app.conf');
+
+      await expect(fs.access(path.join(stackDir, 'app.conf'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fs.readFile(path.join(stackDir, 'configs', 'app.conf'), 'utf-8')).toBe('data');
+    });
+
+    it('moves a file from a subdirectory back to the stack root', async () => {
+      await fs.mkdir(path.join(stackDir, 'configs'));
+      await fs.writeFile(path.join(stackDir, 'configs', 'app.conf'), 'data');
+
+      const service = FileSystemService.getInstance();
+      await service.renameStackPath(STACK, 'configs/app.conf', 'app.conf');
+
+      await expect(fs.access(path.join(stackDir, 'configs', 'app.conf'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fs.readFile(path.join(stackDir, 'app.conf'), 'utf-8')).toBe('data');
+    });
+
+    it('moves a directory into another directory', async () => {
+      await fs.mkdir(path.join(stackDir, 'src'));
+      await fs.writeFile(path.join(stackDir, 'src', 'child.txt'), 'inner');
+      await fs.mkdir(path.join(stackDir, 'dest'));
+
+      const service = FileSystemService.getInstance();
+      await service.renameStackPath(STACK, 'src', 'dest/src');
+
+      await expect(fs.access(path.join(stackDir, 'src'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fs.readFile(path.join(stackDir, 'dest', 'src', 'child.txt'), 'utf-8')).toBe('inner');
+    });
+
+    it('renames a file in place (same directory)', async () => {
+      await fs.writeFile(path.join(stackDir, 'old.txt'), 'x');
+
+      const service = FileSystemService.getInstance();
+      await service.renameStackPath(STACK, 'old.txt', 'new.txt');
+
+      await expect(fs.access(path.join(stackDir, 'old.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await fs.readFile(path.join(stackDir, 'new.txt'), 'utf-8')).toBe('x');
+    });
+
+    it('rejects moving a directory into its own descendant', async () => {
+      await fs.mkdir(path.join(stackDir, 'parent', 'child'), { recursive: true });
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'parent', 'parent/child/parent')).rejects.toMatchObject({
+        code: 'INVALID_PATH',
+      });
+    });
+
+    it('rejects overwriting an existing destination', async () => {
+      await fs.writeFile(path.join(stackDir, 'source.txt'), 'a');
+      await fs.mkdir(path.join(stackDir, 'sub'));
+      await fs.writeFile(path.join(stackDir, 'sub', 'source.txt'), 'b');
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'source.txt', 'sub/source.txt')).rejects.toMatchObject({
+        code: 'EEXIST',
+      });
+    });
+
+    it('rejects an in-place rename onto an existing sibling name', async () => {
+      await fs.writeFile(path.join(stackDir, 'old.txt'), 'a');
+      await fs.writeFile(path.join(stackDir, 'existing.txt'), 'b');
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'old.txt', 'existing.txt')).rejects.toMatchObject({
+        code: 'EEXIST',
+      });
+    });
+
+    it('rejects moving a protected root file out of the stack root', async () => {
+      await fs.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+      await fs.mkdir(path.join(stackDir, 'sub'));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'compose.yaml', 'sub/compose.yaml')).rejects.toMatchObject({
+        code: 'PROTECTED_FILE',
+      });
+    });
+
+    it('rejects a destination that becomes a protected root name', async () => {
+      await fs.mkdir(path.join(stackDir, 'sub'));
+      await fs.writeFile(path.join(stackDir, 'sub', 'compose.yaml'), 'services: {}\n');
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'sub/compose.yaml', 'compose.yaml')).rejects.toMatchObject({
+        code: 'PROTECTED_FILE',
+      });
+    });
+
+    // On a case-insensitive filesystem a differently-cased request resolves to the
+    // real protected file, so the gate must fold case. These only reproduce the
+    // bypass on Windows/macOS; on Linux the cased name is a distinct, unprotected
+    // file and the scenario does not arise.
+    it.skipIf(!isWindows)('rejects moving a protected root file referenced by a different case', async () => {
+      await fs.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+      await fs.mkdir(path.join(stackDir, 'sub'));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'COMPOSE.YAML', 'sub/COMPOSE.YAML')).rejects.toMatchObject({
+        code: 'PROTECTED_FILE',
+      });
+    });
+
+    it.skipIf(!isWindows)('rejects moving a directory into its own descendant when the source case differs', async () => {
+      await fs.mkdir(path.join(stackDir, 'parent', 'child'), { recursive: true });
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'Parent', 'parent/child/x')).rejects.toMatchObject({
+        code: 'INVALID_PATH',
+      });
+    });
+  });
+
   // ── path traversal ──────────────────────────────────────────────────────
 
   describe('path traversal protection', () => {
@@ -552,6 +673,53 @@ describe('FileSystemService stack methods', () => {
       await expect(fs.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
       const kept = await fs.readFile(path.join(targetDir, 'kept.txt'), 'utf-8');
       expect(kept).toBe('preserve');
+    });
+
+    it('move on a symlink relocates the link entry and leaves an internal target intact', async () => {
+      const targetPath = path.join(stackDir, 'target.txt');
+      const linkPath = path.join(stackDir, 'link.txt');
+      await fs.writeFile(targetPath, 'payload');
+      await fs.symlink(targetPath, linkPath);
+      await fs.mkdir(path.join(stackDir, 'sub'));
+
+      const service = FileSystemService.getInstance();
+      await service.renameStackPath(STACK, 'link.txt', 'sub/link.txt');
+
+      // The link entry moved; the old location is gone and the target is untouched.
+      await expect(fs.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const movedLink = await fs.lstat(path.join(stackDir, 'sub', 'link.txt'));
+      expect(movedLink.isSymbolicLink()).toBe(true);
+      expect(await fs.readFile(targetPath, 'utf-8')).toBe('payload');
+      // Following the moved link still resolves to the original target content.
+      expect(await fs.readFile(path.join(stackDir, 'sub', 'link.txt'), 'utf-8')).toBe('payload');
+    });
+
+    it('rejects a move whose destination is occupied by a dangling symlink', async () => {
+      await fs.writeFile(path.join(stackDir, 'real.txt'), 'payload');
+      await fs.mkdir(path.join(stackDir, 'sub'));
+      // A symlink to a now-removed target: lstat sees the link, so the slot is occupied.
+      await fs.symlink(path.join(stackDir, 'sub', 'gone-target'), path.join(stackDir, 'sub', 'real.txt'));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.renameStackPath(STACK, 'real.txt', 'sub/real.txt')).rejects.toMatchObject({
+        code: 'EEXIST',
+      });
+    });
+
+    it('move on a symlink whose target is outside the stack relocates only the link, not the target', async () => {
+      const externalFile = path.join(tmpBase, 'outside.txt');
+      await fs.writeFile(externalFile, 'external');
+      const linkPath = path.join(stackDir, 'escape-link');
+      await fs.symlink(externalFile, linkPath);
+      await fs.mkdir(path.join(stackDir, 'sub'));
+
+      const service = FileSystemService.getInstance();
+      await service.renameStackPath(STACK, 'escape-link', 'sub/escape-link');
+
+      await expect(fs.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const moved = await fs.lstat(path.join(stackDir, 'sub', 'escape-link'));
+      expect(moved.isSymbolicLink()).toBe(true);
+      expect(await fs.readFile(externalFile, 'utf-8')).toBe('external');
     });
   });
 });

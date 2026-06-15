@@ -27,6 +27,75 @@ function assertSafeRelPath(rel: string, label = 'path'): void {
   }
 }
 
+/**
+ * Mirrors backend/src/services/FileSystemService.ts::isProtectedRelPath. Only the
+ * compose and .env files at the stack ROOT are protected; an entry with the same
+ * basename nested in a subdirectory is an ordinary file. FileEntry.isProtected is
+ * basename-only, so callers that care about position (move source gating, root
+ * destination gating) use this instead.
+ */
+const PROTECTED_ROOT_NAMES = new Set([
+  'compose.yaml',
+  'compose.yml',
+  'docker-compose.yaml',
+  'docker-compose.yml',
+  '.env',
+]);
+
+export function isProtectedRootRelPath(rel: string): boolean {
+  if (!rel || rel.includes('/')) return false;
+  return PROTECTED_ROOT_NAMES.has(rel);
+}
+
+/** True when `candidateRel` is `ancestorRel` itself or sits inside it. */
+export function isSameOrDescendantPath(ancestorRel: string, candidateRel: string): boolean {
+  return candidateRel === ancestorRel || candidateRel.startsWith(`${ancestorRel}/`);
+}
+
+/** The directory portion of a relative path; '' for a root-level entry. */
+export function relPathParentDir(rel: string): string {
+  return rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+}
+
+/** Custom drag MIME so move drops are told apart from OS file drags (`Files`). */
+export const FILE_ENTRY_DND_MIME = 'application/x-sencho-file-entry';
+
+export interface FileEntryDragPayload {
+  relPath: string;
+  name: string;
+  type: FileEntry['type'];
+}
+
+const ENTRY_TYPES: ReadonlySet<FileEntry['type']> = new Set(['file', 'directory', 'symlink']);
+
+/**
+ * Reads a tree-move drag payload from a DataTransfer, or null when this is not
+ * one of our entry drags (e.g. an OS file drag carries `Files`, handled by the
+ * upload dropzone). The parsed JSON is shape-validated rather than blindly cast,
+ * so a malformed or foreign payload becomes an ignored no-op instead of flowing
+ * downstream with undefined fields.
+ */
+export function readFileEntryDragPayload(dt: DataTransfer): FileEntryDragPayload | null {
+  if (!dt.types.includes(FILE_ENTRY_DND_MIME)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(dt.getData(FILE_ENTRY_DND_MIME));
+  } catch (err) {
+    console.warn('Ignored malformed file-entry drag payload', err);
+    return null;
+  }
+  if (
+    typeof parsed === 'object' && parsed !== null &&
+    typeof (parsed as FileEntryDragPayload).relPath === 'string' &&
+    typeof (parsed as FileEntryDragPayload).name === 'string' &&
+    ENTRY_TYPES.has((parsed as FileEntryDragPayload).type)
+  ) {
+    return parsed as FileEntryDragPayload;
+  }
+  console.warn('Ignored file-entry drag payload with an unexpected shape');
+  return null;
+}
+
 export interface FileEntry {
   name: string;
   type: 'file' | 'directory' | 'symlink';

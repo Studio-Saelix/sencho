@@ -77,6 +77,14 @@ function stripTrailingSlash(s: string): string {
   return s.endsWith('/') ? s.slice(0, -1) : s;
 }
 
+// On a case-insensitive filesystem (Windows, default macOS) two paths that differ
+// only in case point at the same entry, so comparisons that gate filesystem
+// mutations must fold case to stay authoritative. On Linux (where Sencho runs in
+// production) paths are case-sensitive and this returns the input unchanged.
+function fsCaseKey(s: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? s.toLowerCase() : s;
+}
+
 function isProtectedRelPath(relPath: string): boolean {
   if (!relPath) return false;
   const normalized = stripTrailingSlash(relPath);
@@ -84,7 +92,9 @@ function isProtectedRelPath(relPath: string): boolean {
   // the stack directory itself, so a subdirectory entry named compose.yaml is just
   // an arbitrary file and the user may want to delete it.
   if (normalized.includes('/')) return false;
-  return PROTECTED_STACK_FILES.has(normalized);
+  // Fold case so e.g. a request for COMPOSE.YAML cannot dodge the gate on a
+  // case-insensitive filesystem where it resolves to the real compose.yaml.
+  return PROTECTED_STACK_FILES.has(fsCaseKey(normalized));
 }
 
 function protectedFileError(relPath: string): Error & { code: string } {
@@ -1385,22 +1395,40 @@ export class FileSystemService {
     await fsPromises.mkdir(safePath, { recursive: true });
   }
 
+  /**
+   * Renames or moves an entry within a stack. The source and destination may sit
+   * in different directories (a cross-directory move), since fs.rename relocates
+   * natively. Both paths resolve through the leaf helper so a symlink source is
+   * moved as the link entry itself rather than followed to its target, matching
+   * the delete/chmod policy. fs.rename fails with EXDEV across a filesystem
+   * boundary (e.g. a bind-mounted subdirectory); the route surfaces that as a 409.
+   */
   async renameStackPath(stackName: string, fromRel: string, toRel: string): Promise<void> {
     if (isProtectedRelPath(fromRel)) throw protectedFileError(fromRel);
     if (isProtectedRelPath(toRel)) throw protectedFileError(toRel);
-    const fromPath = await this.resolveSafeStackPath(stackName, fromRel);
-    // toRel must resolve to the same parent directory (rename only, no cross-dir move).
-    const toPath = await this.resolveSafeStackPath(stackName, toRel);
-    if (path.dirname(fromPath) !== path.dirname(toPath)) {
-      throw Object.assign(new Error('Cross-directory rename is not supported'), { code: 'INVALID_PATH' });
-    }
+    const fromPath = await this.resolveSafeStackLeafPath(stackName, fromRel);
+    const toPath = await this.resolveSafeStackLeafPath(stackName, toRel);
     const toName = path.basename(toPath);
     if (!toName || toName === '.' || toName === '..') {
       throw Object.assign(new Error('Invalid destination name'), { code: 'INVALID_PATH' });
     }
-    // Prevent overwriting an existing path.
+    // Block moving a directory into itself or one of its own descendants; fs.rename
+    // would otherwise fail with an opaque EINVAL/EPERM. Compare case-folded so the
+    // guard stays authoritative when the source is supplied with non-disk casing on
+    // a case-insensitive filesystem.
+    const fromStat = await fsPromises.lstat(fromPath);
+    if (fromStat.isDirectory()) {
+      const fromKey = fsCaseKey(fromPath);
+      const fromKeyWithSep = fromKey.endsWith(path.sep) ? fromKey : fromKey + path.sep;
+      const toKey = fsCaseKey(toPath);
+      if (toKey === fromKey || toKey.startsWith(fromKeyWithSep)) {
+        throw Object.assign(new Error('Cannot move a folder into itself'), { code: 'INVALID_PATH' });
+      }
+    }
+    // Prevent overwriting an existing path. lstat (not access) so a dangling
+    // symlink already at the destination still counts as occupied.
     try {
-      await fsPromises.access(toPath);
+      await fsPromises.lstat(toPath);
       throw Object.assign(new Error('A file or folder with that name already exists'), { code: 'EEXIST' });
     } catch (e: unknown) {
       const fe = e as NodeJS.ErrnoException;

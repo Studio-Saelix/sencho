@@ -1129,6 +1129,59 @@ describe('PATCH /api/stacks/:stackName/files/rename', () => {
     const moved = await fs.readFile(path.join(stacksDir, STACK, 'community-rename-to.txt'), 'utf-8');
     expect(moved).toBe('src');
   });
+
+  it('moves a file into a subdirectory (cross-directory move) with 204', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'move-me.txt'), 'payload');
+    await fs.mkdir(path.join(stacksDir, STACK, 'movedest'), { recursive: true });
+
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'move-me.txt', to: 'movedest/move-me.txt' });
+    expect(res.status).toBe(204);
+
+    await expect(fs.access(path.join(stacksDir, STACK, 'move-me.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fs.readFile(path.join(stacksDir, STACK, 'movedest', 'move-me.txt'), 'utf-8')).toBe('payload');
+  });
+
+  it('returns 400 INVALID_PATH when moving a directory into its own descendant', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'movparent', 'movchild'), { recursive: true });
+
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'movparent', to: 'movparent/movchild/movparent' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PATH');
+  });
+
+  it('returns 409 PROTECTED_FILE when moving a nested compose file to the stack root', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'nested'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'nested', 'compose.yaml'), 'services: {}\n');
+
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'nested/compose.yaml', to: 'compose.yaml' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROTECTED_FILE');
+  });
+
+  it('maps a cross-device EXDEV rename failure to 409 EXDEV', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'exdev-src.txt'), 'data');
+    await fs.mkdir(path.join(stacksDir, STACK, 'exdev-dest'), { recursive: true });
+    const renameSpy = vi.spyOn(fs, 'rename').mockRejectedValueOnce(
+      Object.assign(new Error('cross-device link not permitted'), { code: 'EXDEV' }),
+    );
+
+    const res = await request(app)
+      .patch(`/api/stacks/${STACK}/files/rename`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'exdev-src.txt', to: 'exdev-dest/exdev-src.txt' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('EXDEV');
+    renameSpy.mockRestore();
+  });
 });
 
 // ── PUT /:stackName/files/permissions ────────────────────────────────────────

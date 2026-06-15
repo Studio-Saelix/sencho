@@ -466,6 +466,8 @@ export default function EditorLayout() {
       onDismissRecovery={() => { if (selectedFile) dismissActionResult(selectedFile); }}
       panelStartedAt={panelStartedAt}
       onMobileBack={goToMobileList}
+      onCloseEditor={() => stackActions.attemptLeaveEditor(() => setEditingCompose(false))}
+      hasUnsavedChanges={stackActions.hasUnsavedChanges}
     />
   );
 
