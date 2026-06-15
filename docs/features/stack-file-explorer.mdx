@@ -21,7 +21,7 @@ The file explorer gives you direct access to everything inside a stack's directo
 
 The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files tab in one click.
 
-The file explorer is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) require **stack read** permission, which every signed-in role has by default. Write actions (upload, edit, create, rename, change permissions, delete) require **stack edit** permission on your account.
+The file explorer is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) require **stack read** permission, which every signed-in role has by default. Write actions (upload, edit, create, rename, move, change permissions, delete) require **stack edit** permission on your account.
 
 ## Layout
 
@@ -116,9 +116,18 @@ When a file is selected, the right pane action bar shows **Download**. Files str
 
 ## Renaming
 
-Right-click any file or folder and choose **Rename**. The dialog accepts a new name following the same rules as creation.
+Right-click any file or folder and choose **Rename**. The dialog accepts a new name following the same rules as creation. Rename keeps the entry in its current folder.
 
-Rename appears only when your account has stack edit permission. The rename is in-place; cross-directory moves are not supported. To move an entry between directories, copy it via the host shell or upload to the new location and delete the original.
+Rename appears only when your account has stack edit permission.
+
+## Moving
+
+Move a file or folder into a different directory in one of two ways:
+
+- **Move to…** Right-click the entry and choose **Move to…**. The dialog shows the stack's folder tree; pick a destination folder (or **Stack root**) and choose **Move**. Destinations that would collide or make no sense (the entry's current folder, a folder inside the entry itself, or a name that is reserved at the stack root) are not selectable.
+- **Drag and drop.** Drag the entry onto a folder in the tree, or onto empty space to move it to the stack root.
+
+Moving requires stack edit permission. The protected stack files (compose / docker-compose / `.env`) at the stack root stay put: the compose CLI reads them from the stack directory, so they are not offered as move sources or root destinations. Moving a file changes only where it lives on disk; it does not redeploy or restart the stack.
 
 ## Permissions (chmod)
 
@@ -164,8 +173,10 @@ When the entry is one of the five protected names, the modal asks you to type th
 
 | Right-click target | Admin entries (with stack edit) | Viewer entries |
 |---|---|---|
-| Folder | New File, New Folder, Rename, Delete | No write entries |
-| File | Rename, Permissions, Delete | Permissions (read-only) |
+| Folder | New File, New Folder, Rename, Move to…, Delete | No write entries |
+| File | Rename, Move to…, Permissions, Delete | Permissions (read-only) |
+
+**Move to…** is absent for the protected stack files (compose / docker-compose / `.env`) at the stack root, which cannot be moved out of the stack directory.
 
 The Permissions dialog opens for everyone; only users with stack edit permission can save changes.
 
@@ -203,6 +214,6 @@ The Permissions dialog opens for everyone; only users with stack edit permission
     Each directory render is capped at 1000 entries to keep the tree responsive. Use the filter input above the tree to narrow the list, or drop into a host shell with `cd` into the stack directory if you need to work with entries past the cap.
   </Accordion>
   <Accordion title="Write controls are missing">
-    Upload, create, rename, chmod save, and delete require **stack edit** permission. Viewer accounts can browse, preview text files, and inspect permissions in read-only mode.
+    Upload, create, rename, move, chmod save, and delete require **stack edit** permission. Viewer accounts can browse, preview text files, and inspect permissions in read-only mode.
   </Accordion>
 </AccordionGroup>

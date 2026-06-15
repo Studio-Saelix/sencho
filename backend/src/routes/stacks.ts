@@ -1703,7 +1703,8 @@ type FsErrorCode =
   | 'FILE_EXISTS'
   | 'DIR_EXISTS'
   | 'PROTECTED_FILE'
-  | 'LINK_CHMOD_UNSUPPORTED';
+  | 'LINK_CHMOD_UNSUPPORTED'
+  | 'EXDEV';
 
 function sendFsError(
   res: Response,
@@ -1729,6 +1730,9 @@ function sendFsError(
   }
   if (e.code === 'EEXIST') {
     return res.status(409).json({ error: e.message, code: 'ALREADY_EXISTS' satisfies FsErrorCode });
+  }
+  if (e.code === 'EXDEV') {
+    return res.status(409).json({ error: 'Cannot move across a storage boundary', code: 'EXDEV' satisfies FsErrorCode });
   }
   if (e.code === 'ENOTDIR') {
     return res.status(400).json({ error: 'Target path is not a directory', code: 'INVALID_PATH' satisfies FsErrorCode });
