@@ -148,18 +148,20 @@ class TrivyInstaller {
     }
 
     public async install(): Promise<{ version: string }> {
-        const version = await this.resolveInstallVersion();
-        return this.acquire(async () => this.doInstall(version));
+        // Resolve the version inside acquire() so busy stays true through the
+        // latest-version network fetch and a concurrent op is serialized.
+        return this.acquire(async () => this.doInstall(await this.resolveInstallVersion()));
     }
 
     public async update(): Promise<{ version: string }> {
-        if (!this.isManagedInstalled()) {
-            throw new Error('No managed Trivy install to update');
-        }
-        // An explicit update always pulls the newest release, regardless of the
-        // auto-update setting; that is the whole point of the action.
-        const version = await this.fetchLatestVersion(true);
-        return this.acquire(async () => this.doInstall(version));
+        return this.acquire(async () => {
+            if (!this.isManagedInstalled()) {
+                throw new Error('No managed Trivy install to update');
+            }
+            // An explicit update always pulls the newest release, regardless of
+            // the auto-update setting; that is the whole point of the action.
+            return this.doInstall(await this.fetchLatestVersion(true));
+        });
     }
 
     // Fresh installs pin by default for reproducibility; when the operator has

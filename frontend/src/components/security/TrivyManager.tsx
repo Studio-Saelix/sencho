@@ -192,7 +192,7 @@ export function TrivyManager({ status, updateCheck, refresh, refreshUpdateCheck 
           </div>
         )}
 
-        {status.available && isAdmin && (
+        {(status.available || status.preDeployScanAdvisory) && isAdmin && (
           <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
             <div>
               <Label className="text-sm">Pre-deploy scan advisory</Label>

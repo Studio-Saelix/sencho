@@ -105,6 +105,7 @@ export function useOverlayState() {
     stackName: string;
     images: PreDeployScanImage[];
     proceed: () => void;
+    cancel: () => void;
   } | null>(null);
 
   const [stackMisconfigScanId, setStackMisconfigScanId] = useState<number | null>(null);

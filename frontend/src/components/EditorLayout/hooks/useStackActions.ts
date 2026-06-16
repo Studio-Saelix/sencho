@@ -235,6 +235,9 @@ export function useStackActions(options: UseStackActionsOptions) {
   const pendingStackLoadRef = useRef<string | null>(null);
   const pendingLogsRef = useRef<{ stackName: string; containerName: string } | null>(null);
   const checkUpdatesIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // True from a deploy click through the async pre-deploy advisory phase until
+  // the deploy starts or is cancelled, so a double-click cannot start two deploys.
+  const deployPendingRef = useRef(false);
   // Aborts the most recent loadFile sequence (compose GET, envs GET, env content
   // GET, containers GET, backup GET). A node switch, an unmount, or a second
   // loadFile call before the first finishes all cancel the in-flight fetches so
@@ -756,13 +759,22 @@ export function useStackActions(options: UseStackActionsOptions) {
   const deployStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
-    if (!stackListState.selectedFile || stackListState.isStackBusy(stackListState.selectedFile))
+    // deployPendingRef blocks a second deploy from the moment of the click
+    // through the async advisory phase, before setStackAction marks the stack
+    // busy. Without it, a double-click during the advisory fetch window could
+    // launch two deploys. Cleared on cancel and in the deploy's finally.
+    if (
+      !stackListState.selectedFile ||
+      stackListState.isStackBusy(stackListState.selectedFile) ||
+      deployPendingRef.current
+    )
       return;
     const stackFile = stackListState.selectedFile;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     // Snapshot the node once so the advisory fetch and the deploy stay bound to
     // it even if the active node changes while the advisory dialog is open.
     const opNodeId = activeNode?.id ?? null;
+    deployPendingRef.current = true;
 
     // The actual deploy, pulled out so the optional pre-deploy advisory can gate
     // it without duplicating the action lifecycle. The stack action is set here
@@ -776,6 +788,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       } finally {
         stackListState.clearStackAction(stackFile);
         stackListState.refreshStacks(true);
+        deployPendingRef.current = false;
       }
     };
 
@@ -783,15 +796,21 @@ export function useStackActions(options: UseStackActionsOptions) {
     // setting off / timeout / older node / error, so the deploy proceeds).
     const advisoryImages = await fetchPreDeployAdvisory(stackName, opNodeId);
     if (advisoryImages && advisoryImages.length > 0) {
-      let fired = false;
+      let settled = false;
       overlayState.setPreDeployAdvisory({
         stackName,
         images: advisoryImages,
         proceed: () => {
-          if (fired) return;
-          fired = true;
+          if (settled) return;
+          settled = true;
           overlayState.setPreDeployAdvisory(null);
           void runDeployFlow();
+        },
+        cancel: () => {
+          if (settled) return;
+          settled = true;
+          overlayState.setPreDeployAdvisory(null);
+          deployPendingRef.current = false;
         },
       });
       return;

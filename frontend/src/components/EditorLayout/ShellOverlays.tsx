@@ -44,7 +44,7 @@ export function ShellOverlays({
     stackMonitor, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing,
     updateReadiness, setUpdateReadiness,
-    preDeployAdvisory, setPreDeployAdvisory,
+    preDeployAdvisory,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
@@ -105,7 +105,7 @@ export function ShellOverlays({
         open={preDeployAdvisory !== null}
         stackName={preDeployAdvisory?.stackName ?? ''}
         images={preDeployAdvisory?.images ?? []}
-        onCancel={() => setPreDeployAdvisory(null)}
+        onCancel={() => preDeployAdvisory?.cancel()}
         onDeploy={() => preDeployAdvisory?.proceed()}
       />
 

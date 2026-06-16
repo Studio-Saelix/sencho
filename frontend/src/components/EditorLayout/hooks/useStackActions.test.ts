@@ -418,6 +418,52 @@ describe('useStackActions pre-deploy advisory', () => {
     await Promise.resolve();
     expect(lastRunWithLogParams).toBeNull();
   });
+
+  it('blocks a second deploy click while the advisory fetch is still pending', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    const summaryGate: { release: () => void } = { release: () => {} };
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (String(url).includes('/pre-deploy-summary')) {
+        return new Promise<Response>((resolve) => {
+          summaryGate.release = () => resolve(new Response(JSON.stringify({ enabled: false }), { status: 200 }));
+        });
+      }
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+    const { result } = setup({ overlay: { setPreDeployAdvisory } });
+
+    const first = result.current.deployStack(mouseEvent);
+    const second = result.current.deployStack(mouseEvent); // double-click while the summary is in flight
+    summaryGate.release();
+    await Promise.all([first, second]);
+    await vi.waitFor(() => expect(lastRunWithLogParams).not.toBeNull());
+
+    // The second click is blocked before it ever issues a request, so exactly
+    // one summary fetch and one deploy occur.
+    const summaryCalls = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).includes('/pre-deploy-summary'));
+    expect(summaryCalls).toHaveLength(1);
+  });
+
+  it('clears the pending guard on cancel so a later deploy is allowed', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/pre-deploy-summary')) {
+        return new Response(JSON.stringify({ enabled: true, images: [{ imageRef: 'nginx:1.14', scan: null }] }), { status: 200 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result } = setup({ overlay: { setPreDeployAdvisory } });
+
+    await result.current.deployStack(mouseEvent);
+    const arg = (setPreDeployAdvisory.mock.calls[0][0]) as { cancel: () => void };
+    arg.cancel(); // dismiss the advisory; the guard must release
+
+    await result.current.deployStack(mouseEvent); // a fresh deploy must not be blocked
+    // Calls: open, null (cancel), open again. The third proves the guard cleared
+    // and the later deploy opened a fresh advisory rather than being blocked.
+    expect(setPreDeployAdvisory).toHaveBeenCalledTimes(3);
+    expect(setPreDeployAdvisory.mock.calls[2][0]).toMatchObject({ stackName: 'web' });
+  });
 });
 
 describe('useStackActions.bypassPolicyAndRetry', () => {
