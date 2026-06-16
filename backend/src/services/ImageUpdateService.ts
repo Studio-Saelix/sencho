@@ -19,6 +19,24 @@ export interface ImageCheckResult {
     error?: string;
 }
 
+/**
+ * Snapshot of the scanner returned by GET /api/image-updates/status.
+ * Units differ by field: `intervalMinutes` / `manualCooldownMinutes` are
+ * minutes, `manualCooldownRemainingMs` is milliseconds. `manualCooldownMinutes`
+ * is the fixed cooldown ceiling; `manualCooldownRemainingMs` is the live
+ * remaining time (0 when a manual refresh is allowed). `lastCheckedAt` /
+ * `nextCheckAt` are epoch-ms or null ("never checked" / "not scheduled");
+ * `nextCheckAt` is meaningless while `checking` is true.
+ */
+export interface ImageUpdateStatus {
+    checking: boolean;
+    intervalMinutes: number;
+    lastCheckedAt: number | null;
+    nextCheckAt: number | null;
+    manualCooldownMinutes: number;
+    manualCooldownRemainingMs: number;
+}
+
 // ─── Compose file helpers ────────────────────────────────────────────────────
 
 export function loadDotEnv(content: string): Record<string, string> {
@@ -91,14 +109,31 @@ export function extractImagesFromCompose(
 
 export class ImageUpdateService {
     private static instance: ImageUpdateService;
-    private intervalId: NodeJS.Timeout | null = null;
-    private startupTimeoutId: NodeJS.Timeout | null = null;
+
+    private static readonly MIN_INTERVAL_MINUTES = 15;
+    private static readonly MAX_INTERVAL_MINUTES = 1440;          // 24 hours
+    private static readonly DEFAULT_INTERVAL_MINUTES = 120;       // 2 hours
+    private static readonly INTERVAL_SETTING_KEY = 'image_update_check_interval_minutes';
+    private static readonly JITTER_FRACTION = 0.1;                // ±10% so a fleet does not poll in lockstep
+    private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
+
+    // A single self-rescheduling timer (replacing the old setInterval): it lets
+    // us know nextCheckAt precisely, apply per-run jitter, and reschedule on a
+    // settings change without ever leaving two timers running.
+    private timer: NodeJS.Timeout | null = null;
+    private polling = false;
+    // Bumped by stop()/restartPolling(); a tick whose captured generation no
+    // longer matches must not re-arm. This is what stops a settings save that
+    // lands mid-scan from racing the in-flight tick into a duplicate timer.
+    private scheduleGeneration = 0;
     private isRunning = false;
     private checkStartedAt = 0;
     private lastManualRefreshAt = 0;
-
-    private static readonly INTERVAL_MS = 6 * 60 * 60 * 1000;    // 6 hours
-    private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
+    private lastCheckedAt: number | null = null;   // when the last scan body started
+    private nextCheckAt: number | null = null;
+    // Initialized at declaration so getStatus() never reports NaN before start()
+    // or configureFromSettings() has run (e.g. route tests that skip startServer).
+    private intervalMs = ImageUpdateService.DEFAULT_INTERVAL_MINUTES * 60 * 1000;
     private static readonly MANUAL_COOLDOWN_MS = 2 * 60 * 1000;  // 2 min between manual triggers
     private static readonly INTER_IMAGE_DELAY_MS = 300;           // be polite to registries
     private static readonly CHECK_TIMEOUT_MS = 5 * 60 * 1000;     // threshold for the "running long" skip warning
@@ -118,20 +153,99 @@ export class ImageUpdateService {
     }
 
     public start() {
-        if (this.intervalId) return;
-        this.startupTimeoutId = setTimeout(() => this.check(), ImageUpdateService.STARTUP_DELAY_MS);
-        this.intervalId = setInterval(() => this.check(), ImageUpdateService.INTERVAL_MS);
+        if (this.timer) return;
+        this.polling = true;
+        this.configureFromSettings();
+        // Preserve the existing 2-minute post-boot delay before the first check.
+        this.armNext(ImageUpdateService.STARTUP_DELAY_MS);
     }
 
     public stop() {
-        if (this.startupTimeoutId) {
-            clearTimeout(this.startupTimeoutId);
-            this.startupTimeoutId = null;
+        this.scheduleGeneration++;
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
         }
-        if (this.intervalId) {
-            clearInterval(this.intervalId);
-            this.intervalId = null;
+        this.polling = false;
+        this.nextCheckAt = null;
+    }
+
+    /**
+     * Re-read the configured interval and reschedule the next check at the new
+     * cadence without restarting Sencho. Safe to call repeatedly: it always
+     * clears the existing timer first and only arms a new one while polling, so
+     * it never stacks timers and is a no-op (beyond reconfiguring intervalMs)
+     * when the service is stopped or was never started.
+     */
+    public restartPolling(): void {
+        this.scheduleGeneration++;
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
         }
+        this.configureFromSettings();
+        if (this.polling) {
+            this.armNext(this.nextDelayMs());
+        } else {
+            this.nextCheckAt = null;
+        }
+    }
+
+    /**
+     * Reads image_update_check_interval_minutes into intervalMs, clamped to
+     * [15, 1440], falling back to the 2-hour default on a missing, blank,
+     * malformed, or unreadable value.
+     */
+    public configureFromSettings(): void {
+        this.intervalMs = ImageUpdateService.resolveIntervalMinutes() * 60 * 1000;
+    }
+
+    private static resolveIntervalMinutes(): number {
+        const fallback = ImageUpdateService.DEFAULT_INTERVAL_MINUTES;
+        try {
+            const raw = DatabaseService.getInstance().getGlobalSettings()[ImageUpdateService.INTERVAL_SETTING_KEY];
+            // Treat missing/blank as unset; Number('') is 0, which would clamp to
+            // the minimum rather than fall back to the default.
+            if (raw == null || String(raw).trim() === '') return fallback;
+            // Number() (not parseInt) so a malformed value like "15abc" is
+            // rejected to the default rather than silently accepted as 15.
+            const parsed = Number(raw);
+            if (!Number.isInteger(parsed)) return fallback;
+            return Math.min(
+                ImageUpdateService.MAX_INTERVAL_MINUTES,
+                Math.max(ImageUpdateService.MIN_INTERVAL_MINUTES, parsed),
+            );
+        } catch (e) {
+            console.warn('[ImageUpdateService] Could not read interval setting; using default:', getErrorMessage(e, String(e)));
+            return fallback;
+        }
+    }
+
+    private armNext(delayMs: number): void {
+        this.nextCheckAt = Date.now() + delayMs;
+        const gen = this.scheduleGeneration;
+        this.timer = setTimeout(() => { void this.tick(gen); }, delayMs);
+    }
+
+    private async tick(gen: number): Promise<void> {
+        if (!this.polling || gen !== this.scheduleGeneration) return;
+        try {
+            await this.check();
+        } finally {
+            // Only the tick whose generation is still current re-arms. A
+            // restartPolling()/stop() that landed during the await bumped the
+            // generation and already rescheduled or cleared, so a stale tick
+            // bailing here is what keeps exactly one timer alive.
+            if (this.polling && gen === this.scheduleGeneration) {
+                this.armNext(this.nextDelayMs());
+            }
+        }
+    }
+
+    /** intervalMs with ±10% jitter so multiple nodes do not hit registries together. */
+    private nextDelayMs(): number {
+        const jitter = this.intervalMs * ImageUpdateService.JITTER_FRACTION;
+        return Math.round(this.intervalMs - jitter + Math.random() * 2 * jitter);
     }
 
     /**
@@ -151,6 +265,22 @@ export class ImageUpdateService {
 
     public isChecking(): boolean {
         return this.isRunning;
+    }
+
+    /** Milliseconds left on the manual-refresh cooldown; 0 when a refresh is allowed. */
+    public getManualCooldownRemainingMs(): number {
+        return Math.max(0, this.lastManualRefreshAt + ImageUpdateService.MANUAL_COOLDOWN_MS - Date.now());
+    }
+
+    public getStatus(): ImageUpdateStatus {
+        return {
+            checking: this.isRunning,
+            intervalMinutes: Math.round(this.intervalMs / (60 * 1000)),
+            lastCheckedAt: this.lastCheckedAt,
+            nextCheckAt: this.nextCheckAt,
+            manualCooldownMinutes: ImageUpdateService.manualCooldownMinutes,
+            manualCooldownRemainingMs: this.getManualCooldownRemainingMs(),
+        };
     }
 
     // ─── Core check ──────────────────────────────────────────────────────────
@@ -176,6 +306,10 @@ export class ImageUpdateService {
         }
         this.isRunning = true;
         this.checkStartedAt = Date.now();
+        // Stamp last-checked here, in the shared scan path, so a manual Recheck
+        // updates it too. A skipped concurrent trigger returns above this line,
+        // so it never bumps the timestamp.
+        this.lastCheckedAt = this.checkStartedAt;
         console.log('[ImageUpdateService] Starting image update check...');
 
         try {

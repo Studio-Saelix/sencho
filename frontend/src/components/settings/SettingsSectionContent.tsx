@@ -8,6 +8,7 @@ import {
     LicenseSection,
     HostAlertsSection,
     DockerStorageSection,
+    UpdatesSection,
     FleetMeshSection,
     NotificationsSection,
     DeveloperSection,
@@ -82,6 +83,7 @@ function renderSection(
         case 'labels': return <LabelsSection />;
         case 'host-alerts': return <HostAlertsSection onDirtyChange={(d) => onDirtyChange('host-alerts', d)} />;
         case 'docker-storage': return <DockerStorageSection onDirtyChange={(d) => onDirtyChange('docker-storage', d)} />;
+        case 'image-updates': return <UpdatesSection />;
         case 'fleet-mesh': return <FleetMeshSection onDirtyChange={(d) => onDirtyChange('fleet-mesh', d)} />;
         case 'notifications': return <NotificationsSection />;
         case 'notification-routing': return <NotificationRoutingSection />;
