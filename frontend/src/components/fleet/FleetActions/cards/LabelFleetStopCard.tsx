@@ -12,17 +12,20 @@ interface NodeStackResult { stackName: string; success: boolean; error?: string;
 interface FleetStopNodeResult {
   nodeId: number;
   nodeName: string;
+  reachable: boolean;
   matched: boolean;
   stackResults: NodeStackResult[];
+  error?: string;
 }
 
 // Stop-by-label targets stack labels only. The `scope: 'stack'` tag keeps node
 // labels (a separate namespace) from ever being fed into this destructive card,
-// and the counts make the stack scope tangible in the picker.
-interface FleetStopLabelSuggestion { name: string; scope: 'stack'; nodeCount: number; stackCount: number }
+// and the counts make the stack scope tangible in the picker. `nodes` lists the
+// nodes that carry the label so the operator can see the spread before acting.
+interface FleetStopLabelSuggestion { name: string; scope: 'stack'; nodeCount: number; stackCount: number; nodes: string[] }
 
-interface MatchPreviewNode { nodeId: number; nodeName: string; stackCount: number; stackNames: string[] }
-interface MatchPreviewResponse { matchedNodes: number; matchedStacks: number; perNode: MatchPreviewNode[] }
+interface MatchPreviewNode { nodeId: number; nodeName: string; reachable: boolean; labelExists: boolean; stackCount: number; stackNames: string[]; error?: string }
+interface MatchPreviewResponse { matchedNodes: number; matchedStacks: number; unreachableNodes: number; perNode: MatchPreviewNode[] }
 
 type PreviewState =
   | { kind: 'idle' }
@@ -36,24 +39,30 @@ const PREVIEW_ROW_LIMIT = 6;
 function isSuggestion(value: unknown): value is FleetStopLabelSuggestion {
   if (typeof value !== 'object' || value === null) return false;
   const s = value as Record<string, unknown>;
+  // `nodes` is tolerated as absent (coerced to [] at render) so a suggestion is
+  // never dropped over a missing optional detail field.
+  const nodesOk = s.nodes === undefined
+    || (Array.isArray(s.nodes) && s.nodes.every(n => typeof n === 'string'));
   return typeof s.name === 'string' && s.scope === 'stack'
-    && typeof s.nodeCount === 'number' && typeof s.stackCount === 'number';
+    && typeof s.nodeCount === 'number' && typeof s.stackCount === 'number' && nodesOk;
 }
 
 export function LabelFleetStopCard() {
   const [labelName, setLabelName] = useState('');
   const [suggestions, setSuggestions] = useState<FleetStopLabelSuggestion[]>([]);
+  const [suggestUnreachable, setSuggestUnreachable] = useState(0);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
   const [preview, setPreview] = useState<PreviewState>({ kind: 'idle' });
 
-  // Stack-label suggestions for the target picker. The fleet endpoint aggregates
-  // the stack_labels rows across every configured node (central DB), so node
-  // labels can never appear here. A non-ok or malformed response leaves the list
-  // empty rather than crashing: the Actions tab renders without an admin gate
-  // while the endpoint is admin-only, so a viewer simply gets no suggestions and
-  // can still type a name by hand.
+  // Stack-label suggestions for the target picker. The fleet endpoint queries
+  // every node authoritatively (local DB + live remote reads), so node labels
+  // can never appear here and remote-only stack labels do. `unreachableNodes`
+  // flags that the counts cover only the nodes Sencho could reach. A non-ok or
+  // malformed response leaves the list empty rather than crashing: the Actions
+  // tab renders without an admin gate while the endpoint is admin-only, so a
+  // viewer simply gets no suggestions and can still type a name by hand.
   useEffect(() => {
     let cancelled = false;
     async function loadSuggestions() {
@@ -61,9 +70,12 @@ export function LabelFleetStopCard() {
         const res = await apiFetch('/fleet/labels/suggestions');
         const data = res.ok ? await res.json().catch(() => null) : null;
         const list = Array.isArray(data?.suggestions) ? data.suggestions.filter(isSuggestion) : [];
-        if (!cancelled) setSuggestions(list);
+        if (!cancelled) {
+          setSuggestions(list);
+          setSuggestUnreachable(typeof data?.unreachableNodes === 'number' ? data.unreachableNodes : 0);
+        }
       } catch {
-        if (!cancelled) setSuggestions([]);
+        if (!cancelled) { setSuggestions([]); setSuggestUnreachable(0); }
       }
     }
     loadSuggestions();
@@ -97,7 +109,11 @@ export function LabelFleetStopCard() {
         }
         const data = (await res.json()) as MatchPreviewResponse;
         setPreview({ kind: 'ready', data });
-      } catch {
+      } catch (err) {
+        // Non-destructive readout: the operator can still type a name and run the
+        // stop, so we degrade to "unavailable" rather than toasting, but leave a
+        // console trail so a recurring preview failure is diagnosable.
+        console.error('[FleetStop] match-preview failed', err);
         setPreview({ kind: 'unavailable' });
       }
     }, 500);
@@ -112,9 +128,12 @@ export function LabelFleetStopCard() {
     if (preview.kind === 'loading') return 'resolving…';
     if (preview.kind === 'unavailable') return 'preview unavailable';
     if (preview.kind === 'ready') {
-      const { matchedNodes, matchedStacks } = preview.data;
-      if (matchedStacks === 0 || matchedNodes === 0) return '0 matching stacks';
-      return `${matchedStacks} stacks · ${matchedNodes} nodes`;
+      const { matchedNodes, matchedStacks, unreachableNodes } = preview.data;
+      if (matchedStacks === 0 || matchedNodes === 0) {
+        return unreachableNodes > 0 ? `0 reachable · ${unreachableNodes} unreachable` : '0 matching stacks';
+      }
+      const suffix = unreachableNodes > 0 ? ` · ${unreachableNodes} unreachable` : '';
+      return `${matchedStacks} stacks · ${matchedNodes} nodes${suffix}`;
     }
     return 'awaiting target';
   }, [labelName, preview]);
@@ -140,30 +159,47 @@ export function LabelFleetStopCard() {
         return;
       }
       const apiResults = (body.results as FleetStopNodeResult[]) ?? [];
-      const rows: ResultRow[] = apiResults.map((node) => ({
-        key: `node-${node.nodeId}`,
-        label: node.matched
-          ? `${node.nodeName} · ${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}${opts.dryRun ? ' (dry run)' : ''}`
-          : `${node.nodeName} (no matching stack label)`,
-        success: node.matched && node.stackResults.every(s => s.success),
-        error: node.matched ? undefined : 'Stack label not present',
-        sub: node.stackResults.map((s, i) => ({
-          key: `${node.nodeId}-${s.stackName}-${i}`,
-          label: s.stackName,
-          success: s.success,
-          error: s.error,
-        })),
-      }));
+      const rows: ResultRow[] = apiResults.map((node) => {
+        if (!node.reachable) {
+          return {
+            key: `node-${node.nodeId}`,
+            label: `${node.nodeName} (unreachable)`,
+            success: false,
+            error: node.error || 'Node unreachable',
+            sub: [],
+          };
+        }
+        return {
+          key: `node-${node.nodeId}`,
+          label: node.matched
+            ? `${node.nodeName} · ${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}${opts.dryRun ? ' (dry run)' : ''}`
+            : `${node.nodeName} (no matching stack label)`,
+          success: node.matched && node.stackResults.every(s => s.success),
+          error: node.matched ? undefined : 'Stack label not present',
+          sub: node.stackResults.map((s, i) => ({
+            key: `${node.nodeId}-${s.stackName}-${i}`,
+            label: s.stackName,
+            success: s.success,
+            error: s.error,
+          })),
+        };
+      });
       setResults(rows);
-      const matchedNodes = apiResults.filter(n => n.matched).length;
+      const reachable = apiResults.filter(n => n.reachable);
+      const unreachableCount = apiResults.length - reachable.length;
+      const matchedNodes = reachable.filter(n => n.matched).length;
       const stacksTouched = apiResults.flatMap(n => n.stackResults);
       const ok = stacksTouched.filter(s => s.success).length;
       const failed = stacksTouched.length - ok;
-      if (matchedNodes === 0) toast.info('No node carries a stack label by that name.');
-      else if (opts.dryRun) toast.success(`Dry run: would stop ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
-      else if (failed === 0 && ok > 0) toast.success(`Stopped ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
-      else if (ok === 0 && failed === 0) toast.info('Stack label matched but no stacks were assigned to it.');
-      else toast.warning(`${ok} stopped, ${failed} failed. See results below.`);
+      const unreachableSuffix = unreachableCount > 0 ? ` ${unreachableCount} node${unreachableCount === 1 ? '' : 's'} unreachable.` : '';
+      if (matchedNodes === 0) {
+        if (reachable.length === 0) toast.warning(`No reachable nodes.${unreachableSuffix}`);
+        else toast.info(`No reachable node carries a stack label by that name.${unreachableSuffix}`);
+      }
+      else if (opts.dryRun) toast.success(`Dry run: would stop ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.${unreachableSuffix}`);
+      else if (failed === 0 && ok > 0) toast.success(`Stopped ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.${unreachableSuffix}`);
+      else if (ok === 0 && failed === 0) toast.info(`Stack label matched but no stacks were assigned to it.${unreachableSuffix}`);
+      else toast.warning(`${ok} stopped, ${failed} failed. See results below.${unreachableSuffix}`);
     } catch (err) {
       toast.dismiss(toastId);
       toast.error(err instanceof Error ? err.message : 'Network error');
@@ -208,8 +244,13 @@ export function LabelFleetStopCard() {
           meta={`stack labels · ${suggestions.length}`}
         >
           <p className={cn(KICKER, 'text-stat-subtitle mb-2 normal-case tracking-normal text-[11px]')}>
-            Stops stacks assigned to this stack label across matching nodes. Node labels are not used by this action.
+            Stops every stack assigned this stack label on every reachable node across the fleet. Node labels are not used by this action.
           </p>
+          {suggestUnreachable > 0 && (
+            <p className={cn(KICKER, 'text-stat-icon mb-2 normal-case tracking-normal text-[11px]')}>
+              {suggestUnreachable} node{suggestUnreachable === 1 ? '' : 's'} unreachable; suggestions may be incomplete.
+            </p>
+          )}
           <LabelAutocomplete
             value={labelName}
             onChange={setLabelName}
@@ -234,7 +275,7 @@ export function LabelFleetStopCard() {
         variant="destructive"
         kicker="Fleet stop"
         title={`Stop all stacks with the stack label "${trimmed}"?`}
-        description="Sencho will stop every stack assigned this stack label on every node. Node labels are not used by this action. Services will be unavailable until restarted."
+        description="Sencho will stop every stack assigned this stack label on every reachable node at execution time. Node labels are not used by this action. Services will be unavailable until restarted."
         confirmLabel="Stop fleet"
         confirming={running}
         onConfirm={() => run({ dryRun: false })}
@@ -260,24 +301,53 @@ function renderPreviewSection(preview: PreviewState, trimmed: string) {
     );
   }
   if (preview.kind === 'ready') {
-    const { matchedStacks, matchedNodes, perNode } = preview.data;
+    const { matchedStacks, matchedNodes, unreachableNodes, perNode } = preview.data;
+    const unreachable = perNode.filter(n => !n.reachable);
+    const matchingNodes = perNode.filter(n => n.reachable && n.stackCount > 0);
     if (matchedStacks === 0) {
+      // Distinguish "label exists but no stacks" from "no such label", and still
+      // surface unreachable nodes so a 0-count never hides a node we could not ask.
+      const labelExistsSomewhere = perNode.some(n => n.reachable && n.labelExists);
+      const message = labelExistsSomewhere
+        ? 'This stack label exists but has no stacks assigned on the reachable nodes'
+        : 'No reachable node carries a stack label by that name';
       return (
-        <SheetSection title="Preview" meta="0 stacks">
-          <div className={cn(KICKER, 'text-stat-icon')}>No stacks are assigned to this stack label</div>
+        <SheetSection title="Preview" meta={unreachableNodes > 0 ? `${unreachableNodes} unreachable` : '0 stacks'}>
+          <div className={cn(KICKER, 'text-stat-icon normal-case tracking-normal text-[11px]')}>{message}</div>
+          {unreachable.length > 0 && <UnreachableList nodes={unreachable} />}
         </SheetSection>
       );
     }
+    const meta = `across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}${unreachableNodes > 0 ? ` · ${unreachableNodes} unreachable` : ''}`;
     return (
       <SheetSection
         title={`Preview · ${matchedStacks} stack${matchedStacks === 1 ? '' : 's'}`}
-        meta={`across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}`}
+        meta={meta}
       >
-        <PreviewWell perNode={perNode} />
+        <PreviewWell perNode={matchingNodes} />
+        {unreachable.length > 0 && <UnreachableList nodes={unreachable} />}
       </SheetSection>
     );
   }
   return null;
+}
+
+// Muted list of nodes Sencho could not query, shown beneath the preview so a
+// partial blast radius is observable rather than silently dropped.
+function UnreachableList({ nodes }: { nodes: MatchPreviewNode[] }) {
+  return (
+    <div className="mt-2 rounded border border-card-border/60 bg-card/40 p-2">
+      <div className={cn(KICKER, 'text-stat-icon mb-1')}>unreachable · {nodes.length}</div>
+      <ul className="space-y-1">
+        {nodes.map(n => (
+          <li key={n.nodeId} className="flex items-center gap-2">
+            <span className="flex-1 min-w-0 truncate font-mono text-[11px] text-stat-subtitle">{n.nodeName}</span>
+            {n.error && <span className={cn(KICKER, 'shrink-0 max-w-[55%] truncate text-stat-icon')}>{n.error}</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 interface PreviewWellProps {
@@ -382,22 +452,31 @@ function LabelAutocomplete({ value, onChange, suggestions, disabled, placeholder
       {open && filtered.length > 0 && (
         <div className="absolute left-0 top-full mt-1 z-50 w-full rounded-md border border-glass-border bg-popover text-popover-foreground shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
           <ul className="max-h-[200px] overflow-y-auto overflow-x-hidden p-1">
-            {filtered.map((s) => (
+            {filtered.map((s) => {
+              const nodes = s.nodes ?? [];
+              return (
               <li key={s.name}>
                 <button
                   type="button"
                   // mousedown + preventDefault keeps the input focused so the
                   // selection registers before any blur-driven close fires.
                   onMouseDown={(e) => { e.preventDefault(); handleSelect(s.name); }}
-                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 font-mono text-xs text-stat-value hover:bg-accent hover:text-accent-foreground"
+                  title={nodes.join(', ')}
+                  className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-1.5 font-mono text-xs text-stat-value hover:bg-accent hover:text-accent-foreground"
                 >
-                  <span className="flex-1 min-w-0 truncate text-left">{s.name}</span>
-                  <span className="shrink-0 text-[10px] text-stat-subtitle">
-                    {s.stackCount} stack{s.stackCount === 1 ? '' : 's'} · {s.nodeCount} node{s.nodeCount === 1 ? '' : 's'}
+                  <span className="flex w-full items-center gap-2">
+                    <span className="flex-1 min-w-0 truncate text-left">{s.name}</span>
+                    <span className="shrink-0 text-[10px] text-stat-subtitle">
+                      {s.stackCount} stack{s.stackCount === 1 ? '' : 's'} · {s.nodeCount} node{s.nodeCount === 1 ? '' : 's'}
+                    </span>
                   </span>
+                  {nodes.length > 0 && (
+                    <span className="w-full truncate text-left text-[10px] text-stat-icon">{nodes.join(', ')}</span>
+                  )}
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       )}

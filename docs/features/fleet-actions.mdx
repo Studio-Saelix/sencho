@@ -46,7 +46,7 @@ Stop every stack assigned a given **stack label** on every node where that stack
 ### Step by step
 
 1. Open **Fleet → Actions**.
-2. Type a name in the **Stack label** field. The picker suggests stack labels from across the fleet, each with its stack and node counts, so the scope is unmistakable. Suggestions are read from the control instance, so stack labels on offline nodes appear too. You can also type a name by hand.
+2. Type a name in the **Stack label** field. The picker queries each reachable node for its own stack labels and lists each name once with its combined stack and node counts (and the carrying node names), so the scope is unmistakable. A stack label that exists only on a remote node still appears. When a node cannot be reached, the picker notes that the suggestions may be incomplete. You can also type a name by hand.
 3. Click **Stop fleet**.
 4. A confirmation appears with the kicker **Fleet stop** and the title `Stop all stacks with the stack label "<name>"?`. Click **Stop fleet** to commit.
 
@@ -173,7 +173,7 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
     The fleet-stop match is by **stack label name**, not label ID. Confirm the stack label name on the affected node under **Settings → Labels**; a typo, a case mismatch, or a trailing space will leave the node out. Stack labels are scoped per node, so renaming the label on one node does not propagate to the others.
   </Accordion>
   <Accordion title="The autocomplete didn't suggest a stack label I know exists">
-    The picker reads stack labels from the control instance across every configured node, including offline ones, so a name is missing only when no node has a **stack label** by that name. Node labels never appear here, because this action targets stack labels only. You can always type a name by hand; the fleet-stop request still iterates every configured node.
+    The picker queries each reachable node for its own stack labels, so a name is missing when no reachable node has a **stack label** by that name, or when the node that owns it could not be reached when the picker loaded (the picker flags this case). Node labels never appear here, because this action targets stack labels only. You can always type a name by hand; the fleet-stop request still iterates every node and asks each one authoritatively.
   </Accordion>
   <Accordion title="Bulk label assign reports 'Invalid stack name' for one row">
     Stack names must match the standard validator: alphanumeric plus dash and underscore, no spaces, no path separators. The endpoint validates each assignment independently, so a single bad name does not block the rest of the batch. Fix the offending entry and re-run; the rows that already succeeded won't be re-applied.
