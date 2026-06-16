@@ -16,6 +16,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { authoredComposeFileArgs } from '../utils/authoredComposeArgs';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
 export class ComposeRollbackError extends Error {
@@ -86,14 +87,24 @@ export class ComposeService {
   }
 
   /**
-   * Build the `docker compose` argument prefix for a stack, splicing in the
-   * Sencho Mesh override file if the stack is opted into the mesh. When no
-   * override applies, returns args without `-f` so docker compose's built-in
-   * file discovery resolves the stack's actual compose filename. The user's
-   * source compose file is never mutated.
+   * Build the authored `docker compose` argument list for a stack: the validated
+   * multi-file deploy prefix (ordered `-f` files + `-p <stackName>` +
+   * `--project-directory`) for a Git source with an applied multi-file spec, then
+   * the Sencho Mesh override file last (highest `-f` precedence) when the stack is
+   * opted into the mesh, then the action. Single-file / non-git stacks get no file
+   * prefix, so docker compose's built-in discovery resolves the root compose.yaml,
+   * byte-identical to the pre-multi-file behavior. The user's source files are
+   * never mutated. Lifecycle commands (deploy, update, stop/start/restart/down)
+   * route through this method, so they share one file prefix plus the mesh override.
+   * Image scans (listStackImages) and the Compose Doctor (renderConfig) reuse the
+   * same `authoredComposeFileArgs` prefix directly but intentionally omit the mesh
+   * override, rendering the user's authored model without mesh injection.
    */
-  private async composeArgs(stackName: string, action: string[]): Promise<string[]> {
+  private async authoredComposeArgs(stackName: string, action: string[]): Promise<string[]> {
     const args: string[] = ['compose'];
+    const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
+    args.push(...filePrefix);
+
     let overridePath: string | null = null;
     try {
       overridePath = await MeshService.getInstance().ensureStackOverride(this.nodeId, stackName);
@@ -101,8 +112,13 @@ export class ComposeService {
       console.warn('[ComposeService] mesh override skipped:', sanitizeForLog((err as Error).message));
     }
     if (overridePath) {
-      const baseFilename = await FileSystemService.getInstance(this.nodeId).getComposeFilename(stackName);
-      args.push('-f', baseFilename, '-f', overridePath);
+      if (filePrefix.length === 0) {
+        // Single-file stack: passing any -f disables auto-discovery, so name the
+        // base file explicitly before layering the override on top of it.
+        const baseFilename = await FileSystemService.getInstance(this.nodeId).getComposeFilename(stackName);
+        args.push('-f', baseFilename);
+      }
+      args.push('-f', overridePath);
     }
     args.push(...action);
     return args;
@@ -323,7 +339,7 @@ export class ComposeService {
       const fsSvc = FileSystemService.getInstance(this.nodeId);
       await fsSvc.restoreStackFiles(stackName);
       await this.withRegistryAuth(async (env) => {
-        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
+        await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
       }, sendOutput);
       sendOutput('=== Rolled back successfully ===\n');
       return true;
@@ -342,7 +358,7 @@ export class ComposeService {
 
   async runCommand(stackName: string, action: 'down' | 'start' | 'stop' | 'restart', ws?: WebSocket): Promise<void> {
     const stackDir = path.join(this.baseDir, stackName);
-    await this.execute('docker', ['compose', action], stackDir, ws);
+    await this.execute('docker', await this.authoredComposeArgs(stackName, [action]), stackDir, ws);
   }
 
   async deployStack(stackName: string, ws?: WebSocket, atomic?: boolean): Promise<void> {
@@ -371,7 +387,7 @@ export class ComposeService {
       }
 
       await this.withRegistryAuth(async (env) => {
-        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
 
       // Post-Deploy Health Probe
@@ -548,10 +564,10 @@ export class ComposeService {
 
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Pulling latest images ===\n');
-        await this.execute('docker', ['compose', 'pull'], stackDir, ws, true, env, getComposeStallTimeoutMs());
+        await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
 
         sendOutput('=== Recreating containers ===\n');
-        await this.execute('docker', await this.composeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
 
       // Post-Update Health Probe
@@ -611,7 +627,7 @@ export class ComposeService {
   public async downStack(stackName: string): Promise<void> {
     const stackPath = path.join(this.baseDir, stackName);
     try {
-      await this.execute('docker', ['compose', 'down', '--volumes', '--remove-orphans'], stackPath, undefined, false);
+      await this.execute('docker', await this.authoredComposeArgs(stackName, ['down', '--volumes', '--remove-orphans']), stackPath, undefined, false);
     } catch (error) {
       console.warn(`[Teardown] Docker down failed or nothing to clean up for ${sanitizeForLog(stackName)}`);
     }
@@ -634,7 +650,10 @@ export class ComposeService {
     if (!isPathWithinBase(stackDir, this.baseDir) || path.resolve(this.baseDir) === stackDir) {
       throw new Error('Invalid stack path');
     }
-    const stdout = await this.captureCompose(['config', '--images'], stackDir);
+    // Use the authored multi-file model (no mesh override) so override-only image
+    // refs are scanned by the policy gate; single-file stacks get an empty prefix.
+    const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
+    const stdout = await this.captureCompose([...filePrefix, 'config', '--images'], stackDir);
     const seen = new Set<string>();
     const images: string[] = [];
     for (const raw of stdout.split(/\r?\n/)) {
@@ -705,7 +724,15 @@ export class ComposeService {
     if (!stackDir.startsWith(baseResolved + path.sep)) {
       return Promise.reject(new Error('Invalid stack path'));
     }
-    const child = spawn('docker', ['compose', 'config', '--format', 'json'], {
+    // Render the authored multi-file model (no mesh override) so the Compose Doctor
+    // sees every override file; single-file stacks get an empty prefix.
+    let filePrefix: string[];
+    try {
+      filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+    const child = spawn('docker', ['compose', ...filePrefix, 'config', '--format', 'json'], {
       cwd: stackDir,
       env: {
         ...process.env,

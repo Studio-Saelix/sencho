@@ -43,10 +43,10 @@ If a preview shows a relative volume path (for example `./data:/app/data`), Senc
 
 ### From Git
 
-The **From Git** tab clones a public or private repository and treats its compose file as the stack's source of truth.
+The **From Git** tab clones a public or private repository and treats its compose files as the stack's source of truth.
 
 <Frame>
-  <img src="/images/stack-management/create-stack-git.png" alt="New stack dialog on the From Git tab with repository URL, branch, compose file path, authentication, and apply behavior fields" />
+  <img src="/images/stack-management/create-stack-git.png" alt="New stack dialog on the From Git tab with repository URL, branch, the ordered compose-file picker, an optional project directory, authentication, and apply behavior fields" />
 </Frame>
 
 Fill in:
@@ -54,8 +54,8 @@ Fill in:
 - **Stack Name**: same naming rules as the Empty tab.
 - **Repository URL**: HTTPS only. SSH URLs are not supported.
 - **Branch**: defaults to `main`.
-- **Compose file path**: path inside the repository, defaults to `compose.yaml`.
-- **Also sync sibling .env file**: when checked, a `.env` next to the compose file is pulled along with it.
+- **Compose files**: one or more paths inside the repository, merged in the listed order. Defaults to `compose.yaml`. Browse the repository tree to pick them, or type a path. An optional **Project directory** sets the base for relative paths.
+- **Also sync sibling .env file**: when checked, a `.env` next to the primary compose file is pulled along with it.
 - **Authentication**: pick **Public (no auth)** or **Personal Access Token** for private repos.
 - **Apply behavior**: controls what happens on future webhook pulls:
   - **Review only**: diffs surface in the sidebar; you apply manually.
@@ -63,7 +63,7 @@ Fill in:
   - **Auto-deploy**: pulls write and redeploy automatically.
 - **Deploy after create**: deploys the stack immediately after the repo is cloned.
 
-Click **Create from Git**. Sencho clones the repo, writes the compose file into the stack directory, and (when **Deploy after create** is checked) runs `docker compose up -d`.
+Click **Create from Git**. Sencho clones the repo, writes the compose files into the stack directory, and (when **Deploy after create** is checked) runs `docker compose up -d`.
 
 ### Convert from a docker run command
 

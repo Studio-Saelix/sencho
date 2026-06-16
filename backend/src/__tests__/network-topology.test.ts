@@ -38,7 +38,7 @@ vi.mock('../services/NodeRegistry', () => ({
 // Prevent COMPOSE_DIR filesystem reads (resolveProjectNameMap reads compose files).
 // With these mocked, fs.readFile returns ENOENT and the map falls back to
 // { stackName: stackName } for each stack passed in.
-vi.mock('child_process', () => ({ exec: vi.fn() }));
+vi.mock('child_process', () => ({ exec: vi.fn(), execFile: vi.fn() }));
 vi.mock('util', () => ({ promisify: () => vi.fn() }));
 
 import DockerController from '../services/DockerController';

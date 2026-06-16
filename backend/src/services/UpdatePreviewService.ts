@@ -4,6 +4,7 @@ import { RegistryService } from './RegistryService';
 import {
     extractServiceImagesFromCompose,
     loadDotEnv,
+    loadEffectiveServiceImages,
     type ComposeServiceImage,
 } from './ImageUpdateService';
 import {
@@ -121,6 +122,12 @@ async function loadStackImages(
     nodeId: number,
     stackName: string,
 ): Promise<ComposeServiceImage[]> {
+    // A multi-file / context-dir Git stack resolves images from the effective
+    // merged model so override-only services are included; single-file stacks
+    // fall through to the root-compose parse below.
+    const effective = await loadEffectiveServiceImages(nodeId, stackName);
+    if (effective) return effective;
+
     const fs = FileSystemService.getInstance(nodeId);
     const composeContent = await fs.getStackContent(stackName);
     let envVars: Record<string, string> = {};

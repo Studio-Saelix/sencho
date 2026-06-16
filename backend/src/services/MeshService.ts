@@ -18,7 +18,7 @@ import { lookupContainerIp } from '../mesh/containerLookup';
 import { STREAM_PENDING_DATA_MAX_BYTES } from '../pilot/protocol';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
-import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
@@ -2080,23 +2080,48 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const targetNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
         try {
             const fsSvc = FileSystemService.getInstance(targetNodeId);
-            const filename = await fsSvc.getComposeFilename(stackName);
             const baseDir = fsSvc.getBaseDir();
-            // path.basename strips any directory component as defense-in-depth
-            // on top of isValidStackName + isPathWithinBase. Recognized by
-            // CodeQL's path-injection model.
-            const composePath = path.join(baseDir, path.basename(stackName), filename);
-            if (!isPathWithinBase(composePath, baseDir)) return [];
-            const content = await fs.readFile(composePath, 'utf8');
-            const parsed = YAML.parse(content) as { services?: Record<string, unknown> } | null;
-            const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
-            if (!services) return [];
-            return Object.keys(services).filter((name) => /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name));
+            // For a multi-file Git stack, read every materialized compose file and
+            // union their service names, so a service declared only in an override
+            // file is still attached to the mesh. Single-file stacks read the one
+            // resolved compose file, byte-identical to the prior behavior.
+            const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+            const relFiles = spec && spec.files.length > 0
+                ? spec.files
+                : [await fsSvc.getComposeFilename(stackName)];
+            const names = new Set<string>();
+            for (const relFile of relFiles) {
+                if (relFile === '' || !isValidRelativeStackPath(relFile)) continue;
+                for (const name of await this.readComposeServiceNames(baseDir, stackName, relFile)) {
+                    names.add(name);
+                }
+            }
+            return Array.from(names);
         } catch (err) {
             console.warn(
                 '[MeshService] getDeclaredStackServiceNames failed:',
                 sanitizeForLog((err as Error).message),
             );
+            return [];
+        }
+    }
+
+    /**
+     * Read one compose file under a stack directory and return its declared
+     * service names. The stack segment uses path.basename as defense-in-depth and
+     * the resolved path is re-checked against the base dir; the relative file is
+     * validated by the caller. Returns [] when the file is missing or unparseable.
+     */
+    private async readComposeServiceNames(baseDir: string, stackName: string, relFile: string): Promise<string[]> {
+        const composePath = path.join(baseDir, path.basename(stackName), relFile);
+        if (!isPathWithinBase(composePath, baseDir)) return [];
+        try {
+            const content = await fs.readFile(composePath, 'utf8');
+            const parsed = YAML.parse(content) as { services?: Record<string, unknown> } | null;
+            const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
+            if (!services) return [];
+            return Object.keys(services).filter((name) => /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name));
+        } catch {
             return [];
         }
     }

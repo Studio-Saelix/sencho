@@ -42,6 +42,7 @@ vi.mock('../services/DatabaseService', () => ({
     getInstance: () => ({
       getGlobalSettings: () => ({ developer_mode: '0' }),
       getNodes: () => [],
+      getGitSource: () => undefined,
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
@@ -550,6 +551,7 @@ describe('ImageUpdateService - check() concurrency guard', () => {
     dbModule.DatabaseService.getInstance = (() => ({
       getGlobalSettings: () => ({ developer_mode: developerMode }),
       getNodes: () => [{ type: 'local', id: 1, name: 'local', mode: 'proxy', compose_dir: '/tmp/compose', is_default: true, status: 'online', created_at: 1 }],
+      getGitSource: () => undefined,
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,

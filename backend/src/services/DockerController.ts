@@ -1,6 +1,6 @@
 import Docker from 'dockerode';
 import WebSocket from 'ws';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs/promises';
@@ -13,8 +13,9 @@ import { isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
+import { authoredComposeFileArgs } from '../utils/authoredComposeArgs';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const COMPOSE_DIR = process.env.COMPOSE_DIR || '/app/compose';
 
 /** Canonical compose file name variants, checked in priority order. */
@@ -1280,13 +1281,22 @@ class DockerController {
     const stackDir = path.join(COMPOSE_DIR, stackName);
 
     try {
-      const { stdout, stderr } = await execAsync('docker compose ps --format json -a', {
-        cwd: stackDir,
-        env: {
-          ...process.env,
-          PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+      // Splice the authored multi-file prefix (-f files + -p + --project-directory)
+      // so a Git stack's override-only services are listed; single-file stacks get an
+      // empty prefix and behave exactly as before. execFile avoids shell quoting on
+      // the absolute --project-directory path.
+      const filePrefix = authoredComposeFileArgs(stackName);
+      const { stdout, stderr } = await execFileAsync(
+        'docker',
+        ['compose', ...filePrefix, 'ps', '--format', 'json', '-a'],
+        {
+          cwd: stackDir,
+          env: {
+            ...process.env,
+            PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          }
         }
-      });
+      );
 
       // Robust JSON parsing - handle both JSON array and newline-separated JSON objects
       // Docker Compose v2 may return either format depending on version

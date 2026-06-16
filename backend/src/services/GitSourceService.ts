@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import YAML from 'yaml';
 import { CryptoService } from './CryptoService';
-import { DatabaseService, type StackGitSource, type GitSourceAuthType } from './DatabaseService';
+import { DatabaseService, type StackGitSource, type GitSourceAuthType, type GitSourceAppliedSpec } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeService } from './ComposeService';
 import { HealthGateService } from './HealthGateService';
@@ -13,7 +13,8 @@ import { NodeRegistry } from './NodeRegistry';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
-import { isPathWithinBase } from '../utils/validation';
+import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
+import { gitSourceLocalComposeFiles, PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
 
 // isomorphic-git is the heaviest dependency in the backend (~5 MB) and only
@@ -170,17 +171,23 @@ export class GitSourceError extends Error {
     }
 }
 
+/** A single compose file fetched from a repo, keyed by its repo-relative path. */
+export interface ComposeFile {
+    path: string;
+    content: string;
+}
+
 export interface FetchParams {
     repoUrl: string;
     branch: string;
-    composePath: string;
+    composePaths: string[];
     envPath?: string | null;
     token?: string | null;
     timeoutMs?: number;
 }
 
 export interface FetchResult {
-    composeContent: string;
+    composeFiles: ComposeFile[];
     envContent: string | null;
     commitSha: string;
     /**
@@ -195,7 +202,8 @@ export interface UpsertInput {
     stackName: string;
     repoUrl: string;
     branch: string;
-    composePath: string;
+    composePaths: string[];
+    contextDir: string | null;
     syncEnv: boolean;
     envPath: string | null;
     authType: GitSourceAuthType;
@@ -208,7 +216,8 @@ export interface CreateStackFromGitInput {
     stackName: string;
     repoUrl: string;
     branch: string;
-    composePath: string;
+    composePaths: string[];
+    contextDir: string | null;
     syncEnv: boolean;
     envPath: string | null;
     authType: GitSourceAuthType;
@@ -240,6 +249,8 @@ export interface PublicGitSource {
     repo_url: string;
     branch: string;
     compose_path: string;
+    compose_paths: string[];
+    context_dir: string | null;
     sync_env: boolean;
     env_path: string | null;
     auth_type: GitSourceAuthType;
@@ -536,6 +547,8 @@ export class GitSourceService {
             repo_url: src.repo_url,
             branch: src.branch,
             compose_path: src.compose_path,
+            compose_paths: src.compose_paths,
+            context_dir: src.context_dir,
             sync_env: src.sync_env,
             env_path: src.env_path,
             auth_type: src.auth_type,
@@ -583,23 +596,39 @@ export class GitSourceService {
             throw new GitSourceError('GIT_ERROR', 'Auto-deploy requires auto-apply-on-webhook to be enabled.');
         }
 
-        // Dry-run reachability check before persisting.
+        // Dry-run reachability check before persisting. Fetches every configured
+        // file so a bad path in the ordered list is caught at save time.
         const token = encryptedToken ? this.crypto.decrypt(encryptedToken) : null;
         await this.fetchFromGit({
             repoUrl: input.repoUrl,
             branch: input.branch,
-            composePath: input.composePath,
+            composePaths: input.composePaths,
             envPath: input.syncEnv ? input.envPath : null,
             token,
         });
+
+        const resolvedEnvPath = input.syncEnv ? input.envPath : null;
+        // A pending pull captured the files/contextDir for the previous config. If
+        // any of those change, that pending blob would apply the wrong files, so
+        // clear it; the user re-pulls against the new config.
+        const configChanged = !!existing && (
+            existing.repo_url !== input.repoUrl ||
+            existing.branch !== input.branch ||
+            JSON.stringify(existing.compose_paths) !== JSON.stringify(input.composePaths) ||
+            existing.sync_env !== input.syncEnv ||
+            (existing.env_path ?? null) !== resolvedEnvPath ||
+            (existing.context_dir ?? null) !== input.contextDir
+        );
 
         db.upsertGitSource({
             stack_name: input.stackName,
             repo_url: input.repoUrl,
             branch: input.branch,
-            compose_path: input.composePath,
+            compose_path: input.composePaths[0],
+            compose_paths: input.composePaths,
+            context_dir: input.contextDir,
             sync_env: input.syncEnv,
-            env_path: input.syncEnv ? input.envPath : null,
+            env_path: resolvedEnvPath,
             auth_type: input.authType,
             encrypted_token: encryptedToken,
             auto_apply_on_webhook: input.autoApplyOnWebhook,
@@ -613,6 +642,10 @@ export class GitSourceService {
             last_debounce_at: existing?.last_debounce_at ?? null,
         });
 
+        if (configChanged) {
+            db.clearGitSourcePending(input.stackName);
+        }
+
         return this.get(input.stackName)!;
     }
 
@@ -622,29 +655,23 @@ export class GitSourceService {
 
     // ─── Fetch ───────────────────────────────────────────────────────────────
 
-    public async fetchFromGit(params: FetchParams): Promise<FetchResult> {
-        const { repoUrl, branch, composePath, envPath, token } = params;
+    /**
+     * Clone a repo into a throwaway temp dir, run `fn` against the checkout, and
+     * always clean up. Centralizes the clone timeout, size cap, commit-sha read,
+     * and submodule warning so both fetchFromGit (reads compose/env files) and
+     * listRepoTree (lists the working tree) share one hardened clone path.
+     */
+    private async withClonedRepo<T>(
+        params: { repoUrl: string; branch: string; token?: string | null; timeoutMs?: number },
+        fn: (dir: string, commitSha: string, warnings: string[]) => Promise<T>,
+    ): Promise<T> {
+        const { repoUrl, branch, token } = params;
         const timeoutMs = params.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
-
-        // Reject any compose/env target that resolves inside the `.git`
-        // metadata directory BEFORE we spin up a clone. This blocks a
-        // caller from reading `.git/config` (which leaks the remote URL
-        // and any mis-configured inline credentials) via the fetch path.
-        assertNotGitMeta(composePath, 'compose_path');
-        if (envPath) assertNotGitMeta(envPath, 'env_path');
-
         const dir = await createTempDir();
-        const startedAt = Date.now();
-        const diag = isDebugEnabled();
-        if (diag) {
-            console.log(
-                `[GitSource:diag] fetch start host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} compose=${sanitizeForLog(composePath)} envSync=${envPath ? 'true' : 'false'} timeoutMs=${timeoutMs}`
-            );
-        }
 
-        // isomorphic-git's onAuth callback hands credentials to the HTTP
-        // layer without them touching the URL string, which keeps tokens
-        // out of any error messages generated during the clone.
+        // isomorphic-git's onAuth callback hands credentials to the HTTP layer
+        // without them touching the URL string, keeping tokens out of any error
+        // messages generated during the clone.
         const onAuth = token
             ? () => ({ username: 'x-access-token', password: token })
             : undefined;
@@ -698,38 +725,6 @@ export class GitSourceService {
             }
             const commitSha = log[0].oid;
 
-            const composeContent = await readRepoFile(dir, composePath, 'Compose path');
-            if (isLfsPointer(composeContent)) {
-                console.error(`[GitSource] LFS pointer detected in ${sanitizeForLog(composePath)}`);
-                throw new GitSourceError(
-                    'GIT_ERROR',
-                    `Compose file at ${composePath} is stored in Git LFS, which is not supported. Commit the plain file or replace the LFS pointer before linking this repository.`,
-                );
-            }
-
-            let envContent: string | null = null;
-            if (envPath) {
-                try {
-                    envContent = await readRepoFile(dir, envPath, 'Env path');
-                } catch (e) {
-                    if (e instanceof GitSourceError && e.code === 'FILE_NOT_FOUND' && e.message.startsWith('File not found')) {
-                        // A missing sibling .env is legitimate (repo may not carry one
-                        // in the requested directory). Return null so the caller can
-                        // decide whether to warn.
-                        envContent = null;
-                    } else {
-                        throw e;
-                    }
-                }
-                if (envContent !== null && isLfsPointer(envContent)) {
-                    console.error(`[GitSource] LFS pointer detected in ${sanitizeForLog(envPath)}`);
-                    throw new GitSourceError(
-                        'GIT_ERROR',
-                        `Env file at ${envPath} is stored in Git LFS, which is not supported. Commit the plain file or replace the LFS pointer before linking this repository.`,
-                    );
-                }
-            }
-
             // Submodule detection: non-fatal, surfaced as a warning. isomorphic-git
             // does not recursively clone submodules, so any path that lives inside
             // a submodule directory will be empty after apply. Users need to know.
@@ -739,12 +734,75 @@ export class GitSourceService {
                 warnings.push(SUBMODULE_WARNING);
             }
 
-            if (diag) {
-                console.log(
-                    `[GitSource:diag] fetch ok host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} sha=${commitSha.slice(0, 7)} env=${envContent !== null ? 'present' : 'absent'} warnings=${warnings.length} elapsedMs=${Date.now() - startedAt}`
-                );
-            }
-            return { composeContent, envContent, commitSha, warnings };
+            return await fn(dir, commitSha, warnings);
+        } finally {
+            await removeTempDir(dir);
+        }
+    }
+
+    public async fetchFromGit(params: FetchParams): Promise<FetchResult> {
+        const { repoUrl, branch, composePaths, envPath, token } = params;
+
+        // Reject any compose/env target that resolves inside the `.git`
+        // metadata directory BEFORE we spin up a clone. This blocks a
+        // caller from reading `.git/config` (which leaks the remote URL
+        // and any mis-configured inline credentials) via the fetch path.
+        for (const composePath of composePaths) assertNotGitMeta(composePath, 'compose_path');
+        if (envPath) assertNotGitMeta(envPath, 'env_path');
+
+        const startedAt = Date.now();
+        const diag = isDebugEnabled();
+        if (diag) {
+            console.log(
+                `[GitSource:diag] fetch start host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} files=${composePaths.length} envSync=${envPath ? 'true' : 'false'}`
+            );
+        }
+
+        try {
+            return await this.withClonedRepo({ repoUrl, branch, token, timeoutMs: params.timeoutMs }, async (dir, commitSha, warnings) => {
+                const composeFiles: ComposeFile[] = [];
+                for (const composePath of composePaths) {
+                    const content = await readRepoFile(dir, composePath, 'Compose path');
+                    if (isLfsPointer(content)) {
+                        console.error(`[GitSource] LFS pointer detected in ${sanitizeForLog(composePath)}`);
+                        throw new GitSourceError(
+                            'GIT_ERROR',
+                            `Compose file at ${composePath} is stored in Git LFS, which is not supported. Commit the plain file or replace the LFS pointer before linking this repository.`,
+                        );
+                    }
+                    composeFiles.push({ path: composePath, content });
+                }
+
+                let envContent: string | null = null;
+                if (envPath) {
+                    try {
+                        envContent = await readRepoFile(dir, envPath, 'Env path');
+                    } catch (e) {
+                        if (e instanceof GitSourceError && e.code === 'FILE_NOT_FOUND' && e.message.startsWith('File not found')) {
+                            // A missing sibling .env is legitimate (repo may not carry one
+                            // in the requested directory). Return null so the caller can
+                            // decide whether to warn.
+                            envContent = null;
+                        } else {
+                            throw e;
+                        }
+                    }
+                    if (envContent !== null && isLfsPointer(envContent)) {
+                        console.error(`[GitSource] LFS pointer detected in ${sanitizeForLog(envPath)}`);
+                        throw new GitSourceError(
+                            'GIT_ERROR',
+                            `Env file at ${envPath} is stored in Git LFS, which is not supported. Commit the plain file or replace the LFS pointer before linking this repository.`,
+                        );
+                    }
+                }
+
+                if (diag) {
+                    console.log(
+                        `[GitSource:diag] fetch ok host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} sha=${commitSha.slice(0, 7)} files=${composeFiles.length} env=${envContent !== null ? 'present' : 'absent'} warnings=${warnings.length} elapsedMs=${Date.now() - startedAt}`
+                    );
+                }
+                return { composeFiles, envContent, commitSha, warnings };
+            });
         } catch (err) {
             if (diag) {
                 const msg = err instanceof GitSourceError ? `${err.code}: ${err.message}` : (err as Error).message;
@@ -753,9 +811,54 @@ export class GitSourceService {
                 );
             }
             throw err;
-        } finally {
-            await removeTempDir(dir);
         }
+    }
+
+    /**
+     * Clone a repo and list its working-tree files (POSIX-relative, `.git`
+     * skipped) for the "browse repository" compose-file picker. Bounded by the
+     * same clone size/timeout guards as fetch, plus a file-count cap.
+     */
+    public async listRepoTree(
+        params: { repoUrl: string; branch: string; token?: string | null; timeoutMs?: number },
+    ): Promise<{ files: string[]; truncated: boolean; commitSha: string; warnings: string[] }> {
+        return this.withClonedRepo(params, async (dir, commitSha, warnings) => {
+            const { files, truncated } = await this.walkRepoFiles(dir);
+            return { files, truncated, commitSha, warnings };
+        });
+    }
+
+    private async walkRepoFiles(rootDir: string): Promise<{ files: string[]; truncated: boolean }> {
+        const MAX_FILES = 2000;
+        const files: string[] = [];
+        let truncated = false;
+        const walk = async (relDir: string): Promise<void> => {
+            if (truncated) return;
+            let entries: import('fs').Dirent[];
+            try {
+                entries = await fsPromises.readdir(path.join(rootDir, relDir), { withFileTypes: true });
+            } catch (e) {
+                // A readdir failure on a just-cloned subtree silently drops it from the
+                // picker; log so a partial listing is traceable (the user can still
+                // add paths manually).
+                console.warn(`[GitSource] repo walk skipped ${sanitizeForLog(relDir || '.')}:`, (e as Error).message);
+                return;
+            }
+            for (const entry of entries) {
+                if (truncated) return;
+                if (entry.name === '.git') continue;
+                const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+                if (entry.isDirectory()) {
+                    await walk(rel);
+                } else if (entry.isFile()) {
+                    if (files.length >= MAX_FILES) { truncated = true; return; }
+                    files.push(rel);
+                }
+            }
+        };
+        await walk('');
+        files.sort();
+        return { files, truncated };
     }
 
     private mapGitError(err: Error, hasToken: boolean, host = 'unknown'): GitSourceError {
@@ -833,26 +936,51 @@ export class GitSourceService {
      * errors, invalid `include:` references, etc., which a shallow schema
      * check would miss.
      */
-    public async validateCompose(composeContent: string, envContent: string | null): Promise<{ ok: boolean; error?: string }> {
-        // Cheap syntax pre-check
-        try {
-            const parsed = YAML.parse(composeContent);
-            if (parsed === null || parsed === undefined) {
-                return { ok: false, error: 'Compose file is empty.' };
+    public async validateCompose(composeFiles: ComposeFile[], envContent: string | null, contextDir: string | null): Promise<{ ok: boolean; error?: string }> {
+        if (composeFiles.length === 0) return { ok: false, error: 'No compose files provided.' };
+
+        // Cheap syntax pre-check per file
+        for (const file of composeFiles) {
+            try {
+                const parsed = YAML.parse(file.content);
+                if (parsed === null || parsed === undefined) {
+                    return { ok: false, error: `Compose file ${file.path} is empty.` };
+                }
+                if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    return { ok: false, error: `Compose file ${file.path} must be a YAML mapping.` };
+                }
+            } catch (e) {
+                return { ok: false, error: `YAML parse error in ${file.path}: ${(e as Error).message}` };
             }
-            if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-                return { ok: false, error: 'Compose file must be a YAML mapping.' };
-            }
-        } catch (e) {
-            return { ok: false, error: `YAML parse error: ${(e as Error).message}` };
         }
 
-        // Semantic check via `docker compose config`
+        // Semantic check via `docker compose config` over the ordered set, written
+        // in the same local layout the deploy materializes (primary -> compose.yaml,
+        // additional files under their repo-relative paths), with each path segment
+        // re-sanitized for this throwaway dir. So the merge order, project directory,
+        // and relative cross-references resolve from the same base the real deploy uses.
         const dir = await createTempDir();
         try {
-            const composeFile = path.join(dir, 'compose.yaml');
-            await fsPromises.writeFile(composeFile, composeContent, 'utf-8');
-            const args = ['compose', '-f', composeFile];
+            const localFiles = gitSourceLocalComposeFiles(composeFiles.map(f => f.path));
+            const args = ['compose'];
+            for (let i = 0; i < composeFiles.length; i++) {
+                const safeRel = localFiles[i].replace(/\\/g, '/').split('/').map(s => path.basename(s)).join('/');
+                const abs = path.resolve(dir, safeRel);
+                if (!isPathWithinBase(abs, dir)) {
+                    return { ok: false, error: `Compose path escapes the validation dir: ${composeFiles[i].path}` };
+                }
+                await fsPromises.mkdir(path.dirname(abs), { recursive: true });
+                await fsPromises.writeFile(abs, composeFiles[i].content, 'utf-8');
+                args.push('-f', safeRel);
+            }
+            if (contextDir) {
+                const ctxAbs = path.resolve(dir, contextDir);
+                if (!isPathWithinBase(ctxAbs, dir)) {
+                    return { ok: false, error: 'Context directory escapes the validation dir.' };
+                }
+                await fsPromises.mkdir(ctxAbs, { recursive: true });
+                args.push('--project-directory', ctxAbs);
+            }
             if (envContent !== null) {
                 const envFile = path.join(dir, '.env');
                 await fsPromises.writeFile(envFile, envContent, 'utf-8');
@@ -891,21 +1019,87 @@ export class GitSourceService {
 
     // ─── Hashing + diff ──────────────────────────────────────────────────────
 
-    public hashContent(compose: string, env: string | null): string {
-        return crypto.createHash('sha256')
-            .update(compose)
-            .update('\x00')
-            .update(env ?? '')
-            .digest('hex');
+    public hashContent(files: ComposeFile[], env: string | null): string {
+        const h = crypto.createHash('sha256');
+        if (files.length === 1) {
+            // Single-file stacks keep the legacy hash (content + env) stable so a
+            // pre-existing stack is not flagged as locally changed after upgrade.
+            h.update(files[0].content);
+        } else {
+            for (const f of files) {
+                h.update(f.path);
+                h.update('\x00');
+                h.update(f.content);
+                h.update('\x00');
+            }
+        }
+        h.update('\x00');
+        h.update(env ?? '');
+        return h.digest('hex');
     }
 
-    private async readDiskContent(stackName: string, syncEnv: boolean): Promise<{ compose: string; env: string | null }> {
+    /** Combine an ordered file set into a single path-headed preview for the diff UI. */
+    private combinedComposePreview(files: ComposeFile[]): string {
+        if (files.length <= 1) return files[0]?.content ?? '';
+        return files.map(f => `# ── ${f.path} ──\n${f.content}`).join('\n\n');
+    }
+
+    /**
+     * The deploy-time spec for an ordered file set. Single-file stacks with no
+     * context dir get `null`, so runtime stays plain `docker compose` auto-discovery.
+     */
+    private deriveAppliedSpec(composePaths: string[], contextDir: string | null): GitSourceAppliedSpec | null {
+        if (composePaths.length <= 1 && !contextDir) return null;
+        return { files: gitSourceLocalComposeFiles(composePaths), contextDir: contextDir ?? null };
+    }
+
+    /** Encrypt the ordered compose file set as the v2 pending blob (carries contextDir). */
+    private encodePendingCompose(files: ComposeFile[], contextDir: string | null): string {
+        return this.crypto.encrypt(JSON.stringify({ v: 2, files, contextDir }));
+    }
+
+    /**
+     * Decrypt a stored pending compose blob into its ordered file set + contextDir.
+     * Detects the v2 marker; anything else is a legacy single-file plaintext string.
+     */
+    private decodePendingCompose(stored: string): { files: ComposeFile[]; contextDir: string | null } {
+        const raw = this.crypto.decrypt(stored);
+        if (raw.startsWith('{"v":2')) {
+            try {
+                const parsed = JSON.parse(raw) as { v: number; files?: ComposeFile[]; contextDir?: string | null };
+                if (Array.isArray(parsed.files) && parsed.files.length > 0) {
+                    return { files: parsed.files, contextDir: parsed.contextDir ?? null };
+                }
+            } catch (e) {
+                // The v2 marker proves this was written as multi-file, so a parse
+                // failure signals a corrupt pending blob, not a legacy row. Log it
+                // so the misleading downstream validation error is traceable; the
+                // re-validate in apply still blocks deploying the garbled content.
+                console.error('[GitSource] pending compose blob carried the v2 marker but failed to parse; treating as legacy:', (e as Error).message);
+            }
+        }
+        return { files: [{ path: PRIMARY_COMPOSE_FILENAME, content: raw }], contextDir: null };
+    }
+
+    private async readDiskContent(stackName: string, syncEnv: boolean, relFiles: string[]): Promise<{ files: ComposeFile[]; env: string | null }> {
         const fsSvc = FileSystemService.getInstance();
-        let compose: string;
-        try {
-            compose = await fsSvc.getStackContent(stackName);
-        } catch {
-            compose = '';
+        const files: ComposeFile[] = [];
+        for (let i = 0; i < relFiles.length; i++) {
+            const rel = relFiles[i];
+            try {
+                // The primary uses compose discovery (compose.yaml / docker-compose.yml);
+                // additional files are read at their materialized relative path.
+                const content = i === 0
+                    ? await fsSvc.getStackContent(stackName)
+                    : (await fsSvc.readStackFile(stackName, rel)).content ?? '';
+                files.push({ path: rel, content });
+            } catch (e) {
+                // Empty-on-error is a defensible default (a prior-spec file may have
+                // been removed by a concurrent edit), but log it so an unexpected
+                // "local changes detected" can be traced to an unreadable file.
+                console.warn(`[GitSource] could not read ${sanitizeForLog(rel)} for ${sanitizeForLog(stackName)} diff:`, (e as Error).message);
+                files.push({ path: rel, content: '' });
+            }
         }
         let env: string | null = null;
         if (syncEnv) {
@@ -915,7 +1109,57 @@ export class GitSourceService {
                 env = null;
             }
         }
-        return { compose, env };
+        return { files, env };
+    }
+
+    /**
+     * Write an ordered compose file set to a stack on disk: the primary to the
+     * root compose.yaml, each additional file to its repo-relative path. Creates
+     * the context dir when set, writes the env file when syncing, removes files
+     * that the previous applied spec materialized but the new set drops, and
+     * returns the deploy spec to persist.
+     */
+    private async materialize(
+        stackName: string,
+        composeFiles: ComposeFile[],
+        contextDir: string | null,
+        syncEnv: boolean,
+        envContent: string | null,
+        prevSpec: GitSourceAppliedSpec | null,
+    ): Promise<GitSourceAppliedSpec | null> {
+        const fsSvc = FileSystemService.getInstance();
+        const localFiles = gitSourceLocalComposeFiles(composeFiles.map(f => f.path));
+
+        await fsSvc.saveStackContent(stackName, composeFiles[0].content);
+        for (let i = 1; i < composeFiles.length; i++) {
+            await fsSvc.writeStackFile(stackName, localFiles[i], composeFiles[i].content);
+        }
+
+        if (contextDir) {
+            await fsSvc.mkdirStackPath(stackName, contextDir);
+        }
+
+        if (syncEnv && envContent !== null) {
+            await fsSvc.saveEnvContent(stackName, envContent);
+        }
+
+        // Stale cleanup: remove additional files the previous apply wrote that are
+        // no longer in the set. Re-validate each as a safe relative path and never
+        // touch the primary compose.yaml.
+        if (prevSpec) {
+            const keep = new Set(localFiles);
+            for (const old of prevSpec.files) {
+                if (old === PRIMARY_COMPOSE_FILENAME || keep.has(old)) continue;
+                if (!isValidRelativeStackPath(old) || old === '') continue;
+                try {
+                    await fsSvc.deleteStackPath(stackName, old);
+                } catch (e) {
+                    console.warn(`[GitSource] stale file cleanup skipped ${sanitizeForLog(old)} for ${sanitizeForLog(stackName)}:`, (e as Error).message);
+                }
+            }
+        }
+
+        return this.deriveAppliedSpec(composeFiles.map(f => f.path), contextDir);
     }
 
     // ─── Pull / apply ────────────────────────────────────────────────────────
@@ -949,24 +1193,25 @@ export class GitSourceService {
         const fetched = await this.fetchFromGit({
             repoUrl: src.repo_url,
             branch: src.branch,
-            composePath: src.compose_path,
+            composePaths: src.compose_paths,
             envPath: src.sync_env ? src.env_path : null,
             token,
         });
 
-        const validation = await this.validateCompose(fetched.composeContent, fetched.envContent);
-        const disk = await this.readDiskContent(stackName, src.sync_env);
-        const currentHash = this.hashContent(disk.compose, disk.env);
+        const validation = await this.validateCompose(fetched.composeFiles, fetched.envContent, src.context_dir);
+        const appliedFiles = src.applied_deploy_spec?.files ?? [PRIMARY_COMPOSE_FILENAME];
+        const disk = await this.readDiskContent(stackName, src.sync_env, appliedFiles);
+        const currentHash = this.hashContent(disk.files, disk.env);
         const hasLocalChanges = src.last_applied_content_hash !== null
             && src.last_applied_content_hash !== currentHash;
 
         // Store pending so a subsequent apply doesn't re-fetch. Compose files
         // routinely contain secrets inlined as env interpolations or passwords,
-        // so encrypt the pending buffers at rest.
+        // so the v2 blob (ordered files + contextDir) is encrypted at rest.
         db.setGitSourcePending(
             stackName,
             fetched.commitSha,
-            this.crypto.encrypt(fetched.composeContent),
+            this.encodePendingCompose(fetched.composeFiles, src.context_dir),
             fetched.envContent !== null ? this.crypto.encrypt(fetched.envContent) : null,
         );
 
@@ -977,9 +1222,9 @@ export class GitSourceService {
 
         return {
             commitSha: fetched.commitSha,
-            incomingCompose: fetched.composeContent,
+            incomingCompose: this.combinedComposePreview(fetched.composeFiles),
             incomingEnv: fetched.envContent,
-            currentCompose: disk.compose,
+            currentCompose: this.combinedComposePreview(disk.files),
             currentEnv: disk.env,
             validation,
             hasLocalChanges,
@@ -1025,28 +1270,29 @@ export class GitSourceService {
             throw new GitSourceError('GIT_ERROR', 'Pending commit has changed since this pull was fetched. Please review the latest diff.');
         }
 
-        // Pending buffers are stored encrypted; decrypt is a no-op for any
-        // legacy plaintext rows (isEncrypted check inside CryptoService).
-        const composeContent = this.crypto.decrypt(src.pending_compose_content);
+        // Materialize from the pending blob (its files + contextDir), never the
+        // live config: a config edit between pull and apply must not change what
+        // gets written. The v2 blob is decoded here; legacy plaintext is treated
+        // as a single compose.yaml.
+        const pending = this.decodePendingCompose(src.pending_compose_content);
         const envContent = src.pending_env_content !== null
             ? this.crypto.decrypt(src.pending_env_content)
             : null;
 
         // Re-validate before writing.
-        const validation = await this.validateCompose(composeContent, envContent);
+        const validation = await this.validateCompose(pending.files, envContent, pending.contextDir);
         if (!validation.ok) {
             if (diag) console.log(`[GitSource:diag] apply validation fail stack=${stackName}`);
             throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
         }
 
-        const fsSvc = FileSystemService.getInstance();
-        await fsSvc.saveStackContent(stackName, composeContent);
-        if (src.sync_env && envContent !== null) {
-            await fsSvc.saveEnvContent(stackName, envContent);
-        }
+        const appliedSpec = await this.materialize(
+            stackName, pending.files, pending.contextDir, src.sync_env, envContent, src.applied_deploy_spec,
+        );
 
-        const hash = this.hashContent(composeContent, envContent);
+        const hash = this.hashContent(pending.files, envContent);
         db.markGitSourceApplied(stackName, commitSha, hash);
+        db.setGitSourceAppliedSpec(stackName, appliedSpec);
 
         const shouldDeploy = opts.deploy ?? src.auto_deploy_on_apply;
         if (diag) console.log('[GitSource:diag] apply wrote stack=%s sha=%s deploy=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(shouldDeploy));
@@ -1110,31 +1356,29 @@ export class GitSourceService {
             const fetched = await this.fetchFromGit({
                 repoUrl: input.repoUrl,
                 branch: input.branch,
-                composePath: input.composePath,
+                composePaths: input.composePaths,
                 envPath: input.syncEnv ? input.envPath : null,
                 token: input.token,
             });
 
             // 2. Validate against the same `docker compose config` check the
             //    apply path uses. Reject before creating anything on disk.
-            const validation = await this.validateCompose(fetched.composeContent, fetched.envContent);
+            const validation = await this.validateCompose(fetched.composeFiles, fetched.envContent, input.contextDir);
             if (!validation.ok) {
                 throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
             }
 
-            // 3. Create directory + boilerplate, then overwrite with the
-            //    fetched content. createStack() throws if the directory
-            //    already exists, so a name collision is caught here.
+            // 3. Create directory + boilerplate, then materialize the fetched
+            //    files. createStack() throws if the directory already exists, so a
+            //    name collision is caught here.
             let stackCreated = false;
             try {
                 await fsSvc.createStack(input.stackName);
                 stackCreated = true;
-                await fsSvc.saveStackContent(input.stackName, fetched.composeContent);
-                let envWritten = false;
-                if (input.syncEnv && fetched.envContent !== null) {
-                    await fsSvc.saveEnvContent(input.stackName, fetched.envContent);
-                    envWritten = true;
-                }
+                const appliedSpec = await this.materialize(
+                    input.stackName, fetched.composeFiles, input.contextDir, input.syncEnv, fetched.envContent, null,
+                );
+                const envWritten = input.syncEnv && fetched.envContent !== null;
 
                 // 4. Insert the git-source row, then mark it applied so future
                 //    pulls diff against the fetched commit rather than treating
@@ -1142,11 +1386,14 @@ export class GitSourceService {
                 const encryptedToken = input.authType === 'token' && input.token
                     ? this.crypto.encrypt(input.token)
                     : null;
+                const hash = this.hashContent(fetched.composeFiles, fetched.envContent);
                 db.upsertGitSource({
                     stack_name: input.stackName,
                     repo_url: input.repoUrl,
                     branch: input.branch,
-                    compose_path: input.composePath,
+                    compose_path: input.composePaths[0],
+                    compose_paths: input.composePaths,
+                    context_dir: input.contextDir,
                     sync_env: input.syncEnv,
                     env_path: input.syncEnv ? input.envPath : null,
                     auth_type: input.authType,
@@ -1154,18 +1401,15 @@ export class GitSourceService {
                     auto_apply_on_webhook: input.autoApplyOnWebhook,
                     auto_deploy_on_apply: input.autoDeployOnApply,
                     last_applied_commit_sha: fetched.commitSha,
-                    last_applied_content_hash: this.hashContent(fetched.composeContent, fetched.envContent),
+                    last_applied_content_hash: hash,
                     pending_commit_sha: null,
                     pending_compose_content: null,
                     pending_env_content: null,
                     pending_fetched_at: null,
                     last_debounce_at: null,
                 });
-                db.markGitSourceApplied(
-                    input.stackName,
-                    fetched.commitSha,
-                    this.hashContent(fetched.composeContent, fetched.envContent),
-                );
+                db.markGitSourceApplied(input.stackName, fetched.commitSha, hash);
+                db.setGitSourceAppliedSpec(input.stackName, appliedSpec);
 
                 const source = this.get(input.stackName);
                 if (!source) {

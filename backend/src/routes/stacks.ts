@@ -34,6 +34,7 @@ import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
@@ -751,7 +752,6 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       stack_name,
       repo_url,
       branch,
-      compose_path,
       sync_env,
       env_path,
       auth_type,
@@ -775,8 +775,9 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     if (typeof branch !== 'string' || !branch.trim()) {
       return res.status(400).json({ error: 'branch is required' });
     }
-    if (typeof compose_path !== 'string' || !compose_path.trim()) {
-      return res.status(400).json({ error: 'compose_path is required' });
+    const selection = parseComposeSelection(req.body);
+    if (!selection.ok) {
+      return res.status(400).json({ error: selection.error });
     }
     if (auto_apply_on_webhook !== undefined && typeof auto_apply_on_webhook !== 'boolean') {
       return res.status(400).json({ error: 'auto_apply_on_webhook must be a boolean' });
@@ -794,17 +795,11 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     if (branch.length > 256) {
       return res.status(400).json({ error: 'branch is too long' });
     }
-    if (compose_path.length > 1024) {
-      return res.status(400).json({ error: 'compose_path is too long' });
-    }
     if (typeof env_path === 'string' && env_path.length > 1024) {
       return res.status(400).json({ error: 'env_path is too long' });
     }
     if (typeof token === 'string' && token.length > 8192) {
       return res.status(400).json({ error: 'token is too long' });
-    }
-    if (!isValidGitSourcePath(compose_path.trim())) {
-      return res.status(400).json({ error: 'compose_path must be a relative repository file path' });
     }
     if (typeof env_path === 'string' && env_path.trim() && !isValidGitSourcePath(env_path.trim())) {
       return res.status(400).json({ error: 'env_path must be a relative repository file path' });
@@ -821,14 +816,12 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
 
     const syncEnv = Boolean(sync_env);
     const resolvedEnvPath = syncEnv
-      ? (typeof env_path === 'string' && env_path.trim()
-        ? env_path
-        : path.posix.join(path.posix.dirname(compose_path.replace(/\\/g, '/')) || '.', '.env'))
+      ? defaultEnvPath(selection.value.composePaths[0], env_path)
       : null;
 
     if (fromGitDiag) {
       dlog(
-        `[Stacks:diag] from-git start stack=${sanitizeForLog(stack_name)} nodeId=${req.nodeId ?? 'local'} host=${sanitizeForLog(gitRepoHost(repo_url))} branch=${sanitizeForLog(branch)} composePath=${sanitizeForLog(compose_path)} envPath=${sanitizeForLog(resolvedEnvPath ?? 'none')} authType=${sanitizeForLog(resolvedAuthType)} autoApplyOnWebhook=${autoApplyOnWebhook} autoDeployOnApply=${autoDeployOnApply} deployNow=${deploy_now === true}`
+        `[Stacks:diag] from-git start stack=${sanitizeForLog(stack_name)} nodeId=${req.nodeId ?? 'local'} host=${sanitizeForLog(gitRepoHost(repo_url))} branch=${sanitizeForLog(branch)} files=${selection.value.composePaths.length} envPath=${sanitizeForLog(resolvedEnvPath ?? 'none')} authType=${sanitizeForLog(resolvedAuthType)} autoApplyOnWebhook=${autoApplyOnWebhook} autoDeployOnApply=${autoDeployOnApply} deployNow=${deploy_now === true}`
       );
     }
 
@@ -836,7 +829,8 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       stackName: stack_name.trim(),
       repoUrl: repo_url.trim(),
       branch: branch.trim(),
-      composePath: compose_path.trim(),
+      composePaths: selection.value.composePaths,
+      contextDir: selection.value.contextDir,
       syncEnv,
       envPath: resolvedEnvPath,
       authType: resolvedAuthType,

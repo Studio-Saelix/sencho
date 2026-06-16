@@ -12,6 +12,7 @@
  * - Webhook debounce enforcement
  * - Per-stack mutex serialization ordering
  */
+import crypto from 'crypto';
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
@@ -67,6 +68,11 @@ function mockSuccessfulClone(options: {
     composePath?: string;
     envPath?: string | null;
     sha?: string;
+    /**
+     * Additional repo-relative files to write into the clone temp dir on top of
+     * the primary compose file. Lets multi-file tests stage base+override layouts.
+     */
+    extraFiles?: Record<string, string>;
 } = {}) {
     const {
         compose = 'services:\n  web:\n    image: nginx\n',
@@ -74,6 +80,7 @@ function mockSuccessfulClone(options: {
         composePath = 'compose.yaml',
         envPath = null,
         sha = 'abc1234567890abc1234567890abc1234567890a',
+        extraFiles = {},
     } = options;
 
     mockGitClone.mockImplementation(async (args: { dir: string }) => {
@@ -82,6 +89,11 @@ function mockSuccessfulClone(options: {
         const composeAbs = path.join(args.dir, composePath);
         await fsp.mkdir(path.dirname(composeAbs), { recursive: true });
         await fsp.writeFile(composeAbs, compose, 'utf-8');
+        for (const [rel, content] of Object.entries(extraFiles)) {
+            const abs = path.join(args.dir, rel);
+            await fsp.mkdir(path.dirname(abs), { recursive: true });
+            await fsp.writeFile(abs, content, 'utf-8');
+        }
         if (env !== null && envPath) {
             const envAbs = path.join(args.dir, envPath);
             await fsp.mkdir(path.dirname(envAbs), { recursive: true });
@@ -92,45 +104,85 @@ function mockSuccessfulClone(options: {
     return sha;
 }
 
+/** Wrap a single compose string in the ComposeFile[] shape the new APIs take. */
+function asFiles(content: string): import('../services/GitSourceService').ComposeFile[] {
+    return [{ path: 'compose.yaml', content }];
+}
+
+/** Best-effort teardown for tests that materialize a stack on disk. */
+async function cleanupStackDir(name: string) {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    try {
+        await FileSystemService.getInstance().deleteStack(name);
+    } catch {
+        // directory may not exist; ignore
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 describe('GitSourceService.hashContent', () => {
     it('produces stable hashes for identical inputs', () => {
         const svc = GitSourceService.getInstance();
-        const a = svc.hashContent('services:\n  web: nginx\n', 'FOO=bar');
-        const b = svc.hashContent('services:\n  web: nginx\n', 'FOO=bar');
+        const a = svc.hashContent(asFiles('services:\n  web: nginx\n'), 'FOO=bar');
+        const b = svc.hashContent(asFiles('services:\n  web: nginx\n'), 'FOO=bar');
         expect(a).toBe(b);
         expect(a).toMatch(/^[a-f0-9]{64}$/);
     });
 
     it('distinguishes env=null from env=""', () => {
         const svc = GitSourceService.getInstance();
-        const nullHash = svc.hashContent('x: 1', null);
-        const emptyHash = svc.hashContent('x: 1', '');
+        const nullHash = svc.hashContent(asFiles('x: 1'), null);
+        const emptyHash = svc.hashContent(asFiles('x: 1'), '');
         // Both hash-empty-string after null-coalesce, so they should match by design.
         expect(nullHash).toBe(emptyHash);
     });
 
     it('changes when compose content changes', () => {
         const svc = GitSourceService.getInstance();
-        const a = svc.hashContent('x: 1', null);
-        const b = svc.hashContent('x: 2', null);
+        const a = svc.hashContent(asFiles('x: 1'), null);
+        const b = svc.hashContent(asFiles('x: 2'), null);
         expect(a).not.toBe(b);
     });
 
     it('changes when env content changes', () => {
         const svc = GitSourceService.getInstance();
-        const a = svc.hashContent('x: 1', 'A=1');
-        const b = svc.hashContent('x: 1', 'A=2');
+        const a = svc.hashContent(asFiles('x: 1'), 'A=1');
+        const b = svc.hashContent(asFiles('x: 1'), 'A=2');
         expect(a).not.toBe(b);
     });
 
     it('does not confuse compose|env boundary (uses NUL separator)', () => {
         const svc = GitSourceService.getInstance();
         // If the separator were absent, "ab" + "cd" would equal "abc" + "d".
-        const a = svc.hashContent('ab', 'cd');
-        const b = svc.hashContent('abc', 'd');
+        const a = svc.hashContent(asFiles('ab'), 'cd');
+        const b = svc.hashContent(asFiles('abc'), 'd');
         expect(a).not.toBe(b);
+    });
+
+    it('keeps the single-file hash stable vs the legacy content+env formula', () => {
+        const svc = GitSourceService.getInstance();
+        // Legacy single-string hash was sha256(content + '\x00' + (env ?? '')).
+        const legacy = crypto
+            .createHash('sha256')
+            .update('x: 1')
+            .update('\x00')
+            .update('FOO=bar')
+            .digest('hex');
+        expect(svc.hashContent(asFiles('x: 1'), 'FOO=bar')).toBe(legacy);
+    });
+
+    it('folds path + content per file for a multi-file set so order and names matter', () => {
+        const svc = GitSourceService.getInstance();
+        const base = { path: 'compose.yaml', content: 'a' };
+        const override = { path: 'infra/prod.yml', content: 'b' };
+        const ab = svc.hashContent([base, override], null);
+        const ba = svc.hashContent([override, base], null);
+        // Order-sensitive: swapping the two files changes the hash.
+        expect(ab).not.toBe(ba);
+        // Path-sensitive: same content under a different path changes the hash.
+        const renamed = svc.hashContent([base, { path: 'infra/dev.yml', content: 'b' }], null);
+        expect(ab).not.toBe(renamed);
     });
 });
 
@@ -138,25 +190,25 @@ describe('GitSourceService.validateCompose (YAML pre-check)', () => {
     const svc = () => GitSourceService.getInstance();
 
     it('rejects empty content', async () => {
-        const r = await svc().validateCompose('', null);
+        const r = await svc().validateCompose(asFiles(''), null, null);
         expect(r.ok).toBe(false);
         expect(r.error).toMatch(/empty/i);
     });
 
     it('rejects a YAML array at the root', async () => {
-        const r = await svc().validateCompose('- one\n- two\n', null);
+        const r = await svc().validateCompose(asFiles('- one\n- two\n'), null, null);
         expect(r.ok).toBe(false);
         expect(r.error).toMatch(/mapping/i);
     });
 
     it('rejects a YAML scalar at the root', async () => {
-        const r = await svc().validateCompose('42', null);
+        const r = await svc().validateCompose(asFiles('42'), null, null);
         expect(r.ok).toBe(false);
         expect(r.error).toMatch(/mapping/i);
     });
 
     it('rejects malformed YAML syntax', async () => {
-        const r = await svc().validateCompose('services:\n  web:\n    image: "unterminated\n', null);
+        const r = await svc().validateCompose(asFiles('services:\n  web:\n    image: "unterminated\n'), null, null);
         expect(r.ok).toBe(false);
         expect(r.error).toMatch(/YAML parse error/i);
     });
@@ -170,7 +222,8 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             stackName: 'enc-stack',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'token',
@@ -196,7 +249,8 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             stackName: 'keep-stack',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'token',
@@ -210,7 +264,8 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             stackName: 'keep-stack',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'token',
@@ -229,7 +284,8 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             stackName: 'clear-stack',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'token',
@@ -242,7 +298,8 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             stackName: 'clear-stack',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -260,7 +317,8 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             stackName: 'bad-matrix',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -279,7 +337,8 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             stackName: 'unreachable',
             repoUrl: 'https://github.com/example/nope.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -296,7 +355,7 @@ describe('GitSourceService error mapping', () => {
     const fetchParams = {
         repoUrl: 'https://github.com/example/repo.git',
         branch: 'main',
-        composePath: 'compose.yaml',
+        composePaths: ['compose.yaml'],
     };
 
     it('maps 401 with supplied token to AUTH_FAILED', async () => {
@@ -427,7 +486,7 @@ describe('GitSourceService error mapping', () => {
         mockGitLog.mockResolvedValue([{ oid: 'deadbeef' }]);
         await expect(svc().fetchFromGit({
             ...fetchParams,
-            composePath: 'missing/compose.yaml',
+            composePaths: ['missing/compose.yaml'],
         })).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
     });
 
@@ -485,7 +544,7 @@ describe('GitSourceService.fetchFromGit (size limits)', () => {
     const fetchParams = {
         repoUrl: 'https://github.com/example/repo.git',
         branch: 'main',
-        composePath: 'compose.yaml',
+        composePaths: ['compose.yaml'],
     };
 
     it('rejects a compose file larger than the per-file read cap', async () => {
@@ -541,7 +600,8 @@ describe('GitSourceService pending lifecycle', () => {
             stackName: 'pending-stack',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -566,7 +626,8 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
             stackName: 'debounce-stack',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -602,7 +663,8 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
             stackName: 'fanout-stack',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -630,7 +692,8 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
             stackName: 'webhook-validate-fail',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -707,7 +770,7 @@ describe('GitSourceService.fetchFromGit (.git metadata guard)', () => {
         await expect(svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: '.git/config',
+            composePaths: ['.git/config'],
         })).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
         expect(mockGitClone).not.toHaveBeenCalled();
     });
@@ -716,7 +779,7 @@ describe('GitSourceService.fetchFromGit (.git metadata guard)', () => {
         await expect(svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'subdir/.git/HEAD',
+            composePaths: ['subdir/.git/HEAD'],
         })).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
     });
 
@@ -724,7 +787,7 @@ describe('GitSourceService.fetchFromGit (.git metadata guard)', () => {
         await expect(svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
             envPath: '.git/config',
         })).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
     });
@@ -734,7 +797,7 @@ describe('GitSourceService.fetchFromGit (.git metadata guard)', () => {
         await expect(svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'gitops.yaml',
+            composePaths: ['gitops.yaml'],
         })).resolves.toBeDefined();
     });
 
@@ -748,7 +811,7 @@ describe('GitSourceService.fetchFromGit (.git metadata guard)', () => {
         await expect(svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
         })).rejects.toMatchObject({
             code: 'FILE_NOT_FOUND',
             message: expect.stringMatching(/symbolic link/i),
@@ -768,7 +831,7 @@ describe('GitSourceService.fetchFromGit (LFS + submodule detection)', () => {
         await expect(svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
         })).rejects.toMatchObject({
             code: 'GIT_ERROR',
             message: expect.stringMatching(/LFS/i),
@@ -784,7 +847,7 @@ describe('GitSourceService.fetchFromGit (LFS + submodule detection)', () => {
         await expect(svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
             envPath: '.env',
         })).rejects.toMatchObject({
             code: 'GIT_ERROR',
@@ -808,7 +871,7 @@ describe('GitSourceService.fetchFromGit (LFS + submodule detection)', () => {
         const result = await svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
         });
         expect(result.warnings).toEqual(
             expect.arrayContaining([expect.stringMatching(/submodules/i)]),
@@ -820,7 +883,7 @@ describe('GitSourceService.fetchFromGit (LFS + submodule detection)', () => {
         const result = await svc().fetchFromGit({
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
         });
         expect(result.warnings).toEqual([]);
     });
@@ -834,15 +897,6 @@ describe('GitSourceService.pull', () => {
 });
 
 describe('GitSourceService.createStackFromGit', () => {
-    async function cleanupStackDir(name: string) {
-        const { FileSystemService } = await import('../services/FileSystemService');
-        try {
-            await FileSystemService.getInstance().deleteStack(name);
-        } catch {
-            // directory may not exist; ignore
-        }
-    }
-
     it('creates a stack on disk, writes compose, and seeds last_applied columns', async () => {
         const sha = 'fedcba9876543210fedcba9876543210fedcba98';
         mockSuccessfulClone({
@@ -855,7 +909,8 @@ describe('GitSourceService.createStackFromGit', () => {
             stackName: 'create-happy',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -891,7 +946,8 @@ describe('GitSourceService.createStackFromGit', () => {
             stackName: 'create-nested',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'apps/web/compose.yaml',
+            composePaths: ['apps/web/compose.yaml'],
+            contextDir: null,
             syncEnv: true,
             envPath: 'apps/web/.env',
             authType: 'none',
@@ -928,7 +984,8 @@ describe('GitSourceService.createStackFromGit', () => {
             stackName: 'create-env',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: true,
             envPath: '.env',
             authType: 'none',
@@ -951,7 +1008,8 @@ describe('GitSourceService.createStackFromGit', () => {
             stackName: 'create-bad-matrix',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -975,7 +1033,8 @@ describe('GitSourceService.createStackFromGit', () => {
             stackName: 'create-bad-yaml',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -1003,7 +1062,8 @@ describe('GitSourceService.createStackFromGit', () => {
             stackName: 'create-rollback',
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -1028,7 +1088,8 @@ describe('GitSourceService.apply', () => {
             stackName,
             repoUrl: 'https://github.com/example/repo.git',
             branch: 'main',
-            composePath: 'compose.yaml',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
             syncEnv: false,
             envPath: null,
             authType: 'none',
@@ -1169,5 +1230,278 @@ describe('GitSourceService.apply', () => {
         tierSpy.mockRestore();
         trivyAvailableSpy.mockRestore();
         scanSpy.mockRestore();
+    });
+});
+
+describe('GitSourceService DB normalization (compose_paths back-compat)', () => {
+    it('reads back [compose_path] when a row stores compose_paths as null (legacy)', async () => {
+        mockSuccessfulClone({ composePath: 'stacks/web/compose.yaml' });
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'legacy-null',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['stacks/web/compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        // Simulate a row written before the multi-file column existed.
+        const db = DatabaseService.getInstance();
+        db.getDb().prepare('UPDATE stack_git_sources SET compose_paths = NULL WHERE stack_name = ?').run('legacy-null');
+
+        const row = db.getGitSource('legacy-null');
+        expect(row?.compose_paths).toEqual(['stacks/web/compose.yaml']);
+        expect(row?.compose_path).toBe('stacks/web/compose.yaml');
+    });
+
+    it('reads back [compose_path] when compose_paths holds an empty JSON array', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'legacy-empty',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        const db = DatabaseService.getInstance();
+        db.getDb().prepare(`UPDATE stack_git_sources SET compose_paths = '[]' WHERE stack_name = ?`).run('legacy-empty');
+
+        expect(db.getGitSource('legacy-empty')?.compose_paths).toEqual(['compose.yaml']);
+    });
+
+    it('backfills compose_paths to json_array(compose_path) for a NULL-column row', async () => {
+        // The migration runs json_array(compose_path) for any row whose
+        // compose_paths is NULL. Insert a NULL-column row, run the backfill SQL,
+        // and confirm the stored JSON is a one-element array of the legacy path.
+        mockSuccessfulClone({ composePath: 'deploy/compose.yaml' });
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'backfill-stack',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['deploy/compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const db = DatabaseService.getInstance();
+        db.getDb().prepare('UPDATE stack_git_sources SET compose_paths = NULL WHERE stack_name = ?').run('backfill-stack');
+
+        db.getDb().prepare(
+            `UPDATE stack_git_sources SET compose_paths = json_array(compose_path) WHERE compose_paths IS NULL`,
+        ).run();
+
+        const stored = db.getDb()
+            .prepare('SELECT compose_paths FROM stack_git_sources WHERE stack_name = ?')
+            .get('backfill-stack') as { compose_paths: string };
+        expect(JSON.parse(stored.compose_paths)).toEqual(['deploy/compose.yaml']);
+    });
+});
+
+describe('GitSourceService multi-file create + apply flow', () => {
+    it('materializes both files and persists a non-null applied_deploy_spec for a two-file create', async () => {
+        const sha = '1111aaa1111aaa1111aaa1111aaa1111aaa1111a';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            composePath: 'infra/base.yml',
+            extraFiles: { 'infra/prod.yml': 'services:\n  web:\n    environment:\n      - X=1\n' },
+            sha,
+        });
+        const svc = GitSourceService.getInstance();
+        // Isolate materialize behavior from docker availability.
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+        const result = await svc.createStackFromGit({
+            stackName: 'multi-create',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['infra/base.yml', 'infra/prod.yml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            token: null,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        expect(result.commitSha).toBe(sha);
+        const row = DatabaseService.getInstance().getGitSource('multi-create');
+        expect(row?.compose_paths).toEqual(['infra/base.yml', 'infra/prod.yml']);
+        expect(row?.applied_deploy_spec).not.toBeNull();
+        expect(row?.applied_deploy_spec?.files).toEqual(['compose.yaml', 'infra/prod.yml']);
+
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        // Primary lands at the root compose.yaml; the additional file at its repo path.
+        expect(await fsSvc.getStackContent('multi-create')).toContain('image: nginx');
+        const prod = await fsSvc.readStackFile('multi-create', 'infra/prod.yml');
+        expect(prod.content).toContain('X=1');
+
+        validateSpy.mockRestore();
+        await cleanupStackDir('multi-create');
+    });
+
+    it('leaves applied_deploy_spec null for a plain single-file create', async () => {
+        const sha = '2222bbb2222bbb2222bbb2222bbb2222bbb2222b';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+        await svc.createStackFromGit({
+            stackName: 'single-create',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            token: null,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        const row = DatabaseService.getInstance().getGitSource('single-create');
+        expect(row?.compose_paths).toEqual(['compose.yaml']);
+        expect(row?.applied_deploy_spec).toBeNull();
+
+        validateSpy.mockRestore();
+        await cleanupStackDir('single-create');
+    });
+
+    it('sets applied_deploy_spec for a single-file create that has a context_dir', async () => {
+        const sha = '3333ccc3333ccc3333ccc3333ccc3333ccc3333c';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+        await svc.createStackFromGit({
+            stackName: 'ctx-create',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: 'app',
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            token: null,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        const row = DatabaseService.getInstance().getGitSource('ctx-create');
+        expect(row?.applied_deploy_spec).not.toBeNull();
+        expect(row?.applied_deploy_spec?.files).toEqual(['compose.yaml']);
+        expect(row?.applied_deploy_spec?.contextDir).toBe('app');
+
+        validateSpy.mockRestore();
+        await cleanupStackDir('ctx-create');
+    });
+
+    it('pulls a multi-file v2 pending blob and applies both files to disk', async () => {
+        const sha = '4444ddd4444ddd4444ddd4444ddd4444ddd4444d';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            composePath: 'infra/base.yml',
+            extraFiles: { 'infra/prod.yml': 'services:\n  web:\n    environment:\n      - Y=2\n' },
+            sha,
+        });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack('multi-pull');
+
+        await svc.upsert({
+            stackName: 'multi-pull',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['infra/base.yml', 'infra/prod.yml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        const pull = await svc.pull('multi-pull');
+        // Pending compose blob is encrypted; assert it round-trips by applying it.
+        const row = DatabaseService.getInstance().getGitSource('multi-pull');
+        expect(row?.pending_commit_sha).toBe(sha);
+
+        const applied = await svc.apply('multi-pull', pull.commitSha);
+        expect(applied.applied).toBe(true);
+
+        const after = DatabaseService.getInstance().getGitSource('multi-pull');
+        expect(after?.applied_deploy_spec?.files).toEqual(['compose.yaml', 'infra/prod.yml']);
+        expect(await fsSvc.getStackContent('multi-pull')).toContain('image: nginx');
+        expect((await fsSvc.readStackFile('multi-pull', 'infra/prod.yml')).content).toContain('Y=2');
+
+        validateSpy.mockRestore();
+        await cleanupStackDir('multi-pull');
+    });
+
+    it('keeps pending across an upsert with the SAME config and clears it when compose_paths change', async () => {
+        const sha = '5555eee5555eee5555eee5555eee5555eee5555e';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            composePath: 'infra/base.yml',
+            extraFiles: {
+                'infra/prod.yml': 'services:\n  web:\n    environment:\n      - Z=3\n',
+                // The changed-config upsert re-fetches this path; the dry-run reads
+                // every configured file, so it must exist in the clone.
+                'infra/staging.yml': 'services:\n  web:\n    environment:\n      - Z=4\n',
+            },
+            sha,
+        });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('pending-config');
+
+        const baseInput = {
+            stackName: 'pending-config',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['infra/base.yml', 'infra/prod.yml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none' as const,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        };
+        await svc.upsert(baseInput);
+        await svc.pull('pending-config');
+        const db = DatabaseService.getInstance();
+        expect(db.getGitSource('pending-config')?.pending_commit_sha).toBe(sha);
+
+        // Same config -> pending must survive.
+        await svc.upsert(baseInput);
+        expect(db.getGitSource('pending-config')?.pending_commit_sha).toBe(sha);
+
+        // Changed compose_paths -> the captured pending blob no longer matches, clear it.
+        await svc.upsert({ ...baseInput, composePaths: ['infra/base.yml', 'infra/staging.yml'] });
+        expect(db.getGitSource('pending-config')?.pending_commit_sha).toBeNull();
+
+        validateSpy.mockRestore();
+        await cleanupStackDir('pending-config');
     });
 });

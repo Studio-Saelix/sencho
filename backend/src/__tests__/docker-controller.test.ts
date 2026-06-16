@@ -38,6 +38,7 @@ vi.mock('../services/NodeRegistry', () => ({
 // Prevent COMPOSE_DIR related issues
 vi.mock('child_process', () => ({
   exec: vi.fn(),
+  execFile: vi.fn(),
 }));
 vi.mock('util', () => ({
   promisify: () => vi.fn(),

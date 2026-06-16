@@ -82,6 +82,7 @@ vi.mock('../services/DatabaseService', () => ({
     getInstance: () => ({
       getRegistries: mockGetRegistries,
       getGlobalSettings: mockGetGlobalSettings,
+      getGitSource: () => undefined,
     }),
   },
 }));
@@ -107,6 +108,15 @@ vi.mock('../services/LogFormatter', () => ({
   LogFormatter: { formatLine: (line: string) => line },
 }));
 
+// runCommand and the deploy/update paths route through authoredComposeArgs, which
+// resolves the (optional) mesh override. Stub it to "no override" so a single-file
+// stack yields plain `docker compose <action>` args deterministically.
+vi.mock('../services/MeshService', () => ({
+  MeshService: {
+    getInstance: () => ({ ensureStackOverride: vi.fn().mockResolvedValue(null) }),
+  },
+}));
+
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 
 const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
@@ -128,6 +138,16 @@ function createMockProcess() {
     return true;
   });
   return proc;
+}
+
+/**
+ * runCommand now awaits the authored compose args (mesh override resolution) before
+ * spawning, so the child is created one microtask after the call. Tests that drive
+ * the mock child's events must wait for the spawn first, or the event fires before
+ * any listener is attached.
+ */
+async function waitForSpawn() {
+  await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
 }
 
 /** Sets up mockSpawn to auto-close with exit code 0 on next tick */
@@ -186,6 +206,7 @@ describe('ComposeService - runCommand', () => {
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
     proc.emit('close', 0);
     await promise;
 
@@ -202,6 +223,7 @@ describe('ComposeService - runCommand', () => {
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.runCommand('my-stack', 'start');
+    await waitForSpawn();
     proc.emit('close', 0);
 
     await expect(promise).resolves.toBeUndefined();
@@ -213,6 +235,7 @@ describe('ComposeService - runCommand', () => {
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.runCommand('my-stack', 'stop');
+    await waitForSpawn();
     proc.stderr.emit('data', Buffer.from('service not found'));
     proc.emit('close', 1);
 
@@ -225,6 +248,7 @@ describe('ComposeService - runCommand', () => {
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.runCommand('my-stack', 'stop');
+    await waitForSpawn();
     proc.stderr.emit('data', Buffer.from('token=abc123SECRET password=hunter2 Authorization: Bearer abc.def.ghi'));
     proc.emit('close', 1);
 
@@ -240,6 +264,7 @@ describe('ComposeService - runCommand', () => {
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.runCommand('my-stack', 'restart', ws);
+    await waitForSpawn();
     proc.stdout.emit('data', Buffer.from('Restarting...'));
     proc.emit('close', 0);
     await promise;
@@ -272,6 +297,7 @@ describe('ComposeService - runCommand', () => {
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.runCommand('my-stack', 'restart', ws);
+    await waitForSpawn();
     // The deploy is owned by its HTTP request; closing the progress socket
     // (panel minimized, navigated away, connection blip) must not abort it.
     ws.emit('close');
@@ -292,6 +318,7 @@ describe('ComposeService - runCommand', () => {
 
       const svc = ComposeService.getInstance(1);
       const promise = svc.runCommand('my-stack', 'restart', ws);
+      await waitForSpawn();
       const err = Object.assign(new Error('spawn docker ENOMEM'), { code: 'ENOMEM' });
       proc.emit('error', err);
 
@@ -314,6 +341,7 @@ describe('ComposeService - runCommand', () => {
 
       const svc = ComposeService.getInstance(1);
       const promise = svc.runCommand('my-stack', 'restart', ws);
+      await waitForSpawn();
       const err = Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' });
       proc.emit('error', err);
 
@@ -335,6 +363,7 @@ describe('ComposeService - runCommand', () => {
 
       const svc = ComposeService.getInstance(1);
       const promise = svc.runCommand('my-stack', 'restart');
+      await waitForSpawn();
       const err = Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' });
       proc.emit('error', err);
 

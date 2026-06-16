@@ -7,6 +7,7 @@ import { Label } from '../ui/label';
 import { ScrollArea } from '../ui/scroll-area';
 import { Checkbox } from '../ui/checkbox';
 import { GitSourceFields, type ApplyMode } from '../stack/GitSourceFields';
+import type { GitBrowseResult } from '../stack/GitComposeFilePicker';
 import { ImportStackPanel } from './ImportStackPanel';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -64,7 +65,8 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
     const [creatingFromDockerRun, setCreatingFromDockerRun] = useState(false);
     const [gitRepoUrl, setGitRepoUrl] = useState('');
     const [gitBranch, setGitBranch] = useState('main');
-    const [gitComposePath, setGitComposePath] = useState('compose.yaml');
+    const [gitComposePaths, setGitComposePaths] = useState<string[]>(['compose.yaml']);
+    const [gitContextDir, setGitContextDir] = useState('');
     const [gitSyncEnv, setGitSyncEnv] = useState(false);
     const [gitAuthType, setGitAuthType] = useState<'none' | 'token'>('none');
     const [gitToken, setGitToken] = useState('');
@@ -76,12 +78,42 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
         setNewStackName('');
         setGitRepoUrl('');
         setGitBranch('main');
-        setGitComposePath('compose.yaml');
+        setGitComposePaths(['compose.yaml']);
+        setGitContextDir('');
         setGitSyncEnv(false);
         setGitAuthType('none');
         setGitToken('');
         setGitApplyMode('review');
         setGitDeployNow(false);
+    };
+
+    const browseGitRepo = async (): Promise<GitBrowseResult | null> => {
+        if (!gitRepoUrl.trim() || !gitBranch.trim()) {
+            toast.error('Enter a repository URL and branch first.');
+            return null;
+        }
+        try {
+            const body: Record<string, unknown> = {
+                repo_url: gitRepoUrl.trim(),
+                branch: gitBranch.trim(),
+                auth_type: gitAuthType,
+            };
+            if (gitAuthType === 'token' && gitToken !== '') body.token = gitToken;
+            const res = await apiFetch('/git-sources/browse', {
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                return { files: data.files ?? [], truncated: data.truncated ?? false };
+            }
+            const err = await res.json().catch(() => ({}));
+            toast.error(err?.error || 'Failed to browse repository.');
+            return null;
+        } catch (e) {
+            toast.error((e as Error)?.message || 'Network error.');
+            return null;
+        }
     };
 
     const resetCreateFromDockerRunForm = () => {
@@ -142,8 +174,8 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             toast.error('Stack name is required.');
             return;
         }
-        if (!gitRepoUrl.trim() || !gitBranch.trim() || !gitComposePath.trim()) {
-            toast.error('Repository URL, branch, and compose path are required.');
+        if (!gitRepoUrl.trim() || !gitBranch.trim() || gitComposePaths.length === 0) {
+            toast.error('Repository URL, branch, and at least one compose file are required.');
             return;
         }
         if (!/^https:\/\//i.test(gitRepoUrl.trim())) {
@@ -160,7 +192,8 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 stack_name: stackName,
                 repo_url: gitRepoUrl.trim(),
                 branch: gitBranch.trim(),
-                compose_path: gitComposePath.trim(),
+                compose_paths: gitComposePaths,
+                context_dir: gitContextDir.trim() || null,
                 sync_env: gitSyncEnv,
                 auth_type: gitAuthType,
                 auto_apply_on_webhook: autoApply,
@@ -411,7 +444,8 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                                 disabled={creatingFromGit}
                                 repoUrl={gitRepoUrl}
                                 branch={gitBranch}
-                                composePath={gitComposePath}
+                                composePaths={gitComposePaths}
+                                contextDir={gitContextDir}
                                 syncEnv={gitSyncEnv}
                                 authType={gitAuthType}
                                 token={gitToken}
@@ -419,11 +453,13 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                                 applyMode={gitApplyMode}
                                 onRepoUrlChange={setGitRepoUrl}
                                 onBranchChange={setGitBranch}
-                                onComposePathChange={setGitComposePath}
+                                onComposePathsChange={setGitComposePaths}
+                                onContextDirChange={setGitContextDir}
                                 onSyncEnvChange={setGitSyncEnv}
                                 onAuthTypeChange={setGitAuthType}
                                 onTokenChange={setGitToken}
                                 onApplyModeChange={setGitApplyMode}
+                                onBrowse={browseGitRepo}
                             />
 
                             <div className="flex items-center gap-2">
