@@ -101,7 +101,7 @@ describe('GitSourcePanel load', () => {
     await screen.findByRole('button', { name: /^save$/i });
     expect(screen.queryByRole('button', { name: /update/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /remove/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
     expect(screen.getByLabelText(/repository url/i)).toHaveValue('');
   });
 
@@ -113,7 +113,7 @@ describe('GitSourcePanel load', () => {
     // A real source flips the primary action to Update and exposes Pull now / Remove.
     await screen.findByRole('button', { name: /update/i });
     expect(screen.getByRole('button', { name: /pull now/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /remove/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByLabelText(/repository url/i)).toHaveValue('https://github.com/org/repo.git'),
     );

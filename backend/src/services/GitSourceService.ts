@@ -974,8 +974,12 @@ export class GitSourceService {
                 args.push('-f', safeRel);
             }
             if (contextDir) {
-                const ctxAbs = path.resolve(dir, contextDir);
-                if (!isPathWithinBase(ctxAbs, dir)) {
+                // Inline path-injection barrier at the mkdir sink. CodeQL does not
+                // credit the wrapped isPathWithinBase helper, so resolve against a
+                // known-safe base and check containment with startsWith right here.
+                const baseResolved = path.resolve(dir);
+                const ctxAbs = path.resolve(baseResolved, contextDir);
+                if (!ctxAbs.startsWith(baseResolved + path.sep)) {
                     return { ok: false, error: 'Context directory escapes the validation dir.' };
                 }
                 await fsPromises.mkdir(ctxAbs, { recursive: true });

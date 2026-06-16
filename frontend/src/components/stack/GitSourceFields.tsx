@@ -86,7 +86,7 @@ export function GitSourceFields({
 }: GitSourceFieldsProps) {
   const copy = APPLY_MODE_COPY[variant];
   const primaryComposePath = composePaths[0] ?? '';
-  const canBrowse = repoUrl.trim() !== '' && branch.trim() !== '';
+  const canBrowse = !!repoUrl?.trim() && !!branch?.trim();
 
   const radioOption = (mode: ApplyMode) => (
     <button
