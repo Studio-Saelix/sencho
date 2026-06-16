@@ -29,7 +29,21 @@ Cards are grouped by node, with a section header for each node that has at least
 
 ## Empty state
 
-When nothing is pending, the board renders a single Shield-icon panel with the headline "All stacks on current builds" and the sub-line "Sencho will recheck registries on the scheduler interval." Image update detection runs every six hours on each node; the readiness board reflects that cached status until the next cycle (or until you press **Recheck**).
+When nothing is pending, the board renders a single Shield-icon panel with the headline "All stacks on current builds" and the sub-line "Sencho rechecks registries on the configured interval." Image update detection runs on a configurable interval (every 2 hours by default) on each node; the readiness board reflects that cached status until the next check, or until you press **Recheck**. Adjust the interval under **Settings > Automation > Image update checks**.
+
+## Detection cadence
+
+Sencho polls your registries on a set interval to detect available image updates and raise notifications. This detection cadence is configurable under **Settings > Automation > Image update checks**: choose anything from every 15 minutes to once a day. The default is every 2 hours, and changing it takes effect immediately, with no restart.
+
+Detection is separate from applying updates:
+
+- **Registry detection** is this interval. It only looks for newer images and raises an "update available" notification the first time a stack goes from up to date to having an update.
+- **Scheduled auto-update tasks** apply updates on their own cron schedule, independent of the detection interval. See [Scheduling auto-updates](#scheduling-auto-updates).
+- **Apply now** updates a single stack on demand, regardless of either schedule.
+
+The interval is node-scoped: each node runs its own scanner on its own cadence, and across a fleet Sencho staggers the runs slightly so the nodes do not all poll at the same instant. Setting the interval requires an admin account.
+
+The readiness hero shows this instance's cadence at a glance: when it last checked, when the next check is due, and, right after a manual **Recheck**, how long the 2-minute cooldown has left.
 
 ## Workflow
 
@@ -58,7 +72,7 @@ Auto-update is opt-in per stack. A stack participates in unattended updates only
 
 - **Per-stack schedule.** Create a **Auto-update Stack** task targeting that stack alone. Only this stack is updated when the cron fires.
 - **Fleet-wide schedule.** Create a **Auto-update All Stacks** task targeting a node. Every stack on that node is checked and updated when new images are available. If you do not want every stack covered, create per-stack schedules instead.
-- **Stack list dot.** Image-update *detection* runs every six hours regardless of whether any schedule is configured. The sidebar dot and the readiness board still show available updates so you can decide what to do with them.
+- **Stack list dot.** Image-update *detection* runs on the configured interval (every 2 hours by default) regardless of whether any schedule is configured. The sidebar dot and the readiness board still show available updates so you can decide what to do with them.
 - **Manual updates are always available.** The lifecycle **Update** action on a stack applies an update on demand, independent of any scheduled task.
 
 ## Cleaning up after updates
@@ -112,7 +126,7 @@ The preview is recomputed each time the readiness board loads, so it reflects th
     The registry call is either still pending or it failed. Click **Recheck** in the hero to retry. If the stack uses private-registry credentials, confirm they are still valid in **Settings > Registries**.
   </Accordion>
   <Accordion title='"Nothing to update" but I see an update on another view'>
-    Image update detection runs every six hours on each node and the readiness board uses the same cached status. Trigger **Recheck** to force a fresh check across every reachable node.
+    Image update detection runs on the configured interval (every 2 hours by default) on each node, and the readiness board uses the same cached status. Trigger **Recheck** to force a fresh check across every reachable node, or shorten the interval under **Settings > Automation > Image update checks**.
   </Accordion>
   <Accordion title='Scheduled auto-update runs are not applying to a specific stack'>
     No schedule covers that stack. Open **Schedules** in the top nav, create a new **Auto-update Stack** task targeting the stack (or an **Auto-update All Stacks** task on its node), and pick a cron. The next firing will include the stack, or you can trigger an immediate run from the row.

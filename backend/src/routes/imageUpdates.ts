@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { z } from 'zod';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -50,7 +51,31 @@ imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response
 });
 
 imageUpdatesRouter.get('/status', authMiddleware, (_req: Request, res: Response): void => {
-  res.json({ checking: ImageUpdateService.getInstance().isChecking() });
+  res.json(ImageUpdateService.getInstance().getStatus());
+});
+
+// Min/max mirror ImageUpdateService's clamp; the service is the authority and
+// re-clamps on read, so this is the user-facing validation boundary.
+const IntervalPatchSchema = z.object({
+  minutes: z.coerce.number().int().min(15).max(1440),
+});
+
+imageUpdatesRouter.put('/interval', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const parsed = IntervalPatchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'minutes must be an integer between 15 and 1440' });
+    return;
+  }
+  try {
+    DatabaseService.getInstance().updateGlobalSetting('image_update_check_interval_minutes', String(parsed.data.minutes));
+    // Reschedule the live timer so the new cadence takes effect without a restart.
+    ImageUpdateService.getInstance().restartPolling();
+    res.json(ImageUpdateService.getInstance().getStatus());
+  } catch (error) {
+    console.error('Failed to update image-update interval:', error);
+    res.status(500).json({ error: 'Failed to update interval' });
+  }
 });
 
 imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Response): Promise<void> => {

@@ -1471,6 +1471,7 @@ export class DatabaseService {
         stmt.run('reclaim_hero', '1');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
+        stmt.run('image_update_check_interval_minutes', '120');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;

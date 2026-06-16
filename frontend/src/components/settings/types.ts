@@ -51,6 +51,7 @@ export type SectionId =
     | 'labels'
     | 'host-alerts'
     | 'docker-storage'
+    | 'image-updates'
     | 'fleet-mesh'
     | 'notifications'
     | 'webhooks'

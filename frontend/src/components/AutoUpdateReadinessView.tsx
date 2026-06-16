@@ -5,6 +5,8 @@ import { Badge } from '@/components/ui/badge';
 import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play, CalendarClock, Monitor, Globe } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { formatTimeAgo } from '@/lib/relativeTime';
+import type { ImageUpdateStatus } from '@/types/imageUpdates';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
@@ -63,6 +65,46 @@ interface NodeGroup {
 
 interface FleetUpdateResponse {
   [nodeId: string]: Record<string, boolean>;
+}
+
+/**
+ * Detection-cadence status for the control instance's scanner, shown by the
+ * readiness card: when the last registry check ran, when the next is due, and
+ * how long the manual-recheck cooldown has left (ticking once a second).
+ */
+export function CadenceStrip({ cadence, className }: { cadence: ImageUpdateStatus | null; className?: string }) {
+  const [remainingMs, setRemainingMs] = useState(0);
+  useEffect(() => {
+    setRemainingMs(cadence?.manualCooldownRemainingMs ?? 0);
+  }, [cadence]);
+  const cooling = remainingMs > 0;
+  useEffect(() => {
+    if (!cooling) return;
+    const id = setInterval(() => setRemainingMs(prev => Math.max(0, prev - 1000)), 1000);
+    return () => clearInterval(id);
+  }, [cooling]);
+
+  if (!cadence) return null;
+
+  const lastChecked = cadence.lastCheckedAt != null ? formatTimeAgo(cadence.lastCheckedAt) : 'never';
+  const nextCheck = cadence.checking
+    ? 'checking now'
+    : cadence.nextCheckAt != null
+      ? formatRelative(cadence.nextCheckAt)
+      : 'not scheduled';
+  const cooldown = cooling
+    ? `Recheck available in ${Math.ceil(remainingMs / 1000)}s`
+    : 'Recheck ready';
+
+  return (
+    <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-stat-subtitle/90 ${className ?? ''}`}>
+      <span>Last checked {lastChecked}</span>
+      <span aria-hidden="true">·</span>
+      <span>Next check {nextCheck}</span>
+      <span aria-hidden="true">·</span>
+      <span>{cooldown}</span>
+    </div>
+  );
 }
 
 function formatRelative(ts: number | null): string {
@@ -469,9 +511,14 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const [reachableNodeCount, setReachableNodeCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [cadence, setCadence] = useState<ImageUpdateStatus | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Monotonic token guards against stale setGroups from older fetches.
   const loadTokenRef = useRef(0);
+  // Separate token for the cadence fetch: a slow initial /status must not
+  // overwrite the fresher status a Recheck just loaded, and neither may set
+  // state after unmount.
+  const cadenceTokenRef = useRef(0);
   // Holds the latest nodes array so loadReadiness can reference it without
   // re-firing every time NodeContext rebuilds the array on a meta refresh.
   const nodesRef = useRef(nodes);
@@ -612,18 +659,37 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     }
   }, [localNodeId]);
 
+  // Detection-cadence status for the control instance (localOnly): the readiness
+  // list is fleet-wide, but the cadence shown by the card is this instance's own
+  // scanner, configured in Settings. Each node runs its own scanner.
+  const loadCadence = useCallback(async () => {
+    const token = ++cadenceTokenRef.current;
+    try {
+      const res = await apiFetch('/image-updates/status', { localOnly: true });
+      if (!res.ok) return;
+      const data = await res.json() as ImageUpdateStatus;
+      // Drop the result if a newer cadence load started, or the view unmounted,
+      // while this one was in flight.
+      if (token === cadenceTokenRef.current) setCadence(data);
+    } catch (e) {
+      console.error('[AutoUpdate] failed to load image-update cadence status', e);
+    }
+  }, []);
+
   useEffect(() => {
     if (nodesSignature === '') return;
     loadReadiness();
+    void loadCadence();
     return () => {
       // Invalidate any in-flight fetch and cancel pending refresh timers on unmount.
       loadTokenRef.current++;
+      cadenceTokenRef.current++;
       if (refreshTimerRef.current) {
         clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = null;
       }
     };
-  }, [loadReadiness, nodesSignature]);
+  }, [loadReadiness, loadCadence, nodesSignature]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -637,6 +703,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       const tCount = data.triggered.length;
       const rCount = data.rateLimited.length;
       const fCount = data.failed.length;
+      // Re-seed the cadence strip so the manual-cooldown countdown reflects the
+      // recheck we just fired.
+      void loadCadence();
       if (tCount > 0) {
         toast.success(`Rechecking ${tCount} ${tCount === 1 ? 'node' : 'nodes'}...`);
       }
@@ -660,7 +729,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     } finally {
       setRefreshing(false);
     }
-  }, [loadReadiness]);
+  }, [loadReadiness, loadCadence]);
 
   const handleApply = useCallback(async (stack: string, nodeId: number) => {
     const setCardField = (predicate: (c: StackCard) => boolean, patch: Partial<StackCard>) =>
@@ -732,6 +801,8 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
               Recheck
             </Button>
           </div>
+          <CadenceStrip cadence={cadence} />
+
           {showPartialBanner && (
             <div className="font-mono text-[11px] text-stat-subtitle">
               {reachableNodeCount} of {onlineNodeCount} nodes reachable. Unreachable nodes are not shown.
@@ -743,7 +814,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
               <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
               <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
-              <div className="font-mono text-[11px] text-stat-subtitle">Sencho rechecks on the scheduler interval.</div>
+              <div className="font-mono text-[11px] text-stat-subtitle">Sencho rechecks registries on the configured interval.</div>
             </div>
           ) : (
             groups.map(group => <MobileNodeSection key={group.nodeId} group={group} onApply={handleApply} />)
@@ -763,6 +834,8 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         onRefresh={handleRefresh}
       />
 
+      <CadenceStrip cadence={cadence} className="-mt-3 pl-7" />
+
       {showPartialBanner && (
         <div className="font-mono text-[11px] text-stat-subtitle/90 -mt-3 pl-7">
           {reachableNodeCount} of {onlineNodeCount} nodes reachable. Unreachable nodes are not shown.
@@ -778,7 +851,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
           <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
           <div className="font-mono text-[11px] text-stat-subtitle">
-            Sencho will recheck registries on the scheduler interval.
+            Sencho rechecks registries on the configured interval.
           </div>
         </div>
       ) : (

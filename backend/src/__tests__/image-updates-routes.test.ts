@@ -72,10 +72,55 @@ describe('GET /api/image-updates/status', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns a checking flag', async () => {
+  it('returns the enriched status payload', async () => {
     const res = await request(app).get('/api/image-updates/status').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
     expect(typeof res.body.checking).toBe('boolean');
+    // start() never runs in route tests, so the interval reflects the seeded
+    // default (120) via the field initializer rather than NaN.
+    expect(res.body.intervalMinutes).toBe(120);
+    expect(res.body.manualCooldownMinutes).toBe(2);
+    expect(typeof res.body.manualCooldownRemainingMs).toBe('number');
+    expect('lastCheckedAt' in res.body).toBe(true);
+    expect('nextCheckAt' in res.body).toBe(true);
+  });
+});
+
+describe('PUT /api/image-updates/interval', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).put('/api/image-updates/interval').send({ minutes: 30 });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects non-admin users with 403', async () => {
+    const res = await request(app).put('/api/image-updates/interval').set('Cookie', viewerCookie).send({ minutes: 30 });
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an interval below the minimum', async () => {
+    const res = await request(app).put('/api/image-updates/interval').set('Cookie', adminCookie).send({ minutes: 5 });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an interval above the maximum', async () => {
+    const res = await request(app).put('/api/image-updates/interval').set('Cookie', adminCookie).send({ minutes: 5000 });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a non-integer interval', async () => {
+    const res = await request(app).put('/api/image-updates/interval').set('Cookie', adminCookie).send({ minutes: 'soon' });
+    expect(res.status).toBe(400);
+  });
+
+  it('persists a valid interval and returns the enriched status', async () => {
+    const res = await request(app).put('/api/image-updates/interval').set('Cookie', adminCookie).send({ minutes: 30 });
+    expect(res.status).toBe(200);
+    expect(res.body.intervalMinutes).toBe(30);
+    // The value is persisted to global_settings...
+    expect(DatabaseService.getInstance().getGlobalSettings().image_update_check_interval_minutes).toBe('30');
+    // ...and a follow-up status read reflects the rescheduled cadence.
+    const statusRes = await request(app).get('/api/image-updates/status').set('Cookie', adminCookie);
+    expect(statusRes.body.intervalMinutes).toBe(30);
   });
 });
 

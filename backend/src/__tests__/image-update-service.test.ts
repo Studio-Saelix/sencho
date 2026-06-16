@@ -2,7 +2,7 @@
  * Unit tests for ImageUpdateService: image ref parsing, compose extraction,
  * env file loading, checkImage digest comparison, and rate limiting.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -12,7 +12,7 @@ const {
   mockGetSystemState, mockSetSystemState, mockAddNotificationHistory,
   mockDispatchAlert,
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
-  mockGetAllContainers,
+  mockGetAllContainers, mockGetGlobalSettings,
 } = vi.hoisted(() => ({
   mockGetAuthForRegistry: vi.fn().mockResolvedValue(null),
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
@@ -27,6 +27,7 @@ const {
   mockGetEnvContent: vi.fn().mockRejectedValue(new Error('no env')),
   mockEnvExists: vi.fn().mockResolvedValue(false),
   mockGetAllContainers: vi.fn().mockResolvedValue([]),
+  mockGetGlobalSettings: vi.fn().mockReturnValue({ developer_mode: '0' }),
 }));
 
 vi.mock('../services/RegistryService', () => ({
@@ -40,7 +41,7 @@ vi.mock('../services/RegistryService', () => ({
 vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
-      getGlobalSettings: () => ({ developer_mode: '0' }),
+      getGlobalSettings: mockGetGlobalSettings,
       getNodes: () => [],
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
@@ -693,6 +694,177 @@ describe('ImageUpdateService - stop() cancels startup timeout', () => {
     await new Promise(r => setTimeout(r, 100));
 
     expect(checkSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── Configurable interval, status, and reschedule ───────────────────────
+
+describe('ImageUpdateService - configurable interval & status', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (ImageUpdateService as any).instance = undefined;
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    return { promise, resolve };
+  }
+
+  it('reports the default 120-minute interval before start() runs', () => {
+    const service = ImageUpdateService.getInstance();
+    const status = service.getStatus();
+    expect(status.intervalMinutes).toBe(120);
+    expect(status.checking).toBe(false);
+    expect(status.lastCheckedAt).toBeNull();
+    expect(status.nextCheckAt).toBeNull();
+    expect(status.manualCooldownMinutes).toBe(2);
+    expect(status.manualCooldownRemainingMs).toBe(0);
+  });
+
+  it('reads the configured interval from settings', () => {
+    mockGetGlobalSettings.mockReturnValue({ image_update_check_interval_minutes: '30' });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    expect(service.getStatus().intervalMinutes).toBe(30);
+  });
+
+  it('clamps an interval below the minimum to 15', () => {
+    mockGetGlobalSettings.mockReturnValue({ image_update_check_interval_minutes: '5' });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    expect(service.getStatus().intervalMinutes).toBe(15);
+  });
+
+  it('clamps an interval above the maximum to 1440', () => {
+    mockGetGlobalSettings.mockReturnValue({ image_update_check_interval_minutes: '5000' });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    expect(service.getStatus().intervalMinutes).toBe(1440);
+  });
+
+  it('falls back to the default for a malformed or non-integer value', () => {
+    const service = ImageUpdateService.getInstance();
+    const badValues: (string | undefined)[] = ['15abc', '30.5', '', undefined];
+    for (const bad of badValues) {
+      mockGetGlobalSettings.mockReturnValue(bad === undefined ? {} : { image_update_check_interval_minutes: bad });
+      service.configureFromSettings();
+      expect(service.getStatus().intervalMinutes).toBe(120);
+    }
+  });
+
+  it('stamps lastCheckedAt when a manual refresh runs', async () => {
+    const service = ImageUpdateService.getInstance();
+    // getNodes() returns [] in the shared mock, so check() completes immediately.
+    expect(service.getStatus().lastCheckedAt).toBeNull();
+    const triggered = service.triggerManualRefresh();
+    expect(triggered).toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(service.getStatus().lastCheckedAt).not.toBeNull();
+  });
+
+  it('applies ±10% jitter that actually reaches both endpoints', () => {
+    mockGetGlobalSettings.mockReturnValue({ image_update_check_interval_minutes: '60' });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const interval = 60 * 60 * 1000;
+
+    // random=0 must reach the low edge (90%), proving jitter is applied and not
+    // collapsed to the bare interval.
+    const low = vi.spyOn(Math, 'random').mockReturnValue(0);
+    expect((service as any).nextDelayMs()).toBe(Math.round(interval * 0.9));
+    low.mockRestore();
+
+    const mid = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    expect((service as any).nextDelayMs()).toBe(interval);
+    mid.mockRestore();
+
+    // random→1 must reach the high edge (≈110%).
+    const high = vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    const hi = (service as any).nextDelayMs() as number;
+    expect(hi).toBeGreaterThan(interval);
+    expect(hi).toBeGreaterThanOrEqual(Math.round(interval * 1.09));
+    expect(hi).toBeLessThanOrEqual(Math.round(interval * 1.1));
+    high.mockRestore();
+  });
+
+  it('reports the manual-refresh cooldown remaining and clears it after the window', () => {
+    vi.useFakeTimers();
+    const service = ImageUpdateService.getInstance();
+    expect(service.getManualCooldownRemainingMs()).toBe(0);
+    service.triggerManualRefresh();
+    const remaining = service.getManualCooldownRemainingMs();
+    expect(remaining).toBeGreaterThan(0);
+    expect(remaining).toBeLessThanOrEqual(2 * 60 * 1000);
+    vi.advanceTimersByTime(2 * 60 * 1000);
+    expect(service.getManualCooldownRemainingMs()).toBe(0);
+  });
+
+  it('stop() after start() clears the timer and nulls nextCheckAt without firing a check', () => {
+    vi.useFakeTimers();
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+    service.start();
+    expect(service.getStatus().nextCheckAt).not.toBeNull();
+    expect(vi.getTimerCount()).toBe(1);
+
+    service.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(service.getStatus().nextCheckAt).toBeNull();
+
+    // Past the old startup delay: the cleared timer + bumped generation mean no
+    // check fires on a stopped service.
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(checkSpy).not.toHaveBeenCalled();
+    checkSpy.mockRestore();
+  });
+
+  it('restartPolling() while stopped reconfigures the interval but arms no timer', () => {
+    vi.useFakeTimers();
+    mockGetGlobalSettings.mockReturnValue({ image_update_check_interval_minutes: '45' });
+    const service = ImageUpdateService.getInstance();
+    // Never started: polling is false, so it reconfigures without arming.
+    service.restartPolling();
+    expect(service.getStatus().intervalMinutes).toBe(45);
+    expect(service.getStatus().nextCheckAt).toBeNull();
+    expect((service as any).timer).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('restartPolling() during an in-flight tick leaves exactly one timer', async () => {
+    vi.useFakeTimers();
+    const service = ImageUpdateService.getInstance();
+    const d = deferred();
+    const checkSpy = vi.spyOn(service as any, 'check').mockReturnValue(d.promise);
+
+    service.start();
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Fire the startup tick: it invokes check() (our pending deferred) and does
+    // not re-arm until check resolves.
+    vi.advanceTimersByTime(2 * 60 * 1000);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // A settings save lands mid-scan: it arms a fresh timer.
+    service.restartPolling();
+    expect(vi.getTimerCount()).toBe(1);
+
+    // The original tick resolves; its generation is now stale, so it must not
+    // re-arm a second timer.
+    d.resolve();
+    await d.promise;
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(1);
+
+    service.stop();
+    checkSpy.mockRestore();
   });
 });
 
