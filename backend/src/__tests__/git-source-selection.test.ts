@@ -69,6 +69,19 @@ describe('parseComposeSelection', () => {
         expect(result.ok).toBe(false);
     });
 
+    it('rejects an additional file nested under the primary compose.yaml', () => {
+        // 'compose.yaml/prod.yml' would try to write under the root compose.yaml file.
+        const result = parseComposeSelection({ compose_paths: ['infra/base.yml', 'compose.yaml/prod.yml'] });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toMatch(/collides/i);
+    });
+
+    it('rejects two selected files where one is a directory ancestor of another', () => {
+        const result = parseComposeSelection({ compose_paths: ['base.yml', 'sub.yml', 'sub.yml/deep.yml'] });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toMatch(/collides/i);
+    });
+
     it('allows compose.yaml as the primary (index 0)', () => {
         const value = expectOk(parseComposeSelection({ compose_paths: ['compose.yaml', 'infra/prod.yml'] }));
         expect(value.composePaths).toEqual(['compose.yaml', 'infra/prod.yml']);
@@ -118,6 +131,21 @@ describe('parseComposeSelection', () => {
         const result = parseComposeSelection({
             compose_paths: ['compose.yaml', 'infra/prod.yml'],
             context_dir: 'infra/prod.yml',
+        });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toMatch(/context_dir/i);
+    });
+
+    it('rejects a context_dir nested under the primary compose.yaml', () => {
+        const result = parseComposeSelection({ compose_paths: ['infra/base.yml'], context_dir: 'compose.yaml/app' });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toMatch(/context_dir/i);
+    });
+
+    it('rejects a context_dir nested under a selected additional compose file', () => {
+        const result = parseComposeSelection({
+            compose_paths: ['compose.yaml', 'infra/prod.yml'],
+            context_dir: 'infra/prod.yml/sub',
         });
         expect(result.ok).toBe(false);
         if (!result.ok) expect(result.error).toMatch(/context_dir/i);

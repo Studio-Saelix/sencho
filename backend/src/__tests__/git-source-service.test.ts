@@ -172,17 +172,22 @@ describe('GitSourceService.hashContent', () => {
         expect(svc.hashContent(asFiles('x: 1'), 'FOO=bar')).toBe(legacy);
     });
 
-    it('folds path + content per file for a multi-file set so order and names matter', () => {
+    it('folds ordered contents (not paths) for a multi-file set', () => {
         const svc = GitSourceService.getInstance();
         const base = { path: 'compose.yaml', content: 'a' };
         const override = { path: 'infra/prod.yml', content: 'b' };
         const ab = svc.hashContent([base, override], null);
         const ba = svc.hashContent([override, base], null);
-        // Order-sensitive: swapping the two files changes the hash.
+        // Order-sensitive: swapping the two files changes the hash (content order).
         expect(ab).not.toBe(ba);
-        // Path-sensitive: same content under a different path changes the hash.
-        const renamed = svc.hashContent([base, { path: 'infra/dev.yml', content: 'b' }], null);
-        expect(ab).not.toBe(renamed);
+        // Path-INsensitive by design: the same contents in the same order hash equal
+        // regardless of path, so create (repo paths) and pull (materialized paths,
+        // primary -> compose.yaml) agree and a clean stack is not flagged as edited.
+        const repoPaths = svc.hashContent([{ path: 'infra/base.yml', content: 'a' }, { path: 'infra/prod.yml', content: 'b' }], null);
+        const localPaths = svc.hashContent([{ path: 'compose.yaml', content: 'a' }, { path: 'infra/prod.yml', content: 'b' }], null);
+        expect(repoPaths).toBe(localPaths);
+        // Content-sensitive: changing a file's content changes the hash.
+        expect(ab).not.toBe(svc.hashContent([base, { path: 'infra/prod.yml', content: 'B' }], null));
     });
 });
 
@@ -929,6 +934,42 @@ describe('GitSourceService.createStackFromGit', () => {
         expect(onDisk).toContain('image: nginx');
 
         await cleanupStackDir('create-happy');
+    });
+
+    it('multi-file create then pull reports no local changes (hash is path-independent)', async () => {
+        const sha = 'aaaa1111bbbb2222cccc3333dddd4444eeee5555';
+        mockSuccessfulClone({
+            composePath: 'infra/base.yml',
+            compose: 'services:\n  web:\n    image: nginx\n',
+            extraFiles: { 'infra/prod.yml': 'services:\n  web:\n    restart: always\n' },
+            sha,
+        });
+        const svc = GitSourceService.getInstance();
+        await svc.createStackFromGit({
+            stackName: 'mf-clean-pull',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['infra/base.yml', 'infra/prod.yml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            token: null,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        // The primary is materialized as compose.yaml, the override at its repo path.
+        const row = DatabaseService.getInstance().getGitSource('mf-clean-pull');
+        expect(row?.applied_deploy_spec?.files).toEqual(['compose.yaml', 'infra/prod.yml']);
+
+        // Pulling the identical commit must NOT flag local edits, even though the
+        // stored hash was computed from repo paths while the disk read uses the
+        // materialized paths (primary -> compose.yaml). This was the regression.
+        const pull = await svc.pull('mf-clean-pull');
+        expect(pull.hasLocalChanges).toBe(false);
+
+        await cleanupStackDir('mf-clean-pull');
     });
 
     it('resolves a nested compose_path and nested env_path into the stack dir', async () => {

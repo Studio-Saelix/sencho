@@ -492,6 +492,38 @@ describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () 
     });
 });
 
+describe('DELETE /api/stacks/:stackName/git-source — multi-file unlink guard', () => {
+    it('blocks unlinking a multi-file source with 409 and keeps the row', async () => {
+        seedGitSource('mf-unlink');
+        DatabaseService.getInstance().setGitSourceAppliedSpec('mf-unlink', { files: ['compose.yaml', 'infra/prod.yml'], contextDir: null });
+        const res = await request(app)
+            .delete('/api/stacks/mf-unlink/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(409);
+        expect(res.body.error).toMatch(/multiple compose files/i);
+        expect(DatabaseService.getInstance().getGitSource('mf-unlink')).toBeTruthy();
+    });
+
+    it('blocks unlinking a context-dir source with 409', async () => {
+        seedGitSource('ctx-unlink');
+        DatabaseService.getInstance().setGitSourceAppliedSpec('ctx-unlink', { files: ['compose.yaml'], contextDir: 'app' });
+        const res = await request(app)
+            .delete('/api/stacks/ctx-unlink/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(409);
+        expect(DatabaseService.getInstance().getGitSource('ctx-unlink')).toBeTruthy();
+    });
+
+    it('allows unlinking a single-file source', async () => {
+        seedGitSource('sf-unlink');
+        const res = await request(app)
+            .delete('/api/stacks/sf-unlink/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(DatabaseService.getInstance().getGitSource('sf-unlink')).toBeUndefined();
+    });
+});
+
 describe('GET /api/git-sources', () => {
     it('returns 200 and a JSON array for an authenticated admin', async () => {
         const res = await request(app)

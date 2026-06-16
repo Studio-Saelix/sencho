@@ -1,6 +1,6 @@
 import path from 'path';
 import { isValidGitSourcePath, isValidRelativeStackPath } from '../utils/validation';
-import { PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
+import { PRIMARY_COMPOSE_FILENAME, gitSourceLocalComposeFiles } from '../utils/gitComposeFiles';
 
 /** Upper bound on how many compose files one stack can order. Generous; real
  *  base+override layouts use a handful. */
@@ -57,12 +57,19 @@ export function parseComposeSelection(body: unknown): ParseResult {
     return { ok: false, error: 'compose_paths cannot contain duplicate entries' };
   }
 
-  // Each additional file is materialized at its repo-relative path; only the
-  // primary (index 0) is written to the root compose.yaml. An additional entry
-  // that normalizes to compose.yaml would clobber the primary.
-  for (let i = 1; i < composePaths.length; i++) {
-    if (composePaths[i].replace(/^\.\//, '') === PRIMARY_COMPOSE_FILENAME) {
-      return { ok: false, error: 'an additional compose file cannot be named compose.yaml (reserved for the primary file)' };
+  // Materialized local layout: the primary (index 0) is written to the root
+  // compose.yaml, each additional file at its repo-relative path. Reject the
+  // collisions that would make materialization fail at runtime (ENOTDIR / clobber):
+  // an additional file equal to or nested under compose.yaml, and any file path
+  // that is a directory ancestor of another selected file.
+  const materialized = gitSourceLocalComposeFiles(composePaths);
+  const label = (k: number) => (k === 0 ? PRIMARY_COMPOSE_FILENAME : composePaths[k]);
+  for (let i = 0; i < materialized.length; i++) {
+    for (let j = 0; j < materialized.length; j++) {
+      if (i === j) continue;
+      if (materialized[j] === materialized[i] || materialized[j].startsWith(materialized[i] + '/')) {
+        return { ok: false, error: `compose file "${label(j)}" collides with "${label(i)}" once materialized to disk` };
+      }
     }
   }
 
@@ -83,8 +90,10 @@ export function parseComposeSelection(body: unknown): ParseResult {
       if (ctx.split('/').some(seg => seg.toLowerCase() === '.git')) {
         return { ok: false, error: 'context_dir cannot target the .git directory' };
       }
-      if (ctx === PRIMARY_COMPOSE_FILENAME || composePaths.some(p => p.replace(/^\.\//, '') === ctx)) {
-        return { ok: false, error: 'context_dir cannot match a compose file path' };
+      // The project dir is mkdir'd, so it cannot equal a compose file path or sit
+      // beneath one (the primary compose.yaml and any override are files, not dirs).
+      if (materialized.some(f => ctx === f || ctx.startsWith(f + '/'))) {
+        return { ok: false, error: 'context_dir cannot match or be nested under a compose file path' };
       }
       contextDir = ctx;
     }

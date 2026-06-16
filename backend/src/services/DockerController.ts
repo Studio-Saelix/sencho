@@ -1278,14 +1278,17 @@ class DockerController {
   }
 
   public async getContainersByStack(stackName: string) {
-    const stackDir = path.join(COMPOSE_DIR, stackName);
+    // Resolve the compose dir and the authored prefix for THIS controller's node,
+    // not the process default, so a non-default local node sees its own stack dir
+    // and deploy spec.
+    const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
 
     try {
       // Splice the authored multi-file prefix (-f files + -p + --project-directory)
       // so a Git stack's override-only services are listed; single-file stacks get an
       // empty prefix and behave exactly as before. execFile avoids shell quoting on
       // the absolute --project-directory path.
-      const filePrefix = authoredComposeFileArgs(stackName);
+      const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
       const { stdout, stderr } = await execFileAsync(
         'docker',
         ['compose', ...filePrefix, 'ps', '--format', 'json', '-a'],

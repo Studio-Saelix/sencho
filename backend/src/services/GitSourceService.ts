@@ -1020,15 +1020,18 @@ export class GitSourceService {
     // ─── Hashing + diff ──────────────────────────────────────────────────────
 
     public hashContent(files: ComposeFile[], env: string | null): string {
+        // Hash the ordered file CONTENTS (NUL-separated) plus env. Paths are
+        // deliberately excluded: create/apply hash the fetched files (repo paths)
+        // while pull hashes the on-disk files (materialized paths, primary ->
+        // compose.yaml), so including paths would make the two disagree and flag a
+        // clean multi-file stack as locally edited. Content order already changes
+        // the hash on reorder, and a reorder is a config change that re-applies.
+        // Single-file keeps the legacy (content + env) shape, byte-stable on upgrade.
         const h = crypto.createHash('sha256');
         if (files.length === 1) {
-            // Single-file stacks keep the legacy hash (content + env) stable so a
-            // pre-existing stack is not flagged as locally changed after upgrade.
             h.update(files[0].content);
         } else {
             for (const f of files) {
-                h.update(f.path);
-                h.update('\x00');
                 h.update(f.content);
                 h.update('\x00');
             }

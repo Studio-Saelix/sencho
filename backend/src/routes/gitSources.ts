@@ -241,6 +241,18 @@ stackGitSourceRouter.delete('/:stackName/git-source', async (req: Request, res: 
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
+    // The deploy spec lives on the Git-source row, so unlinking a multi-file (or
+    // project-directory) source would silently drop the spec and revert future
+    // deploys to root compose.yaml auto-discovery, ignoring the override files
+    // still on disk. Refuse rather than change deploy semantics out from under the
+    // user; deleting the stack removes it cleanly.
+    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+    if (spec && (spec.files.length > 1 || spec.contextDir)) {
+      res.status(409).json({
+        error: 'This stack deploys multiple compose files configured by its Git source. Unlinking would change it to deploy only compose.yaml. Delete the stack to remove it, or keep the Git source.',
+      });
+      return;
+    }
     GitSourceService.getInstance().delete(stackName);
     console.log(`[GitSource] Removed git source for ${stackName}`);
     res.json({ success: true });
