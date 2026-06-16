@@ -34,7 +34,7 @@ function setup({ isPaid }: { isPaid: boolean }) {
   vi.mocked(AuthContext.useAuth).mockReturnValue({ isAdmin: true } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(NodeContext.useNodes).mockReturnValue({ activeNode: { type: 'local', id: 1, name: 'local' } } as unknown as ReturnType<typeof NodeContext.useNodes>);
   vi.mocked(TrivyStatus.useTrivyStatus).mockReturnValue({
-    status: { available: true, version: '1', source: 'managed', autoUpdate: false, honorSuppressionsOnDeploy: false, busy: false },
+    status: { available: true, version: '1', source: 'managed', autoUpdate: false, honorSuppressionsOnDeploy: false, preDeployScanAdvisory: false, busy: false },
     updateCheck: null,
     refresh: vi.fn().mockResolvedValue(undefined),
     refreshUpdateCheck: vi.fn().mockResolvedValue(undefined),

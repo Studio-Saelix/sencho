@@ -86,6 +86,8 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     setPolicyBypassing: vi.fn(),
     updateReadiness: null,
     setUpdateReadiness: vi.fn(),
+    preDeployAdvisory: null,
+    setPreDeployAdvisory: vi.fn(),
     setDiffPreview: vi.fn(),
     ...over,
   } as unknown as OverlayState;
@@ -253,6 +255,9 @@ describe('useStackActions policy-block dialog wiring', () => {
   });
 
   it('opens the dialog with action "deploy" when an editor deploy is blocked', async () => {
+    // deployStack first fetches the pre-deploy advisory summary; keep it off so
+    // the flow reaches the deploy POST that returns the policy block.
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({ enabled: false }), { status: 200 }));
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify(policyPayload), { status: 409 }));
     const { result, overlayState } = setup();
     await result.current.deployStack(mouseEvent);
@@ -306,6 +311,158 @@ describe('useStackActions policy-block dialog wiring', () => {
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
       expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'rollback' }),
     );
+  });
+});
+
+describe('useStackActions pre-deploy advisory', () => {
+  const mouseEvent = { preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent;
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    lastRunWithLogParams = null;
+  });
+
+  it('opens the advisory before deploying and defers the deploy until the user proceeds', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/pre-deploy-summary')) {
+        return new Response(JSON.stringify({ enabled: true, images: [{ imageRef: 'nginx:1.14', scan: null }] }), { status: 200 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result } = setup({ overlay: { setPreDeployAdvisory } });
+
+    await result.current.deployStack(mouseEvent);
+
+    // The advisory opened and the deploy has NOT started (no progress log, no POST).
+    expect(setPreDeployAdvisory).toHaveBeenCalledWith(
+      expect.objectContaining({ stackName: 'web', images: [{ imageRef: 'nginx:1.14', scan: null }] }),
+    );
+    expect(lastRunWithLogParams).toBeNull();
+    expect(vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).includes('/deploy'))).toHaveLength(0);
+
+    // Proceeding runs the actual deploy.
+    const arg = setPreDeployAdvisory.mock.calls[0][0] as { proceed: () => void };
+    arg.proceed();
+    await vi.waitFor(() => expect(lastRunWithLogParams).not.toBeNull());
+  });
+
+  it('deploys directly, with no advisory, when the summary is disabled', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ enabled: false }), { status: 200 }));
+    const { result } = setup({ overlay: { setPreDeployAdvisory } });
+
+    await result.current.deployStack(mouseEvent);
+
+    expect(setPreDeployAdvisory).not.toHaveBeenCalled();
+    expect(lastRunWithLogParams).not.toBeNull();
+  });
+
+  it('deploys directly when the advisory is enabled but no images are returned', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/pre-deploy-summary')) {
+        return new Response(JSON.stringify({ enabled: true, images: [] }), { status: 200 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result } = setup({ overlay: { setPreDeployAdvisory } });
+
+    await result.current.deployStack(mouseEvent);
+
+    expect(setPreDeployAdvisory).not.toHaveBeenCalled();
+    expect(lastRunWithLogParams).not.toBeNull();
+  });
+
+  it('binds the advisory fetch and the deferred deploy to the captured node', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/pre-deploy-summary')) {
+        return new Response(JSON.stringify({ enabled: true, images: [{ imageRef: 'nginx:1.14', scan: null }] }), { status: 200 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result } = setup({
+      overlay: { setPreDeployAdvisory },
+      activeNode: { id: 42, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
+    });
+
+    await result.current.deployStack(mouseEvent);
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/pre-deploy-summary'),
+      expect.objectContaining({ nodeId: 42 }),
+    );
+    const arg = (setPreDeployAdvisory.mock.calls[0][0]) as { proceed: () => void };
+    arg.proceed();
+    await vi.waitFor(() => expect(lastRunWithLogParams?.nodeId).toBe(42));
+  });
+
+  it('runs the deploy at most once even if proceed fires twice', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/pre-deploy-summary')) {
+        return new Response(JSON.stringify({ enabled: true, images: [{ imageRef: 'nginx:1.14', scan: null }] }), { status: 200 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result } = setup({ overlay: { setPreDeployAdvisory } });
+
+    await result.current.deployStack(mouseEvent);
+    const arg = (setPreDeployAdvisory.mock.calls[0][0]) as { proceed: () => void };
+    arg.proceed();
+    await vi.waitFor(() => expect(lastRunWithLogParams).not.toBeNull());
+
+    lastRunWithLogParams = null;
+    arg.proceed();
+    await Promise.resolve();
+    expect(lastRunWithLogParams).toBeNull();
+  });
+
+  it('blocks a second deploy click while the advisory fetch is still pending', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    const summaryGate: { release: () => void } = { release: () => {} };
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (String(url).includes('/pre-deploy-summary')) {
+        return new Promise<Response>((resolve) => {
+          summaryGate.release = () => resolve(new Response(JSON.stringify({ enabled: false }), { status: 200 }));
+        });
+      }
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+    const { result } = setup({ overlay: { setPreDeployAdvisory } });
+
+    const first = result.current.deployStack(mouseEvent);
+    const second = result.current.deployStack(mouseEvent); // double-click while the summary is in flight
+    summaryGate.release();
+    await Promise.all([first, second]);
+    await vi.waitFor(() => expect(lastRunWithLogParams).not.toBeNull());
+
+    // The second click is blocked before it ever issues a request, so exactly
+    // one summary fetch and one deploy occur.
+    const summaryCalls = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]).includes('/pre-deploy-summary'));
+    expect(summaryCalls).toHaveLength(1);
+  });
+
+  it('clears the pending guard on cancel so a later deploy is allowed', async () => {
+    const setPreDeployAdvisory = vi.fn();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/pre-deploy-summary')) {
+        return new Response(JSON.stringify({ enabled: true, images: [{ imageRef: 'nginx:1.14', scan: null }] }), { status: 200 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result } = setup({ overlay: { setPreDeployAdvisory } });
+
+    await result.current.deployStack(mouseEvent);
+    const arg = (setPreDeployAdvisory.mock.calls[0][0]) as { cancel: () => void };
+    arg.cancel(); // dismiss the advisory; the guard must release
+
+    await result.current.deployStack(mouseEvent); // a fresh deploy must not be blocked
+    // Calls: open, null (cancel), open again. The third proves the guard cleared
+    // and the later deploy opened a fresh advisory rather than being blocked.
+    expect(setPreDeployAdvisory).toHaveBeenCalledTimes(3);
+    expect(setPreDeployAdvisory.mock.calls[2][0]).toMatchObject({ stackName: 'web' });
   });
 });
 

@@ -8,6 +8,7 @@ const INITIAL_STATUS: TrivyStatus = {
   source: 'none',
   autoUpdate: false,
   honorSuppressionsOnDeploy: false,
+  preDeployScanAdvisory: false,
   busy: false,
 };
 
@@ -33,6 +34,7 @@ export function useTrivyStatus(): UseTrivyStatusResult {
         source: d.source === 'managed' || d.source === 'host' ? d.source : 'none',
         autoUpdate: !!d.autoUpdate,
         honorSuppressionsOnDeploy: !!d.honorSuppressionsOnDeploy,
+        preDeployScanAdvisory: !!d.preDeployScanAdvisory,
         busy: !!d.busy,
       });
     } catch (err) {

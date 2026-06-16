@@ -46,7 +46,7 @@ interface TrivyManagerProps {
  */
 export function TrivyManager({ status, updateCheck, refresh, refreshUpdateCheck }: TrivyManagerProps) {
   const { isAdmin } = useAuth();
-  const [trivyBusy, setTrivyBusy] = useState<null | 'install' | 'update' | 'uninstall' | 'auto-update'>(null);
+  const [trivyBusy, setTrivyBusy] = useState<null | 'install' | 'update' | 'uninstall' | 'auto-update' | 'advisory'>(null);
   const [uninstallConfirm, setUninstallConfirm] = useState(false);
 
   const runTrivyOp = async (
@@ -84,6 +84,25 @@ export function TrivyManager({ status, updateCheck, refresh, refreshUpdateCheck 
     setTrivyBusy('auto-update');
     try {
       const res = await apiFetch('/security/trivy-auto-update', {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to update setting');
+      }
+      await refresh();
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Failed to update setting');
+    } finally {
+      setTrivyBusy(null);
+    }
+  };
+
+  const handleAdvisoryToggle = async (enabled: boolean) => {
+    setTrivyBusy('advisory');
+    try {
+      const res = await apiFetch('/security/pre-deploy-scan-advisory', {
         method: 'PUT',
         body: JSON.stringify({ enabled }),
       });
@@ -168,6 +187,22 @@ export function TrivyManager({ status, updateCheck, refresh, refreshUpdateCheck 
             <TogglePill
               checked={status.autoUpdate}
               onChange={handleAutoUpdateToggle}
+              disabled={trivyBusy !== null}
+            />
+          </div>
+        )}
+
+        {(status.available || status.preDeployScanAdvisory) && isAdmin && (
+          <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
+            <div>
+              <Label className="text-sm">Pre-deploy scan advisory</Label>
+              <p className="text-xs text-muted-foreground">
+                Before a manual deploy, show each image's latest scan results so you can review them first. Advisory only; it never blocks the deploy.
+              </p>
+            </div>
+            <TogglePill
+              checked={status.preDeployScanAdvisory}
+              onChange={handleAdvisoryToggle}
               disabled={trivyBusy !== null}
             />
           </div>

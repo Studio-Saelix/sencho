@@ -4,7 +4,9 @@ import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { trivyInstallLimiter } from '../middleware/rateLimiters';
 import TrivyService, { SbomFormat } from '../services/TrivyService';
 import TrivyInstaller from '../services/TrivyInstaller';
-import { DatabaseService, parsePolicyEvaluation, type VulnerabilityScan } from '../services/DatabaseService';
+import { DatabaseService, parsePolicyEvaluation, type VulnerabilityScan, type VulnSeverity } from '../services/DatabaseService';
+import { ComposeService } from '../services/ComposeService';
+import { isValidStackName } from '../utils/validation';
 import { FleetSyncService } from '../services/FleetSyncService';
 import { LicenseService } from '../services/LicenseService';
 import { validateImageRef } from '../utils/image-ref';
@@ -149,6 +151,7 @@ securityRouter.get('/trivy-status', authMiddleware, (_req: Request, res: Respons
     source: svc.getSource(),
     autoUpdate: settings.trivy_auto_update === '1',
     honorSuppressionsOnDeploy: settings.deploy_block_honor_suppressions === '1',
+    preDeployScanAdvisory: settings.pre_deploy_scan_advisory === '1',
     busy: installer.isBusy(),
   });
 });
@@ -261,6 +264,89 @@ securityRouter.put('/deploy-block-honor-suppressions', authMiddleware, (req: Req
     const msg = getErrorMessage(err, 'Failed to update setting');
     console.error('[Security] Deploy-block honor-suppressions toggle failed:', msg);
     res.status(500).json({ error: msg });
+  }
+});
+
+// Pre-deploy scan advisory toggle. When on, a manual stack deploy first shows
+// the latest cached scan severity for each image so the operator can review it
+// before deploying. Visibility only: it never blocks (that is the paid
+// deploy-block policy). Per-instance, admin-only, all tiers. Default off.
+securityRouter.put('/pre-deploy-scan-advisory', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  if (typeof req.body?.enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled must be a boolean' });
+    return;
+  }
+  const enabled = req.body.enabled;
+  try {
+    DatabaseService.getInstance().updateGlobalSetting('pre_deploy_scan_advisory', enabled ? '1' : '0');
+    res.json({ preDeployScanAdvisory: enabled });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to update setting');
+    console.error('[Security] Pre-deploy scan advisory toggle failed:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+interface PreDeployImageSummary {
+  imageRef: string;
+  scan: {
+    criticalCount: number;
+    highCount: number;
+    mediumCount: number;
+    lowCount: number;
+    highestSeverity: VulnSeverity | null;
+    scannedAt: number;
+  } | null;
+}
+
+// Read-only advisory data for the pre-deploy dialog: the latest cached,
+// node-scoped, vulnerability-bearing scan for each image declared in the stack's
+// compose file. Cache-only by design (never triggers a scan) so it stays fast
+// and side-effect-free on the deploy path, and short-circuits when the advisory
+// is off so the common path does no compose/digest work. No tier gate
+// (visibility is free); matches the auth model of the other /scans read routes.
+securityRouter.get('/stacks/:stackName/pre-deploy-summary', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  const settings = DatabaseService.getInstance().getGlobalSettings();
+  if (settings.pre_deploy_scan_advisory !== '1') {
+    res.json({ enabled: false });
+    return;
+  }
+  const stackName = String(req.params.stackName);
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  const nodeId = req.nodeId;
+  try {
+    const db = DatabaseService.getInstance();
+    const trivy = TrivyService.getInstance();
+    const imageRefs = await ComposeService.getInstance(nodeId).listStackImages(stackName);
+    const images: PreDeployImageSummary[] = [];
+    for (const imageRef of imageRefs) {
+      const digest = await trivy.getImageDigest(imageRef, nodeId);
+      const scan = digest ? db.getLatestVulnScanByDigestForNode(digest, nodeId) : null;
+      images.push({
+        imageRef,
+        scan: scan
+          ? {
+              criticalCount: scan.critical_count,
+              highCount: scan.high_count,
+              mediumCount: scan.medium_count,
+              lowCount: scan.low_count,
+              highestSeverity: scan.highest_severity,
+              scannedAt: scan.scanned_at,
+            }
+          : null,
+      });
+    }
+    res.json({ enabled: true, images });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to build pre-deploy summary');
+    console.error('[Security] Pre-deploy summary failed for %s:', sanitizeForLog(stackName), sanitizeForLog(msg));
+    // Keep the detail in the server log only: this path runs docker compose and
+    // image inspect, whose error text can carry filesystem or daemon detail.
+    res.status(500).json({ error: 'Failed to build pre-deploy summary' });
   }
 });
 
