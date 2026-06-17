@@ -255,13 +255,6 @@ export function OverviewToolbar({
                 className="ml-auto shrink-0 shadow-card-bevel"
             />
 
-            {onAddNode && (
-                <Button size="sm" className="gap-1.5 shrink-0 h-9" onClick={onAddNode}>
-                    <Plus className="w-4 h-4" strokeWidth={1.5} />
-                    Add node
-                </Button>
-            )}
-
             {onCheckUpdates && (
                 <Button
                     variant="outline"
@@ -272,6 +265,13 @@ export function OverviewToolbar({
                 >
                     <RefreshCcwDot className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`} />
                     Check Updates
+                </Button>
+            )}
+
+            {onAddNode && (
+                <Button size="sm" className="gap-1.5 shrink-0 h-9" onClick={onAddNode}>
+                    <Plus className="w-4 h-4" strokeWidth={1.5} />
+                    Add node
                 </Button>
             )}
         </div>
