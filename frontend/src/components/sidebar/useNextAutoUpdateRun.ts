@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import type { ScheduledTask } from '@/types/scheduling';
 
 const POLL_INTERVAL_MS = 60_000;
@@ -19,10 +20,18 @@ async function fetchNextRun(signal: AbortSignal): Promise<number | null> {
 }
 
 export function useNextAutoUpdateRun(): number | null {
+  const { isAdmin } = useAuth();
   const [nextRunAt, setNextRunAt] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    // The list endpoint is admin-only; non-admins would 403 on every poll.
+    // Skip all fetching/polling/listeners for them and report no scheduled run.
+    if (!isAdmin) {
+      setNextRunAt(null); // eslint-disable-line react-hooks/set-state-in-effect
+      return;
+    }
+
     let active = true;
     let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -57,7 +66,7 @@ export function useNextAutoUpdateRun(): number | null {
       clearInterval(interval);
       abortRef.current?.abort();
     };
-  }, []);
+  }, [isAdmin]);
 
   return nextRunAt;
 }
