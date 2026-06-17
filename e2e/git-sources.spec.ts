@@ -187,10 +187,10 @@ test.describe('Git Sources', () => {
     // Source should render with the saved repo URL.
     await expect(page.locator('#git-source-repo')).toHaveValue(/awesome-compose/);
 
-    // Click Remove → AlertDialog appears → confirm → source cleared. Match the
-    // footer button by its exact name so the picker's per-file "Remove <path>"
-    // buttons do not make the locator ambiguous.
-    await page.getByRole('dialog').getByRole('button', { name: 'Remove' }).click();
+    // Click Remove → AlertDialog appears → confirm → source cleared. Playwright's
+    // name match is substring by default, so require an exact match to select the
+    // footer button and not the picker's per-file "Remove <path>" buttons.
+    await page.getByRole('dialog').getByRole('button', { name: 'Remove', exact: true }).click();
     await expect(page.getByRole('alertdialog')).toBeVisible({ timeout: 5_000 });
     await page.getByRole('alertdialog').getByRole('button', { name: /^Remove$/ }).click();
 
