@@ -10,6 +10,7 @@ import { useNodes } from '@/context/NodeContext';
 import { toast } from '@/components/ui/toast-store';
 import { GitSourceDiffDialog, type PullResult } from './GitSourceDiffDialog';
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
+import type { GitBrowseResult } from './GitComposeFilePicker';
 
 export interface GitSource {
   id: number;
@@ -17,6 +18,8 @@ export interface GitSource {
   repo_url: string;
   branch: string;
   compose_path: string;
+  compose_paths: string[];
+  context_dir: string | null;
   sync_env: boolean;
   env_path: string | null;
   auth_type: 'none' | 'token';
@@ -64,7 +67,8 @@ export function GitSourcePanel({
 
   const [repoUrl, setRepoUrl] = useState('');
   const [branch, setBranch] = useState('main');
-  const [composePath, setComposePath] = useState('compose.yaml');
+  const [composePaths, setComposePaths] = useState<string[]>(['compose.yaml']);
+  const [contextDir, setContextDir] = useState('');
   const [syncEnv, setSyncEnv] = useState(false);
   const [authType, setAuthType] = useState<'none' | 'token'>('none');
   const [token, setToken] = useState('');
@@ -82,7 +86,8 @@ export function GitSourcePanel({
     setSource(null);
     setRepoUrl('');
     setBranch('main');
-    setComposePath('compose.yaml');
+    setComposePaths(['compose.yaml']);
+    setContextDir('');
     setSyncEnv(false);
     setAuthType('none');
     setToken('');
@@ -102,7 +107,8 @@ export function GitSourcePanel({
           setSource(data);
           setRepoUrl(data.repo_url);
           setBranch(data.branch);
-          setComposePath(data.compose_path);
+          setComposePaths(data.compose_paths?.length ? data.compose_paths : [data.compose_path]);
+          setContextDir(data.context_dir ?? '');
           setSyncEnv(data.sync_env);
           setAuthType(data.auth_type);
           setToken('');
@@ -131,8 +137,8 @@ export function GitSourcePanel({
   }, [open, load]);
 
   const save = async () => {
-    if (!repoUrl.trim() || !branch.trim() || !composePath.trim()) {
-      toast.error('Repository URL, branch, and compose path are required.');
+    if (!repoUrl.trim() || !branch.trim() || composePaths.length === 0) {
+      toast.error('Repository URL, branch, and at least one compose file are required.');
       return;
     }
     if (!/^https:\/\//i.test(repoUrl.trim())) {
@@ -147,7 +153,8 @@ export function GitSourcePanel({
       const body: Record<string, unknown> = {
         repo_url: repoUrl.trim(),
         branch: branch.trim(),
-        compose_path: composePath.trim(),
+        compose_paths: composePaths,
+        context_dir: contextDir.trim() || null,
         sync_env: syncEnv,
         auth_type: authType,
         auto_apply_on_webhook: autoApply,
@@ -176,6 +183,35 @@ export function GitSourcePanel({
     } finally {
       toast.dismiss(loadingId);
       setSaving(false);
+    }
+  };
+
+  const browseRepo = async (): Promise<GitBrowseResult | null> => {
+    if (!repoUrl.trim() || !branch.trim()) {
+      toast.error('Enter a repository URL and branch first.');
+      return null;
+    }
+    try {
+      const body: Record<string, unknown> = {
+        repo_url: repoUrl.trim(),
+        branch: branch.trim(),
+        auth_type: authType,
+      };
+      if (authType === 'token' && token !== '') body.token = token;
+      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/browse`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return { files: data.files ?? [], truncated: data.truncated ?? false };
+      }
+      const err = await res.json().catch(() => ({}));
+      toast.error(err?.error || 'Failed to browse repository.');
+      return null;
+    } catch (e) {
+      toast.error((e as Error)?.message || 'Network error.');
+      return null;
     }
   };
 
@@ -343,7 +379,8 @@ export function GitSourcePanel({
                     disabled={!canEdit || saving}
                     repoUrl={repoUrl}
                     branch={branch}
-                    composePath={composePath}
+                    composePaths={composePaths}
+                    contextDir={contextDir}
                     syncEnv={syncEnv}
                     authType={authType}
                     token={token}
@@ -351,11 +388,13 @@ export function GitSourcePanel({
                     applyMode={applyMode}
                     onRepoUrlChange={setRepoUrl}
                     onBranchChange={setBranch}
-                    onComposePathChange={setComposePath}
+                    onComposePathsChange={setComposePaths}
+                    onContextDirChange={setContextDir}
                     onSyncEnvChange={setSyncEnv}
                     onAuthTypeChange={setAuthType}
                     onTokenChange={setToken}
                     onApplyModeChange={setApplyModeOverride}
+                    onBrowse={browseRepo}
                   />
 
                   {source && (

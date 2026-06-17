@@ -38,7 +38,7 @@ vi.mock('../services/DockerController', () => ({
 }));
 
 vi.mock('../services/DatabaseService', () => ({
-  DatabaseService: { getInstance: () => ({ getRegistries: () => [] }) },
+  DatabaseService: { getInstance: () => ({ getRegistries: () => [], getGitSource: () => undefined }) },
 }));
 
 vi.mock('../services/RegistryService', () => ({

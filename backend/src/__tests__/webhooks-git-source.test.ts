@@ -13,6 +13,30 @@ function adminToken(): string {
     return jwt.sign({ username: TEST_USERNAME, role: 'admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 }
 
+function seedGitSource(stackName: string): void {
+    DatabaseService.getInstance().upsertGitSource({
+        stack_name: stackName,
+        repo_url: 'https://github.com/example/repo.git',
+        branch: 'main',
+        compose_path: 'compose.yaml',
+        compose_paths: ['compose.yaml'],
+        context_dir: null,
+        sync_env: false,
+        env_path: null,
+        auth_type: 'none',
+        encrypted_token: null,
+        auto_apply_on_webhook: false,
+        auto_deploy_on_apply: false,
+        last_applied_commit_sha: null,
+        last_applied_content_hash: null,
+        pending_commit_sha: null,
+        pending_compose_content: null,
+        pending_env_content: null,
+        pending_fetched_at: null,
+        last_debounce_at: null,
+    });
+}
+
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ app } = await import('../index'));
@@ -35,25 +59,7 @@ describe('node-aware Git source webhooks', () => {
     it('persists node_id when creating a webhook', async () => {
         const db = DatabaseService.getInstance();
         const nodeId = db.getDefaultNode()!.id;
-        db.upsertGitSource({
-            stack_name: 'webhook-local-git',
-            repo_url: 'https://github.com/example/repo.git',
-            branch: 'main',
-            compose_path: 'compose.yaml',
-            sync_env: false,
-            env_path: null,
-            auth_type: 'none',
-            encrypted_token: null,
-            auto_apply_on_webhook: false,
-            auto_deploy_on_apply: false,
-            last_applied_commit_sha: null,
-            last_applied_content_hash: null,
-            pending_commit_sha: null,
-            pending_compose_content: null,
-            pending_env_content: null,
-            pending_fetched_at: null,
-            last_debounce_at: null,
-        });
+        seedGitSource('webhook-local-git');
 
         const res = await request(app)
             .post('/api/webhooks')
@@ -117,25 +123,7 @@ describe('node-aware Git source webhooks', () => {
     it('rejects retargeting an existing git-pull webhook without a Git source', async () => {
         const db = DatabaseService.getInstance();
         const nodeId = db.getDefaultNode()!.id;
-        db.upsertGitSource({
-            stack_name: 'retarget-source-stack',
-            repo_url: 'https://github.com/example/repo.git',
-            branch: 'main',
-            compose_path: 'compose.yaml',
-            sync_env: false,
-            env_path: null,
-            auth_type: 'none',
-            encrypted_token: null,
-            auto_apply_on_webhook: false,
-            auto_deploy_on_apply: false,
-            last_applied_commit_sha: null,
-            last_applied_content_hash: null,
-            pending_commit_sha: null,
-            pending_compose_content: null,
-            pending_env_content: null,
-            pending_fetched_at: null,
-            last_debounce_at: null,
-        });
+        seedGitSource('retarget-source-stack');
         const webhookId = db.addWebhook({
             node_id: nodeId,
             name: 'retarget git webhook',

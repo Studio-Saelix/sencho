@@ -1,9 +1,9 @@
 ---
 title: Git Sources
-description: Link a stack to a Git repository and keep compose.yaml in sync via manual pulls or webhook triggers.
+description: Link a stack to a Git repository and keep one or more compose files in sync via manual pulls or webhook triggers.
 ---
 
-Git Sources turn any stack into a GitOps target. Point Sencho at a repository, branch, and `compose.yaml` path; pull updates on demand or from CI; and review a diff before applying changes to disk. Optional sibling `.env` sync keeps configuration consistent too.
+Git Sources turn any stack into a GitOps target. Point Sencho at a repository and branch, choose one or more compose files to merge in order, pull updates on demand or from CI, and review a diff before applying changes to disk. Optional sibling `.env` sync keeps configuration consistent too.
 
 <Note>
   Git Sources are available on every tier, including Community.
@@ -12,7 +12,7 @@ Git Sources turn any stack into a GitOps target. Point Sencho at a repository, b
 ## How it works
 
 1. Open a stack and click the **Git Source** button in the editor toolbar.
-2. Fill in the repository URL, branch, and compose file path. Add a token if the repo is private.
+2. Fill in the repository URL and branch, then choose the compose files. Use **Browse** to pick them from the repository tree, or type a path and press Enter. Add a token if the repo is private.
 3. Click **Pull now** to fetch the latest commit. Sencho opens a side-by-side diff between the on-disk files and the incoming version.
 4. Click **Apply** to write the incoming content to disk. Tick **Deploy after apply** in the same dialog to redeploy in one step.
 
@@ -27,7 +27,7 @@ Writes land in the stack's existing directory using the same storage Sencho uses
 The panel groups four regions:
 
 - **Pending update banner.** Appears at the top when a webhook in **Review only** mode has fetched a new commit. Click **Review** to re-fetch the incoming commit and open the diff dialog.
-- **Form fields.** Repository URL, branch, compose file path, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
+- **Form fields.** Repository URL, branch, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
 - **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, plus the timestamp of the most recent successful save or pull.
 - **Footer actions.** **Remove** disconnects the source without touching the stack files; **Pull now** fetches the configured branch's HEAD; **Save** or **Update** persists form changes after a reachability check passes.
 
@@ -39,7 +39,7 @@ Skip the "empty stack then link later" detour and point at a repo from the start
   <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, branch, compose path, sibling .env toggle, authentication toggle, apply behavior radio group, a Deploy after create checkbox, and an HTTPS REPOS ONLY footer hint" />
 </Frame>
 
-Sencho fetches the compose file, validates it with `docker compose config`, writes it to a fresh stack directory, and links the Git source in one step. The last-applied commit SHA is seeded from the fetch so the first manual pull produces a clean diff rather than a "local edits detected" warning.
+Sencho fetches the compose files, validates the merged result with `docker compose config`, writes them to a fresh stack directory, and links the Git source in one step. The last-applied commit SHA is seeded from the fetch so the first manual pull produces a clean diff rather than a "local edits detected" warning.
 
 Tick **Deploy after create** to run `docker compose up -d` immediately after the files land. If the deploy fails, the stack and Git source are kept on disk so you can fix the underlying issue (missing image, port conflict, host resources) and retry the deploy from the editor.
 
@@ -58,12 +58,19 @@ Tick **Deploy after create** to run `docker compose up -d` immediately after the
 |-------|-------------|
 | **Repository URL** | `https://github.com/your-org/your-repo.git` (HTTPS only) |
 | **Branch** | Branch to track (e.g. `main`) |
-| **Compose file path** | Path within the repo (e.g. `deploy/compose.yaml`) |
-| **Also sync sibling `.env` file** | When enabled, also pulls the `.env` from the same directory as the compose file. The form shows the resolved path inline (e.g. `deploy/.env` for a compose at `deploy/compose.yaml`). |
+| **Compose files** | One or more paths within the repo, merged in the listed order (e.g. `deploy/base.yaml` then `deploy/prod.yaml`). The first file is the primary. Reorder by dragging (or the up/down arrows on a phone) and remove with the **×** button. |
+| **Project directory** | Optional path within the repo passed to `docker compose --project-directory`, so relative build contexts, bind mounts, and `env_file` references resolve from that base. Leave blank to use the stack root. |
+| **Also sync sibling `.env` file** | When enabled, also pulls the `.env` from the same directory as the primary compose file. The form shows the resolved path inline (e.g. `deploy/.env` for a primary at `deploy/compose.yaml`). |
 | **Authentication** | **Public (no auth)** for public repos, **Personal Access Token** for private repos |
 | **Apply behavior** | See the three modes below |
 
-Saving runs a reachability check against the repository. If the URL is wrong, the token is invalid, the branch does not exist, or the file is missing, Sencho surfaces the error inline and nothing is persisted.
+Saving runs a reachability check against the repository. If the URL is wrong, the token is invalid, the branch does not exist, or a file is missing, Sencho surfaces the error inline and nothing is persisted.
+
+### Multiple compose files
+
+Many projects split a stack into a base file plus environment overrides. List the files in the order you want them merged and Sencho deploys with `docker compose -f base.yaml -f prod.yaml ...`, applying each later file's values on top of the earlier ones, exactly as the Compose CLI does. The same ordered set is used for every action on the stack: deploy, update, restart, stop, and teardown.
+
+On disk, the primary file lands as the stack's `compose.yaml` and each additional file keeps its repository-relative path inside the stack directory, so you can still browse and edit them in the file explorer. A single-file source behaves exactly as before.
 
 ### Apply behavior modes
 
@@ -178,7 +185,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="File not found">
-    The compose path is relative to the repository root and must point at the file, not its parent directory. If the file was moved, update the path on the panel and save.
+    Each compose path is relative to the repository root and must point at the file, not its parent directory. Every file in the list must exist on the tracked branch; if any is missing, the save or pull fails and names the path. If a file was moved, update its path on the panel and save.
   </Accordion>
 
   <Accordion title="Compose validation failed">
@@ -217,6 +224,14 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
     Repositories that use Git submodules do not have their submodule contents cloned during a Git Source fetch. Sencho surfaces a warning on create when `.gitmodules` is present. If the compose file references paths inside a submodule (build contexts, volume mounts, include directives), inline the referenced files into the main repository or flatten the submodule so the paths resolve at deploy time.
   </Accordion>
 
+  <Accordion title="An additional file named compose.yaml is rejected">
+    The first file in the list is always written to the stack's root `compose.yaml`. To avoid clobbering it, an additional file whose repository path is also `compose.yaml` is rejected. Rename it in the repository, or move it to the top of the list to make it the primary.
+  </Accordion>
+
+  <Accordion title="A relative build context or extends target is missing with multiple files">
+    A Git Source materializes only the compose and `.env` files you select, not the rest of the repository. Build contexts, bind-mount sources, and cross-file `extends:` targets referenced by relative path are not pulled, so they can be missing at deploy time. Set a **Project directory** to fix the base for relative paths, and for build-based stacks keep the referenced files in the repository alongside the compose files or build the image out of band.
+  </Accordion>
+
   <Accordion title="Only HTTPS is supported">
     Git Sources fetch over HTTPS only. SSH clone URLs (`git@host:org/repo.git`) and custom protocols are rejected with a client-side validation error. Paste the `https://...` URL and use a Personal Access Token for authentication on private repositories.
   </Accordion>
@@ -229,3 +244,5 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 - **No submodules.** Submodule contents are not fetched; paths inside a submodule directory will be missing at deploy time. A warning is shown on create when `.gitmodules` is present.
 - **Branch-tracking only.** Sources follow the head of a branch. Specific commit SHAs and tags are not pinnable.
 - **Clone size cap.** A clone is bounded on how much it downloads (and each compose/env file is capped on read), so very large repositories are rejected. Operators can adjust the download ceiling with `GITSOURCE_MAX_CLONE_BYTES`.
+- **Referenced files are not materialized.** Only the selected compose and `.env` files are written to disk. Relative build contexts, bind-mount sources, and `extends:` targets are not pulled, so build-based stacks that depend on other repository files need those files committed alongside the compose files (or the image built out of band).
+- **Some read-only views read the primary file.** The dependency graph, drift snapshot, and networking inspector summarize the primary compose file, so a service declared only in an override may not appear in those views. Deploy, update, image-update checks, and mesh attachment use the full merged set.

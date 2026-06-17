@@ -26,6 +26,8 @@ function seedGitSource(stackName: string): void {
         repo_url: 'https://github.com/example/repo.git',
         branch: 'main',
         compose_path: 'compose.yaml',
+        compose_paths: ['compose.yaml'],
+        context_dir: null,
         sync_env: false,
         env_path: null,
         auth_type: 'none',
@@ -132,7 +134,7 @@ describe('PUT /api/stacks/:stackName/git-source — max-length caps', () => {
                 compose_path: 'c'.repeat(1100),
             });
         expect(res.status).toBe(400);
-        expect(res.body.error).toMatch(/compose_path/i);
+        expect(res.body.error).toMatch(/compose path/i);
     });
 
     it('rejects oversized env_path', async () => {
@@ -191,7 +193,7 @@ describe('git-source routes — repository path validation', () => {
                 auth_type: 'none',
             });
         expect(res.status).toBe(400);
-        expect(res.body.error).toMatch(/compose_path/i);
+        expect(res.body.error).toMatch(/compose path/i);
     });
 
     it('rejects absolute env_path on create-from-git', async () => {
@@ -285,6 +287,97 @@ describe('GET /api/stacks/:stackName/git-source', () => {
         expect(res.body.stack_name).toBe('linked-stack');
         expect(res.body.repo_url).toBe('https://github.com/example/repo.git');
         expect(res.body.linked).toBeUndefined();
+    });
+});
+
+describe('PUT /api/stacks/:stackName/git-source: multi-file selection', () => {
+    // The success-path tests forward a parsed selection to upsert(), whose dry-run
+    // fetch would clone a real repo. Stub upsert so the assertion stays at the
+    // route layer (parse + forward) without network. Rejection-path tests hit the
+    // parseComposeSelection 400 before upsert is ever reached, so they need no stub.
+    it('persists a compose_paths array and forwards it to the service', async () => {
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert')
+            .mockResolvedValue({} as Awaited<ReturnType<typeof GitSourceService.prototype.upsert>>);
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_paths: ['infra/base.yml', 'infra/prod.yml'],
+                context_dir: 'app',
+                auth_type: 'none',
+            });
+        expect(res.status).toBe(200);
+        expect(upsertSpy).toHaveBeenCalledWith(expect.objectContaining({
+            composePaths: ['infra/base.yml', 'infra/prod.yml'],
+            contextDir: 'app',
+        }));
+        upsertSpy.mockRestore();
+    });
+
+    it('still accepts the legacy compose_path string and maps it to a one-element array', async () => {
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert')
+            .mockResolvedValue({} as Awaited<ReturnType<typeof GitSourceService.prototype.upsert>>);
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_path: 'stacks/web/compose.yaml',
+                auth_type: 'none',
+            });
+        expect(res.status).toBe(200);
+        expect(upsertSpy).toHaveBeenCalledWith(expect.objectContaining({
+            composePaths: ['stacks/web/compose.yaml'],
+            contextDir: null,
+        }));
+        upsertSpy.mockRestore();
+    });
+
+    it('rejects a compose_paths array with more than 10 files (400)', async () => {
+        const tooMany = Array.from({ length: 11 }, (_, i) => `f${i}.yml`);
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_paths: tooMany,
+                auth_type: 'none',
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/exceed/i);
+    });
+
+    it('rejects duplicate entries in compose_paths (400)', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_paths: ['compose.yaml', 'infra/prod.yml', 'infra/prod.yml'],
+                auth_type: 'none',
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/duplicate/i);
+    });
+
+    it('rejects a context_dir that collides with the primary compose.yaml (400)', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'main',
+                compose_paths: ['compose.yaml'],
+                context_dir: 'compose.yaml',
+                auth_type: 'none',
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/context_dir/i);
     });
 });
 
@@ -396,6 +489,38 @@ describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () 
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
         pullSpy.mockRestore();
+    });
+});
+
+describe('DELETE /api/stacks/:stackName/git-source — multi-file unlink guard', () => {
+    it('blocks unlinking a multi-file source with 409 and keeps the row', async () => {
+        seedGitSource('mf-unlink');
+        DatabaseService.getInstance().setGitSourceAppliedSpec('mf-unlink', { files: ['compose.yaml', 'infra/prod.yml'], contextDir: null });
+        const res = await request(app)
+            .delete('/api/stacks/mf-unlink/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(409);
+        expect(res.body.error).toMatch(/multiple compose files/i);
+        expect(DatabaseService.getInstance().getGitSource('mf-unlink')).toBeTruthy();
+    });
+
+    it('blocks unlinking a context-dir source with 409', async () => {
+        seedGitSource('ctx-unlink');
+        DatabaseService.getInstance().setGitSourceAppliedSpec('ctx-unlink', { files: ['compose.yaml'], contextDir: 'app' });
+        const res = await request(app)
+            .delete('/api/stacks/ctx-unlink/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(409);
+        expect(DatabaseService.getInstance().getGitSource('ctx-unlink')).toBeTruthy();
+    });
+
+    it('allows unlinking a single-file source', async () => {
+        seedGitSource('sf-unlink');
+        const res = await request(app)
+            .delete('/api/stacks/sf-unlink/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(DatabaseService.getInstance().getGitSource('sf-unlink')).toBeUndefined();
     });
 });
 

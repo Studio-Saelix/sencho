@@ -2,6 +2,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { cn } from '@/lib/utils';
+import { GitComposeFilePicker, type GitBrowseResult } from './GitComposeFilePicker';
 
 export type ApplyMode = 'review' | 'auto-write' | 'auto-deploy';
 
@@ -9,8 +10,8 @@ export type ApplyMode = 'review' | 'auto-write' | 'auto-deploy';
  * Mirror of the backend's env-path default (see `/api/stacks/from-git` and
  * the git-source PUT handler): if the user ticks "Sync .env" without
  * specifying an explicit path, the service reads `<dirname>/.env`
- * alongside the compose file. Surfacing this in the form saves the user
- * a round-trip to figure out which directory the `.env` will come from.
+ * alongside the primary compose file. Surfacing this in the form saves the
+ * user a round-trip to figure out which directory the `.env` will come from.
  */
 function computeDefaultEnvPath(composePath: string): string {
   const normalized = composePath.trim().replace(/\\/g, '/').replace(/^\.\//, '');
@@ -22,7 +23,8 @@ function computeDefaultEnvPath(composePath: string): string {
 export interface GitSourceFieldsState {
   repoUrl: string;
   branch: string;
-  composePath: string;
+  composePaths: string[];
+  contextDir: string;
   syncEnv: boolean;
   authType: 'none' | 'token';
   token: string;
@@ -37,11 +39,14 @@ export interface GitSourceFieldsProps extends GitSourceFieldsState {
   variant: 'edit' | 'create';
   onRepoUrlChange: (value: string) => void;
   onBranchChange: (value: string) => void;
-  onComposePathChange: (value: string) => void;
+  onComposePathsChange: (value: string[]) => void;
+  onContextDirChange: (value: string) => void;
   onSyncEnvChange: (value: boolean) => void;
   onAuthTypeChange: (value: 'none' | 'token') => void;
   onTokenChange: (value: string) => void;
   onApplyModeChange: (value: ApplyMode) => void;
+  /** Runs the correct browse endpoint (create vs edit); returns the repo file list or null on failure. */
+  onBrowse: () => Promise<GitBrowseResult | null>;
 }
 
 const APPLY_MODE_COPY: Record<'edit' | 'create', Record<ApplyMode, { title: string; description: string }>> = {
@@ -60,7 +65,8 @@ const APPLY_MODE_COPY: Record<'edit' | 'create', Record<ApplyMode, { title: stri
 export function GitSourceFields({
   repoUrl,
   branch,
-  composePath,
+  composePaths,
+  contextDir,
   syncEnv,
   authType,
   token,
@@ -70,13 +76,17 @@ export function GitSourceFields({
   variant,
   onRepoUrlChange,
   onBranchChange,
-  onComposePathChange,
+  onComposePathsChange,
+  onContextDirChange,
   onSyncEnvChange,
   onAuthTypeChange,
   onTokenChange,
   onApplyModeChange,
+  onBrowse,
 }: GitSourceFieldsProps) {
   const copy = APPLY_MODE_COPY[variant];
+  const primaryComposePath = composePaths[0] ?? '';
+  const canBrowse = !!repoUrl?.trim() && !!branch?.trim();
 
   const radioOption = (mode: ApplyMode) => (
     <button
@@ -119,30 +129,27 @@ export function GitSourceFields({
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-2">
-          <Label htmlFor="git-source-branch">Branch</Label>
-          <Input
-            id="git-source-branch"
-            placeholder="main"
-            value={branch}
-            onChange={(e) => onBranchChange(e.target.value)}
-            disabled={disabled}
-            className="font-mono text-xs"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="git-source-path">Compose file path</Label>
-          <Input
-            id="git-source-path"
-            placeholder="compose.yaml"
-            value={composePath}
-            onChange={(e) => onComposePathChange(e.target.value)}
-            disabled={disabled}
-            className="font-mono text-xs"
-          />
-        </div>
+      <div className="space-y-2">
+        <Label htmlFor="git-source-branch">Branch</Label>
+        <Input
+          id="git-source-branch"
+          placeholder="main"
+          value={branch}
+          onChange={(e) => onBranchChange(e.target.value)}
+          disabled={disabled}
+          className="font-mono text-xs"
+        />
       </div>
+
+      <GitComposeFilePicker
+        composePaths={composePaths}
+        contextDir={contextDir}
+        onComposePathsChange={onComposePathsChange}
+        onContextDirChange={onContextDirChange}
+        onBrowse={onBrowse}
+        canBrowse={canBrowse}
+        disabled={disabled}
+      />
 
       <div className="space-y-1">
         <div className="flex items-center gap-2">
@@ -156,11 +163,11 @@ export function GitSourceFields({
             Also sync sibling <span className="font-mono">.env</span> file
           </Label>
         </div>
-        {syncEnv && composePath.trim() !== '' && (
+        {syncEnv && primaryComposePath.trim() !== '' && (
           <p className="text-[11px] text-stat-subtitle pl-6">
             Will read{' '}
             <span className="font-mono">
-              {computeDefaultEnvPath(composePath)}
+              {computeDefaultEnvPath(primaryComposePath)}
             </span>{' '}
             from the repository.
           </p>

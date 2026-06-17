@@ -1,0 +1,138 @@
+/**
+ * Unit tests for authoredComposeFileArgs: the docker compose global-flag prefix
+ * (`-f` per file, `-p <project>`, optional `--project-directory`) derived from a
+ * stack's applied deploy spec.
+ *
+ * Contract:
+ *   - no applied spec (single-file / non-git) -> [] so runtime stays plain auto-discovery
+ *   - a multi-file applied spec -> ordered -f flags, then -p <stack>, then
+ *     --project-directory <abs> when a context dir is set
+ *   - any spec file path or context dir that is absolute / contains ".." throws
+ *     before any args are returned (it is spliced straight into child-process argv)
+ */
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import path from 'path';
+import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+
+let tmpDir: string;
+let authoredComposeFileArgs: typeof import('../utils/authoredComposeArgs').authoredComposeFileArgs;
+let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
+
+beforeAll(async () => {
+    tmpDir = await setupTestDb();
+    ({ authoredComposeFileArgs } = await import('../utils/authoredComposeArgs'));
+    ({ DatabaseService } = await import('../services/DatabaseService'));
+    ({ NodeRegistry } = await import('../services/NodeRegistry'));
+});
+
+afterAll(() => {
+    cleanupTestDb(tmpDir);
+});
+
+beforeEach(() => {
+    const db = DatabaseService.getInstance();
+    for (const s of db.getGitSources()) db.deleteGitSource(s.stack_name);
+});
+
+/** Seed a git-source row (no applied spec yet) so setGitSourceAppliedSpec can target it. */
+function seedSource(stackName: string, composePaths: string[]): void {
+    DatabaseService.getInstance().upsertGitSource({
+        stack_name: stackName,
+        repo_url: 'https://github.com/example/repo.git',
+        branch: 'main',
+        compose_path: composePaths[0],
+        compose_paths: composePaths,
+        context_dir: null,
+        sync_env: false,
+        env_path: null,
+        auth_type: 'none',
+        encrypted_token: null,
+        auto_apply_on_webhook: false,
+        auto_deploy_on_apply: false,
+        last_applied_commit_sha: null,
+        last_applied_content_hash: null,
+        pending_commit_sha: null,
+        pending_compose_content: null,
+        pending_env_content: null,
+        pending_fetched_at: null,
+        last_debounce_at: null,
+    });
+}
+
+describe('authoredComposeFileArgs', () => {
+    it('returns [] for a stack with no git source at all', () => {
+        expect(authoredComposeFileArgs('no-such-stack')).toEqual([]);
+    });
+
+    it('returns [] for a git-source stack with no applied spec (single-file)', () => {
+        seedSource('single-stack', ['compose.yaml']);
+        // No setGitSourceAppliedSpec call -> applied_deploy_spec stays null.
+        expect(authoredComposeFileArgs('single-stack')).toEqual([]);
+    });
+
+    it('returns ordered -f / -p / --project-directory for a multi-file spec', () => {
+        const stackName = 'multi-stack';
+        seedSource(stackName, ['infra/base.yml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', 'infra/prod.yml'],
+            contextDir: 'app',
+        });
+
+        const args = authoredComposeFileArgs(stackName);
+
+        const baseDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
+        const expectedCtx = path.resolve(baseDir, stackName, 'app');
+        expect(args).toEqual([
+            '-f', 'compose.yaml',
+            '-f', 'infra/prod.yml',
+            '-p', stackName,
+            '--project-directory', expectedCtx,
+        ]);
+    });
+
+    it('omits --project-directory when the spec has no context dir', () => {
+        const stackName = 'multi-no-ctx';
+        seedSource(stackName, ['infra/base.yml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', 'infra/prod.yml'],
+            contextDir: null,
+        });
+
+        expect(authoredComposeFileArgs(stackName)).toEqual([
+            '-f', 'compose.yaml',
+            '-f', 'infra/prod.yml',
+            '-p', stackName,
+        ]);
+    });
+
+    it('throws when a spec file path is absolute', () => {
+        const stackName = 'abs-file';
+        seedSource(stackName, ['compose.yaml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', '/etc/passwd'],
+            contextDir: null,
+        });
+        expect(() => authoredComposeFileArgs(stackName)).toThrow();
+    });
+
+    it('throws when a spec file path contains a ".." traversal', () => {
+        const stackName = 'dotdot-file';
+        seedSource(stackName, ['compose.yaml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', '../escape.yml'],
+            contextDir: null,
+        });
+        expect(() => authoredComposeFileArgs(stackName)).toThrow();
+    });
+
+    it('throws when the context dir contains a ".." traversal', () => {
+        const stackName = 'dotdot-ctx';
+        seedSource(stackName, ['compose.yaml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', 'infra/prod.yml'],
+            contextDir: '../escape',
+        });
+        expect(() => authoredComposeFileArgs(stackName)).toThrow();
+    });
+});

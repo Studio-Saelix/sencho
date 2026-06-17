@@ -105,6 +105,54 @@ export function extractImagesFromCompose(
     return extractServiceImagesFromCompose(yamlContent, envVars).map(e => e.image);
 }
 
+/**
+ * Extract service images from a `docker compose config --format json` render.
+ * The render is already merged + interpolated, so no env substitution is needed.
+ */
+export function extractServiceImagesFromRenderedConfig(renderedJson: string): ComposeServiceImage[] {
+    let parsed: { services?: Record<string, { image?: unknown }> };
+    try {
+        parsed = JSON.parse(renderedJson);
+    } catch {
+        return [];
+    }
+    if (!parsed?.services || typeof parsed.services !== 'object') return [];
+    const out: ComposeServiceImage[] = [];
+    for (const [service, svc] of Object.entries(parsed.services)) {
+        const raw = svc?.image;
+        if (!raw || typeof raw !== 'string') continue;
+        const ref = raw.trim();
+        if (!ref || ref.startsWith('sha256:')) continue;
+        out.push({ service, image: ref });
+    }
+    return out;
+}
+
+/**
+ * Service-name -> image refs for a stack. For a Git stack with an applied
+ * multi-file / context-dir spec, this comes from the effective merged model
+ * (docker compose config), so a service/image declared only in an override file
+ * is included. Returns null for single-file / non-git stacks (and on a render
+ * failure) so the caller falls back to its existing single-file compose parse.
+ */
+export async function loadEffectiveServiceImages(nodeId: number, stackName: string): Promise<ComposeServiceImage[] | null> {
+    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+    if (!spec || spec.files.length === 0) return null;
+    // Lazy import to avoid a static module cycle (ComposeService is a heavy hub).
+    const { ComposeService } = await import('./ComposeService');
+    const rendered = await ComposeService.getInstance(nodeId).renderConfig(stackName);
+    if (!rendered.rendered) {
+        // The effective render failed (unset var, bad include, timeout, output cap).
+        // Falling back to the root-compose parse misses override-only images, so log
+        // the reason; without this the degradation is invisible to the operator.
+        console.warn(
+            `[ImageUpdateService] effective image render failed for "${sanitizeForLog(stackName)}" (code=${rendered.code} timedOut=${rendered.timedOut}); falling back to root-compose parse: ${sanitizeForLog(rendered.stderr)}`,
+        );
+        return null;
+    }
+    return extractServiceImagesFromRenderedConfig(rendered.rendered);
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export class ImageUpdateService {
@@ -348,6 +396,14 @@ export class ImageUpdateService {
         // Phase 2: Parse compose files for image refs
         for (const stackName of stacks) {
             try {
+                // Multi-file / context-dir Git stacks resolve images from the
+                // effective merged model so override-only images are captured.
+                const effective = await loadEffectiveServiceImages(nodeId, stackName);
+                if (effective) {
+                    for (const e of effective) stackImages.get(stackName)?.add(e.image);
+                    continue;
+                }
+
                 const content = await withTimeout(fs.getStackContent(stackName), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getStackContent');
 
                 // Load .env for variable resolution (best-effort)
@@ -384,13 +440,26 @@ export class ImageUpdateService {
         try {
             const containers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
             for (const c of containers) {
-                const workingDir: string | undefined = c.Labels?.['com.docker.compose.project.working_dir'];
-                if (!workingDir) continue;
+                // Prefer the pinned project label (== stackName for Sencho-deployed
+                // stacks, including multi-file / context-dir ones where
+                // --project-directory would otherwise change the working-dir
+                // basename). Fall back to the working-dir basename for legacy /
+                // non-Sencho containers.
+                const project: string | undefined = c.Labels?.['com.docker.compose.project'];
+                let stackName: string | null = null;
+                if (project && stackImages.has(project)) {
+                    stackName = project;
+                } else {
+                    const workingDir: string | undefined = c.Labels?.['com.docker.compose.project.working_dir'];
+                    if (workingDir) {
+                        const resolved = path.resolve(workingDir);
+                        if (resolved === composeDir || resolved.startsWith(composeDir + path.sep)) {
+                            stackName = path.basename(resolved);
+                        }
+                    }
+                }
+                if (!stackName) continue;
 
-                const resolved = path.resolve(workingDir);
-                if (resolved !== composeDir && !resolved.startsWith(composeDir + path.sep)) continue;
-
-                const stackName = path.basename(resolved);
                 const imageRef: string = c.Image ?? '';
                 if (!imageRef || imageRef.startsWith('sha256:')) continue;
 

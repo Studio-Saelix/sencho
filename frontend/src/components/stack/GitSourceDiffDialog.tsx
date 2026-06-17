@@ -103,7 +103,7 @@ export function GitSourceDiffDialog({
               <TabsList>
                 <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
                   <TabsHighlightItem value="compose">
-                    <TabsTrigger value="compose">compose.yaml</TabsTrigger>
+                    <TabsTrigger value="compose">Compose</TabsTrigger>
                   </TabsHighlightItem>
                   <TabsHighlightItem value="env">
                     <TabsTrigger value="env">.env</TabsTrigger>

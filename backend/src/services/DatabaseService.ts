@@ -221,12 +221,28 @@ export interface Webhook {
 
 export type GitSourceAuthType = 'none' | 'token';
 
+/**
+ * The ordered set of local compose files actually materialized on disk for a
+ * stack, plus the optional project directory. This is the deploy-time source of
+ * truth: the deploy/lifecycle path, the mesh service, and the image-update path all
+ * read it (never the configured `compose_paths`), so a saved-but-not-yet-applied config change does
+ * not alter runtime until apply writes the files. `null` (the default) means a
+ * plain single-file stack that uses docker compose auto-discovery, byte-identical
+ * to pre-multi-file behavior.
+ */
+export interface GitSourceAppliedSpec {
+    files: string[];            // ordered local relative compose filenames (files[0] is always compose.yaml)
+    contextDir: string | null;  // optional project dir within the stack, passed as --project-directory
+}
+
 export interface StackGitSource {
     id?: number;
     stack_name: string;
     repo_url: string;
     branch: string;
-    compose_path: string;
+    compose_path: string;           // primary repo path; kept in sync with compose_paths[0] for back-compat readers
+    compose_paths: string[];        // ordered repo-relative compose paths; normalized to [compose_path] for legacy rows
+    context_dir: string | null;     // configured project dir within the repo
     sync_env: boolean;
     env_path: string | null;
     auth_type: GitSourceAuthType;
@@ -240,6 +256,7 @@ export interface StackGitSource {
     pending_env_content: string | null;
     pending_fetched_at: number | null;
     last_debounce_at: number | null;
+    applied_deploy_spec: GitSourceAppliedSpec | null;  // deploy-time materialized file set; null = single-file auto-discovery
     created_at: number;
     updated_at: number;
 }
@@ -786,6 +803,7 @@ export class DatabaseService {
         this.migrateAutoHealNodeId();
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
+        this.migrateGitSourceMultiFile();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1195,6 +1213,8 @@ export class DatabaseService {
         repo_url TEXT NOT NULL,
         branch TEXT NOT NULL,
         compose_path TEXT NOT NULL,
+        compose_paths TEXT,
+        context_dir TEXT,
         sync_env INTEGER NOT NULL DEFAULT 0,
         env_path TEXT,
         auth_type TEXT NOT NULL DEFAULT 'none',
@@ -1208,6 +1228,7 @@ export class DatabaseService {
         pending_env_content TEXT,
         pending_fetched_at INTEGER,
         last_debounce_at INTEGER,
+        applied_deploy_spec TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -1647,6 +1668,21 @@ export class DatabaseService {
     private migrateStackDossierHashes(): void {
         this.tryAddColumn('stack_dossiers', 'source_hash', 'TEXT');
         this.tryAddColumn('stack_dossiers', 'rendered_hash', 'TEXT');
+    }
+
+    private migrateGitSourceMultiFile(): void {
+        this.tryAddColumn('stack_git_sources', 'compose_paths', 'TEXT');
+        this.tryAddColumn('stack_git_sources', 'context_dir', 'TEXT');
+        this.tryAddColumn('stack_git_sources', 'applied_deploy_spec', 'TEXT');
+        // Backfill legacy rows so compose_paths is always a JSON array. parseGitSource
+        // also normalizes on read, so this is belt-and-suspenders for any direct readers.
+        try {
+            this.db.prepare(
+                `UPDATE stack_git_sources SET compose_paths = json_array(compose_path) WHERE compose_paths IS NULL`
+            ).run();
+        } catch (e) {
+            console.warn('[DatabaseService] git-source compose_paths backfill skipped:', (e as Error).message);
+        }
     }
 
     private migrateScanPolicyFleetColumns(): void {
@@ -3736,14 +3772,51 @@ export class DatabaseService {
 
     // --- Stack Git Sources ---
 
+    /**
+     * Normalize the stored compose_paths column to a non-empty ordered array.
+     * Legacy rows (column null), empty arrays, or malformed JSON all fall back
+     * to the single compose_path so every consumer can rely on a usable list.
+     */
+    private normalizeComposePaths(raw: unknown, composePath: string): string[] {
+        if (typeof raw === 'string' && raw.trim()) {
+            try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                    const paths = parsed.filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+                    if (paths.length > 0) return paths;
+                }
+            } catch {
+                // fall through to the single-path fallback
+            }
+        }
+        return [composePath];
+    }
+
+    private parseAppliedDeploySpec(raw: unknown): GitSourceAppliedSpec | null {
+        if (typeof raw !== 'string' || !raw.trim()) return null;
+        try {
+            const parsed = JSON.parse(raw) as Partial<GitSourceAppliedSpec>;
+            if (!parsed || !Array.isArray(parsed.files)) return null;
+            const files = parsed.files.filter((f): f is string => typeof f === 'string' && f.trim().length > 0);
+            if (files.length === 0) return null;
+            return { files, contextDir: typeof parsed.contextDir === 'string' ? parsed.contextDir : null };
+        } catch {
+            return null;
+        }
+    }
+
     private parseGitSource(row: Record<string, unknown> | undefined): StackGitSource | undefined {
         if (!row) return undefined;
+        const composePath = row.compose_path as string;
         return {
             id: row.id as number,
             stack_name: row.stack_name as string,
             repo_url: row.repo_url as string,
             branch: row.branch as string,
-            compose_path: row.compose_path as string,
+            compose_path: composePath,
+            compose_paths: this.normalizeComposePaths(row.compose_paths, composePath),
+            context_dir: (row.context_dir as string | null) ?? null,
+            applied_deploy_spec: this.parseAppliedDeploySpec(row.applied_deploy_spec),
             sync_env: Number(row.sync_env) === 1,
             env_path: (row.env_path as string | null) ?? null,
             auth_type: row.auth_type as GitSourceAuthType,
@@ -3772,19 +3845,21 @@ export class DatabaseService {
         return rows.map(r => this.parseGitSource(r)!);
     }
 
-    public upsertGitSource(source: Omit<StackGitSource, 'id' | 'created_at' | 'updated_at'>): number {
+    public upsertGitSource(source: Omit<StackGitSource, 'id' | 'created_at' | 'updated_at' | 'applied_deploy_spec'>): number {
         const now = Date.now();
         const existing = this.getGitSource(source.stack_name);
+        const composePathsJson = JSON.stringify(source.compose_paths ?? [source.compose_path]);
         if (existing) {
             this.db.prepare(
                 `UPDATE stack_git_sources SET
-                    repo_url = ?, branch = ?, compose_path = ?, sync_env = ?, env_path = ?,
+                    repo_url = ?, branch = ?, compose_path = ?, compose_paths = ?, context_dir = ?,
+                    sync_env = ?, env_path = ?,
                     auth_type = ?, encrypted_token = ?,
                     auto_apply_on_webhook = ?, auto_deploy_on_apply = ?,
                     updated_at = ?
                  WHERE stack_name = ?`
             ).run(
-                source.repo_url, source.branch, source.compose_path,
+                source.repo_url, source.branch, source.compose_path, composePathsJson, source.context_dir,
                 source.sync_env ? 1 : 0, source.env_path,
                 source.auth_type, source.encrypted_token,
                 source.auto_apply_on_webhook ? 1 : 0, source.auto_deploy_on_apply ? 1 : 0,
@@ -3794,18 +3869,30 @@ export class DatabaseService {
         }
         const result = this.db.prepare(
             `INSERT INTO stack_git_sources
-                (stack_name, repo_url, branch, compose_path, sync_env, env_path,
+                (stack_name, repo_url, branch, compose_path, compose_paths, context_dir, sync_env, env_path,
                  auth_type, encrypted_token, auto_apply_on_webhook, auto_deploy_on_apply,
                  created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
-            source.stack_name, source.repo_url, source.branch, source.compose_path,
+            source.stack_name, source.repo_url, source.branch, source.compose_path, composePathsJson, source.context_dir,
             source.sync_env ? 1 : 0, source.env_path,
             source.auth_type, source.encrypted_token,
             source.auto_apply_on_webhook ? 1 : 0, source.auto_deploy_on_apply ? 1 : 0,
             now, now
         );
         return result.lastInsertRowid as number;
+    }
+
+    /**
+     * Persist (or clear) the deploy-time materialized compose file set. Called by
+     * the Git apply/create paths after files land on disk; the deploy/lifecycle
+     * path, the mesh service, and the image-update path read it back via
+     * getGitSource(). Passing null resets the stack to single-file auto-discovery.
+     */
+    public setGitSourceAppliedSpec(stackName: string, spec: GitSourceAppliedSpec | null): void {
+        this.db.prepare(
+            `UPDATE stack_git_sources SET applied_deploy_spec = ?, updated_at = ? WHERE stack_name = ?`
+        ).run(spec ? JSON.stringify(spec) : null, Date.now(), stackName);
     }
 
     public deleteGitSource(stackName: string): void {

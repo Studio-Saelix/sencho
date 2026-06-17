@@ -1,11 +1,12 @@
 import { Router, type Request, type Response } from 'express';
-import path from 'path';
 import { GitSourceService } from '../services/GitSourceService';
 import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
+import { CryptoService } from '../services/CryptoService';
 import { checkPermission, requirePermission } from '../middleware/permissions';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { triggerPostDeployScan } from '../helpers/policyGate';
+import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
 import { isValidGitSourcePath, isValidStackName } from '../utils/validation';
 import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -14,9 +15,58 @@ import { sanitizeForLog } from '../utils/safeLog';
 // payloads. Generous compared to anything a real Git provider emits.
 const MAX_REPO_URL_LENGTH = 2048;
 const MAX_BRANCH_LENGTH = 256;
-const MAX_COMPOSE_PATH_LENGTH = 1024;
 const MAX_ENV_PATH_LENGTH = 1024;
 const MAX_TOKEN_LENGTH = 8192;
+
+/**
+ * Shared handler for the "browse repository" compose-file picker: validate the
+ * repo target, clone it, and list its files. `storedToken` (already decrypted)
+ * is reused when the request omits a token, so the edit-mode flow does not force
+ * re-entering a stored PAT.
+ */
+async function handleBrowse(req: Request, res: Response, storedToken: string | null): Promise<void> {
+  const { repo_url, branch, auth_type, token } = req.body ?? {};
+  if (typeof repo_url !== 'string' || !repo_url.trim()) {
+    res.status(400).json({ error: 'repo_url is required' });
+    return;
+  }
+  if (typeof branch !== 'string' || !branch.trim()) {
+    res.status(400).json({ error: 'branch is required' });
+    return;
+  }
+  if (!/^https:\/\//i.test(repo_url)) {
+    res.status(400).json({ error: 'Only HTTPS repository URLs are supported' });
+    return;
+  }
+  if (repo_url.length > MAX_REPO_URL_LENGTH) {
+    res.status(400).json({ error: 'repo_url is too long' });
+    return;
+  }
+  if (branch.length > MAX_BRANCH_LENGTH) {
+    res.status(400).json({ error: 'branch is too long' });
+    return;
+  }
+  if (auth_type !== undefined && auth_type !== 'none' && auth_type !== 'token') {
+    res.status(400).json({ error: 'auth_type must be "none" or "token"' });
+    return;
+  }
+  if (typeof token === 'string' && token.length > MAX_TOKEN_LENGTH) {
+    res.status(400).json({ error: 'token is too long' });
+    return;
+  }
+  const explicitToken = typeof token === 'string' && token.trim() ? token : null;
+  const effectiveToken = auth_type === 'none' ? null : (explicitToken ?? storedToken);
+  try {
+    const result = await GitSourceService.getInstance().listRepoTree({
+      repoUrl: repo_url.trim(),
+      branch: branch.trim(),
+      token: effectiveToken,
+    });
+    res.json(result);
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+}
 
 /** Router for listing git-source configuration: `GET /api/git-sources`. */
 export const gitSourcesRouter = Router();
@@ -31,6 +81,13 @@ gitSourcesRouter.get('/', async (req: Request, res: Response): Promise<void> => 
   } catch (error) {
     sendGitSourceError(res, error);
   }
+});
+
+// Create-mode repo browse (no stack yet): gated by the same permission as
+// creating a stack from Git.
+gitSourcesRouter.post('/browse', async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:create')) return;
+  await handleBrowse(req, res, null);
 });
 
 /**
@@ -80,7 +137,6 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
     const {
       repo_url,
       branch,
-      compose_path,
       sync_env,
       env_path,
       auth_type,
@@ -97,8 +153,9 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'branch is required' });
       return;
     }
-    if (typeof compose_path !== 'string' || !compose_path.trim()) {
-      res.status(400).json({ error: 'compose_path is required' });
+    const selection = parseComposeSelection(req.body);
+    if (!selection.ok) {
+      res.status(400).json({ error: selection.error });
       return;
     }
     if (auth_type !== 'none' && auth_type !== 'token') {
@@ -125,16 +182,8 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'branch is too long' });
       return;
     }
-    if (compose_path.length > MAX_COMPOSE_PATH_LENGTH) {
-      res.status(400).json({ error: 'compose_path is too long' });
-      return;
-    }
     if (typeof env_path === 'string' && env_path.length > MAX_ENV_PATH_LENGTH) {
       res.status(400).json({ error: 'env_path is too long' });
-      return;
-    }
-    if (!isValidGitSourcePath(compose_path.trim())) {
-      res.status(400).json({ error: 'compose_path must be a relative repository file path' });
       return;
     }
     if (typeof env_path === 'string' && env_path.trim() && !isValidGitSourcePath(env_path.trim())) {
@@ -160,16 +209,15 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
 
     const syncEnv = Boolean(sync_env);
     const resolvedEnvPath = syncEnv
-      ? (typeof env_path === 'string' && env_path.trim()
-        ? env_path
-        : path.posix.join(path.posix.dirname(compose_path.replace(/\\/g, '/')) || '.', '.env'))
+      ? defaultEnvPath(selection.value.composePaths[0], env_path)
       : null;
 
     const source = await GitSourceService.getInstance().upsert({
       stackName,
       repoUrl: repo_url.trim(),
       branch: branch.trim(),
-      composePath: compose_path.trim(),
+      composePaths: selection.value.composePaths,
+      contextDir: selection.value.contextDir,
       syncEnv,
       envPath: resolvedEnvPath,
       authType: auth_type,
@@ -193,6 +241,18 @@ stackGitSourceRouter.delete('/:stackName/git-source', async (req: Request, res: 
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
+    // The deploy spec lives on the Git-source row, so unlinking a multi-file (or
+    // project-directory) source would silently drop the spec and revert future
+    // deploys to root compose.yaml auto-discovery, ignoring the override files
+    // still on disk. Refuse rather than change deploy semantics out from under the
+    // user; deleting the stack removes it cleanly.
+    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+    if (spec && (spec.files.length > 1 || spec.contextDir)) {
+      res.status(409).json({
+        error: 'This stack deploys multiple compose files configured by its Git source. Unlinking would change it to deploy only compose.yaml. Delete the stack to remove it, or keep the Git source.',
+      });
+      return;
+    }
     GitSourceService.getInstance().delete(stackName);
     console.log(`[GitSource] Removed git source for ${stackName}`);
     res.json({ success: true });
@@ -298,4 +358,19 @@ stackGitSourceRouter.post('/:stackName/git-source/dismiss-pending', async (req: 
   } catch (error) {
     sendGitSourceError(res, error);
   }
+});
+
+// Edit-mode repo browse for an existing stack: gated by stack:edit so a user who
+// can edit (but not create) stacks can re-pick files, and reuses the stored token
+// when the request omits one.
+stackGitSourceRouter.post('/:stackName/git-source/browse', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const src = DatabaseService.getInstance().getGitSource(stackName);
+  const storedToken = src?.encrypted_token ? CryptoService.getInstance().decrypt(src.encrypted_token) : null;
+  await handleBrowse(req, res, storedToken);
 });
