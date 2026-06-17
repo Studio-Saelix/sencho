@@ -105,7 +105,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # so all deps come from the vendored tree (no network access needed).
 # Base image pinned by digest so the Go toolchain that compiles the static
 # Docker CLI binary cannot change without an explicit Dependabot bump.
-FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:f1ddd9fe14fffc091dd98cb4bfa999f32c5fc77d2f2305ea9f0e2595c5437c14 AS cli-builder
 
 ARG TARGETARCH
 
@@ -159,7 +159,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # by compose at all, so this is defense-in-depth rather than a live exposure.
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:f1ddd9fe14fffc091dd98cb4bfa999f32c5fc77d2f2305ea9f0e2595c5437c14 AS compose-builder
 
 ARG TARGETARCH
 
