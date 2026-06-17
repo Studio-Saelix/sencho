@@ -68,8 +68,6 @@ test.describe('Git Sources', () => {
 
     await page.locator('#git-source-repo').fill('git@github.com:org/repo.git');
     await page.locator('#git-source-branch').fill('main');
-    await page.locator('#git-source-path').fill('compose.yaml');
-
     await page.getByRole('dialog').getByRole('button', { name: /^Save$/ }).click();
 
     await expect(page.getByText(/Only HTTPS repository URLs are supported/i)).toBeVisible({ timeout: 5_000 });
@@ -83,8 +81,6 @@ test.describe('Git Sources', () => {
     // which maps to NETWORK_TIMEOUT or REPO_NOT_FOUND.
     await page.locator('#git-source-repo').fill('https://git.invalid.example/nope/nope.git');
     await page.locator('#git-source-branch').fill('main');
-    await page.locator('#git-source-path').fill('compose.yaml');
-
     await page.getByRole('dialog').getByRole('button', { name: /^Save$/ }).click();
 
     // Any of the mapped error messages is acceptable; the key is that nothing
@@ -191,8 +187,10 @@ test.describe('Git Sources', () => {
     // Source should render with the saved repo URL.
     await expect(page.locator('#git-source-repo')).toHaveValue(/awesome-compose/);
 
-    // Click Remove → AlertDialog appears → confirm → source cleared.
-    await page.getByRole('dialog').getByRole('button', { name: /Remove/i }).click();
+    // Click Remove → AlertDialog appears → confirm → source cleared. Match the
+    // footer button by its exact name so the picker's per-file "Remove <path>"
+    // buttons do not make the locator ambiguous.
+    await page.getByRole('dialog').getByRole('button', { name: 'Remove' }).click();
     await expect(page.getByRole('alertdialog')).toBeVisible({ timeout: 5_000 });
     await page.getByRole('alertdialog').getByRole('button', { name: /^Remove$/ }).click();
 
@@ -249,8 +247,6 @@ test.describe('Create stack from Git', () => {
     await page.locator('#create-git-stack-name').fill(CREATE_FROM_GIT_STACK);
     await page.locator('#git-source-repo').fill('git@github.com:org/repo.git');
     await page.locator('#git-source-branch').fill('main');
-    await page.locator('#git-source-path').fill('compose.yaml');
-
     await page.getByRole('dialog').getByRole('button', { name: /Create from Git/i }).click();
     await expect(page.getByText(/Only HTTPS repository URLs are supported/i)).toBeVisible({ timeout: 5_000 });
   });
@@ -365,7 +361,12 @@ test.describe('Create stack from Git', () => {
       await page.locator('#create-git-stack-name').fill(uiName);
       await page.locator('#git-source-repo').fill('https://github.com/docker/awesome-compose.git');
       await page.locator('#git-source-branch').fill('master');
-      await page.locator('#git-source-path').fill('nginx-golang/compose.yaml');
+      // Drive the compose-file picker: add the repo path, then drop the default
+      // compose.yaml so only the intended file is deployed.
+      const createDialog = page.getByRole('dialog');
+      await createDialog.getByPlaceholder('path/to/compose.yaml').fill('nginx-golang/compose.yaml');
+      await createDialog.getByPlaceholder('path/to/compose.yaml').press('Enter');
+      await createDialog.getByRole('button', { name: 'Remove compose.yaml' }).click();
 
       await page.getByRole('dialog').getByRole('button', { name: /Create from Git/i }).click();
 
