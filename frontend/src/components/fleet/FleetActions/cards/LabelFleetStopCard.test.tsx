@@ -247,6 +247,40 @@ it('populates the blast readout from the debounced match-preview', async () => {
   await waitFor(() => expect(screen.getByText('3 stacks · 2 nodes')).toBeInTheDocument(), { timeout: 2000 });
 });
 
+it('degrades to "preview unavailable" when match-preview returns a malformed 200 body', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      // 200 but perNode is missing: the render path must degrade, not throw.
+      return Promise.resolve(jsonResponse(200, { matchedStacks: 1, matchedNodes: 1 }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
+  expect(await screen.findByText('preview endpoint did not respond', undefined, { timeout: 2000 })).toBeInTheDocument();
+  // The card stays interactive; no crash from the missing perNode array.
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeEnabled();
+});
+
+it('does not crash when fleet-stop returns a malformed 200 body', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      // results is not an array: must degrade to a toast, not throw.
+      return Promise.resolve(jsonResponse(200, { results: 'nope' }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
+  await user.click(screen.getByRole('button', { name: 'Dry run' }));
+  // Reported as an unexpected response, not masqueraded as "No reachable nodes".
+  await waitFor(() => expect(toastError).toHaveBeenCalledWith('Fleet stop returned an unexpected response. Check the server logs and retry.'));
+  expect(toastWarning).not.toHaveBeenCalled();
+  expect(screen.getByPlaceholderText('e.g. production')).toBeInTheDocument();
+});
+
 it('shows remote labels with their node spread and flags partial coverage', async () => {
   const user = userEvent.setup();
   mockedFetch.mockImplementation((url: string) => {

@@ -47,6 +47,26 @@ function isSuggestion(value: unknown): value is FleetStopLabelSuggestion {
     && typeof s.nodeCount === 'number' && typeof s.stackCount === 'number' && nodesOk;
 }
 
+// The preview section renders `perNode` (filter/some/flatMap) outside any
+// try/catch, so a malformed success body would throw during render rather than
+// degrade. Validate the load-bearing shape before trusting it; anything off
+// falls to the "unavailable" state.
+function isMatchPreviewResponse(value: unknown): value is MatchPreviewResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const d = value as Record<string, unknown>;
+  if (typeof d.matchedNodes !== 'number' || typeof d.matchedStacks !== 'number') return false;
+  if (!Array.isArray(d.perNode)) return false;
+  return d.perNode.every((n) => {
+    if (typeof n !== 'object' || n === null) return false;
+    const node = n as Record<string, unknown>;
+    return typeof node.nodeId === 'number'
+      && typeof node.nodeName === 'string'
+      && typeof node.reachable === 'boolean'
+      && typeof node.stackCount === 'number'
+      && Array.isArray(node.stackNames);
+  });
+}
+
 export function LabelFleetStopCard() {
   const [labelName, setLabelName] = useState('');
   const [suggestions, setSuggestions] = useState<FleetStopLabelSuggestion[]>([]);
@@ -107,7 +127,14 @@ export function LabelFleetStopCard() {
           setPreview({ kind: 'unavailable' });
           return;
         }
-        const data = (await res.json()) as MatchPreviewResponse;
+        const data = await res.json().catch(() => null);
+        if (!isMatchPreviewResponse(data)) {
+          // A 200 with a shape we can't render is a server/contract bug, not a
+          // transport miss; log it like the catch path so it's diagnosable.
+          console.error('[FleetStop] match-preview returned a malformed body', data);
+          setPreview({ kind: 'unavailable' });
+          return;
+        }
         setPreview({ kind: 'ready', data });
       } catch (err) {
         // Non-destructive readout: the operator can still type a name and run the
@@ -158,7 +185,17 @@ export function LabelFleetStopCard() {
         toast.error(body.error || 'Fleet stop failed');
         return;
       }
-      const apiResults = (body.results as FleetStopNodeResult[]) ?? [];
+      // A 200 with a non-array `results` is a server/contract bug, not an empty
+      // fleet: don't let it masquerade as the legitimate "No reachable nodes"
+      // outcome (a valid empty array below still reports that honestly). Log it
+      // and tell the operator it was unexpected. A node's `stackResults` is
+      // guarded per node further down so one bad node never nukes the readout.
+      if (!Array.isArray(body.results)) {
+        console.error('[FleetStop] fleet-stop returned a malformed body', body);
+        toast.error('Fleet stop returned an unexpected response. Check the server logs and retry.');
+        return;
+      }
+      const apiResults = body.results as FleetStopNodeResult[];
       const rows: ResultRow[] = apiResults.map((node) => {
         if (!node.reachable) {
           return {
@@ -169,14 +206,15 @@ export function LabelFleetStopCard() {
             sub: [],
           };
         }
+        const stackResults = Array.isArray(node.stackResults) ? node.stackResults : [];
         return {
           key: `node-${node.nodeId}`,
           label: node.matched
-            ? `${node.nodeName} · ${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}${opts.dryRun ? ' (dry run)' : ''}`
+            ? `${node.nodeName} · ${stackResults.length} stack${stackResults.length === 1 ? '' : 's'}${opts.dryRun ? ' (dry run)' : ''}`
             : `${node.nodeName} (no matching stack label)`,
-          success: node.matched && node.stackResults.every(s => s.success),
+          success: node.matched && stackResults.every(s => s.success),
           error: node.matched ? undefined : 'Stack label not present',
-          sub: node.stackResults.map((s, i) => ({
+          sub: stackResults.map((s, i) => ({
             key: `${node.nodeId}-${s.stackName}-${i}`,
             label: s.stackName,
             success: s.success,
@@ -188,7 +226,7 @@ export function LabelFleetStopCard() {
       const reachable = apiResults.filter(n => n.reachable);
       const unreachableCount = apiResults.length - reachable.length;
       const matchedNodes = reachable.filter(n => n.matched).length;
-      const stacksTouched = apiResults.flatMap(n => n.stackResults);
+      const stacksTouched = apiResults.flatMap(n => Array.isArray(n.stackResults) ? n.stackResults : []);
       const ok = stacksTouched.filter(s => s.success).length;
       const failed = stacksTouched.length - ok;
       const unreachableSuffix = unreachableCount > 0 ? ` ${unreachableCount} node${unreachableCount === 1 ? '' : 's'} unreachable.` : '';

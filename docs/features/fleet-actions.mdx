@@ -66,7 +66,7 @@ A few quirks worth knowing:
 
 - A node that has no stack label by that name appears as `<node> (no matching stack label)` and is counted in the **failed** badge. This is not a transport failure, it just means the stack label was not present on that node.
 - A node where the label exists but no stacks are assigned to it appears with a matched count of zero stacks. No per-stack rows render.
-- When the control instance reaches a remote node, the per-stack result you see comes from the remote node's own response. If the remote returns a non-2xx for the whole label, every stack on that node renders with the same error message.
+- When the control instance reaches a remote node, the per-stack results you see come from the remote node's own response. A remote the control cannot reach, or that returns a non-2xx, is reported once as a single `<node> (unreachable)` row carrying the reason, not as a per-stack error, and it never blocks the stops on the reachable nodes.
 
 ### Behaviour and partial-failure semantics
 
@@ -130,7 +130,7 @@ Scope is a segmented control with two options:
 
 | Requirement | Why it matters |
 |---|---|
-| **Configured remote nodes in Settings → Nodes** | The two fan-out cards iterate the configured node list. A node missing its `api_url` or `api_token` shows up in the results with *Remote node not configured* per stack or per target. |
+| **Configured remote nodes in Settings → Nodes** | The two fan-out cards iterate the configured node list. A node missing its `api_url` or `api_token`, or one that cannot be reached, is reported once per node as unreachable (Stop fleet by label) or per target (Prune), and never blocks the reachable nodes. |
 | **Labels you intend to target** | Stop fleet by label and the autocomplete depend on labels existing on at least one node. See [Stack Labels](/features/stack-labels) for the authoring flow. |
 
 ## Behaviour and lifecycle
@@ -190,8 +190,8 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
   <Accordion title="The Apply button returns an error toast">
     Fleet Actions runs admin-only. Confirm the active user has the admin role under **Settings → Users**. Operator and viewer roles see the cards but cannot apply them.
   </Accordion>
-  <Accordion title="A node returns a transport error row for every stack or every target">
-    The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Open **Settings → Nodes** on the control instance and click **Test connection** for the remote; fix the credential or the reachability, then re-run the action.
+  <Accordion title="A node is reported as unreachable (or shows a transport error per target)">
+    The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Stop fleet by label reports it once as a single `<node> (unreachable)` row; Prune reports it per target. Open **Settings → Nodes** on the control instance and click **Test connection** for the remote; fix the credential or the reachability, then re-run the action.
   </Accordion>
 </AccordionGroup>
 
