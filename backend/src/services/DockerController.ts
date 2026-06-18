@@ -13,7 +13,7 @@ import { isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
-import { authoredComposeFileArgs } from '../utils/authoredComposeArgs';
+import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 
 const execFileAsync = promisify(execFile);
 const COMPOSE_DIR = process.env.COMPOSE_DIR || '/app/compose';
@@ -1289,9 +1289,10 @@ class DockerController {
       // empty prefix and behave exactly as before. execFile avoids shell quoting on
       // the absolute --project-directory path.
       const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
+      const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
       const { stdout, stderr } = await execFileAsync(
         'docker',
-        ['compose', ...filePrefix, 'ps', '--format', 'json', '-a'],
+        ['compose', ...filePrefix, ...envFileArgs, 'ps', '--format', 'json', '-a'],
         {
           cwd: stackDir,
           env: {

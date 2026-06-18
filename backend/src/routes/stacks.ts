@@ -17,6 +17,7 @@ import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } f
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
+import { buildEffectiveAnatomy } from '../services/effectiveAnatomy';
 import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
 import { UpdateGuardService } from '../services/UpdateGuardService';
 import { HealthGateService } from '../services/HealthGateService';
@@ -1139,6 +1140,25 @@ stacksRouter.get('/:stackName/networking', async (req: Request, res: Response) =
     console.error('[Stacks] Failed to build networking facts for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build networking facts' });
+  }
+});
+
+// Effective Stack Anatomy: structural facts (services, ports, volumes, networks,
+// restart) from the fully-merged effective model, so a multi-file Git source's
+// dossier and doc-drift reflect every override file, not just the root compose.
+// Read-only and advisory; auto-proxies to the active node. Secret-safe: the
+// response carries only structural fields; resolved env, label, and command
+// values in the rendered model are never extracted into the payload.
+stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildEffectiveAnatomy(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to build effective anatomy for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to build effective anatomy' });
   }
 });
 

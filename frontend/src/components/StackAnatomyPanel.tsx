@@ -5,7 +5,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { ScrollableTabRow } from './ui/ScrollableTabRow';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { type AnatomyMarkdownInput } from '@/lib/anatomyMarkdown';
+import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
 import { parseAnatomy, parseEnvKeys, formatGitSource, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
@@ -48,6 +48,15 @@ interface UpdatePreview {
   changelog: string | null;
 }
 
+/** Secret-safe effective facts from GET /stacks/:name/effective-anatomy. */
+interface EffectiveAnatomyFacts {
+  services: string[];
+  ports: Record<string, PortRow[]>;
+  volumes: Record<string, VolumeRow[]>;
+  restart: string | null;
+  networks: string[];
+}
+
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[72px_1fr] gap-3 border-t border-muted py-2 first:border-t-0">
@@ -84,7 +93,12 @@ export default function StackAnatomyPanel({
   const doctorEnabled = hasCapability('compose-doctor');
   const networkingEnabled = hasCapability('compose-networking');
 
-  const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo } | null>(null);
+  const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo; multiFile: boolean } | null>(null);
+  // Merged effective facts (services/ports/volumes/networks/restart) for a
+  // multi-file Git stack, fetched from the backend's rendered model so the Dossier
+  // and its doc-drift reflect every override file. Null for single-file / non-git
+  // stacks and whenever the render is unavailable, where the root-only parse stands.
+  const [effectiveAnatomy, setEffectiveAnatomy] = useState<({ stack: string } & EffectiveAnatomyFacts) | null>(null);
   const [updatePreview, setUpdatePreview] = useState<UpdatePreview | null>(null);
   // Last preflight severity, used only to dot the Doctor tab. Radix mounts the
   // active tab content lazily, so the badge cannot come from PreflightPanel; the
@@ -129,9 +143,13 @@ export default function StackAnatomyPanel({
           if (data && data.linked === false) {
             setGitSource(null);
           } else {
+            // More than one configured compose path means override files merge into
+            // the deployed model, so the dossier must read the effective render.
+            const multiFile = Array.isArray(data.compose_paths) && data.compose_paths.length > 1;
             setGitSource({
               stack: stackName,
               info: { repo_url: data.repo_url, branch: data.branch, compose_path: data.compose_path },
+              multiFile,
             });
           }
         } else {
@@ -144,6 +162,41 @@ export default function StackAnatomyPanel({
     void run();
     return () => { cancelled = true; };
   }, [stackName]);
+
+  // Multi-file Git stacks deploy a merged model, so the dossier reads the backend's
+  // rendered effective facts instead of the root compose alone.
+  useEffect(() => {
+    // Single-file / non-git stacks keep the root-only parse and skip the fetch.
+    // Any tagged result left from a previous stack is ignored downstream by the
+    // stack-name guard, so there is no need to clear state synchronously here.
+    if (!(gitSource?.stack === stackName && gitSource.multiFile)) return;
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const res = await apiFetch(`/stacks/${stackName}/effective-anatomy`);
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          // Adopt the merged facts only when the model actually rendered; on a render
+          // error keep the root-only parse so the dossier never shows an empty summary.
+          setEffectiveAnatomy(data && data.renderable ? {
+            stack: stackName,
+            services: Array.isArray(data.services) ? data.services : [],
+            ports: data.ports ?? {},
+            volumes: data.volumes ?? {},
+            restart: data.restart ?? null,
+            networks: Array.isArray(data.networks) ? data.networks : [],
+          } : null);
+        } else {
+          setEffectiveAnatomy(null);
+        }
+      } catch {
+        if (!cancelled) setEffectiveAnatomy(null);
+      }
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [stackName, activeNode?.id, gitSource]);
 
   useEffect(() => {
     let cancelled = false;
@@ -235,20 +288,29 @@ export default function StackAnatomyPanel({
   // Assembled facts for this stack, passed to the Dossier tab for its read-only
   // summary and Markdown export. Null until compose parses.
   const anatomyInput = useMemo<AnatomyMarkdownInput | null>(() => {
-    if (!anatomy) return null;
+    // Prefer the merged effective facts for multi-file Git stacks so the dossier and
+    // its doc-drift reflect every override file; fall back to the root-only parse.
+    // Env-derived fields (count, missing vars, env file) always come from the raw
+    // parse, which reads the unresolved `${VAR}` references the render has substituted.
+    // `anatomy` already carries the same structural fields (plus env-only extras we
+    // read separately below), so the raw parse stands in directly when there are no
+    // effective facts for this stack.
+    const activeEffective = effectiveAnatomy?.stack === stackName ? effectiveAnatomy : null;
+    const structural = activeEffective ?? anatomy;
+    if (!structural) return null;
     return {
       stackName,
-      services: anatomy.services,
-      ports: anatomy.ports,
-      volumes: anatomy.volumes,
-      restart: anatomy.restart,
+      services: structural.services,
+      ports: structural.ports,
+      volumes: structural.volumes,
+      restart: structural.restart,
       envFile: firstEnvFile,
       envVarCount,
       missingVars,
-      networkName,
+      networkName: structural.networks.length > 0 ? structural.networks[0] : `${stackName}_default`,
       gitSource: activeGitSource ? formatGitSource(activeGitSource) : null,
     };
-  }, [anatomy, stackName, firstEnvFile, envVarCount, missingVars, networkName, activeGitSource]);
+  }, [effectiveAnatomy, anatomy, stackName, firstEnvFile, envVarCount, missingVars, activeGitSource]);
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
