@@ -405,23 +405,27 @@ export class BlueprintService {
         }
 
         const fs = FileSystemService.getInstance(node.id);
-        if (!(await this.stackDirExists(node, blueprint.name))) {
-            await fs.createStack(blueprint.name);
-        }
-        await fs.writeStackFile(blueprint.name, COMPOSE_FILENAME, blueprint.compose_content);
-        await fs.writeStackFile(blueprint.name, MARKER_FILENAME, JSON.stringify(marker, null, 2));
-        await assertPolicyGateAllows(
-            blueprint.name,
-            node.id,
-            buildSystemPolicyGateOptions('blueprint', {
-                auditPath: `/api/blueprints/${blueprint.id}/deployments/${node.id}`,
-            }),
-        );
-        // Per-stack lock so blueprint reconciliation cannot race a manual
-        // deploy/update/rollback/backup on the same stack and node.
+        // Own the per-stack lock before any stack-file mutation, so a reconcile
+        // cannot rewrite the compose/marker files (let alone deploy) while a
+        // manual deploy/update/rollback/backup is running on the same stack and
+        // node. On conflict nothing is written: the callback never runs.
         const lock = await StackOpLockService.getInstance().runExclusive(
             node.id, blueprint.name, 'deploy', 'system',
-            () => ComposeService.getInstance(node.id).deployStack(blueprint.name, undefined, false),
+            async () => {
+                if (!(await this.stackDirExists(node, blueprint.name))) {
+                    await fs.createStack(blueprint.name);
+                }
+                await fs.writeStackFile(blueprint.name, COMPOSE_FILENAME, blueprint.compose_content);
+                await fs.writeStackFile(blueprint.name, MARKER_FILENAME, JSON.stringify(marker, null, 2));
+                await assertPolicyGateAllows(
+                    blueprint.name,
+                    node.id,
+                    buildSystemPolicyGateOptions('blueprint', {
+                        auditPath: `/api/blueprints/${blueprint.id}/deployments/${node.id}`,
+                    }),
+                );
+                await ComposeService.getInstance(node.id).deployStack(blueprint.name, undefined, false);
+            },
         );
         if (!lock.ran) {
             throw new Error(stackOpSkipMessage(blueprint.name, lock.existing.action));

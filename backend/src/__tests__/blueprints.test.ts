@@ -397,6 +397,24 @@ describe('BlueprintReconciler developer-mode diagnostics', () => {
 });
 
 describe('BlueprintService per-stack lock', () => {
+    it('deploy skips, writes no stack files, and records failed when the stack lock is held', async () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        // A manual operation holds the lock; the reconcile deploy must not race
+        // it, and must not mutate compose/marker files before owning the lock.
+        StackOpLockService.getInstance().tryAcquire(nodeId, bp.name, 'update', 'admin');
+
+        const outcome = await BlueprintService.getInstance().deployToNode(bp, node);
+
+        expect(outcome.status).toBe('failed');
+        expect(outcome.error).toContain('already in progress');
+        // No marker file was written (the lock guards the file writes too).
+        expect(await BlueprintService.getInstance().readMarker(bp.name, node)).toBeNull();
+        // The manual op still holds the lock; the deploy never acquired it.
+        expect(StackOpLockService.getInstance().get(nodeId, bp.name)?.action).toBe('update');
+    });
+
     it('withdraw skips and records failed when a manual operation holds the stack lock', async () => {
         const nodeId = seedNode();
         const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
