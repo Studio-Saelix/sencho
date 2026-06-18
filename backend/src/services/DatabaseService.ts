@@ -5345,10 +5345,12 @@ export class DatabaseService {
 
     /**
      * Add labels to a stack without disturbing its existing assignments. Unlike
-     * `setStackLabels` (replace), this is additive and race-free: validation and
-     * `INSERT OR IGNORE` run in one transaction, so concurrent add-preserve
-     * writes to the same stack cannot drop each other's labels (the
-     * `(label_id, stack_name, node_id)` primary key makes re-adds idempotent).
+     * `setStackLabels` (replace), this is additive: validation and
+     * `INSERT OR IGNORE` run in one transaction and the
+     * `(label_id, stack_name, node_id)` primary key makes re-adds idempotent, so
+     * two additive writes to the same stack never drop each other's labels. A
+     * concurrent `setStackLabels` (replace) still wins last-writer, which is the
+     * intended replace semantics, not a lost update.
      */
     public addStackLabels(stackName: string, nodeId: number, labelIds: number[]): void {
         if (labelIds.length === 0) return;

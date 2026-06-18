@@ -1,0 +1,9 @@
+fix(fleet): treat malformed remote label responses as per-node failures
+
+A 200 response from a remote node whose body is not the expected shape was
+treated as a benign empty result, so a malformed remote could read as a clean
+zero-stack assign or a "matched, nothing to stop" no-op and even surface a
+success toast. Validate the wire shape in the bulk-assign and fleet-stop remote
+legs and in the authoritative label discovery fan-out; on a malformed body,
+report the node as a per-node failure with the error attributed to its stacks
+instead of silently dropping it.

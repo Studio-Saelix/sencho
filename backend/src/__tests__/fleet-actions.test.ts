@@ -627,7 +627,7 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
     expect(row.stackResults[0]).toMatchObject({ stackName: 'r1', success: false });
   });
 
-  it('degrades a malformed 200 body to empty results', async () => {
+  it('reports a malformed 200 body as a per-node failure', async () => {
     const remoteId = addRemote('assign-remote-malformed');
     vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
@@ -642,8 +642,9 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
 
     expect(res.status).toBe(200);
     const row = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
-    expect(row.reachable).toBe(true);
-    expect(row.stackResults).toEqual([]);
+    expect(row.reachable).toBe(false);
+    expect(row.error).toMatch(/malformed/);
+    expect(row.stackResults).toEqual([{ stackName: 'r1', success: false, error: 'Remote returned a malformed response' }]);
   });
 });
 
@@ -749,6 +750,22 @@ describe('authoritative fleet label discovery (remote fan-out)', () => {
     const remoteRow = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
     expect(remoteRow.reachable).toBe(false);
     expect(remoteRow.error).toBeTruthy();
+  });
+
+  it('match-preview marks a remote that returns a 200 with a wrong-shaped body unreachable', async () => {
+    const remoteId = addProxyRemote('disc-remote-wrongshape');
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    // Valid JSON, but /api/labels must be an array; an object is malformed.
+    mockRemoteLabels({ not: 'an array' }, {});
+
+    const res = await request(app)
+      .post('/api/fleet/labels/match-preview')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'anything' });
+    expect(res.status).toBe(200);
+    const remoteRow = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+    expect(remoteRow.reachable).toBe(false);
+    expect(remoteRow.error).toMatch(/shape/);
   });
 
   it('fleet-stop calls the remote local-stop even when the control DB has no label for the remote', async () => {

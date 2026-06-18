@@ -1321,14 +1321,23 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
             stackResults: failAllStacks(knownStacks, message),
           };
         }
-        // Trust the remote's own matched flag (it is authoritative for its own
-        // labels). Guard results as an array so a malformed 200 body degrades to
-        // empty rather than flowing a non-array into the per-stack renderers.
-        const remote = (await response.json()) as Partial<LabelLocalStopResponse>;
+        // A 200 whose body is not the expected { matched, results } shape is a
+        // degraded node, not a benign no-op: report it as a per-node failure
+        // (with best-effort stack attribution from the control mirror) so a
+        // malformed remote cannot read as a clean "matched, nothing to stop".
+        const remote = (await response.json().catch(() => null)) as Partial<LabelLocalStopResponse> | null;
+        if (!remote || typeof remote.matched !== 'boolean' || !Array.isArray(remote.results)) {
+          const message = 'Remote returned a malformed response';
+          return {
+            nodeId: node.id, nodeName: node.name, reachable: false, matched: false, error: message,
+            stackResults: failAllStacks(knownStacks, message),
+          };
+        }
+        // Trust the remote's own matched flag (it is authoritative for its own labels).
         return {
           nodeId: node.id, nodeName: node.name, reachable: true,
-          matched: remote.matched ?? false,
-          stackResults: Array.isArray(remote.results) ? remote.results : [],
+          matched: remote.matched,
+          stackResults: remote.results,
         };
       } catch (err) {
         const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
@@ -1452,13 +1461,18 @@ fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res
           const message = err.error || `Remote returned ${response.status}`;
           return { nodeId: node.id, nodeName: node.name, reachable: false, created: false, error: message, stackResults: failAllAssign(target.stackNames, message) };
         }
-        // Guard results as an array so a malformed 200 body degrades to empty
-        // rather than flowing a non-array into the per-stack renderers.
-        const remote = (await response.json()) as Partial<LabelLocalAssignResponse>;
+        // A 200 whose body is not the expected { created, results } shape is a
+        // degraded node, not a clean no-op: report it as a per-node failure so a
+        // malformed remote cannot read as a successful zero-stack assign.
+        const remote = (await response.json().catch(() => null)) as Partial<LabelLocalAssignResponse> | null;
+        if (!remote || typeof remote.created !== 'boolean' || !Array.isArray(remote.results)) {
+          const message = 'Remote returned a malformed response';
+          return { nodeId: node.id, nodeName: node.name, reachable: false, created: false, error: message, stackResults: failAllAssign(target.stackNames, message) };
+        }
         return {
           nodeId: node.id, nodeName: node.name, reachable: true,
-          created: remote.created === true,
-          stackResults: Array.isArray(remote.results) ? remote.results : [],
+          created: remote.created,
+          stackResults: remote.results,
         };
       } catch (err) {
         const errorMsg = getErrorMessage(err, 'Failed to reach remote node');

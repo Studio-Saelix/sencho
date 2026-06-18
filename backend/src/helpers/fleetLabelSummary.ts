@@ -94,9 +94,9 @@ export async function getFleetStackLabelStates(): Promise<NodeStackLabelState[]>
         console.warn(`[FleetLabelSummary] node ${node.id} (${node.name}) returned ${status} for label state`);
         return { nodeId: node.id, nodeName: node.name, reachable: false, error: `Remote returned ${status}`, labels: [], labelStacks: {} };
       }
-      // A 200 with an unparseable body is a degraded node, not an empty one:
-      // report it unreachable rather than silently dropping its labels (which
-      // would defeat the authoritative discovery this helper exists for).
+      // A 200 with an unparseable or wrong-shaped body is a degraded node, not an
+      // empty one: report it unreachable rather than silently dropping its labels
+      // (which would defeat the authoritative discovery this helper exists for).
       let labelsBody: unknown;
       let assignBody: unknown;
       try {
@@ -105,6 +105,13 @@ export async function getFleetStackLabelStates(): Promise<NodeStackLabelState[]>
       } catch (err) {
         console.warn(`[FleetLabelSummary] node ${node.id} (${node.name}) returned an unreadable label body:`, getErrorMessage(err, 'parse error'));
         return { nodeId: node.id, nodeName: node.name, reachable: false, error: 'Remote returned an unreadable response', labels: [], labelStacks: {} };
+      }
+      // `/api/labels` returns an array; `/api/labels/assignments` returns an
+      // object map. A wrong top-level shape is a malformed response, not a
+      // genuinely label-less node, so surface it instead of reporting zero labels.
+      if (!Array.isArray(labelsBody) || assignBody === null || typeof assignBody !== 'object' || Array.isArray(assignBody)) {
+        console.warn(`[FleetLabelSummary] node ${node.id} (${node.name}) returned an unexpected label shape`);
+        return { nodeId: node.id, nodeName: node.name, reachable: false, error: 'Remote returned an unexpected label shape', labels: [], labelStacks: {} };
       }
       return { nodeId: node.id, nodeName: node.name, reachable: true, labels: parseLabels(labelsBody), labelStacks: invertAssignments(assignBody) };
     } catch (err) {

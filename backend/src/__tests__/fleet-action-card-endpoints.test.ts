@@ -435,7 +435,7 @@ describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
     }
   });
 
-  it('degrades a malformed 200 body (non-array results) to empty instead of forwarding it', async () => {
+  it('reports a malformed 200 body (non-array results) as a per-node failure', async () => {
     const remoteId = db.addNode({
       name: 'remote-malformed', type: 'remote', api_url: 'http://remote-malformed.example:1852',
       api_token: 'tok', compose_dir: '/app/compose', is_default: false,
@@ -454,7 +454,10 @@ describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
 
       expect(res.status).toBe(200);
       const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
-      expect(remoteRow.stackResults).toEqual([]);
+      expect(remoteRow.reachable).toBe(false);
+      expect(remoteRow.error).toMatch(/malformed/);
+      // Best-effort attribution from the control mirror (alpha was assigned above).
+      expect(remoteRow.stackResults).toEqual([{ stackName: 'alpha', success: false, error: 'Remote returned a malformed response' }]);
     } finally {
       db.deleteNode(remoteId);
     }
