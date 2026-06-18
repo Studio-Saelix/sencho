@@ -27,7 +27,7 @@
   "devDependencies": {
     "@commitlint/cli": "^21.0.2",
     "@commitlint/config-conventional": "^21.0.2",
-    "@playwright/test": "^1.60.0",
+    "@playwright/test": "^1.61.0",
     "husky": "^9.1.7",
     "otplib": "^13.4.1"
   }

@@ -1,122 +1,140 @@
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, type Node } from '../services/DatabaseService';
+import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { getErrorMessage } from '../utils/errors';
 import { formatNoTargetError } from '../utils/remoteTarget';
+import { getErrorMessage } from '../utils/errors';
 
-// Per-node read budget for the authoritative label fan-out. Mirrors the
-// node-stacks proxy budget in fleet.ts so a slow remote cannot stall the Stop
-// card's suggestions/preview reads indefinitely; an unreachable node is reported
-// rather than blocking the rest of the fleet.
-const REMOTE_TIMEOUT_MS = 8_000;
+export interface NodeLabelSummaryEntry {
+  name: string;
+  color: string;
+  stackNames: string[];
+}
 
-export interface NodeStackLabelState {
+export interface NodeLabelSummary {
   nodeId: number;
   nodeName: string;
   reachable: boolean;
+  labels: NodeLabelSummaryEntry[];
   error?: string;
-  /** Every stack label on this node (name + node-local color), assigned or not. */
-  labels: { name: string; color: string }[];
-  /** Stack-label name -> stack names assigned to it on this node. */
-  labelStacks: Record<string, string[]>;
 }
 
-// Narrow a `GET /api/labels` response (`Label[]`) to name/color pairs. Tolerates
-// `unknown` so a malformed remote body degrades to empty rather than throwing.
-function parseLabels(raw: unknown): { name: string; color: string }[] {
-  if (!Array.isArray(raw)) return [];
+// Per-node fetch budget. Suggestions load on card mount and match-preview runs
+// on a 500ms debounce, so keep this short: a wedged or slow remote should fall
+// to "unreachable" fast rather than stall the whole fleet readout.
+const SUMMARY_FETCH_TIMEOUT_MS = 5000;
+
+/**
+ * Authoritative stack-label summary for one node's own labels.
+ *
+ * Stack names are filtered to those still present on disk, matching the
+ * `/api/labels/assignments` cleanup (routes/labels.ts) and runLocalLabelStop's
+ * validStacks filter (helpers/fleetLabelStop.ts), so the preview/suggestion
+ * counts equal the set a stop would actually act on.
+ */
+export async function readLocalLabelSummary(nodeId: number): Promise<NodeLabelSummaryEntry[]> {
+  const db = DatabaseService.getInstance();
+  const labels = db.getLabels(nodeId);
+  if (labels.length === 0) return [];
+  const fsStacks = new Set(await FileSystemService.getInstance(nodeId).getStacks());
+  return labels.map(label => ({
+    name: label.name,
+    color: label.color,
+    stackNames: db.getStacksForLabel(label.id, nodeId).filter(name => fsStacks.has(name)),
+  }));
+}
+
+// Fail-closed parser for a remote `/api/labels` body (Label[]). A malformed
+// shape returns null so the caller marks the node unreachable rather than
+// flowing partial data into the aggregate counts.
+function parseRemoteLabels(value: unknown): { name: string; color: string }[] | null {
+  if (!Array.isArray(value)) return null;
   const out: { name: string; color: string }[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const name = (item as { name?: unknown }).name;
-    const color = (item as { color?: unknown }).color;
-    if (typeof name === 'string') out.push({ name, color: typeof color === 'string' ? color : 'slate' });
+  for (const item of value) {
+    if (!item || typeof item !== 'object') return null;
+    const label = item as Record<string, unknown>;
+    if (typeof label.name !== 'string' || typeof label.color !== 'string') return null;
+    out.push({ name: label.name, color: label.color });
   }
   return out;
 }
 
-// Invert a `GET /api/labels/assignments` response (`Record<stackName, Label[]>`)
-// into label-name -> assigned stack names.
-function invertAssignments(raw: unknown): Record<string, string[]> {
-  const labelStacks: Record<string, string[]> = {};
-  if (!raw || typeof raw !== 'object') return labelStacks;
-  for (const [stackName, labels] of Object.entries(raw as Record<string, unknown>)) {
-    if (!Array.isArray(labels)) continue;
+// Fail-closed parser for a remote `/api/labels/assignments` body
+// (Record<stackName, Label[]>). Collapses to label-name -> stack-name lists.
+function parseRemoteAssignments(value: unknown): Map<string, string[]> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const stacksByLabel = new Map<string, string[]>();
+  for (const [stackName, labels] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(labels)) return null;
     for (const label of labels) {
-      if (!label || typeof label !== 'object') continue;
-      const name = (label as { name?: unknown }).name;
-      if (typeof name === 'string') (labelStacks[name] ??= []).push(stackName);
+      if (!label || typeof label !== 'object') return null;
+      const name = (label as Record<string, unknown>).name;
+      if (typeof name !== 'string') return null;
+      const list = stacksByLabel.get(name) ?? [];
+      list.push(stackName);
+      stacksByLabel.set(name, list);
     }
   }
-  return labelStacks;
+  return stacksByLabel;
+}
+
+async function summarizeRemoteNode(node: Node): Promise<NodeLabelSummary> {
+  const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+  if (!target) {
+    return { nodeId: node.id, nodeName: node.name, reachable: false, labels: [], error: formatNoTargetError(node) };
+  }
+  const base = target.apiUrl.replace(/\/$/, '');
+  // Conditional Bearer only: pilot-agent targets carry an empty token and reach
+  // the remote over the loopback tunnel without an Authorization header.
+  const headers: Record<string, string> = {};
+  if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
+  try {
+    const [labelsRes, assignmentsRes] = await Promise.all([
+      fetch(`${base}/api/labels`, { headers, signal: AbortSignal.timeout(SUMMARY_FETCH_TIMEOUT_MS) }),
+      fetch(`${base}/api/labels/assignments`, { headers, signal: AbortSignal.timeout(SUMMARY_FETCH_TIMEOUT_MS) }),
+    ]);
+    if (!labelsRes.ok || !assignmentsRes.ok) {
+      // Surface the remote's own error body (e.g. a token/tier message) the same
+      // way the fleet-stop leg does, so a reached-but-erroring node reports its
+      // real cause rather than a bare status number.
+      const failed = labelsRes.ok ? assignmentsRes : labelsRes;
+      const errBody = (await failed.json().catch(() => ({}))) as { error?: string };
+      return { nodeId: node.id, nodeName: node.name, reachable: false, labels: [], error: errBody.error || `Remote returned ${failed.status}` };
+    }
+    const labels = parseRemoteLabels(await labelsRes.json().catch(() => null));
+    const stacksByLabel = parseRemoteAssignments(await assignmentsRes.json().catch(() => null));
+    if (!labels || !stacksByLabel) {
+      return { nodeId: node.id, nodeName: node.name, reachable: false, labels: [], error: 'Invalid label response from remote node' };
+    }
+    const summary = labels.map(label => ({
+      name: label.name,
+      color: label.color,
+      stackNames: stacksByLabel.get(label.name) ?? [],
+    }));
+    return { nodeId: node.id, nodeName: node.name, reachable: true, labels: summary };
+  } catch (err) {
+    return { nodeId: node.id, nodeName: node.name, reachable: false, labels: [], error: getErrorMessage(err, 'Failed to reach remote node') };
+  }
 }
 
 /**
- * Resolve every node's authoritative stack-label state.
- *
- * The local node is read in-process; each remote is queried live via its own
- * `GET /api/labels` (all stack labels) and `GET /api/labels/assignments` (which
- * stacks carry each). This is the authoritative source for fleet-wide stack-label
- * discovery: the control DB does not mirror remote-node labels (FleetSyncService
- * replicates only security resources), so a central-DB read would miss labels
- * that live only on a remote. An unreachable remote is returned with
- * `reachable: false` and empty maps so callers can flag it without dropping the
- * rest of the fleet. Node labels (the separate `/api/node-labels` namespace) are
- * never included, because `/api/labels` returns stack labels only.
+ * Authoritative fleet-wide stack-label state: the local node from its own DB,
+ * each remote queried live through its `/api/labels` + `/api/labels/assignments`
+ * endpoints via the proxy target. Replaces the old central-DB read, which only
+ * ever held the local node's labels (remote label rows are never mirrored to the
+ * control). A node that cannot be reached, or that answers with a non-ok or
+ * unusable response, is `reachable: false` with an error (its real cause) and
+ * never blocks the reachable ones; reachable nodes carry complete `labels`.
  */
-export async function getFleetStackLabelStates(): Promise<NodeStackLabelState[]> {
-  const db = DatabaseService.getInstance();
-  const nodes = db.getNodes();
-  return Promise.all(nodes.map(async (node): Promise<NodeStackLabelState> => {
+export async function collectFleetLabelSummaries(): Promise<NodeLabelSummary[]> {
+  const nodes = DatabaseService.getInstance().getNodes();
+  return Promise.all(nodes.map(async (node): Promise<NodeLabelSummary> => {
     if (node.type === 'local') {
       try {
-        const labels = db.getLabels(node.id).map(l => ({ name: l.name, color: l.color }));
-        return { nodeId: node.id, nodeName: node.name, reachable: true, labels, labelStacks: invertAssignments(db.getLabelsForStacks(node.id)) };
+        return { nodeId: node.id, nodeName: node.name, reachable: true, labels: await readLocalLabelSummary(node.id) };
       } catch (err) {
-        console.warn(`[FleetLabelSummary] local node ${node.id} (${node.name}) label read failed:`, getErrorMessage(err, 'read error'));
-        return { nodeId: node.id, nodeName: node.name, reachable: false, error: getErrorMessage(err, 'Failed to read local labels'), labels: [], labelStacks: {} };
+        return { nodeId: node.id, nodeName: node.name, reachable: false, labels: [], error: getErrorMessage(err, 'Failed to read local labels') };
       }
     }
-
-    try {
-      const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-      if (!target) {
-        return { nodeId: node.id, nodeName: node.name, reachable: false, error: formatNoTargetError(node), labels: [], labelStacks: {} };
-      }
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
-      const base = target.apiUrl.replace(/\/$/, '');
-      const [labelsRes, assignRes] = await Promise.all([
-        fetch(`${base}/api/labels`, { headers, signal: AbortSignal.timeout(REMOTE_TIMEOUT_MS) }),
-        fetch(`${base}/api/labels/assignments`, { headers, signal: AbortSignal.timeout(REMOTE_TIMEOUT_MS) }),
-      ]);
-      if (!labelsRes.ok || !assignRes.ok) {
-        const status = labelsRes.ok ? assignRes.status : labelsRes.status;
-        console.warn(`[FleetLabelSummary] node ${node.id} (${node.name}) returned ${status} for label state`);
-        return { nodeId: node.id, nodeName: node.name, reachable: false, error: `Remote returned ${status}`, labels: [], labelStacks: {} };
-      }
-      // A 200 with an unparseable or wrong-shaped body is a degraded node, not an
-      // empty one: report it unreachable rather than silently dropping its labels
-      // (which would defeat the authoritative discovery this helper exists for).
-      let labelsBody: unknown;
-      let assignBody: unknown;
-      try {
-        labelsBody = await labelsRes.json();
-        assignBody = await assignRes.json();
-      } catch (err) {
-        console.warn(`[FleetLabelSummary] node ${node.id} (${node.name}) returned an unreadable label body:`, getErrorMessage(err, 'parse error'));
-        return { nodeId: node.id, nodeName: node.name, reachable: false, error: 'Remote returned an unreadable response', labels: [], labelStacks: {} };
-      }
-      // `/api/labels` returns an array; `/api/labels/assignments` returns an
-      // object map. A wrong top-level shape is a malformed response, not a
-      // genuinely label-less node, so surface it instead of reporting zero labels.
-      if (!Array.isArray(labelsBody) || assignBody === null || typeof assignBody !== 'object' || Array.isArray(assignBody)) {
-        console.warn(`[FleetLabelSummary] node ${node.id} (${node.name}) returned an unexpected label shape`);
-        return { nodeId: node.id, nodeName: node.name, reachable: false, error: 'Remote returned an unexpected label shape', labels: [], labelStacks: {} };
-      }
-      return { nodeId: node.id, nodeName: node.name, reachable: true, labels: parseLabels(labelsBody), labelStacks: invertAssignments(assignBody) };
-    } catch (err) {
-      console.warn(`[FleetLabelSummary] node ${node.id} (${node.name}) unreachable:`, getErrorMessage(err, 'Failed to reach remote node'));
-      return { nodeId: node.id, nodeName: node.name, reachable: false, error: getErrorMessage(err, 'Failed to reach remote node'), labels: [], labelStacks: {} };
-    }
+    return summarizeRemoteNode(node);
   }));
 }

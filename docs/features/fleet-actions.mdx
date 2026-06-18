@@ -46,7 +46,7 @@ Stop every stack assigned a given **stack label** on every node where that stack
 ### Step by step
 
 1. Open **Fleet → Actions**.
-2. Type a name in the **Stack label** field. The picker suggests stack labels from across the fleet, each with its stack and node counts, so the scope is unmistakable. Suggestions are read live from each reachable node, so a stack label that exists only on a remote appears too; a label on an offline node cannot be read, so type the name by hand to target it. You can also type a name by hand at any time.
+2. Type a name in the **Stack label** field. The picker queries each reachable node for its own stack labels and lists each name once with its combined stack and node counts (and the carrying node names), so the scope is unmistakable. A stack label that exists only on a remote node still appears. When a node cannot be reached, the picker notes that the suggestions may be incomplete. You can also type a name by hand.
 3. Click **Stop fleet**.
 4. A confirmation appears with the kicker **Fleet stop** and the title `Stop all stacks with the stack label "<name>"?`. Click **Stop fleet** to commit.
 
@@ -66,7 +66,7 @@ A few quirks worth knowing:
 
 - A node that has no stack label by that name appears as `<node> (no matching stack label)` and is counted in the **failed** badge. This is not a transport failure, it just means the stack label was not present on that node.
 - A node where the label exists but no stacks are assigned to it appears with a matched count of zero stacks. No per-stack rows render.
-- When the control instance reaches a remote node, the per-stack result you see comes from the remote node's own response. If the remote returns a non-2xx for the whole label, every stack on that node renders with the same error message.
+- When the control instance reaches a remote node, the per-stack results you see come from the remote node's own response. A remote the control cannot reach, or that returns a non-2xx, is reported once as a single `<node> (unreachable)` row carrying the reason, not as a per-stack error, and it never blocks the stops on the reachable nodes.
 
 ### Behaviour and partial-failure semantics
 
@@ -130,7 +130,7 @@ Scope is a segmented control with two options:
 
 | Requirement | Why it matters |
 |---|---|
-| **Configured remote nodes in Settings → Nodes** | The two fan-out cards iterate the configured node list. A node missing its `api_url` or `api_token` shows up in the results with *Remote node not configured* per stack or per target. |
+| **Configured remote nodes in Settings → Nodes** | The two fan-out cards iterate the configured node list. A node missing its `api_url` or `api_token`, or one that cannot be reached, is reported once per node as unreachable (Stop fleet by label) or per target (Prune), and never blocks the reachable nodes. |
 | **Labels you intend to target** | Stop fleet by label and the autocomplete depend on labels existing on at least one node. See [Stack Labels](/features/stack-labels) for the authoring flow. |
 
 ## Behaviour and lifecycle
@@ -173,7 +173,7 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
     The fleet-stop match is by **stack label name**, not label ID. Confirm the stack label name on the affected node under **Settings → Labels**; a typo, a case mismatch, or a trailing space will leave the node out. Stack labels are scoped per node, so renaming the label on one node does not propagate to the others.
   </Accordion>
   <Accordion title="The autocomplete didn't suggest a stack label I know exists">
-    The picker reads stack labels live from each reachable node, so a name that exists only on a remote still appears, but a label on an offline node cannot be read. Node labels never appear here, because these actions target stack labels only. You can always type a name by hand; the fleet-stop request still runs authoritatively against every reachable node.
+    The picker queries each reachable node for its own stack labels, so a name is missing when no reachable node has a **stack label** by that name, or when the node that owns it could not be reached when the picker loaded (the picker flags this case). Node labels never appear here, because this action targets stack labels only. You can always type a name by hand; the fleet-stop request still iterates every node and asks each one authoritatively.
   </Accordion>
   <Accordion title="Bulk label assign reports 'Invalid stack name' or 'Stack not found' for one row">
     Stack names must match the standard validator: alphanumeric plus dash and underscore, no spaces, no path separators. A name that does not exist on its node returns *Stack not found*. Each stack is validated independently, so one bad row does not block the rest of the batch. Fix the offending entry and re-run; the rows that already succeeded are simply re-added with no change.
@@ -190,8 +190,8 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
   <Accordion title="The Apply button returns an error toast">
     Fleet Actions runs admin-only. Confirm the active user has the admin role under **Settings → Users**. Operator and viewer roles see the cards but cannot apply them.
   </Accordion>
-  <Accordion title="A node returns a transport error row for every stack or every target">
-    The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Open **Settings → Nodes** on the control instance and click **Test connection** for the remote; fix the credential or the reachability, then re-run the action.
+  <Accordion title="A node is reported as unreachable (or shows a transport error per target)">
+    The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Stop fleet by label reports it once as a single `<node> (unreachable)` row; Prune reports it per target. Open **Settings → Nodes** on the control instance and click **Test connection** for the remote; fix the credential or the reachability, then re-run the action.
   </Accordion>
 </AccordionGroup>
 

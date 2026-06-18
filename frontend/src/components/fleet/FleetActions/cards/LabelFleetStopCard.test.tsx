@@ -146,7 +146,7 @@ it('shows a zero-stack preview when a node-only name is typed', async () => {
   render(<LabelFleetStopCard />);
   await user.type(screen.getByPlaceholderText('e.g. production'), 'edge');
 
-  expect(await screen.findByText('No stacks are assigned to this stack label', undefined, { timeout: 2000 })).toBeInTheDocument();
+  expect(await screen.findByText('No reachable node carries a stack label by that name', undefined, { timeout: 2000 })).toBeInTheDocument();
   await waitFor(() => expect(screen.getByText('0 matching stacks')).toBeInTheDocument());
 });
 
@@ -169,7 +169,7 @@ it('dry run calls fleet-stop with dryRun:true and never opens the confirm modal'
   mockedFetch.mockImplementation((url: string) => {
     if (url === '/fleet/labels/fleet-stop') {
       return Promise.resolve(jsonResponse(200, {
-        results: [{ nodeId: 1, nodeName: 'central', matched: true, stackResults: [{ stackName: 'web', success: true, dryRun: true }] }],
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true, dryRun: true }] }],
       }));
     }
     return Promise.resolve(jsonResponse(404, {}));
@@ -193,8 +193,8 @@ it('stop fleet opens the confirm modal, and confirming runs a real stop that ren
     if (url === '/fleet/labels/fleet-stop') {
       return Promise.resolve(jsonResponse(200, {
         results: [
-          { nodeId: 1, nodeName: 'central', matched: true, stackResults: [{ stackName: 'web', success: true }] },
-          { nodeId: 2, nodeName: 'edge-1', matched: false, stackResults: [] },
+          { nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true }] },
+          { nodeId: 2, nodeName: 'edge-1', reachable: true, matched: false, stackResults: [] },
         ],
       }));
     }
@@ -238,11 +238,128 @@ it('populates the blast readout from the debounced match-preview', async () => {
   const user = userEvent.setup();
   mockedFetch.mockImplementation((url: string) => {
     if (url === '/fleet/labels/match-preview') {
-      return Promise.resolve(jsonResponse(200, { matchedNodes: 2, matchedStacks: 3, perNode: [] }));
+      return Promise.resolve(jsonResponse(200, { matchedNodes: 2, matchedStacks: 3, unreachableNodes: 0, perNode: [] }));
     }
     return Promise.resolve(jsonResponse(404, {}));
   });
   render(<LabelFleetStopCard />);
   await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
   await waitFor(() => expect(screen.getByText('3 stacks · 2 nodes')).toBeInTheDocument(), { timeout: 2000 });
+});
+
+it('degrades to "preview unavailable" when match-preview returns a malformed 200 body', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      // 200 but perNode is missing: the render path must degrade, not throw.
+      return Promise.resolve(jsonResponse(200, { matchedStacks: 1, matchedNodes: 1 }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
+  expect(await screen.findByText('preview endpoint did not respond', undefined, { timeout: 2000 })).toBeInTheDocument();
+  // The card stays interactive; no crash from the missing perNode array.
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeEnabled();
+});
+
+it('does not crash when fleet-stop returns a malformed 200 body', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      // results is not an array: must degrade to a toast, not throw.
+      return Promise.resolve(jsonResponse(200, { results: 'nope' }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
+  await user.click(screen.getByRole('button', { name: 'Dry run' }));
+  // Reported as an unexpected response, not masqueraded as "No reachable nodes".
+  await waitFor(() => expect(toastError).toHaveBeenCalledWith('Fleet stop returned an unexpected response. Check the server logs and retry.'));
+  expect(toastWarning).not.toHaveBeenCalled();
+  expect(screen.getByPlaceholderText('e.g. production')).toBeInTheDocument();
+});
+
+it('shows remote labels with their node spread and flags partial coverage', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/suggestions') {
+      return Promise.resolve(jsonResponse(200, {
+        suggestions: [{ name: 'media', scope: 'stack', nodeCount: 2, stackCount: 3, nodes: ['central', 'edge-1'] }],
+        unreachableNodes: 1,
+        partial: true,
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  expect(await screen.findByText(/1 node unreachable; suggestions may be incomplete/i)).toBeInTheDocument();
+  await user.click(screen.getByPlaceholderText('e.g. production'));
+  expect(await screen.findByText('media')).toBeInTheDocument();
+  // The node-name spread renders as a muted detail under the label name.
+  expect(screen.getByText('central, edge-1')).toBeInTheDocument();
+});
+
+it('renders unreachable nodes in the preview without dropping the matched ones', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(jsonResponse(200, {
+        matchedNodes: 1,
+        matchedStacks: 1,
+        unreachableNodes: 1,
+        perNode: [
+          { nodeId: 1, nodeName: 'central', reachable: true, labelExists: true, stackCount: 1, stackNames: ['web'] },
+          { nodeId: 2, nodeName: 'edge-1', reachable: false, labelExists: false, stackCount: 0, stackNames: [], error: 'Remote node not configured' },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'media');
+  expect(await screen.findByText('web', undefined, { timeout: 2000 })).toBeInTheDocument();
+  expect(screen.getByText('unreachable · 1')).toBeInTheDocument();
+  expect(screen.getByText('edge-1')).toBeInTheDocument();
+});
+
+it('distinguishes "label exists, no stacks" and shows a 0-reachable blast when the rest are unreachable', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(jsonResponse(200, {
+        matchedNodes: 0,
+        matchedStacks: 0,
+        unreachableNodes: 1,
+        perNode: [
+          { nodeId: 1, nodeName: 'central', reachable: true, labelExists: true, stackCount: 0, stackNames: [] },
+          { nodeId: 2, nodeName: 'edge-1', reachable: false, labelExists: false, stackCount: 0, stackNames: [], error: 'Remote node not configured' },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'media');
+  expect(await screen.findByText('This stack label exists but has no stacks assigned on the reachable nodes', undefined, { timeout: 2000 })).toBeInTheDocument();
+  expect(screen.getByText('unreachable · 1')).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText('0 reachable · 1 unreachable')).toBeInTheDocument());
+});
+
+it('renders an unreachable fleet-stop node as unreachable, not "no matching label", and warns', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 2, nodeName: 'edge-1', reachable: false, matched: false, stackResults: [], error: 'Remote node not configured' }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
+  await user.click(screen.getByRole('button', { name: 'Dry run' }));
+  expect(await screen.findByText(/edge-1 \(unreachable\)/)).toBeInTheDocument();
+  await waitFor(() => expect(toastWarning).toHaveBeenCalled());
 });

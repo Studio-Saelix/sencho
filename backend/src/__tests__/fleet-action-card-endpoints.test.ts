@@ -109,11 +109,30 @@ async function createAssignedLabel(name: string, stacks: string[]) {
   return created.body as { id: number; node_id: number; name: string };
 }
 
-// Fresh 200 JSON Response per call: the authoritative label summary issues two
-// parallel fetches per remote (/api/labels and /api/labels/assignments) and a
-// Response body can be read only once.
-function okJson(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+// Stub the control's server-side fan-out to a remote node. The remote's
+// authoritative stack-label state is read live via /api/labels +
+// /api/labels/assignments; this returns canned bodies for those two URLs and
+// passes any other URL (e.g. the fleet-stop local-stop receiver) to `other`.
+function mockRemoteLabelFetch(opts: {
+  labels: { name: string; color?: string }[];
+  assignments: Record<string, string[]>; // stackName -> label names
+  other?: (url: string) => Response;
+}) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+    const url = String(input);
+    if (url.endsWith('/api/labels')) {
+      const body = opts.labels.map((l, i) => ({ id: i + 1, node_id: 9, name: l.name, color: l.color ?? 'teal' }));
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.endsWith('/api/labels/assignments')) {
+      const body: Record<string, { name: string; color: string }[]> = {};
+      for (const [stack, names] of Object.entries(opts.assignments)) {
+        body[stack] = names.map(n => ({ name: n, color: 'teal' }));
+      }
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return opts.other ? opts.other(url) : new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  });
 }
 
 describe('POST /api/fleet/labels/match-preview', () => {
@@ -171,6 +190,99 @@ describe('POST /api/fleet/labels/match-preview', () => {
     expect(res.body.matchedNodes).toBe(0);
     expect(res.body.matchedStacks).toBe(0);
   });
+
+  it('includes remote stacks grouped per node, drops stale local stacks, and flags reachability', async () => {
+    const localId = db.getNodes().find(n => n.is_default)!.id;
+    const local = db.createLabel(localId, 'media', 'teal');
+    db.setStackLabels('alpha', localId, [local.id]);
+    // A stale local assignment to a stack that no longer exists on disk
+    // (not in mockFsStacks) must be filtered out, not counted.
+    db.setStackLabels('media-ghost', localId, [local.id]);
+    const remoteId = db.addNode({
+      name: 'media-remote', type: 'remote', api_url: 'http://media.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      // The control DB holds no 'media' row for the remote; its stacks come live.
+      mockRemoteLabelFetch({ labels: [{ name: 'media' }], assignments: { sonarr: ['media'], radarr: ['media'] } });
+      const res = await request(app)
+        .post('/api/fleet/labels/match-preview')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'media' });
+      expect(res.status).toBe(200);
+      // 1 live local stack (the ghost is dropped) + 2 remote stacks.
+      expect(res.body.matchedStacks).toBe(3);
+      expect(res.body.matchedNodes).toBe(2);
+      expect(res.body.unreachableNodes).toBe(0);
+      const localRow = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === localId);
+      expect(localRow.stackCount).toBe(1);
+      expect(localRow.stackNames).toEqual(['alpha']);
+      const remote = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remote.reachable).toBe(true);
+      expect(remote.labelExists).toBe(true);
+      expect(remote.stackNames.sort()).toEqual(['radarr', 'sonarr']);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('distinguishes label-exists-no-stacks from an unreachable remote', async () => {
+    const localId = db.getNodes().find(n => n.is_default)!.id;
+    // Local carries the label but assigns no stacks to it.
+    db.createLabel(localId, 'empty-label', 'teal');
+    const remoteId = db.addNode({
+      name: 'unreach-remote', type: 'remote', api_url: 'http://unreach.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
+      const res = await request(app)
+        .post('/api/fleet/labels/match-preview')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'empty-label' });
+      expect(res.status).toBe(200);
+      expect(res.body.unreachableNodes).toBe(1);
+      const localRow = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === localId);
+      expect(localRow.reachable).toBe(true);
+      expect(localRow.labelExists).toBe(true);
+      expect(localRow.stackCount).toBe(0);
+      const remoteRow = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remoteRow.reachable).toBe(false);
+      expect(remoteRow.error).toMatch(/ECONNREFUSED|reach/i);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('surfaces the remote error body when it serves labels but rejects assignments', async () => {
+    const localId = db.getNodes().find(n => n.is_default)!.id;
+    db.setStackLabels('alpha', localId, [db.createLabel(localId, 'ok-label', 'teal').id]);
+    const remoteId = db.addNode({
+      name: 'split-remote', type: 'remote', api_url: 'http://split.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith('/api/labels')) {
+          return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        // /api/labels/assignments rejects with a real error body.
+        return new Response(JSON.stringify({ error: 'token expired' }), { status: 403, headers: { 'content-type': 'application/json' } });
+      });
+      const res = await request(app)
+        .post('/api/fleet/labels/match-preview')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'ok-label' });
+      expect(res.status).toBe(200);
+      const remoteRow = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remoteRow.reachable).toBe(false);
+      // The remote's own message is surfaced, not a bare status number.
+      expect(remoteRow.error).toBe('token expired');
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
 });
 
 describe('GET /api/fleet/labels/suggestions', () => {
@@ -199,27 +311,22 @@ describe('GET /api/fleet/labels/suggestions', () => {
     expect(Array.isArray(res.body.suggestions)).toBe(true);
   });
 
-  it('aggregates stack labels across nodes, includes unassigned ones, and excludes node labels', async () => {
-    const localId = db.getNodes().find(n => n.is_default)!.id;
+  it('surfaces remote-only stack labels and aggregates shared names across nodes', async () => {
+    const localNode = db.getNodes().find(n => n.is_default)!;
     const remoteId = db.addNode({
       name: 'sugg-remote', type: 'remote', api_url: 'http://sugg.example:1852',
       api_token: 'tok', compose_dir: '/app/compose', is_default: false,
     });
     try {
-      // Local node: one assigned stack label and one unassigned (the picker
-      // still lists labels with no assignments).
-      const local = db.createLabel(localId, 'shared-prod', 'teal');
-      db.setStackLabels('alpha', localId, [local.id]);
-      db.createLabel(localId, 'unused-stack-label', 'slate');
-      // The remote is queried authoritatively: it carries the same-named stack
-      // label (assigned to one stack). Its node-only label is never returned by
-      // /api/labels, proving node labels can't surface as stop targets.
-      db.addNodeLabel(remoteId, 'edge-only');
-      vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
-        const u = String(url);
-        if (u.endsWith('/api/labels/assignments')) return Promise.resolve(okJson({ beta: [{ id: 1, node_id: remoteId, name: 'shared-prod', color: 'teal' }] }));
-        if (u.endsWith('/api/labels')) return Promise.resolve(okJson([{ id: 1, node_id: remoteId, name: 'shared-prod', color: 'teal' }]));
-        return Promise.resolve(okJson({}));
+      // Local node: 'shared-prod' on stack 'alpha' (alpha is in mockFsStacks).
+      const local = db.createLabel(localNode.id, 'shared-prod', 'teal');
+      db.setStackLabels('alpha', localNode.id, [local.id]);
+      // Remote node: queried live. It carries 'shared-prod' on TWO stacks plus a
+      // remote-only 'edge'. NONE of this is mirrored in the control DB. The
+      // asymmetric remote count (2) makes a sum-vs-concatenate bug observable.
+      mockRemoteLabelFetch({
+        labels: [{ name: 'shared-prod' }, { name: 'edge' }],
+        assignments: { sonarr: ['shared-prod'], lidarr: ['shared-prod'], radarr: ['edge'] },
       });
 
       const res = await request(app)
@@ -229,44 +336,42 @@ describe('GET /api/fleet/labels/suggestions', () => {
 
       const names = res.body.suggestions.map((s: { name: string }) => s.name);
       expect(names).toContain('shared-prod');
-      expect(names).toContain('unused-stack-label');
-      expect(names).not.toContain('edge-only');
+      // Remote-only label is visible despite no control-DB row.
+      expect(names).toContain('edge');
       // Sorted by name.
       expect(names).toEqual([...names].sort((a: string, b: string) => a.localeCompare(b)));
+      expect(res.body.partial).toBe(false);
+      expect(res.body.unreachableNodes).toBe(0);
 
       const shared = res.body.suggestions.find((s: { name: string }) => s.name === 'shared-prod');
       expect(shared.scope).toBe('stack');
       expect(shared.nodeCount).toBe(2);
-      expect(shared.stackCount).toBe(2);
+      // 1 local stack + 2 remote stacks, summed (not deduped to the node count).
+      expect(shared.stackCount).toBe(3);
+      expect([...shared.nodes].sort()).toEqual([localNode.name, 'sugg-remote'].sort());
 
-      const unused = res.body.suggestions.find((s: { name: string }) => s.name === 'unused-stack-label');
-      expect(unused.nodeCount).toBe(1);
-      expect(unused.stackCount).toBe(0);
+      const edge = res.body.suggestions.find((s: { name: string }) => s.name === 'edge');
+      expect(edge.nodeCount).toBe(1);
+      expect(edge.stackCount).toBe(1);
     } finally {
       db.deleteNode(remoteId);
     }
   });
 
-  it('counts only the stack-label side when a node label shares the name', async () => {
+  it('never folds node labels into the picker even when one shares a stack-label name', async () => {
     const localId = db.getNodes().find(n => n.is_default)!.id;
     const remoteId = db.addNode({
       name: 'collision-remote', type: 'remote', api_url: 'http://collision.example:1852',
       api_token: 'tok', compose_dir: '/app/compose', is_default: false,
     });
     try {
-      // A stack label 'prod' lives on the local node only...
+      // A stack label 'prod' lives on the local node...
       const stackLabel = db.createLabel(localId, 'prod', 'teal');
       db.setStackLabels('alpha', localId, [stackLabel.id]);
       // ...while a node label of the same name lives on the remote node. The
-      // remote's authoritative /api/labels returns stack labels only (none here),
-      // so the node label cannot inflate the stack-label counts.
+      // remote's stack-label endpoint (/api/labels) never returns node labels.
       db.addNodeLabel(remoteId, 'prod');
-      vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
-        const u = String(url);
-        if (u.endsWith('/api/labels/assignments')) return Promise.resolve(okJson({}));
-        if (u.endsWith('/api/labels')) return Promise.resolve(okJson([]));
-        return Promise.resolve(okJson({}));
-      });
+      mockRemoteLabelFetch({ labels: [], assignments: {} });
 
       const res = await request(app)
         .get('/api/fleet/labels/suggestions')
@@ -277,6 +382,75 @@ describe('GET /api/fleet/labels/suggestions', () => {
       // The node label must not inflate the counts: only the local stack label counts.
       expect(prod.nodeCount).toBe(1);
       expect(prod.stackCount).toBe(1);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('excludes labels whose only assigned stacks no longer exist on disk', async () => {
+    const localId = db.getNodes().find(n => n.is_default)!.id;
+    const ghost = db.createLabel(localId, 'ghost-only', 'teal');
+    // 'vanished-stack' is not in mockFsStacks, so the fs-present filter drops it,
+    // leaving the label with zero matching stacks fleet-wide.
+    db.setStackLabels('vanished-stack', localId, [ghost.id]);
+
+    const res = await request(app)
+      .get('/api/fleet/labels/suggestions')
+      .set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    const names = res.body.suggestions.map((s: { name: string }) => s.name);
+    expect(names).not.toContain('ghost-only');
+  });
+
+  it('reports unreachable remotes as partial without dropping reachable suggestions', async () => {
+    const localId = db.getNodes().find(n => n.is_default)!.id;
+    const local = db.createLabel(localId, 'live-label', 'teal');
+    db.setStackLabels('alpha', localId, [local.id]);
+    const remoteId = db.addNode({
+      name: 'down-remote', type: 'remote', api_url: 'http://down.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
+      const res = await request(app)
+        .get('/api/fleet/labels/suggestions')
+        .set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      expect(res.body.partial).toBe(true);
+      expect(res.body.unreachableNodes).toBe(1);
+      const names = res.body.suggestions.map((s: { name: string }) => s.name);
+      expect(names).toContain('live-label');
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('fails closed: a remote returning a malformed label body is marked unreachable', async () => {
+    const localId = db.getNodes().find(n => n.is_default)!.id;
+    const local = db.createLabel(localId, 'safe-label', 'teal');
+    db.setStackLabels('alpha', localId, [local.id]);
+    const remoteId = db.addNode({
+      name: 'garbage-remote', type: 'remote', api_url: 'http://garbage.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith('/api/labels')) {
+          // Not an array: the fail-closed parser must reject the whole node.
+          return new Response(JSON.stringify({ not: 'an array' }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      const res = await request(app)
+        .get('/api/fleet/labels/suggestions')
+        .set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      expect(res.body.partial).toBe(true);
+      expect(res.body.unreachableNodes).toBe(1);
+      // The garbage remote contributes nothing; the local label still surfaces.
+      const names = res.body.suggestions.map((s: { name: string }) => s.name);
+      expect(names).toContain('safe-label');
     } finally {
       db.deleteNode(remoteId);
     }
@@ -435,7 +609,7 @@ describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
     }
   });
 
-  it('reports a malformed 200 body (non-array results) as a per-node failure', async () => {
+  it('degrades a malformed 200 body (non-array results) to empty instead of forwarding it', async () => {
     const remoteId = db.addNode({
       name: 'remote-malformed', type: 'remote', api_url: 'http://remote-malformed.example:1852',
       api_token: 'tok', compose_dir: '/app/compose', is_default: false,
@@ -454,10 +628,65 @@ describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
 
       expect(res.status).toBe(200);
       const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(remoteRow.stackResults).toEqual([]);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('calls the remote local-stop even when the control DB has no remote label row', async () => {
+    const remoteId = db.addNode({
+      name: 'remote-nomirror', type: 'remote', api_url: 'http://remote-nomirror.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      // Deliberately seed NO label/assignment for the remote in the control DB.
+      // The old mirror pre-check would have skipped this node entirely.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, status: 200,
+        json: async () => ({ matched: true, results: [{ stackName: 'remote-stack', success: true }] }),
+      } as unknown as Response);
+
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'remote-only-label' });
+
+      expect(res.status).toBe(200);
+      const urls = fetchSpy.mock.calls.map(c => String(c[0]));
+      expect(urls.some(u => u.endsWith('/api/fleet-actions/labels/local-stop'))).toBe(true);
+      const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(remoteRow.reachable).toBe(true);
+      expect(remoteRow.matched).toBe(true);
+      expect(remoteRow.stackResults).toEqual([{ stackName: 'remote-stack', success: true }]);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('reports an unreachable remote at the node level without blocking the local stop', async () => {
+    const localLabel = await createAssignedLabel('local-live', ['alpha']);
+    const remoteId = db.addNode({
+      name: 'remote-down', type: 'remote', api_url: 'http://remote-down.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: localLabel.name });
+
+      expect(res.status).toBe(200);
+      const localResult = res.body.results.find((r: { nodeId: number }) => r.nodeId === localLabel.node_id);
+      expect(localResult.reachable).toBe(true);
+      expect(localResult.matched).toBe(true);
+      expect(localResult.stackResults).toEqual([{ stackName: 'alpha', success: true }]);
+      const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
       expect(remoteRow.reachable).toBe(false);
-      expect(remoteRow.error).toMatch(/malformed/);
-      // Best-effort attribution from the control mirror (alpha was assigned above).
-      expect(remoteRow.stackResults).toEqual([{ stackName: 'alpha', success: false, error: 'Remote returned a malformed response' }]);
+      expect(remoteRow.matched).toBe(false);
+      expect(remoteRow.stackResults).toEqual([]);
+      expect(remoteRow.error).toMatch(/ECONNREFUSED|reach/i);
     } finally {
       db.deleteNode(remoteId);
     }
