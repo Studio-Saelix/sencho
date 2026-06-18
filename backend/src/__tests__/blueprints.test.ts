@@ -397,6 +397,32 @@ describe('BlueprintReconciler developer-mode diagnostics', () => {
 });
 
 describe('BlueprintService per-stack lock', () => {
+    it('deploy under a free lock writes compose then marker, then deploys', async () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        // Spy the file/deploy primitives so the locked critical section runs
+        // without touching the real filesystem or Docker.
+        vi.spyOn(FileSystemService.prototype, 'createStack').mockResolvedValue(undefined);
+        const writeSpy = vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockResolvedValue(undefined);
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
+
+        const outcome = await BlueprintService.getInstance().deployToNode(bp, node);
+
+        expect(outcome.status).toBe('active');
+        expect(deploySpy).toHaveBeenCalledWith(bp.name, undefined, false);
+        // Compose is written first, then the marker, both before the deploy.
+        expect(writeSpy).toHaveBeenCalledTimes(2);
+        expect(writeSpy.mock.calls[0][2]).toBe(bp.compose_content);
+        expect(writeSpy.mock.calls[1][2]).toContain('"blueprintId"');
+        const [composeOrder, markerOrder] = writeSpy.mock.invocationCallOrder;
+        const [deployOrder] = deploySpy.mock.invocationCallOrder;
+        expect(composeOrder).toBeLessThan(markerOrder);
+        expect(markerOrder).toBeLessThan(deployOrder);
+    });
+
     it('deploy skips, writes no stack files, and records failed when the stack lock is held', async () => {
         const nodeId = seedNode();
         const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });

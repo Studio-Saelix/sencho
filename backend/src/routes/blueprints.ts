@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import {
     DatabaseService,
     type BlueprintSelector,
@@ -307,6 +308,53 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
     } catch (error) {
         console.error('[Blueprints] Delete error:', error);
         res.status(500).json({ error: 'Failed to delete blueprint' });
+    }
+});
+
+// Node-to-node atomic blueprint apply. A hub posts here on the node that owns
+// the stack so the create / write compose+marker / deploy runs under that node's
+// per-stack lock (a remote node's lock is process-local and cannot be held by
+// the hub over separate HTTP calls). Gated by paid tier plus per-stack stack:edit
+// and stack:deploy, the same permissions as the PUT-compose + deploy it bundles;
+// the node token the hub presents satisfies them.
+blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promise<void> => {
+    if (!requirePaid(req, res)) return;
+    const body = (req.body ?? {}) as { stackName?: unknown; composeContent?: unknown; markerContent?: unknown };
+    if (typeof body.stackName !== 'string' || !isValidStackName(body.stackName)) {
+        res.status(400).json({ error: 'Invalid stack name' });
+        return;
+    }
+    // Same per-stack RBAC as writing the compose file and deploying it directly.
+    if (!requirePermission(req, res, 'stack:edit', 'stack', body.stackName)) return;
+    if (!requirePermission(req, res, 'stack:deploy', 'stack', body.stackName)) return;
+    if (typeof body.composeContent !== 'string' || typeof body.markerContent !== 'string') {
+        res.status(400).json({ error: 'composeContent and markerContent are required strings' });
+        return;
+    }
+    if (Buffer.byteLength(body.composeContent, 'utf8') > MAX_BLUEPRINT_COMPOSE_BYTES) {
+        res.status(413).json({ error: 'compose content too large' });
+        return;
+    }
+    if (BlueprintService.parseMarker(body.markerContent) === null) {
+        res.status(400).json({ error: 'Invalid blueprint marker' });
+        return;
+    }
+    try {
+        const outcome = await BlueprintService.getInstance().applyLocalUnderLock(
+            req.nodeId, body.stackName, body.composeContent, body.markerContent, '/api/blueprints/apply-local',
+        );
+        if (!outcome.ran) {
+            res.status(409).json({
+                error: `${body.stackName} is busy: another operation (${outcome.existingAction}) is already in progress`,
+                code: 'stack_op_in_progress',
+                inProgress: { action: outcome.existingAction },
+            });
+            return;
+        }
+        res.json({ deployed: true });
+    } catch (error) {
+        console.error('[Blueprints] apply-local error:', sanitizeForLog(getErrorMessage(error, 'apply failed')));
+        res.status(500).json({ error: getErrorMessage(error, 'Blueprint apply failed') });
     }
 });
 

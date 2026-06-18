@@ -9,7 +9,7 @@ import {
     type Node,
 } from './DatabaseService';
 import { ComposeService } from './ComposeService';
-import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
+import { StackOpLockService, stackOpSkipMessage, type StackOpAction } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER } from './license-headers';
@@ -380,8 +380,8 @@ export class BlueprintService {
 
     // ---- local primitives ----
 
-    private async stackDirExists(node: Node, blueprintName: string): Promise<boolean> {
-        const baseDir = NodeRegistry.getInstance().getComposeDir(node.id);
+    private async stackDirExists(nodeId: number, blueprintName: string): Promise<boolean> {
+        const baseDir = NodeRegistry.getInstance().getComposeDir(nodeId);
         const stackDir = path.resolve(baseDir, blueprintName);
         if (!stackDir.startsWith(path.resolve(baseDir))) return false;
         try {
@@ -404,36 +404,57 @@ export class BlueprintService {
             throw new Error(`Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`);
         }
 
-        const fs = FileSystemService.getInstance(node.id);
-        // Own the per-stack lock before any stack-file mutation, so a reconcile
-        // cannot rewrite the compose/marker files (let alone deploy) while a
-        // manual deploy/update/rollback/backup is running on the same stack and
-        // node. On conflict nothing is written: the callback never runs.
-        const lock = await StackOpLockService.getInstance().runExclusive(
-            node.id, blueprint.name, 'deploy', 'system',
-            async () => {
-                if (!(await this.stackDirExists(node, blueprint.name))) {
-                    await fs.createStack(blueprint.name);
-                }
-                await fs.writeStackFile(blueprint.name, COMPOSE_FILENAME, blueprint.compose_content);
-                await fs.writeStackFile(blueprint.name, MARKER_FILENAME, JSON.stringify(marker, null, 2));
-                await assertPolicyGateAllows(
-                    blueprint.name,
-                    node.id,
-                    buildSystemPolicyGateOptions('blueprint', {
-                        auditPath: `/api/blueprints/${blueprint.id}/deployments/${node.id}`,
-                    }),
-                );
-                await ComposeService.getInstance(node.id).deployStack(blueprint.name, undefined, false);
-            },
+        const outcome = await this.applyLocalUnderLock(
+            node.id,
+            blueprint.name,
+            blueprint.compose_content,
+            JSON.stringify(marker, null, 2),
+            `/api/blueprints/${blueprint.id}/deployments/${node.id}`,
         );
-        if (!lock.ran) {
-            throw new Error(stackOpSkipMessage(blueprint.name, lock.existing.action));
+        if (!outcome.ran) {
+            throw new Error(stackOpSkipMessage(blueprint.name, outcome.existingAction));
         }
         triggerPostDeployScan(blueprint.name, node.id).catch(err => {
             console.error('[BlueprintService] post-deploy scan failed for "%s" on node %s: %s',
                 sanitizeForLog(blueprint.name), node.id, sanitizeForLog(BlueprintService.formatError(err)));
         });
+    }
+
+    /**
+     * Create the stack if needed, write the compose and marker files, run the
+     * deploy policy gate, and deploy, all under the per-stack operation lock so
+     * none of it can race a manual deploy/update/rollback/backup on the same
+     * stack and node. Runs on the node that owns the stack: deployLocal calls it
+     * for the hub's own node, and the /api/blueprints/apply-local route calls it
+     * on a remote node receiving a blueprint apply from its hub (so the file
+     * writes hold the remote's lock, not just the deploy). On lock conflict
+     * nothing is written and { ran: false } is returned.
+     */
+    async applyLocalUnderLock(
+        nodeId: number,
+        stackName: string,
+        composeContent: string,
+        markerContent: string,
+        auditPath: string,
+    ): Promise<{ ran: true } | { ran: false; existingAction: StackOpAction }> {
+        const fs = FileSystemService.getInstance(nodeId);
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            nodeId, stackName, 'deploy', 'system',
+            async () => {
+                if (!(await this.stackDirExists(nodeId, stackName))) {
+                    await fs.createStack(stackName);
+                }
+                await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
+                await fs.writeStackFile(stackName, MARKER_FILENAME, markerContent);
+                await assertPolicyGateAllows(
+                    stackName,
+                    nodeId,
+                    buildSystemPolicyGateOptions('blueprint', { auditPath }),
+                );
+                await ComposeService.getInstance(nodeId).deployStack(stackName, undefined, false);
+            },
+        );
+        return lock.ran ? { ran: true } : { ran: false, existingAction: lock.existing.action };
     }
 
     private async withdrawLocal(blueprint: Blueprint, node: Node): Promise<void> {
@@ -449,7 +470,7 @@ export class BlueprintService {
                     // best-effort: continue to delete the directory even if down fails
                     console.warn(`[BlueprintService] downStack failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(err)}`);
                 }
-                if (await this.stackDirExists(node, blueprint.name)) {
+                if (await this.stackDirExists(node.id, blueprint.name)) {
                     await FileSystemService.getInstance(node.id).deleteStack(blueprint.name);
                 }
             },
@@ -471,6 +492,45 @@ export class BlueprintService {
     }
 
     private async deployRemote(blueprint: Blueprint, node: Node, marker: BlueprintMarker): Promise<void> {
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) throw new Error(`Remote node "${node.name}" has no proxy target configured`);
+        const baseUrl = target.apiUrl.replace(/\/$/, '');
+        const headers = this.remoteHeaders(target.apiToken);
+
+        // Atomic apply: the remote runs create + write compose/marker + deploy
+        // under its own per-stack lock, so the file writes cannot race a manual
+        // operation on that node. Older nodes without this route answer 404; we
+        // fall back to the legacy multi-call flow there (not lock-atomic).
+        const res = await axios.post(
+            `${baseUrl}/api/blueprints/apply-local`,
+            {
+                stackName: blueprint.name,
+                composeContent: blueprint.compose_content,
+                markerContent: JSON.stringify(marker, null, 2),
+            },
+            { headers, timeout: REMOTE_HTTP_TIMEOUT_MS, validateStatus: () => true },
+        );
+        if (res.status === 404) {
+            console.warn(`[BlueprintService] remote node ${node.id} lacks /api/blueprints/apply-local; using legacy non-atomic apply`);
+            await this.deployRemoteLegacy(blueprint, node, marker);
+            return;
+        }
+        if (res.status === 409) {
+            throw new Error(`blueprint apply skipped: ${BlueprintService.extractApiError(res.data) || 'another operation is already in progress'}`);
+        }
+        if (res.status >= 400) {
+            throw new Error(`blueprint apply: HTTP ${res.status} ${BlueprintService.extractApiError(res.data)}`);
+        }
+    }
+
+    /**
+     * Legacy remote apply for nodes that predate /api/blueprints/apply-local:
+     * create, write compose, write marker, deploy as separate calls. The remote
+     * deploy locks, but the preceding file writes do not, so this is not atomic
+     * against a concurrent manual operation on that node. Kept only as a
+     * compatibility fallback.
+     */
+    private async deployRemoteLegacy(blueprint: Blueprint, node: Node, marker: BlueprintMarker): Promise<void> {
         const target = NodeRegistry.getInstance().getProxyTarget(node.id);
         if (!target) throw new Error(`Remote node "${node.name}" has no proxy target configured`);
         const baseUrl = target.apiUrl.replace(/\/$/, '');
