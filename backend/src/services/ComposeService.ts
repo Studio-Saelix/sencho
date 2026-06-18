@@ -16,7 +16,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
-import { authoredComposeFileArgs } from '../utils/authoredComposeArgs';
+import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
 export class ComposeRollbackError extends Error {
@@ -104,6 +104,9 @@ export class ComposeService {
     const args: string[] = ['compose'];
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
     args.push(...filePrefix);
+    // Pin env resolution to the root .env when a context dir shifts the project
+    // directory, so deploy/update resolve the same effective config the validator did.
+    args.push(...await authoredComposeEnvFileArgs(stackName, this.nodeId));
 
     let overridePath: string | null = null;
     try {
@@ -653,7 +656,8 @@ export class ComposeService {
     // Use the authored multi-file model (no mesh override) so override-only image
     // refs are scanned by the policy gate; single-file stacks get an empty prefix.
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
-    const stdout = await this.captureCompose([...filePrefix, 'config', '--images'], stackDir);
+    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
+    const stdout = await this.captureCompose([...filePrefix, ...envFileArgs, 'config', '--images'], stackDir);
     const seen = new Set<string>();
     const images: string[] = [];
     for (const raw of stdout.split(/\r?\n/)) {
@@ -708,11 +712,11 @@ export class ComposeService {
    * finding rather than an exception. Bounded by a timeout and an output cap.
    * Rejects only when the docker binary cannot be spawned.
    */
-  public renderConfig(
+  public async renderConfig(
     stackName: string,
   ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean }> {
     if (!isValidStackName(stackName)) {
-      return Promise.reject(new Error('Invalid stack path'));
+      throw new Error('Invalid stack path');
     }
     // Canonical inline js/path-injection barrier, kept in the same scope as the
     // spawn cwd sink below. CodeQL credits neither the wrapped isPathWithinBase
@@ -722,17 +726,19 @@ export class ComposeService {
     const baseResolved = path.resolve(this.baseDir);
     const stackDir = path.resolve(baseResolved, stackName);
     if (!stackDir.startsWith(baseResolved + path.sep)) {
-      return Promise.reject(new Error('Invalid stack path'));
+      throw new Error('Invalid stack path');
     }
     // Render the authored multi-file model (no mesh override) so the Compose Doctor
-    // sees every override file; single-file stacks get an empty prefix.
+    // sees every override file; single-file stacks get an empty prefix. The env-file
+    // flag keeps render resolving the same root .env the validator and deploy use.
     let filePrefix: string[];
     try {
       filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
     } catch (err) {
-      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+      throw err instanceof Error ? err : new Error(String(err));
     }
-    const child = spawn('docker', ['compose', ...filePrefix, 'config', '--format', 'json'], {
+    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
+    const child = spawn('docker', ['compose', ...filePrefix, ...envFileArgs, 'config', '--format', 'json'], {
       cwd: stackDir,
       env: {
         ...process.env,

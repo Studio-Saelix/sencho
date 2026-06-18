@@ -1,4 +1,5 @@
 import path from 'path';
+import { promises as fsPromises } from 'fs';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { isPathWithinBase, isValidRelativeStackPath } from './validation';
@@ -54,4 +55,44 @@ export function authoredComposeFileArgs(stackName: string, nodeId?: number): str
   }
 
   return args;
+}
+
+/**
+ * Build the `--env-file <stackDir>/.env` flag a multi-file Git deploy needs when
+ * the applied spec sets a context dir, or `[]` otherwise.
+ *
+ * When `authoredComposeFileArgs` emits `--project-directory <contextDir>`, Docker
+ * Compose treats the context dir as the project directory and looks for `.env`
+ * there, not at the stack root where Sencho writes it. `validateCompose` passes
+ * the root `.env` explicitly with `--env-file` whenever the stack has env content,
+ * so without the same flag at deploy/render/scan time a Git source could validate
+ * with one effective config and deploy or render another. This flag makes every
+ * compose invocation resolve env from the same root `.env` the validator used.
+ *
+ * Scoped to the context-dir case on purpose: with no `--project-directory`, the
+ * project directory stays the stack dir (the compose command's cwd) and Compose
+ * auto-discovers the root `.env`, so single-file / no-context stacks need no flag
+ * and keep their existing behavior. An explicit `--env-file` to a missing file
+ * errors, so the flag is only added when a root `.env` actually exists.
+ */
+export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: number): Promise<string[]> {
+  const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+  const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+  if (!spec || spec.files.length === 0 || !spec.contextDir) return [];
+
+  const baseDir = NodeRegistry.getInstance().getComposeDir(resolvedNodeId);
+  // `.env` is a fixed filename under the validated stack dir, so it can never
+  // escape; no traversal check is needed here.
+  const envPath = path.resolve(baseDir, stackName, '.env');
+  try {
+    await fsPromises.access(envPath);
+  } catch (err) {
+    // A missing `.env` is the normal "nothing to pass" case. Any other error
+    // (e.g. EACCES on an existing but unreadable `.env`) is a real fault: surface
+    // it rather than silently dropping the flag and deploying a different effective
+    // config than the one validated.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+  return ['--env-file', envPath];
 }

@@ -10,18 +10,20 @@
  *   - any spec file path or context dir that is absolute / contains ".." throws
  *     before any args are returned (it is spliced straight into child-process argv)
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import path from 'path';
+import fs from 'fs';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 let tmpDir: string;
 let authoredComposeFileArgs: typeof import('../utils/authoredComposeArgs').authoredComposeFileArgs;
+let authoredComposeEnvFileArgs: typeof import('../utils/authoredComposeArgs').authoredComposeEnvFileArgs;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
-    ({ authoredComposeFileArgs } = await import('../utils/authoredComposeArgs'));
+    ({ authoredComposeFileArgs, authoredComposeEnvFileArgs } = await import('../utils/authoredComposeArgs'));
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ NodeRegistry } = await import('../services/NodeRegistry'));
 });
@@ -134,5 +136,83 @@ describe('authoredComposeFileArgs', () => {
             contextDir: '../escape',
         });
         expect(() => authoredComposeFileArgs(stackName)).toThrow();
+    });
+});
+
+/**
+ * authoredComposeEnvFileArgs: the `--env-file <stackDir>/.env` flag a multi-file
+ * Git deploy needs when a context dir is set. With `--project-directory <ctx>`,
+ * Compose treats the context dir as the project directory and stops auto-finding
+ * the root `.env` Sencho writes, so validation (which passes --env-file) and
+ * deploy would otherwise resolve different env. Single-file / no-context stacks
+ * keep Compose's default `.env` discovery from the stack dir, so they get no flag.
+ */
+describe('authoredComposeEnvFileArgs', () => {
+    /** Create the on-disk stack directory and optionally a root .env for it. */
+    function makeStackDir(stackName: string, withEnv: boolean): string {
+        const baseDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
+        const stackDir = path.join(baseDir, stackName);
+        fs.mkdirSync(stackDir, { recursive: true });
+        if (withEnv) fs.writeFileSync(path.join(stackDir, '.env'), 'TAG=1\n', 'utf-8');
+        else fs.rmSync(path.join(stackDir, '.env'), { force: true });
+        return stackDir;
+    }
+
+    it('returns [] for a stack with no git source at all', async () => {
+        expect(await authoredComposeEnvFileArgs('no-such-stack')).toEqual([]);
+    });
+
+    it('returns [] when the context dir is set but no .env exists', async () => {
+        const stackName = 'ctx-no-env';
+        seedSource(stackName, ['compose.yaml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', 'infra/prod.yml'],
+            contextDir: 'app',
+        });
+        makeStackDir(stackName, false);
+        expect(await authoredComposeEnvFileArgs(stackName)).toEqual([]);
+    });
+
+    it('returns [] when a .env exists but the spec has no context dir', async () => {
+        // No --project-directory, so the project dir stays the stack dir (cwd) and
+        // Compose auto-discovers the root .env; an explicit flag is not needed.
+        const stackName = 'env-no-ctx';
+        seedSource(stackName, ['compose.yaml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', 'infra/prod.yml'],
+            contextDir: null,
+        });
+        makeStackDir(stackName, true);
+        expect(await authoredComposeEnvFileArgs(stackName)).toEqual([]);
+    });
+
+    it('returns --env-file <stackDir>/.env when a context dir is set and a .env exists', async () => {
+        const stackName = 'ctx-with-env';
+        seedSource(stackName, ['compose.yaml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', 'infra/prod.yml'],
+            contextDir: 'app',
+        });
+        const stackDir = makeStackDir(stackName, true);
+        expect(await authoredComposeEnvFileArgs(stackName)).toEqual([
+            '--env-file', path.join(stackDir, '.env'),
+        ]);
+    });
+
+    it('rethrows a non-ENOENT access error instead of silently dropping the env file', async () => {
+        // An EACCES on an existing .env must surface, not be treated as "no env
+        // file": dropping --env-file there would deploy a different effective config
+        // than the one validated.
+        const stackName = 'ctx-eacces';
+        seedSource(stackName, ['compose.yaml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', 'infra/prod.yml'],
+            contextDir: 'app',
+        });
+        const spy = vi.spyOn(fs.promises, 'access').mockRejectedValueOnce(
+            Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+        );
+        await expect(authoredComposeEnvFileArgs(stackName)).rejects.toThrow(/permission denied/);
+        spy.mockRestore();
     });
 });
