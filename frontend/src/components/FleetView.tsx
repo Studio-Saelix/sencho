@@ -226,7 +226,9 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                     </TabsContent>
                 )}
                 <TabsContent value="actions">
-                    <FleetActionsTab nodes={overview.allNodes} />
+                    {/* Fleet Actions runs against the whole fleet, so it takes the
+                        unfiltered node list rather than the overview-filtered view. */}
+                    <FleetActionsTab nodes={overview.nodes} />
                 </TabsContent>
                 {isPaid && isAdmin && (
                     <TabsContent value="secrets">

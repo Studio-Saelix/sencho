@@ -13,15 +13,18 @@ interface FleetStopNodeResult {
   nodeId: number;
   nodeName: string;
   matched: boolean;
+  reachable?: boolean;
+  error?: string;
   stackResults: NodeStackResult[];
 }
 
 // Stop-by-label targets stack labels only. The `scope: 'stack'` tag keeps node
 // labels (a separate namespace) from ever being fed into this destructive card,
-// and the counts make the stack scope tangible in the picker.
-interface FleetStopLabelSuggestion { name: string; scope: 'stack'; nodeCount: number; stackCount: number }
+// and the counts make the stack scope tangible in the picker. `color` is the
+// representative node-local color the fleet aggregate reports.
+interface FleetStopLabelSuggestion { name: string; scope: 'stack'; color?: string; nodeCount: number; stackCount: number }
 
-interface MatchPreviewNode { nodeId: number; nodeName: string; stackCount: number; stackNames: string[] }
+interface MatchPreviewNode { nodeId: number; nodeName: string; reachable?: boolean; error?: string; stackCount: number; stackNames: string[] }
 interface MatchPreviewResponse { matchedNodes: number; matchedStacks: number; perNode: MatchPreviewNode[] }
 
 type PreviewState =
@@ -48,12 +51,13 @@ export function LabelFleetStopCard() {
   const [results, setResults] = useState<ResultRow[]>([]);
   const [preview, setPreview] = useState<PreviewState>({ kind: 'idle' });
 
-  // Stack-label suggestions for the target picker. The fleet endpoint aggregates
-  // the stack_labels rows across every configured node (central DB), so node
-  // labels can never appear here. A non-ok or malformed response leaves the list
-  // empty rather than crashing: the Actions tab renders without an admin gate
-  // while the endpoint is admin-only, so a viewer simply gets no suggestions and
-  // can still type a name by hand.
+  // Stack-label suggestions for the target picker. The fleet endpoint reads each
+  // node's stack labels live (local in process, remotes over the proxy), so a
+  // label that exists only on a reachable remote appears; offline remotes cannot
+  // be queried and do not contribute, and node labels never appear here. A non-ok
+  // or malformed response leaves the list empty rather than crashing: the Actions
+  // tab renders without an admin gate while the endpoint is admin-only, so a
+  // viewer simply gets no suggestions and can still type a name by hand.
   useEffect(() => {
     let cancelled = false;
     async function loadSuggestions() {
@@ -140,30 +144,37 @@ export function LabelFleetStopCard() {
         return;
       }
       const apiResults = (body.results as FleetStopNodeResult[]) ?? [];
-      const rows: ResultRow[] = apiResults.map((node) => ({
-        key: `node-${node.nodeId}`,
-        label: node.matched
-          ? `${node.nodeName} · ${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}${opts.dryRun ? ' (dry run)' : ''}`
-          : `${node.nodeName} (no matching stack label)`,
-        success: node.matched && node.stackResults.every(s => s.success),
-        error: node.matched ? undefined : 'Stack label not present',
-        sub: node.stackResults.map((s, i) => ({
-          key: `${node.nodeId}-${s.stackName}-${i}`,
-          label: s.stackName,
-          success: s.success,
-          error: s.error,
-        })),
-      }));
+      const rows: ResultRow[] = apiResults.map((node) => {
+        const unreachable = node.reachable === false;
+        return {
+          key: `node-${node.nodeId}`,
+          label: unreachable
+            ? `${node.nodeName} (unreachable)`
+            : node.matched
+              ? `${node.nodeName} · ${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}${opts.dryRun ? ' (dry run)' : ''}`
+              : `${node.nodeName} (no matching stack label)`,
+          success: !unreachable && node.matched && node.stackResults.every(s => s.success),
+          error: unreachable ? (node.error || 'Node unreachable') : node.matched ? undefined : 'Stack label not present',
+          sub: node.stackResults.map((s, i) => ({
+            key: `${node.nodeId}-${s.stackName}-${i}`,
+            label: s.stackName,
+            success: s.success,
+            error: s.error,
+          })),
+        };
+      });
       setResults(rows);
       const matchedNodes = apiResults.filter(n => n.matched).length;
+      const unreachableCount = apiResults.filter(n => n.reachable === false).length;
+      const unreachableSuffix = unreachableCount > 0 ? `, ${unreachableCount} node${unreachableCount === 1 ? '' : 's'} unreachable` : '';
       const stacksTouched = apiResults.flatMap(n => n.stackResults);
       const ok = stacksTouched.filter(s => s.success).length;
       const failed = stacksTouched.length - ok;
-      if (matchedNodes === 0) toast.info('No node carries a stack label by that name.');
-      else if (opts.dryRun) toast.success(`Dry run: would stop ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
-      else if (failed === 0 && ok > 0) toast.success(`Stopped ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
-      else if (ok === 0 && failed === 0) toast.info('Stack label matched but no stacks were assigned to it.');
-      else toast.warning(`${ok} stopped, ${failed} failed. See results below.`);
+      if (matchedNodes === 0 && unreachableCount === 0) toast.info('No node carries a stack label by that name.');
+      else if (opts.dryRun) toast.success(`Dry run: would stop ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}${unreachableSuffix}.`);
+      else if (failed === 0 && ok > 0 && unreachableCount === 0) toast.success(`Stopped ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.`);
+      else if (ok === 0 && failed === 0 && unreachableCount === 0) toast.info('Stack label matched but no stacks were assigned to it.');
+      else toast.warning(`${ok} stopped, ${failed} failed${unreachableSuffix}. See results below.`);
     } catch (err) {
       toast.dismiss(toastId);
       toast.error(err instanceof Error ? err.message : 'Network error');
@@ -261,10 +272,17 @@ function renderPreviewSection(preview: PreviewState, trimmed: string) {
   }
   if (preview.kind === 'ready') {
     const { matchedStacks, matchedNodes, perNode } = preview.data;
+    const unreachable = perNode.filter(n => n.reachable === false);
+    const unreachableNote = unreachable.length > 0 ? (
+      <div className={cn(KICKER, 'text-stat-icon mt-2')}>
+        {unreachable.length} node{unreachable.length === 1 ? '' : 's'} unreachable: {unreachable.map(n => n.nodeName).join(', ')}
+      </div>
+    ) : null;
     if (matchedStacks === 0) {
       return (
         <SheetSection title="Preview" meta="0 stacks">
           <div className={cn(KICKER, 'text-stat-icon')}>No stacks are assigned to this stack label</div>
+          {unreachableNote}
         </SheetSection>
       );
     }
@@ -274,6 +292,7 @@ function renderPreviewSection(preview: PreviewState, trimmed: string) {
         meta={`across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}`}
       >
         <PreviewWell perNode={perNode} />
+        {unreachableNote}
       </SheetSection>
     );
   }

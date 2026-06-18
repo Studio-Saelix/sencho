@@ -3,7 +3,7 @@ title: "Stack Labels"
 description: "Per-node tags that group your stacks by purpose, surface them under collapsible headers in the sidebar, and unlock cross-stack bulk actions across the fleet."
 ---
 
-A **Stack Label** is a per-node tag (name plus color) you can stick on any stack. Once a stack carries a label, the sidebar groups it under that label's header instead of dumping every stack into a flat list, and Fleet View can filter the overview by tag. Admins also get a pair of fleet-wide actions powered by labels: stop every stack labeled `prod` across every node, or replace the label set on a batch of stacks in one shot.
+A **Stack Label** is a per-node tag (name plus color) you can stick on any stack. Once a stack carries a label, the sidebar groups it under that label's header instead of dumping every stack into a flat list, and Fleet View can filter the overview by tag. Admins also get a pair of fleet-wide actions powered by labels: stop every stack labeled `prod` across every node, or add a label to stacks across nodes in one shot.
 
 <Frame>
   <img src="/images/stack-labels/sidebar-grouping.png" alt="Sidebar showing stacks grouped under three uppercase label headers (MEDIA 6, UTILITIES 5, NETWORK 3) and an UNLABELED 1 group at the bottom. Each stack row carries a small colored dot on the trailing edge that matches the group's color." />
@@ -88,27 +88,25 @@ A stack can carry multiple labels and will then appear under each label's group 
 Two cards in the **Fleet · Actions** tab use labels to drive cross-node operations. See [Fleet Actions](/features/fleet-actions) for the full reference.
 
 <Frame>
-  <img src="/images/stack-labels/fleet-actions.png" alt="Fleet Actions tab with two cards side by side. Left card 'Stop fleet by label' (rose accent rail) has a Stack label combobox containing 'Media' and a Stop fleet button beneath. Right card 'Bulk label assign' (purple accent rail) has a node selector reading Local (local), a stacks checklist showing plex and radarr ticked, a Labels row with a highlighted Media pill plus inactive Network and Utilities, and an Apply to 3 stacks button." />
+  <img src="/images/stack-labels/fleet-actions.png" alt="Fleet Actions tab with two cards side by side. Left card 'Stop fleet by label' (rose accent rail) has a Stack label combobox containing 'Media' and a Stop fleet button beneath. Right card 'Bulk label assign' (purple accent rail) has a label source row with a highlighted Media pill, a target-stacks list grouped by node with several stacks ticked, a per-node create-or-reuse preview, and an Apply button." />
 </Frame>
 
 ### Stop fleet by label
 
-Type a stack label name; Sencho fans the request out to every node and stops every stack on that node assigned a stack label with the same name. This action targets stack labels only, never node labels. The picker suggests stack labels from across the fleet, read from the control instance so labels on offline nodes appear too, each with its stack and node counts so the scope is unmistakable. The result list shows a per-node breakdown with success and failure counts, and the helper line under the input states the scope: `Stops stacks assigned to this stack label across matching nodes. Node labels are not used by this action.` A confirmation modal titled `Stop all stacks with the stack label "<name>"?` with the **Stop fleet** primary action runs the action.
+Type a stack label name; Sencho fans the request out to every node and stops every stack on that node assigned a stack label with the same name. This action targets stack labels only, never node labels. The picker suggests stack labels read live from each reachable node, so a label that exists only on a remote appears too, each with its stack and node counts so the scope is unmistakable. The result list shows a per-node breakdown with success and failure counts, and the helper line under the input states the scope: `Stops stacks assigned to this stack label across matching nodes. Node labels are not used by this action.` A confirmation modal titled `Stop all stacks with the stack label "<name>"?` with the **Stop fleet** primary action runs the action.
 
 A node with no stack label by that name is reported as a failure during the run, so a partial-fleet stop is observable rather than silent.
 
 ### Bulk label assign
 
-Pick a node from the dropdown; the card loads that node's stacks and labels in parallel. Tick the stacks you want to relabel and click the label pills you want to apply. The footer button reads `Apply to N stack(s)` and the confirmation modal title reads `Apply N label(s) to M stack(s)?` so the scope is unambiguous before you commit. A line under the controls makes the replacement semantics explicit:
+Pick a label that exists anywhere in the fleet, then tick the stacks you want across one or more nodes (grouped by node, with a filter and per-node select-all). The preview shows, per node, whether the label will be created or reused; **Apply** adds the label to each chosen stack on its node, creating it there first with the same name and color if the node does not have it yet. Existing labels on the selected stacks are preserved. The confirmation modal summarizes the blast radius before you commit, and the result list breaks down per node, noting whether the label was created or reused.
 
-> Selected labels replace each chosen stack's existing label set on this node. Selecting no labels clears assignments.
-
-The **Bulk label assign** card is per-node only by design. To re-tag stacks on a different node, switch the picker; the stack and label list refreshes and your previous selection clears.
+Because labels are node-local, each target node uses its own copy of the label rather than the control node's, so propagating a label keeps every node's label table self-consistent.
 
 ## Limits and rules
 
 - **50 labels per node.** Settings hides the **New label** button at the cap; the inline `+ New label` entry in the stack menu hides itself too.
-- **Names are unique per node**, case-sensitive. The same name on two nodes is two separate label rows. Cross-node fleet stop matches on name; bulk assign always operates on one node's labels at a time.
+- **Names are unique per node**, case-sensitive. The same name on two nodes is two separate label rows. Cross-node fleet stop and bulk assign both match by name across nodes; each node resolves the name to its own label (and bulk assign creates it there if missing).
 - **Allowed name characters**: letters, digits, spaces, and hyphens. Empty names and names beyond 30 characters are rejected at the API.
 - **Bulk-action concurrency**: only one label-driven bulk action can run on a single node at a time. A second concurrent attempt against the same node returns HTTP 429 and the operator sees an error toast; the in-flight action keeps running.
 - **Role visibility**: label authoring is open to every signed-in role. Sidebar grouping, trailing dots on stack rows, the **Settings · Organization · Labels** panel, the inline create form in the stack menu, and the Fleet View **Tags** filter all work for every user.
@@ -129,13 +127,13 @@ The **Bulk label assign** card is per-node only by design. To re-tag stacks on a
     The Tags filter aggregates labels across every node in the fleet by name. If the new label only exists on one node and that node was offline at the moment the page loaded, the dropdown may not include it. Refresh **Fleet · Overview** with the **Refresh** button in the toolbar to repull node state.
   </Accordion>
   <Accordion title="`Stop fleet by label` reports `No node carries a stack label by that name`">
-    Stack labels are per-node, so the fleet-stop matches by name across nodes. If the stack label you typed only exists on one node and you typed the wrong case (`prod` versus `Prod`), no node will match. The picker suggests stack labels read from the control instance across every configured node, including offline ones; node labels never appear there. Pick from the suggestion list rather than typing freehand to avoid case mistakes.
+    Stack labels are per-node, so the fleet-stop matches by name across nodes. If the stack label you typed only exists on one node and you typed the wrong case (`prod` versus `Prod`), no node will match. The picker suggests stack labels read live from each reachable node; a label on an offline node cannot be read, and node labels never appear there. Pick from the suggestion list rather than typing freehand to avoid case mistakes.
   </Accordion>
-  <Accordion title="`Bulk label assign` cleared every label on my stacks unexpectedly">
-    The card replaces, it does not merge. Selecting no labels and clicking **Apply to N stack(s)** is the documented way to clear assignments, and the confirmation copy on the **Bulk label assign** modal restates this: `No labels selected, this will clear existing assignments on the selected stacks.` Re-pick the labels you want and run the action again to restore them.
+  <Accordion title="`Bulk label assign` did not remove the old labels on my stacks">
+    By design it never does: the card only adds the label you picked, leaving each stack's other labels intact. There is no clear or replace mode. To remove or swap a stack's labels, edit them from that stack's own **Labels** menu.
   </Accordion>
-  <Accordion title="Two stacks with the same name on different nodes only got relabeled on one">
-    `Bulk label assign` is per-node by design. The node picker at the top is the source of truth and the stacks list only shows stacks on that node. Run the card a second time with the other node selected, or use **Stop fleet by label** instead if the goal is fleet-wide.
+  <Accordion title="A label did not appear on a remote node after bulk assign">
+    Confirm the node was reachable when you applied: an unreachable node is shown in the target list and reported in the per-node results rather than silently skipped. If the node was reachable, the label is created there by name with the chosen color and assigned; re-run to retry any node that failed.
   </Accordion>
   <Accordion title="The Fleet Actions cards return an error when I click Apply">
     The cards run admin-only. Confirm the active user has the admin role under **Settings · Users**; operator and viewer roles see the cards rendered but cannot apply them. All other Stack Labels surfaces (sidebar grouping, trailing dots, the Settings panel, the inline create form, the Fleet View Tags filter) work for every role.

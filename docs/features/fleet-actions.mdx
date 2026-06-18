@@ -1,6 +1,6 @@
 ---
 title: "Fleet Actions"
-description: "Bulk operations across the fleet from one tab: stop stacks by label, replace labels on a batch of stacks, and reclaim Docker disk space on every node."
+description: "Bulk operations across the fleet from one tab: stop stacks by label, assign a label to stacks across nodes, and reclaim Docker disk space on every node."
 ---
 
 The **Actions** tab on the Fleet view groups bulk operations that touch more than a single stack on a single node. Each action lives in its own card, runs from the control instance, and reports per-node and per-stack results inline so you never have to click through a modal to learn what happened.
@@ -34,10 +34,10 @@ The cards share a tab and a role gate, but they don't share an execution path. K
 | Card | Endpoint | Where it runs | Scope |
 |---|---|---|---|
 | Stop fleet by label | `POST /api/fleet/labels/fleet-stop` | Control instance orchestrates; fans out to each node | Every configured node |
-| Bulk label assign | `POST /api/fleet-actions/labels/bulk-assign` | Target node (request is proxied) | The single node you pick |
+| Bulk label assign | `POST /api/fleet/labels/bulk-assign` | Control instance orchestrates; fans out to each target node | The stacks you select across nodes |
 | Prune Docker resources fleet-wide | `POST /api/fleet/labels/fleet-prune` | Control instance orchestrates; fans out to each node | Every reachable node |
 
-The two fan-out cards (Stop and Prune) iterate every node in **Settings → Nodes**, including offline remotes; unreachable nodes show up in the results with a transport error rather than blocking the rest of the batch. The single-node card (Bulk label assign) proxies the request through the standard `x-node-id` header to the node you select, so the work happens locally on that node.
+All three cards orchestrate from the control instance and report results grouped by node. Stop and Prune iterate every node in **Settings → Nodes**; Bulk label assign iterates only the nodes whose stacks you selected. Each card runs the authoritative work on the executing node (the local node in process, every remote over the node proxy), so unreachable nodes show up in the results with a transport error rather than blocking the rest of the batch.
 
 ## Stop fleet by label
 
@@ -46,7 +46,7 @@ Stop every stack assigned a given **stack label** on every node where that stack
 ### Step by step
 
 1. Open **Fleet → Actions**.
-2. Type a name in the **Stack label** field. The picker suggests stack labels from across the fleet, each with its stack and node counts, so the scope is unmistakable. Suggestions are read from the control instance, so stack labels on offline nodes appear too. You can also type a name by hand.
+2. Type a name in the **Stack label** field. The picker suggests stack labels from across the fleet, each with its stack and node counts, so the scope is unmistakable. Suggestions are read live from each reachable node, so a stack label that exists only on a remote appears too; a label on an offline node cannot be read, so type the name by hand to target it. You can also type a name by hand at any time.
 3. Click **Stop fleet**.
 4. A confirmation appears with the kicker **Fleet stop** and the title `Stop all stacks with the stack label "<name>"?`. Click **Stop fleet** to commit.
 
@@ -76,30 +76,30 @@ A few quirks worth knowing:
 
 ## Bulk label assign
 
-Replace the label set on a batch of stacks on a single node, in one round trip. Use this when you've decided on a taxonomy change (e.g. splitting `prod` into `prod-edge` and `prod-core`) and need to relabel many stacks without clicking through each stack's editor.
+Add a stack label to stacks across the fleet in one round trip. Pick a label that exists anywhere in the fleet, select stacks on one or more nodes, and Sencho assigns that label on each target node, creating it there first if the node does not have it yet. Existing labels on the selected stacks are preserved. Use this to keep a label like `media` consistent across nodes without visiting each one to recreate and assign it by hand.
 
 <Frame>
-  <img src="/images/fleet-actions/fleet-actions-bulk-assign.png" alt="Bulk label assign card with the Local node selected, three stacks checked (bazarr, plex; counter reads 'Stacks (3/14)'), two labels toggled on (Media and Network; counter reads 'Labels (2/3)'), and the primary button reading 'Apply to 3 stacks'." />
+  <img src="/images/fleet-actions/fleet-actions-bulk-assign.png" alt="Bulk label assign card. A label source row of pills with 'Media' selected, a target-stacks list grouped by node (Local and a remote) with several stacks checked, a preview showing 'create' on the remote and 'reuse' on Local, and a primary button reading 'Apply'." />
 </Frame>
 
-### Single-node scope (and why)
+### Cross-node by label identity
 
-Unlike the other two cards, Bulk label assign targets exactly one node. The request is proxied via `x-node-id` to the node you pick from the **Select a node** dropdown, so the label rewrites happen on that node's local database. There is no fleet-wide variant in v1; if you need to retag the same stacks on multiple nodes, run the card once per node.
+Labels are node-local: each node owns its own copy of a label. Bulk label assign treats the label you pick as a name plus color, then resolves it per target node. If the node already has a label with that exact name, its own label is used; if not, Sencho creates one with the same name and color. The target node's own label is always used for the assignment, never the control node's.
 
 ### Step by step
 
-1. Pick a node from the **Select a node** dropdown. The card loads that node's stacks and labels in parallel.
-2. Check the stacks you want to update. The counter in the **STACKS** header reads `Stacks (selected/total)`; the **Select all** affordance flips to **Clear** once everything is selected.
-3. Toggle the label pills you want as the new label set. The counter in the **LABELS** header tracks the selection.
-4. Click **Apply to N stacks**. A confirmation appears titled `Apply N labels to M stacks?` (or the singular forms). Confirm to commit.
+1. Pick a label under **Label · source**. The pills list every stack label defined across the reachable fleet. If the same name carries different colors on different nodes, the local node's color is used where the label is created.
+2. Under **Target stacks**, check the stacks you want, grouped by node. Use the filter to narrow long lists and **Select all** to take a whole node. Unreachable nodes are shown and cannot be selected.
+3. The **Preview** shows, per node, whether the label will be **created** or **reused** and how many stacks it will touch.
+4. Click **Apply**. A confirmation summarizes the blast radius; confirm to commit. Results render grouped by node, each row noting whether the label was created or reused alongside the per-stack outcome.
 
-### Replace, not append
+### Add, preserving existing labels
 
-The selected label set **replaces** each chosen stack's existing label set on this node. Selecting zero labels clears assignments on those stacks; the confirmation modal calls this out so the destructive case is hard to miss.
+The selected label is **added** to each chosen stack; the stack keeps its other labels. The card only ever adds the one label you picked, so a fleet-wide propagation cannot accidentally wipe labels a remote node already carries.
 
 ### Batch ceiling
 
-The endpoint accepts up to **1,000 stack assignments per call** and returns `400` over the limit. In practice this is well above any sensible UI selection. Per-entry validation is lenient: an invalid stack name returns a per-entry failure row in the **Per-stack results** card, and the rest of the batch still applies.
+A single Apply accepts up to **1,000 stack assignments** summed across every target node and returns `400` over the limit. In practice this is well above any sensible UI selection. A stack that is missing on disk or has an invalid name returns a per-stack failure row, and the rest of the batch still applies.
 
 ## Prune Docker resources fleet-wide
 
@@ -144,8 +144,8 @@ Scope is a segmented control with two options:
 
 Fleet Actions is intentionally narrow in v1. The following are deliberately out of scope:
 
-- **No fleet-wide bulk label assign.** Bulk label assign targets one node at a time. Re-tagging the same stacks on multiple nodes is two clicks of the node selector and two confirmations.
-- **No fleet-wide bulk start, restart, or update.** Stop is the only fleet-wide stack action today. Per-node multi-stack start, restart, and update live in the sidebar's Bulk mode.
+- **No replace mode for bulk label assign.** The card only adds the label you pick; it never removes a stack's existing labels. To remove or swap labels on a stack, edit them from that stack's own view.
+- **No fleet-wide bulk start, restart, or update.** Stop is the only fleet-wide stack lifecycle action today. Per-node multi-stack start, restart, and update live in the sidebar's Bulk mode.
 - **No label-set selectors.** Stop fleet by label matches one label name. Combinations like "stacks labelled A AND B" are not supported.
 - **No partial-stop ceiling.** The Stop card stops every stack the label matches; there is no "stop the first N" knob.
 - **No undo.** A stopped stack stays stopped until you start it again; a pruned image is gone until it is pulled or rebuilt.
@@ -158,9 +158,9 @@ Fleet Actions is intentionally narrow in v1. The following are deliberately out 
 
 Tag the stacks you want to bring down with a dedicated label (for example `evening-shutdown`). Run **Stop fleet by label** with that label name. The per-node breakdown confirms each stack's stop result; restart from the sidebar when power is back.
 
-### Migrate a label taxonomy on one node
+### Propagate a label across the fleet
 
-Split a coarse label like `prod` into `prod-edge` and `prod-core` by creating the new labels in **Settings → Labels** on the affected node, then opening **Bulk label assign**, picking that node, checking the stacks that should move, and toggling the new label set. The replace-not-append semantic guarantees the old label is removed in the same write.
+Define a label like `media` on one node (for example the local node) under **Settings → Labels**, then open **Bulk label assign**, pick `media` under the label source, and check the matching stacks on every node. Sencho creates `media` on each node that does not have it and assigns it, leaving each stack's other labels intact. The label then matches fleet-wide in **Stop fleet by label** and in per-node stack filtering.
 
 ### Free disk before a heavy deploy
 
@@ -173,13 +173,13 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
     The fleet-stop match is by **stack label name**, not label ID. Confirm the stack label name on the affected node under **Settings → Labels**; a typo, a case mismatch, or a trailing space will leave the node out. Stack labels are scoped per node, so renaming the label on one node does not propagate to the others.
   </Accordion>
   <Accordion title="The autocomplete didn't suggest a stack label I know exists">
-    The picker reads stack labels from the control instance across every configured node, including offline ones, so a name is missing only when no node has a **stack label** by that name. Node labels never appear here, because this action targets stack labels only. You can always type a name by hand; the fleet-stop request still iterates every configured node.
+    The picker reads stack labels live from each reachable node, so a name that exists only on a remote still appears, but a label on an offline node cannot be read. Node labels never appear here, because these actions target stack labels only. You can always type a name by hand; the fleet-stop request still runs authoritatively against every reachable node.
   </Accordion>
-  <Accordion title="Bulk label assign reports 'Invalid stack name' for one row">
-    Stack names must match the standard validator: alphanumeric plus dash and underscore, no spaces, no path separators. The endpoint validates each assignment independently, so a single bad name does not block the rest of the batch. Fix the offending entry and re-run; the rows that already succeeded won't be re-applied.
+  <Accordion title="Bulk label assign reports 'Invalid stack name' or 'Stack not found' for one row">
+    Stack names must match the standard validator: alphanumeric plus dash and underscore, no spaces, no path separators. A name that does not exist on its node returns *Stack not found*. Each stack is validated independently, so one bad row does not block the rest of the batch. Fix the offending entry and re-run; the rows that already succeeded are simply re-added with no change.
   </Accordion>
-  <Accordion title="Apply to N stacks button is disabled">
-    The button requires at least one stack selected; the label selection can be empty (which clears assignments). Check that the node selector resolved (the **Loading…** spinner has cleared) and that the stack list is populated.
+  <Accordion title="The Apply button on Bulk label assign is disabled">
+    Apply needs both a label picked under the source and at least one stack checked. An empty label source means no stack labels are defined on any reachable node yet; create one under **Settings → Labels** first. Wait for the per-node lists to finish loading before selecting.
   </Accordion>
   <Accordion title="Fleet stop timed out on one remote node">
     Each remote node call carries a 60-second timeout. A remote with many stacks or a slow Docker daemon can outlast that budget. Check the affected remote's logs; the stop usually completed on the remote even though the control instance stopped waiting. Re-running the same fleet-stop is safe: stacks that are already stopped return the per-stack error *No containers found for this stack* and do not toggle anything else.

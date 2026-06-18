@@ -109,6 +109,13 @@ async function createAssignedLabel(name: string, stacks: string[]) {
   return created.body as { id: number; node_id: number; name: string };
 }
 
+// Fresh 200 JSON Response per call: the authoritative label summary issues two
+// parallel fetches per remote (/api/labels and /api/labels/assignments) and a
+// Response body can be read only once.
+function okJson(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
 describe('POST /api/fleet/labels/match-preview', () => {
   it('returns 401 without auth', async () => {
     const res = await request(app)
@@ -199,15 +206,21 @@ describe('GET /api/fleet/labels/suggestions', () => {
       api_token: 'tok', compose_dir: '/app/compose', is_default: false,
     });
     try {
-      // Same-named stack label on both nodes, each with one assigned stack.
+      // Local node: one assigned stack label and one unassigned (the picker
+      // still lists labels with no assignments).
       const local = db.createLabel(localId, 'shared-prod', 'teal');
       db.setStackLabels('alpha', localId, [local.id]);
-      const remote = db.createLabel(remoteId, 'shared-prod', 'teal');
-      db.setStackLabels('beta', remoteId, [remote.id]);
-      // A stack label with no assignments still belongs to the picker.
-      db.createLabel(localId, 'unused-stack-label', 'sky');
-      // A node-only label that must never surface as a stop target.
+      db.createLabel(localId, 'unused-stack-label', 'slate');
+      // The remote is queried authoritatively: it carries the same-named stack
+      // label (assigned to one stack). Its node-only label is never returned by
+      // /api/labels, proving node labels can't surface as stop targets.
       db.addNodeLabel(remoteId, 'edge-only');
+      vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+        const u = String(url);
+        if (u.endsWith('/api/labels/assignments')) return Promise.resolve(okJson({ beta: [{ id: 1, node_id: remoteId, name: 'shared-prod', color: 'teal' }] }));
+        if (u.endsWith('/api/labels')) return Promise.resolve(okJson([{ id: 1, node_id: remoteId, name: 'shared-prod', color: 'teal' }]));
+        return Promise.resolve(okJson({}));
+      });
 
       const res = await request(app)
         .get('/api/fleet/labels/suggestions')
@@ -244,8 +257,16 @@ describe('GET /api/fleet/labels/suggestions', () => {
       // A stack label 'prod' lives on the local node only...
       const stackLabel = db.createLabel(localId, 'prod', 'teal');
       db.setStackLabels('alpha', localId, [stackLabel.id]);
-      // ...while a node label of the same name lives on the remote node.
+      // ...while a node label of the same name lives on the remote node. The
+      // remote's authoritative /api/labels returns stack labels only (none here),
+      // so the node label cannot inflate the stack-label counts.
       db.addNodeLabel(remoteId, 'prod');
+      vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+        const u = String(url);
+        if (u.endsWith('/api/labels/assignments')) return Promise.resolve(okJson({}));
+        if (u.endsWith('/api/labels')) return Promise.resolve(okJson([]));
+        return Promise.resolve(okJson({}));
+      });
 
       const res = await request(app)
         .get('/api/fleet/labels/suggestions')
