@@ -9,6 +9,7 @@ import {
     type Node,
 } from './DatabaseService';
 import { ComposeService } from './ComposeService';
+import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER } from './license-headers';
@@ -416,7 +417,15 @@ export class BlueprintService {
                 auditPath: `/api/blueprints/${blueprint.id}/deployments/${node.id}`,
             }),
         );
-        await ComposeService.getInstance(node.id).deployStack(blueprint.name, undefined, false);
+        // Per-stack lock so blueprint reconciliation cannot race a manual
+        // deploy/update/rollback/backup on the same stack and node.
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            node.id, blueprint.name, 'deploy', 'system',
+            () => ComposeService.getInstance(node.id).deployStack(blueprint.name, undefined, false),
+        );
+        if (!lock.ran) {
+            throw new Error(stackOpSkipMessage(blueprint.name, lock.existing.action));
+        }
         triggerPostDeployScan(blueprint.name, node.id).catch(err => {
             console.error('[BlueprintService] post-deploy scan failed for "%s" on node %s: %s',
                 sanitizeForLog(blueprint.name), node.id, sanitizeForLog(BlueprintService.formatError(err)));
@@ -424,14 +433,25 @@ export class BlueprintService {
     }
 
     private async withdrawLocal(blueprint: Blueprint, node: Node): Promise<void> {
-        try {
-            await ComposeService.getInstance(node.id).downStack(blueprint.name);
-        } catch (err) {
-            // best-effort: continue to delete the directory even if down fails
-            console.warn(`[BlueprintService] downStack failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(err)}`);
-        }
-        if (await this.stackDirExists(node, blueprint.name)) {
-            await FileSystemService.getInstance(node.id).deleteStack(blueprint.name);
+        // Hold the per-stack lock across both the compose down and the directory
+        // delete so a withdraw cannot race a manual operation, nor tear the
+        // files out from under one that starts mid-withdraw.
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            node.id, blueprint.name, 'down', 'system',
+            async () => {
+                try {
+                    await ComposeService.getInstance(node.id).downStack(blueprint.name);
+                } catch (err) {
+                    // best-effort: continue to delete the directory even if down fails
+                    console.warn(`[BlueprintService] downStack failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(err)}`);
+                }
+                if (await this.stackDirExists(node, blueprint.name)) {
+                    await FileSystemService.getInstance(node.id).deleteStack(blueprint.name);
+                }
+            },
+        );
+        if (!lock.ran) {
+            throw new Error(stackOpSkipMessage(blueprint.name, lock.existing.action));
         }
     }
 

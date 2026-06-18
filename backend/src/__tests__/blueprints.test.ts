@@ -24,6 +24,7 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 let BlueprintReconciler: typeof import('../services/BlueprintReconciler').BlueprintReconciler;
 let NodeLabelService: typeof import('../services/NodeLabelService').NodeLabelService;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
+let StackOpLockService: typeof import('../services/StackOpLockService').StackOpLockService;
 let counter = 0;
 
 beforeAll(async () => {
@@ -32,6 +33,7 @@ beforeAll(async () => {
     ({ BlueprintReconciler } = await import('../services/BlueprintReconciler'));
     ({ NodeLabelService } = await import('../services/NodeLabelService'));
     ({ BlueprintService } = await import('../services/BlueprintService'));
+    ({ StackOpLockService } = await import('../services/StackOpLockService'));
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -43,6 +45,7 @@ beforeEach(() => {
     db.prepare('DELETE FROM node_labels').run();
     db.prepare("DELETE FROM nodes WHERE is_default = 0").run();
     db.prepare("UPDATE global_settings SET value = '0' WHERE key = 'developer_mode'").run();
+    StackOpLockService.resetForTests();
     vi.restoreAllMocks();
 });
 
@@ -390,6 +393,23 @@ describe('BlueprintReconciler developer-mode diagnostics', () => {
         await BlueprintReconciler.getInstance().reconcileOne(bp.id);
 
         expect(infoSpy.mock.calls.some(([message]) => String(message).includes('[BlueprintReconciler:diag]'))).toBe(true);
+    });
+});
+
+describe('BlueprintService per-stack lock', () => {
+    it('withdraw skips and records failed when a manual operation holds the stack lock', async () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        // A manual operation holds the lock; the withdraw must not race it.
+        StackOpLockService.getInstance().tryAcquire(nodeId, bp.name, 'update', 'admin');
+
+        const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
+
+        expect(outcome.status).toBe('failed');
+        expect(outcome.error).toContain('already in progress');
+        // The lock is still held by the manual op (the withdraw never acquired it).
+        expect(StackOpLockService.getInstance().get(nodeId, bp.name)?.action).toBe('update');
     });
 });
 

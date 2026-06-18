@@ -749,7 +749,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const errorMessage = deployError.message || 'Failed to deploy stack';
       toast.error(
         deployError.rolledBack === true
-          ? `${errorMessage} - automatically rolled back to previous version.`
+          ? `${errorMessage} - automatically restored the previous compose and env files.`
           : errorMessage,
       );
       recordActionFailureFor(stackFile, stackName, 'deploy', startedAt, errorMessage, deployError.rolledBack === true, deployError.failure);
@@ -1265,7 +1265,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const msg = actionError.message || `Failed to ${action} stack`;
       toast.error(
         action === 'deploy' && actionError.rolledBack === true
-          ? `${msg} - automatically rolled back to previous version.`
+          ? `${msg} - automatically restored the previous compose and env files.`
           : msg,
       );
       recordActionFailureFor(stackFile, stackName, action, startedAt, msg, actionError.rolledBack === true, actionError.failure);

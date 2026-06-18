@@ -341,7 +341,7 @@ export class ComposeService {
       await this.withRegistryAuth(async (env) => {
         await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env);
       }, sendOutput);
-      sendOutput('=== Rolled back successfully ===\n');
+      sendOutput('=== Restored previous compose and env files ===\n');
       return true;
     } catch (rollbackError) {
       console.error('Rollback failed for %s:', sanitizeForLog(stackName), getErrorMessage(rollbackError, 'unknown error'));
@@ -413,7 +413,7 @@ export class ComposeService {
       if (debug) console.debug(`[ComposeService:debug] deployStack completed in ${Date.now() - t0}ms`, { stackName });
     } catch (deployError) {
       if (atomic) {
-        sendOutput('\n=== Deployment failed - rolling back to previous version ===\n');
+        sendOutput('\n=== Deployment failed - restoring previous compose and env files ===\n');
         const rolledBack = await this.restoreAtomicBackup(stackName, stackDir, ws, sendOutput);
         throw new ComposeRollbackError(deployError, true, rolledBack);
       }
@@ -613,7 +613,7 @@ export class ComposeService {
       if (debug) console.debug(`[ComposeService:debug] updateStack completed in ${Date.now() - t0}ms`, { stackName });
     } catch (updateError) {
       if (atomic) {
-        sendOutput('\n=== Update failed - rolling back to previous version ===\n');
+        sendOutput('\n=== Update failed - restoring previous compose and env files ===\n');
         const rolledBack = await this.restoreAtomicBackup(stackName, stackDir, ws, sendOutput);
         throw new ComposeRollbackError(updateError, true, rolledBack);
       }
