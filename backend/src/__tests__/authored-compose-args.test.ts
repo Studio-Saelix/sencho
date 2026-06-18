@@ -199,6 +199,18 @@ describe('authoredComposeEnvFileArgs', () => {
         ]);
     });
 
+    it('returns [] for a stack name that escapes the compose base (path-injection guard)', async () => {
+        // The inline barrier rejects a traversal name before the fs access, so no
+        // --env-file is emitted for a path outside the compose base.
+        const stackName = '../escape';
+        seedSource(stackName, ['infra/base.yml', 'infra/prod.yml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml', 'infra/prod.yml'],
+            contextDir: 'app',
+        });
+        expect(await authoredComposeEnvFileArgs(stackName)).toEqual([]);
+    });
+
     it('rethrows a non-ENOENT access error instead of silently dropping the env file', async () => {
         // An EACCES on an existing .env must surface, not be treated as "no env
         // file": dropping --env-file there would deploy a different effective config

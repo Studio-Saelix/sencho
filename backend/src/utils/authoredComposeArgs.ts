@@ -80,10 +80,14 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
   const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
   if (!spec || spec.files.length === 0 || !spec.contextDir) return [];
 
-  const baseDir = NodeRegistry.getInstance().getComposeDir(resolvedNodeId);
-  // `.env` is a fixed filename under the validated stack dir, so it can never
-  // escape; no traversal check is needed here.
-  const envPath = path.resolve(baseDir, stackName, '.env');
+  // Inline js/path-injection barrier at the fs sink: resolve against a known-safe
+  // base and assert containment with startsWith right here. CodeQL does not credit
+  // the wrapped isPathWithinBase helper or a check separated from the sink, matching
+  // the inline guards in renderConfig and validateCompose. `.env` is a fixed name.
+  const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
+  const stackDir = path.resolve(baseResolved, stackName);
+  if (!stackDir.startsWith(baseResolved + path.sep)) return [];
+  const envPath = path.resolve(stackDir, '.env');
   try {
     await fsPromises.access(envPath);
   } catch (err) {
