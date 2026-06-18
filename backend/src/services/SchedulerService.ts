@@ -5,6 +5,7 @@ import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
+import { StackOpLockService, stackOpSkipMessage as skipMessage } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
 import { HealthGateService } from './HealthGateService';
 import { ImageUpdateService } from './ImageUpdateService';
@@ -488,7 +489,14 @@ export class SchedulerService {
             await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/backup`);
             return `Backed up stack "${task.target_id}" files on remote node`;
         }
-        await FileSystemService.getInstance(task.node_id).backupStackFiles(task.target_id);
+        const localNodeId = task.node_id ?? NodeRegistry.getInstance().getDefaultNodeId();
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            localNodeId, task.target_id, 'backup', 'system',
+            () => FileSystemService.getInstance(localNodeId).backupStackFiles(task.target_id),
+        );
+        // Throw (not return) so the skip records as a failed run instead of a
+        // silent success; the next scheduled tick retries once the lock frees.
+        if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
         return `Backed up stack "${task.target_id}" files`;
     }
 
@@ -498,7 +506,12 @@ export class SchedulerService {
             await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/stop`);
             return `Stopped stack "${task.target_id}" (containers preserved) on remote node`;
         }
-        await ComposeService.getInstance(task.node_id).runCommand(task.target_id, 'stop');
+        const localNodeId = task.node_id ?? NodeRegistry.getInstance().getDefaultNodeId();
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            localNodeId, task.target_id, 'stop', 'system',
+            () => ComposeService.getInstance(localNodeId).runCommand(task.target_id, 'stop'),
+        );
+        if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
         return `Stopped stack "${task.target_id}" (containers preserved)`;
     }
 
@@ -508,7 +521,12 @@ export class SchedulerService {
             await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/down`);
             return `Took down stack "${task.target_id}" (containers removed) on remote node`;
         }
-        await ComposeService.getInstance(task.node_id).runCommand(task.target_id, 'down');
+        const localNodeId = task.node_id ?? NodeRegistry.getInstance().getDefaultNodeId();
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            localNodeId, task.target_id, 'down', 'system',
+            () => ComposeService.getInstance(localNodeId).runCommand(task.target_id, 'down'),
+        );
+        if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
         return `Took down stack "${task.target_id}" (containers removed)`;
     }
 
@@ -527,7 +545,12 @@ export class SchedulerService {
             'Auto-start',
             `/api/scheduled-tasks/${task.id}/run`,
         );
-        await ComposeService.getInstance(task.node_id).deployStack(task.target_id);
+        const localNodeId = task.node_id ?? NodeRegistry.getInstance().getDefaultNodeId();
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            localNodeId, task.target_id, 'deploy', 'system',
+            () => ComposeService.getInstance(localNodeId).deployStack(task.target_id),
+        );
+        if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
         return `Started stack "${task.target_id}"`;
     }
 
@@ -860,7 +883,11 @@ export class SchedulerService {
         // Atomic backup/rollback is the default deploy mode: take a pre-op
         // backup and roll back on failure for every scheduled auto-update.
         const atomic = true;
-        await compose.updateStack(stackName, undefined, atomic);
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            nodeId, stackName, 'update', 'system',
+            () => compose.updateStack(stackName, undefined, atomic),
+        );
+        if (!lock.ran) return skipMessage(stackName, lock.existing.action);
         db.clearStackUpdateStatus(nodeId, stackName);
         HealthGateService.getInstance().begin(nodeId, stackName, 'update', 'system:scheduler');
 

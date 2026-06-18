@@ -188,9 +188,12 @@ export interface RollbackInputs {
   /**
    * UpdatePreview.rollback_target wrapped in an object so the Errored sentinel
    * cannot be absorbed into the string domain (an image literally named
-   * "error" must not read as a failed preview).
+   * "error" must not read as a failed preview). `moving` is true when any image
+   * in the stack uses a moving tag (latest, a branch, an unpinned major/minor),
+   * in which case restoring files does not revert the image because the local
+   * tag already resolves to the newer digest.
    */
-  rollbackTarget: { target: string | null } | Errored;
+  rollbackTarget: { target: string | null; moving: boolean } | Errored;
   /** Timestamp of the most recent deploy_success activity event, if any. */
   lastDeployAt: number | null | Errored;
   containers: ContainerProbe[] | Errored;
@@ -224,8 +227,10 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
 
   if (inputs.rollbackTarget === 'error') {
     items.push({ id: 'previous_images', state: 'unknown', label: 'Previous image tag', detail: 'The update preview is unavailable.' });
+  } else if (inputs.rollbackTarget.target && inputs.rollbackTarget.moving) {
+    items.push({ id: 'previous_images', state: 'not_covered', label: 'Previous image tag', detail: `Rollback target ${inputs.rollbackTarget.target}. This stack uses a moving image tag, so restoring the compose and env files does not revert the image: the local tag still resolves to the newer digest. Pin every image to an immutable version tag for a true image rollback.` });
   } else if (inputs.rollbackTarget.target) {
-    items.push({ id: 'previous_images', state: 'ready', label: 'Previous image tag', detail: `Known rollback target: ${inputs.rollbackTarget.target}. If the compose file uses a moving tag, restoring files alone does not revert the image; pin this tag to be exact.` });
+    items.push({ id: 'previous_images', state: 'ready', label: 'Previous image tag', detail: `Known rollback target: ${inputs.rollbackTarget.target}. The compose file pins an immutable tag, so restoring files also restores the image.` });
   } else {
     items.push({ id: 'previous_images', state: 'unknown', label: 'Previous image tag', detail: 'The previous image tag could not be determined. A rollback restores compose and env files; a moving tag may keep the newer image.' });
   }

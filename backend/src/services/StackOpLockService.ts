@@ -11,6 +11,14 @@
 
 export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'rollback' | 'backup';
 
+/**
+ * Note returned by a background path that skipped its operation because a manual
+ * or concurrent operation already held the stack's lock.
+ */
+export function stackOpSkipMessage(stackName: string, existingAction: StackOpAction): string {
+  return `Skipped "${stackName}": another operation (${existingAction}) is already in progress.`;
+}
+
 export interface StackOpLock {
   action: StackOpAction;
   startedAt: number;
@@ -60,6 +68,34 @@ export class StackOpLockService {
 
   public release(nodeId: number, stackName: string): void {
     this.locks.delete(this.key(nodeId, stackName));
+  }
+
+  /**
+   * Acquire the per-(nodeId, stackName) lock for the duration of `fn`, then
+   * release it. Returns `{ ran: true, result }` when the lock was free, or
+   * `{ ran: false, existing }` when another operation already holds it, so the
+   * caller can skip rather than race. Background/system paths (scheduler,
+   * webhook, Git source, image auto-update, label bulk actions, fleet snapshot
+   * redeploy, mesh redeploy) run their lifecycle calls through this so they
+   * cannot interleave with a manual deploy/update/rollback/backup on the same
+   * stack and node. An error thrown by `fn` still releases the lock, then
+   * propagates to the caller.
+   */
+  public async runExclusive<T>(
+    nodeId: number,
+    stackName: string,
+    action: StackOpAction,
+    user: string,
+    fn: () => Promise<T>,
+  ): Promise<{ ran: true; result: T } | { ran: false; existing: StackOpLock }> {
+    const acquired = this.tryAcquire(nodeId, stackName, action, user);
+    if (!acquired.acquired) return { ran: false, existing: acquired.existing };
+    try {
+      const result = await fn();
+      return { ran: true, result };
+    } finally {
+      this.release(nodeId, stackName);
+    }
   }
 
   public get(nodeId: number, stackName: string): StackOpLock | undefined {

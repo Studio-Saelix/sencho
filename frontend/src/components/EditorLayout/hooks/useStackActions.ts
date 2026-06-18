@@ -660,14 +660,16 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   // Parse a 409 body for a scan-policy block. When it is one, record it (with
-  // the originating action and file so the bypass retries the right endpoint)
-  // so PolicyBlockDialog can open, and return the policy name. Returns null
-  // when the body is not a policy block (e.g. a stack-op-in-progress 409).
+  // the originating action, file, and the node the operation targeted so the
+  // bypass retries the right endpoint on the right node) so PolicyBlockDialog
+  // can open, and return the policy name. Returns null when the body is not a
+  // policy block (e.g. a stack-op-in-progress 409).
   const tryOpenPolicyBlock = (
     rawBody: string,
     stackName: string,
     stackFile: string,
     action: PolicyBlockableAction,
+    opNodeId: number | null,
   ): string | null => {
     let parsed: PolicyBlockPayload | null = null;
     try {
@@ -676,7 +678,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       /* not JSON */
     }
     if (parsed && parsed.policy && Array.isArray(parsed.violations)) {
-      overlayState.setPolicyBlock({ stackName, stackFile, action, payload: parsed });
+      overlayState.setPolicyBlock({ stackName, stackFile, action, payload: parsed, nodeId: opNodeId });
       return parsed.policy.name;
     }
     return null;
@@ -712,7 +714,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             toast.error(message);
             return { ok: false, errorMessage: message };
           }
-          const blockedBy = tryOpenPolicyBlock(rawBody, stackName, stackFile, 'deploy');
+          const blockedBy = tryOpenPolicyBlock(rawBody, stackName, stackFile, 'deploy', opNodeId ?? null);
           if (blockedBy) {
             const message = `Deploy blocked by policy "${blockedBy}"`;
             toast.error(message);
@@ -831,19 +833,20 @@ export function useStackActions(options: UseStackActionsOptions) {
   const bypassPolicyAndRetry = async () => {
     const policyBlock = overlayState.policyBlock;
     if (!policyBlock) return;
-    const { stackName, stackFile, action } = policyBlock;
+    // Retry on the node the block was raised against, not the live active node,
+    // which may have changed while the dialog was open.
+    const { stackName, stackFile, action, nodeId: opNodeId } = policyBlock;
     const existingFile = stackListState.files.includes(stackFile)
       ? stackFile
       : (stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackFile);
     overlayState.setPolicyBypassing(true);
     try {
       if (action === 'update') {
-        await runStackAction(existingFile, 'update', 'update', 'running', 'Stack updated successfully!', true);
+        await runStackAction(existingFile, 'update', 'update', 'running', 'Stack updated successfully!', true, opNodeId);
       } else if (action === 'rollback') {
-        await rollbackStack(true);
+        await rollbackStack(true, opNodeId);
       } else {
         stackListState.setStackAction(existingFile, 'deploy');
-        const opNodeId = activeNode?.id ?? null;
         try {
           await runWithLog({ stackName, action: 'deploy', nodeId: opNodeId }, (started, ds) =>
             runDeploy(stackName, existingFile, true, started, ds, opNodeId),
@@ -858,7 +861,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const rollbackStack = async (ignorePolicy = false) => {
+  const rollbackStack = async (ignorePolicy = false, opNodeId: number | null = activeNode?.id ?? null) => {
     if (!stackListState.selectedFile || stackListState.isStackBusy(stackListState.selectedFile))
       return;
     const stackFile = stackListState.selectedFile;
@@ -870,7 +873,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const path = ignorePolicy
         ? `/stacks/${stackFile}/rollback?ignorePolicy=true`
         : `/stacks/${stackFile}/rollback`;
-      const res = await apiFetch(path, { method: 'POST' });
+      const res = await apiFetch(path, { method: 'POST', nodeId: opNodeId });
       if (!res.ok) {
         const rawBody = await res.text();
         if (res.status === 409) {
@@ -880,7 +883,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             toast.error(message);
             return;
           }
-          const blockedBy = tryOpenPolicyBlock(rawBody, stackName, stackFile, 'rollback');
+          const blockedBy = tryOpenPolicyBlock(rawBody, stackName, stackFile, 'rollback', opNodeId);
           if (blockedBy) {
             toast.error(`Rollback blocked by policy "${blockedBy}"`);
             return;
@@ -889,7 +892,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         throw parseStackActionError(rawBody, 'Rollback failed', res.status);
       }
       overlayState.setPolicyBlock(null);
-      toast.success('Stack rolled back successfully.');
+      toast.success('Stack rolled back: compose and env files restored.');
       stackListState.recordActionSuccess(stackFile);
       // The rollback already succeeded; a failure of the cosmetic refetches below
       // (containers redeployed by the rollback, restored compose content, backup
@@ -968,6 +971,11 @@ export function useStackActions(options: UseStackActionsOptions) {
     optimisticStatus: 'running' | 'exited',
     successMessage: string,
     ignorePolicy = false,
+    // Node the operation targets. Defaults to the live active node for direct
+    // callers (toolbar stop/restart); the update path passes the node captured
+    // when its readiness dialog opened so a mid-dialog node switch cannot
+    // retarget the update.
+    opNodeId: number | null = activeNode?.id ?? null,
   ): Promise<void> => {
     if (stackListState.isStackBusy(stackFile)) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
@@ -975,9 +983,6 @@ export function useStackActions(options: UseStackActionsOptions) {
     const startedAt = Date.now();
     stackListState.setStackAction(stackFile, action);
     stackListState.setOptimisticStatus(stackFile, optimisticStatus);
-    // Snapshot the node once so stop/restart/update stays bound to it even if
-    // the active node changes while the operation is in flight.
-    const opNodeId = activeNode?.id ?? null;
     try {
       await runWithLog({ stackName, action, nodeId: opNodeId }, async (started, ds) => {
         await started;
@@ -996,7 +1001,7 @@ export function useStackActions(options: UseStackActionsOptions) {
                 return { ok: false as const, errorMessage: message };
               }
               if (action === 'update') {
-                const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, 'update');
+                const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, 'update', opNodeId);
                 if (blockedBy) {
                   const message = `Update blocked by policy "${blockedBy}"`;
                   toast.error(message);
@@ -1091,11 +1096,15 @@ export function useStackActions(options: UseStackActionsOptions) {
   const requestStackUpdate = async (stackFile: string): Promise<void> => {
     if (stackListState.isStackBusy(stackFile)) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
-    const run = () => runStackAction(stackFile, 'update', 'update', 'running', 'Stack updated successfully!');
+    // Capture the node now so the readiness fetch and the update both target it
+    // even if the active node changes while the readiness dialog is open.
+    const opNodeId = activeNode?.id ?? null;
+    const run = () => runStackAction(stackFile, 'update', 'update', 'running', 'Stack updated successfully!', false, opNodeId);
     if (hasUpdateGuard) {
       overlayState.setUpdateReadiness({
         stackName,
         stackFile,
+        nodeId: opNodeId,
         proceed: () => {
           overlayState.setUpdateReadiness(null);
           void run();
@@ -1208,6 +1217,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const startedAt = Date.now();
+    // Bind this sidebar action to the active node now so a policy-block bypass
+    // retries on the same node even if the active node changes meanwhile.
+    const opNodeId = activeNode?.id ?? null;
     stackListState.setStackAction(stackFile, action);
 
     if (action === 'stop') {
@@ -1217,7 +1229,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
 
     try {
-      const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST' });
+      const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST', nodeId: opNodeId });
       if (!response.ok) {
         const errText = await response.text();
         if (response.status === 409) {
@@ -1227,7 +1239,7 @@ export function useStackActions(options: UseStackActionsOptions) {
             return;
           }
           if (action === 'deploy') {
-            const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, action);
+            const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, action, opNodeId);
             if (blockedBy) {
               toast.error(`Deploy blocked by policy "${blockedBy}"`);
               return;

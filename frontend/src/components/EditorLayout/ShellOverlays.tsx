@@ -96,6 +96,7 @@ export function ShellOverlays({
       <UpdateReadinessDialog
         open={updateReadiness !== null}
         stackName={updateReadiness?.stackName ?? ''}
+        nodeId={updateReadiness?.nodeId ?? null}
         onCancel={() => setUpdateReadiness(null)}
         onProceed={() => updateReadiness?.proceed()}
       />

@@ -18,6 +18,10 @@ type PolicyBlock = {
   stackFile: string;
   action: PolicyBlockableAction;
   payload: PolicyBlockPayload;
+  // Node captured when the block was raised, so a bypass retry (deploy, update,
+  // or rollback) targets that node even if the active node changes while the
+  // dialog is open.
+  nodeId: number | null;
 };
 type Container = { id: string; name: string };
 
@@ -90,10 +94,13 @@ export function useOverlayState() {
   const [policyBypassing, setPolicyBypassing] = useState(false);
 
   // Pre-update readiness dialog. `proceed` runs the actual update when the
-  // user confirms; opened by useStackActions.requestStackUpdate.
+  // user confirms; opened by useStackActions.requestStackUpdate. `nodeId` is
+  // captured at open time so both the readiness fetch and the update run against
+  // the same node even if the active node changes while the dialog is open.
   const [updateReadiness, setUpdateReadiness] = useState<{
     stackName: string;
     stackFile: string;
+    nodeId: number | null;
     proceed: () => void;
   } | null>(null);
 
