@@ -609,7 +609,37 @@ describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
     }
   });
 
-  it('degrades a malformed 200 body (non-array results) to empty instead of forwarding it', async () => {
+  it('accepts a legitimate empty stop (matched:true, results:[]) without flagging it malformed', async () => {
+    const remoteId = db.addNode({
+      name: 'remote-empty', type: 'remote', api_url: 'http://remote-empty.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      const label = db.createLabel(remoteId, `remote-empty-${++labelCounter}`, 'teal');
+      db.setStackLabels('alpha', remoteId, [label.id]);
+      // The local-stop receiver emits exactly this when the label exists with no
+      // assigned stacks. The guard must let it through, not over-reject it.
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, status: 200, json: async () => ({ matched: true, results: [] }),
+      } as unknown as Response);
+
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: label.name });
+
+      expect(res.status).toBe(200);
+      const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(remoteRow.reachable).toBe(true);
+      expect(remoteRow.matched).toBe(true);
+      expect(remoteRow.stackResults).toEqual([]);
+      expect(remoteRow.error).toBeUndefined();
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('fails a node whose 200 body has a non-array results, never rendering it as zero-stack success', async () => {
     const remoteId = db.addNode({
       name: 'remote-malformed', type: 'remote', api_url: 'http://remote-malformed.example:1852',
       api_token: 'tok', compose_dir: '/app/compose', is_default: false,
@@ -628,7 +658,41 @@ describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
 
       expect(res.status).toBe(200);
       const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      // A malformed contract is a node failure: reachable:false + error, not the
+      // matched:true/empty-results shape the UI reads as a successful no-op.
+      expect(remoteRow.reachable).toBe(false);
+      expect(remoteRow.matched).toBe(false);
       expect(remoteRow.stackResults).toEqual([]);
+      expect(remoteRow.error).toMatch(/malformed/i);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('fails a node whose 200 body omits the matched flag instead of defaulting it to true', async () => {
+    const remoteId = db.addNode({
+      name: 'remote-no-matched', type: 'remote', api_url: 'http://remote-no-matched.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      const label = db.createLabel(remoteId, `remote-no-matched-${++labelCounter}`, 'teal');
+      db.setStackLabels('alpha', remoteId, [label.id]);
+      // The previous default (`matched: remote.matched ?? true`) turned this body
+      // into a matched:true/zero-stack success; the guard must fail the node.
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, status: 200, json: async () => ({ results: [] }),
+      } as unknown as Response);
+
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: label.name });
+
+      expect(res.status).toBe(200);
+      const remoteRow = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(remoteRow.reachable).toBe(false);
+      expect(remoteRow.matched).toBe(false);
+      expect(remoteRow.error).toMatch(/malformed/i);
     } finally {
       db.deleteNode(remoteId);
     }

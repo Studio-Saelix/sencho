@@ -37,7 +37,7 @@ import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
 import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { activeBulkActions } from './labels';
-import { runLocalLabelStop, type LabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
+import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
@@ -1320,14 +1320,19 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
           const err = (await response.json().catch(() => ({}))) as { error?: string };
           return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: err.error || `Remote returned ${response.status}` };
         }
-        // Trust the remote's own matched flag. Guard results as an array so a
-        // malformed 200 body degrades to empty rather than flowing a non-array
-        // into the per-stack renderers.
-        const remote = (await response.json()) as Partial<LabelLocalStopResponse>;
+        // A 200 with a body that isn't the local-stop contract is a remote
+        // failure, not an empty stop. Fail the node (matching the non-ok and
+        // unreachable paths above) instead of defaulting matched to true and
+        // results to [], which the UI renders as a successful zero-stack node
+        // and hides the remote contract break.
+        const remote = await response.json().catch(() => null);
+        if (!isLabelLocalStopResponse(remote)) {
+          return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: 'Remote returned a malformed response' };
+        }
         return {
           nodeId: node.id, nodeName: node.name, reachable: true,
-          matched: remote.matched ?? true,
-          stackResults: Array.isArray(remote.results) ? remote.results : [],
+          matched: remote.matched,
+          stackResults: remote.results,
         };
       } catch (err) {
         return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: getErrorMessage(err, 'Failed to reach remote node') };
