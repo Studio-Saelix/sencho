@@ -158,7 +158,50 @@ describe('POST /api/fleet/labels/fleet-stop (pilot-agent dispatch)', () => {
 
     expect(res.status).toBe(200);
     const pilotResult = res.body.results.find((r: { nodeId: number }) => r.nodeId === pilotNodeId);
-    expect(pilotResult.stackResults[0].error).toMatch(/pilot tunnel/i);
+    // A node with no reachable target is reported at the node level; there is no
+    // control-side mirror to enumerate per-stack rows for an unreachable remote.
+    expect(pilotResult.reachable).toBe(false);
+    expect(pilotResult.matched).toBe(false);
+    expect(pilotResult.stackResults).toEqual([]);
+    expect(pilotResult.error).toMatch(/pilot tunnel/i);
+  });
+});
+
+describe('GET /api/fleet/labels/suggestions (pilot-agent summary fan-out)', () => {
+  it('reads each remote label set through the proxy target with conditional Authorization', async () => {
+    mockTargets();
+    const calls: Array<{ url: string; auth: string | undefined }> = [];
+    mockFetch((url, init) => {
+      const headers = (init?.headers as Record<string, string>) ?? {};
+      calls.push({ url, auth: headers.Authorization });
+      if (url.endsWith('/api/labels')) {
+        return new Response(JSON.stringify([{ id: 1, node_id: 0, name: 'summary-label', color: 'teal' }]), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/api/labels/assignments')) {
+        return new Response(JSON.stringify({ svc: [{ id: 1, node_id: 0, name: 'summary-label', color: 'teal' }] }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const res = await request(app)
+      .get('/api/fleet/labels/suggestions')
+      .set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    // Both fan-out legs (labels + assignments) must use the proxy target with the
+    // right auth: pilot loopback carries no Authorization, proxy carries Bearer.
+    const pilotCalls = calls.filter(c => c.url.startsWith(PILOT_LOOPBACK));
+    expect(pilotCalls.map(c => c.url).sort()).toEqual([`${PILOT_LOOPBACK}/api/labels`, `${PILOT_LOOPBACK}/api/labels/assignments`]);
+    expect(pilotCalls.every(c => c.auth === undefined)).toBe(true);
+    const proxyCalls = calls.filter(c => c.url.startsWith(PROXY_URL));
+    expect(proxyCalls.map(c => c.url).sort()).toEqual([`${PROXY_URL}/api/labels`, `${PROXY_URL}/api/labels/assignments`]);
+    expect(proxyCalls.every(c => c.auth === `Bearer ${PROXY_TOKEN}`)).toBe(true);
+    // The label only exists on the remotes (live fan-out), never in the control DB.
+    expect(res.body.suggestions.some((s: { name: string }) => s.name === 'summary-label')).toBe(true);
   });
 });
 

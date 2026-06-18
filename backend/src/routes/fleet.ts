@@ -38,6 +38,7 @@ import { NotificationService } from '../services/NotificationService';
 import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { activeBulkActions } from './labels';
 import { runLocalLabelStop, type LabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
+import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
@@ -1238,13 +1239,25 @@ fleetRouter.delete('/update-status', authMiddleware, async (req: Request, res: R
 // lives here so it sits behind the `/api/fleet/` proxy-exempt prefix.
 
 // Attribute one error to every stack a node was supposed to act on. Used for
-// the fleet-stop failure paths (no proxy target, non-ok remote, transport
-// error, local exception) so each stack carries the same node-level cause.
+// the local-node exception path, where the control DB authoritatively knows the
+// local stack list, so each stack carries the same node-level cause.
 const failAllStacks = (stacks: string[], error: string): StackStopResult[] =>
   stacks.map(stackName => ({ stackName, success: false, error }));
 
-// Fleet-wide stop by label name. Matches each node's labels by name and runs
-// container stops on each matching stack.
+type FleetStopNodeResult = {
+  nodeId: number;
+  nodeName: string;
+  reachable: boolean;
+  matched: boolean;
+  stackResults: StackStopResult[];
+  error?: string;
+};
+
+// Fleet-wide stop by label name. Each node is asked authoritatively: the local
+// node matches against its own DB in-process; each remote runs the match + stop
+// on its own Docker via its local-stop receiver. Remote label rows are never
+// mirrored to the control, so there is no central pre-check; unreachable nodes
+// are reported at the node level and never block the reachable ones.
 // Tier: requireAdmin (admin-only fleet plumbing; available on every license).
 fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
@@ -1264,51 +1277,35 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
     if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-stop:', { labelName: trimmed, dryRun: isDryRun, nodes: nodes.length });
-    const results = await Promise.all(nodes.map(async (node) => {
+    const results = await Promise.all(nodes.map(async (node): Promise<FleetStopNodeResult> => {
       if (node.type === 'local') {
         // Match + stop runs in-process against the control's own Docker. The
         // helper shares the per-node `bulk:<id>` lock with the per-label action
         // route so the two cannot double-stop the same containers. A control-side
         // failure (e.g. the compose dir is unreadable) degrades to a per-stack
-        // error for this node only, the same way the remote leg does, so one bad
-        // node never discards the rest of the fleet's results.
+        // error for this node only; the node is reachable, the stop just failed.
         try {
           const outcome = await runLocalLabelStop(node.id, trimmed, isDryRun);
-          return { nodeId: node.id, nodeName: node.name, matched: outcome.matched, stackResults: outcome.stackResults };
+          return { nodeId: node.id, nodeName: node.name, reachable: true, matched: outcome.matched, stackResults: outcome.stackResults };
         } catch (err) {
           const errorMsg = getErrorMessage(err, 'Failed to stop local stacks');
           const localLabel = db.getLabels(node.id).find(l => l.name === trimmed);
           const localStacks = localLabel ? db.getStacksForLabel(localLabel.id, node.id) : [];
           return {
-            nodeId: node.id, nodeName: node.name, matched: !!localLabel,
+            nodeId: node.id, nodeName: node.name, reachable: true, matched: !!localLabel,
             stackResults: failAllStacks(localStacks, errorMsg),
           };
         }
       }
 
-      // Remote node. The control's mirror tells us which stacks *should* match
-      // so transport errors can be attributed per stack; the authoritative stop
-      // runs on the remote via its admin-only local-stop receiver, which reuses
-      // the same name-matched helper under the remote's own bulk lock. This
-      // replaces the previous fan-out to `POST /api/labels/:id/action`, a
-      // paid-tier route that 403'd on Community remotes even though fleet-stop
-      // itself is available on every license.
-      const label = db.getLabels(node.id).find(l => l.name === trimmed);
-      if (!label) {
-        return { nodeId: node.id, nodeName: node.name, matched: false, stackResults: [] };
-      }
-      const stackNames = db.getStacksForLabel(label.id, node.id);
-      if (stackNames.length === 0) {
-        return { nodeId: node.id, nodeName: node.name, matched: true, stackResults: [] };
-      }
-
+      // Remote node. Ask the remote authoritatively via its admin-only local-stop
+      // receiver, which name-matches under the remote's own bulk lock. There is no
+      // control-side pre-check: remote label rows are never mirrored to the
+      // control, so a mirror lookup would skip every remote. A node we cannot
+      // reach is reported at the node level and never blocks the reachable nodes.
       const target = NodeRegistry.getInstance().getProxyTarget(node.id);
       if (!target) {
-        const error = formatNoTargetError(node);
-        return {
-          nodeId: node.id, nodeName: node.name, matched: true,
-          stackResults: failAllStacks(stackNames, error),
-        };
+        return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: formatNoTargetError(node) };
       }
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -1321,29 +1318,19 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         });
         if (!response.ok) {
           const err = (await response.json().catch(() => ({}))) as { error?: string };
-          const message = err.error || `Remote returned ${response.status}`;
-          return {
-            nodeId: node.id, nodeName: node.name, matched: true,
-            stackResults: failAllStacks(stackNames, message),
-          };
+          return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: err.error || `Remote returned ${response.status}` };
         }
-        // Trust the remote's own matched flag over the control's mirror: a
-        // mirror-skewed control could believe the label exists while the remote
-        // has no such label, which the remote reports as matched:false. Guard
-        // results as an array so a malformed 200 body degrades to empty rather
-        // than flowing a non-array into the per-stack renderers.
+        // Trust the remote's own matched flag. Guard results as an array so a
+        // malformed 200 body degrades to empty rather than flowing a non-array
+        // into the per-stack renderers.
         const remote = (await response.json()) as Partial<LabelLocalStopResponse>;
         return {
-          nodeId: node.id, nodeName: node.name,
+          nodeId: node.id, nodeName: node.name, reachable: true,
           matched: remote.matched ?? true,
           stackResults: Array.isArray(remote.results) ? remote.results : [],
         };
       } catch (err) {
-        const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
-        return {
-          nodeId: node.id, nodeName: node.name, matched: true,
-          stackResults: failAllStacks(stackNames, errorMsg),
-        };
+        return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: getErrorMessage(err, 'Failed to reach remote node') };
       }
     }));
     if (isDebugEnabled()) {
@@ -1531,10 +1518,11 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
 // destructive endpoints above so the surface stays uniform: an operator who
 // can fire `fleet-stop` is also the operator who can ask how big it would be.
 
-// Per-label fleet preview. Walks the central node list and looks up the label
-// + assignments table for each node. No remote fan-out: stack-to-label
-// assignments live in the central DB even for remote nodes, populated by the
-// nodes' own UIs and synced via Distributed API.
+// Per-label fleet preview. Fans out to every node authoritatively (local DB +
+// live remote reads via collectFleetLabelSummaries) and reports, per node, the
+// matching stacks, whether the label exists at all, and reachability. The card
+// uses these to distinguish "0 matching stacks" from "label exists but no
+// stacks assigned" from "remote unavailable".
 fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   const body = req.body as { labelName?: unknown } | undefined;
@@ -1549,54 +1537,60 @@ fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, r
   }
   const trimmed = labelName.trim();
   try {
-    const db = DatabaseService.getInstance();
-    const nodes = db.getNodes();
+    const summaries = await collectFleetLabelSummaries();
     let matchedStacks = 0;
-    const perNode = nodes.map((node) => {
-      const label = db.getLabels(node.id).find(l => l.name === trimmed);
-      const stackNames = label ? db.getStacksForLabel(label.id, node.id) : [];
+    const perNode = summaries.map((node) => {
+      const entry = node.labels.find(l => l.name === trimmed);
+      const stackNames = entry?.stackNames ?? [];
       matchedStacks += stackNames.length;
       return {
-        nodeId: node.id,
-        nodeName: node.name,
+        nodeId: node.nodeId,
+        nodeName: node.nodeName,
+        reachable: node.reachable,
+        labelExists: !!entry,
         stackCount: stackNames.length,
         stackNames,
+        ...(node.error ? { error: node.error } : {}),
       };
     });
     const matchedNodes = perNode.filter(n => n.stackCount > 0).length;
-    res.json({ matchedNodes, matchedStacks, perNode });
+    const unreachableNodes = perNode.filter(n => !n.reachable).length;
+    res.json({ matchedNodes, matchedStacks, unreachableNodes, perNode });
   } catch (error) {
     console.error('[Fleet] match-preview error:', error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to compute match preview') });
   }
 });
 
-// Stack-label suggestions for the Stop-by-label target picker. Aggregates the
-// per-node stack-label rows (the `stack_labels` table, via getLabels) into one
-// name-keyed list with stack/node counts. This is the only source the card's
-// autocomplete consumes; node labels (the separate `/api/node-labels`
-// namespace) are deliberately never folded in, because fleet-stop targets stack
-// labels only. The `scope: 'stack'` tag and the counts make that explicit at the
-// type level and in the UI. Central-DB only, same as match-preview, so it covers
-// every configured node including offline remotes.
+// Stack-label suggestions for the Stop-by-label target picker. Fans out to every
+// node authoritatively (local DB + live remote reads via collectFleetLabelSummaries)
+// and aggregates the per-node stack labels into one name-keyed list with node and
+// stack counts plus the carrying node names. Node labels (the separate
+// `/api/node-labels` namespace) are deliberately never folded in, because
+// fleet-stop targets stack labels only; the `scope: 'stack'` tag makes that
+// explicit. Labels with zero matching stacks fleet-wide are dropped (stopping
+// them is a no-op). `unreachableNodes`/`partial` tell the card the counts cover
+// only the nodes it could reach.
 fleetRouter.get('/labels/suggestions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
-    const db = DatabaseService.getInstance();
-    const agg = new Map<string, { nodeCount: number; stackCount: number }>();
-    for (const node of db.getNodes()) {
-      for (const label of db.getLabels(node.id)) {
-        const stackCount = db.getStacksForLabel(label.id, node.id).length;
-        const entry = agg.get(label.name) ?? { nodeCount: 0, stackCount: 0 };
+    const summaries = await collectFleetLabelSummaries();
+    const agg = new Map<string, { nodeCount: number; stackCount: number; nodes: string[] }>();
+    for (const node of summaries) {
+      for (const label of node.labels) {
+        const entry = agg.get(label.name) ?? { nodeCount: 0, stackCount: 0, nodes: [] };
         entry.nodeCount += 1;
-        entry.stackCount += stackCount;
+        entry.stackCount += label.stackNames.length;
+        entry.nodes.push(node.nodeName);
         agg.set(label.name, entry);
       }
     }
     const suggestions = Array.from(agg.entries())
-      .map(([name, counts]) => ({ name, scope: 'stack' as const, nodeCount: counts.nodeCount, stackCount: counts.stackCount }))
+      .filter(([, counts]) => counts.stackCount > 0)
+      .map(([name, counts]) => ({ name, scope: 'stack' as const, nodeCount: counts.nodeCount, stackCount: counts.stackCount, nodes: counts.nodes }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    res.json({ suggestions });
+    const unreachableNodes = summaries.filter(n => !n.reachable).length;
+    res.json({ suggestions, unreachableNodes, partial: unreachableNodes > 0 });
   } catch (error) {
     console.error('[Fleet] label-suggestions error:', error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to load stack-label suggestions') });
