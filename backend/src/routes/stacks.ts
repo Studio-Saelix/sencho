@@ -1612,7 +1612,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), false);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
-    res.json({ message: 'Stack rolled back successfully.' });
+    res.json({ message: 'Stack rolled back: compose and env files restored.' });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);

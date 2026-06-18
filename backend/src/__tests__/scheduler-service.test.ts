@@ -195,9 +195,13 @@ vi.mock('../services/PolicyEnforcement', () => ({
 }));
 
 import { SchedulerService } from '../services/SchedulerService';
+import { StackOpLockService } from '../services/StackOpLockService';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Lifecycle/update handlers run through the real StackOpLockService; reset it
+  // so a lock left held by one test cannot make a later test skip its op.
+  StackOpLockService.resetForTests();
   // clearAllMocks only clears call history, not implementations, so restore the
   // mocks that individual tests mutate (tier, node lookup, proxy target) to
   // their documented defaults. Without this a test that points getNode at a
@@ -1641,6 +1645,17 @@ describe('SchedulerService - lifecycle actions', () => {
     await SchedulerService.getInstance().triggerTask(300);
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
+  });
+
+  it('records failure (not success) and skips the op when the stack lock is held', async () => {
+    // A manual operation holds the lock; the scheduled lifecycle op must skip
+    // rather than race, and surface as a failed run instead of a silent success.
+    StackOpLockService.getInstance().tryAcquire(1, 'my-stack', 'deploy', 'admin');
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop'));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(mockRunCommand).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
+    expect(mockUpdateScheduledTask).toHaveBeenCalledWith(300, expect.objectContaining({ last_status: 'failure' }));
   });
 
   it('paid tier executes lifecycle actions', async () => {

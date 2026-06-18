@@ -6,7 +6,7 @@
  * `resetForTests()` so state doesn't leak between cases.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { StackOpLockService } from '../services/StackOpLockService';
+import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
 
 beforeEach(() => {
   StackOpLockService.resetForTests();
@@ -92,5 +92,58 @@ describe('StackOpLockService', () => {
     expect(lock).toBeDefined();
     expect(lock!.startedAt).toBeGreaterThanOrEqual(t0);
     expect(lock!.startedAt).toBeLessThanOrEqual(Date.now());
+  });
+});
+
+describe('StackOpLockService.runExclusive', () => {
+  it('runs fn and releases the lock when the slot is free', async () => {
+    const svc = StackOpLockService.getInstance();
+    const outcome = await svc.runExclusive(1, 'web', 'deploy', 'system', async () => 'done');
+    expect(outcome).toEqual({ ran: true, result: 'done' });
+    // Released after fn resolves, so a later op acquires.
+    expect(svc.size()).toBe(0);
+  });
+
+  it('holds the lock for the duration of fn, blocking a concurrent acquire', async () => {
+    const svc = StackOpLockService.getInstance();
+    let observed: ReturnType<typeof svc.tryAcquire> | null = null;
+    const outcome = await svc.runExclusive(1, 'web', 'update', 'system', async () => {
+      // A manual op attempting to acquire mid-operation must be rejected.
+      observed = svc.tryAcquire(1, 'web', 'deploy', 'admin');
+      return 42;
+    });
+    expect(outcome).toEqual({ ran: true, result: 42 });
+    expect(observed!.acquired).toBe(false);
+  });
+
+  it('skips (ran=false) and returns the holder when the lock is already held', async () => {
+    const svc = StackOpLockService.getInstance();
+    svc.tryAcquire(1, 'web', 'rollback', 'admin');
+    let called = false;
+    const outcome = await svc.runExclusive(1, 'web', 'deploy', 'system', async () => {
+      called = true;
+      return 'should not run';
+    });
+    expect(called).toBe(false);
+    expect(outcome.ran).toBe(false);
+    if (!outcome.ran) expect(outcome.existing.action).toBe('rollback');
+  });
+
+  it('releases the lock even when fn throws, then propagates', async () => {
+    const svc = StackOpLockService.getInstance();
+    await expect(
+      svc.runExclusive(1, 'web', 'deploy', 'system', async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(svc.size()).toBe(0);
+  });
+});
+
+describe('stackOpSkipMessage', () => {
+  it('names the stack and the conflicting action', () => {
+    expect(stackOpSkipMessage('web', 'update')).toBe(
+      'Skipped "web": another operation (update) is already in progress.',
+    );
   });
 });

@@ -5,6 +5,7 @@ import {
     computeSemverBump,
     computeImagePreview,
     buildSummary,
+    isMovingTag,
     type ComputePreviewDeps,
 } from '../services/UpdatePreviewService';
 
@@ -22,6 +23,21 @@ describe('parseSemverTag', () => {
         expect(parseSemverTag('latest')).toBeNull();
         expect(parseSemverTag('main')).toBeNull();
         expect(parseSemverTag('1.2')).toBeNull();
+    });
+});
+
+describe('isMovingTag', () => {
+    it('treats fully-pinned semver as immutable', () => {
+        expect(isMovingTag('1.2.3')).toBe(false);
+        expect(isMovingTag('v1.2.3')).toBe(false);
+        expect(isMovingTag('27.1.4-alpine')).toBe(false);
+    });
+    it('treats latest, branches, and unpinned major/minor as moving', () => {
+        expect(isMovingTag('latest')).toBe(true);
+        expect(isMovingTag('main')).toBe(true);
+        expect(isMovingTag('stable')).toBe(true);
+        expect(isMovingTag('1.25')).toBe(true);
+        expect(isMovingTag('unknown')).toBe(true);
     });
 });
 

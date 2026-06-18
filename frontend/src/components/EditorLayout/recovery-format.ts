@@ -27,7 +27,7 @@ export function buildDiagnostics(
         `Stack: ${stackName}`,
         `Node: ${activeNode?.name ?? 'local'}${activeNode?.id != null ? ` (id ${activeNode.id})` : ''}`,
         `Action: ${result.action}`,
-        `Outcome: failed${result.rolledBack ? ' (rolled back to previous version)' : ''}`,
+        `Outcome: failed${result.rolledBack ? ' (restored previous compose and env files)' : ''}`,
         `Elapsed: ${formatElapsed(result.endedAt - result.startedAt)}`,
         `Error: ${result.errorMessage ?? 'unknown'}`,
         `Backup: ${backupInfo.exists

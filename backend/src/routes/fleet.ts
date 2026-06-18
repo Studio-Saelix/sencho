@@ -12,6 +12,7 @@ import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../ser
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
+import { StackOpLockService } from '../services/StackOpLockService';
 import SelfUpdateService from '../services/SelfUpdateService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
@@ -2043,7 +2044,13 @@ async function applySnapshotStackFiles(
 // the remote node), so this only performs the deploy itself.
 async function redeploySnapshotStack(node: Node, stackName: string): Promise<void> {
   if (node.type === 'local') {
-    await ComposeService.getInstance(node.id).deployStack(stackName);
+    const lock = await StackOpLockService.getInstance().runExclusive(
+      node.id, stackName, 'deploy', 'system',
+      () => ComposeService.getInstance(node.id).deployStack(stackName),
+    );
+    if (!lock.ran) {
+      throw new Error(`Cannot redeploy "${stackName}": another operation (${lock.existing.action}) is already in progress.`);
+    }
     return;
   }
   const ctx = buildRemoteProxyContext(node);

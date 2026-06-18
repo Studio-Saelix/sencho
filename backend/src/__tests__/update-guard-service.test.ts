@@ -11,6 +11,8 @@ const {
   mockGetLatest,
   mockGetPreview,
   mockGetBackupInfo,
+  mockGetBackupEnvSummary,
+  mockEnvExists,
   mockGetOpenDriftFindings,
   mockGetGlobalSettings,
   mockFsSize,
@@ -20,6 +22,8 @@ const {
   mockGetLatest: vi.fn(),
   mockGetPreview: vi.fn(),
   mockGetBackupInfo: vi.fn(),
+  mockGetBackupEnvSummary: vi.fn(),
+  mockEnvExists: vi.fn(),
   mockGetOpenDriftFindings: vi.fn(),
   mockGetGlobalSettings: vi.fn(),
   mockFsSize: vi.fn(),
@@ -40,7 +44,10 @@ vi.mock('../services/ComposeDoctorService', () => ({
   ComposeDoctorService: { getInstance: () => ({ getLatest: mockGetLatest }) },
 }));
 
-vi.mock('../services/UpdatePreviewService', () => ({
+vi.mock('../services/UpdatePreviewService', async (importOriginal) => ({
+  // Keep the real pure helpers (isMovingTag, parseSemverTag) that
+  // UpdateGuardService imports; only stub the service singleton.
+  ...(await importOriginal<typeof import('../services/UpdatePreviewService')>()),
   UpdatePreviewService: { getInstance: () => ({ getPreview: mockGetPreview }) },
 }));
 
@@ -48,8 +55,8 @@ vi.mock('../services/FileSystemService', () => ({
   FileSystemService: {
     getInstance: () => ({
       getBackupInfo: mockGetBackupInfo,
-      getBackupEnvSummary: vi.fn().mockRejectedValue(new Error('not used here')),
-      envExists: vi.fn().mockRejectedValue(new Error('not used here')),
+      getBackupEnvSummary: mockGetBackupEnvSummary,
+      envExists: mockEnvExists,
     }),
   },
 }));
@@ -81,6 +88,9 @@ const inspectResult = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetGlobalSettings.mockReturnValue({ host_disk_limit: '90' });
+  // Sensible defaults for the rollback-readiness inputs (only computeRollbackReadiness reads these).
+  mockGetBackupEnvSummary.mockResolvedValue({ exists: true, envPresent: true, keys: ['DB_HOST'] });
+  mockEnvExists.mockResolvedValue(true);
 });
 
 describe('UpdateGuardService.probeContainers', () => {
@@ -151,5 +161,38 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
 
     const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
     expect(report.verdict).toBe('ready');
+  });
+});
+
+describe('UpdateGuardService.computeRollbackReadiness moving-tag wiring', () => {
+  const preview = (images: Array<{ current_tag: string }>) => ({
+    stack_name: 'app',
+    images,
+    summary: {
+      has_update: false, primary_image: 'app', current_tag: images[0]?.current_tag ?? null,
+      next_tag: null, semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
+    },
+    rollback_target: 'app:1.2.3',
+    changelog: null,
+  });
+
+  beforeEach(() => {
+    mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
+    mockListContainers.mockResolvedValue([]);
+  });
+
+  it('marks previous_images not_covered (overall partial) when any image uses a moving tag', async () => {
+    // Primary pinned, sidecar on a moving tag: a file rollback cannot revert it.
+    mockGetPreview.mockResolvedValue(preview([{ current_tag: '1.2.3' }, { current_tag: 'latest' }]));
+    const report = await UpdateGuardService.getInstance().computeRollbackReadiness(0, 'app');
+    expect(report.items.find(i => i.id === 'previous_images')?.state).toBe('not_covered');
+    expect(report.overall).toBe('partial');
+  });
+
+  it('marks previous_images ready (overall ready) when every image is pinned', async () => {
+    mockGetPreview.mockResolvedValue(preview([{ current_tag: '1.2.3' }, { current_tag: 'v2.0.1' }]));
+    const report = await UpdateGuardService.getInstance().computeRollbackReadiness(0, 'app');
+    expect(report.items.find(i => i.id === 'previous_images')?.state).toBe('ready');
+    expect(report.overall).toBe('ready');
   });
 });

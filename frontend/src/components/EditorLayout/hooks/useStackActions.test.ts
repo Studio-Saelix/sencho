@@ -513,6 +513,19 @@ describe('useStackActions.bypassPolicyAndRetry', () => {
     expect(urls).toContain('/stacks/web.yml/rollback?ignorePolicy=true');
   });
 
+  it('retries on the node captured in the policy block, not the live active node', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null, { status: 200 })); // update OK
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response('[]', { status: 200 })); // containers refresh
+    const { result } = setup({
+      activeNode: { id: 1, type: 'local' } as never, // active node has since moved to 1
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'update', payload, nodeId: 9 } as never },
+    });
+    await result.current.bypassPolicyAndRetry();
+    const updateCall = vi.mocked(apiFetch).mock.calls.find(c => String(c[0]).includes('/update?ignorePolicy=true'));
+    expect(updateCall).toBeDefined();
+    expect((updateCall![1] as { nodeId?: number | null }).nodeId).toBe(9);
+  });
+
   it('does nothing when no policy block is stored', async () => {
     const { result } = setup({ overlay: { policyBlock: null as never } });
     await result.current.bypassPolicyAndRetry();

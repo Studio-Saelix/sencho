@@ -49,6 +49,7 @@ let authHeader: string;
 let db: import('../services/DatabaseService').DatabaseService;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
 let activeBulkActions: typeof import('../routes/labels').activeBulkActions;
+let StackOpLockService: typeof import('../services/StackOpLockService').StackOpLockService;
 let labelCounter = 0;
 
 beforeAll(async () => {
@@ -56,6 +57,7 @@ beforeAll(async () => {
   ({ app } = await import('../index'));
   ({ LicenseService } = await import('../services/LicenseService'));
   ({ activeBulkActions } = await import('../routes/labels'));
+  ({ StackOpLockService } = await import('../services/StackOpLockService'));
   const { DatabaseService } = await import('../services/DatabaseService');
   db = DatabaseService.getInstance();
   authHeader = `Bearer ${jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
@@ -77,6 +79,7 @@ beforeEach(() => {
   restartContainer.mockResolvedValue(undefined);
   enforcePolicyPreDeploy.mockResolvedValue({ ok: true });
   activeBulkActions.clear();
+  StackOpLockService.resetForTests();
   db.getDb().prepare('DELETE FROM stack_label_assignments').run();
   db.getDb().prepare('DELETE FROM stack_labels').run();
 });
@@ -148,6 +151,27 @@ describe('Stack Labels bulk actions', () => {
     expect(res.status).toBe(429);
     expect(res.body.error).toContain('already running');
     expect(restartContainer).not.toHaveBeenCalled();
+  });
+
+  it('skips a stack whose per-stack lock is held by a manual operation', async () => {
+    const label = await createAssignedLabel(['alpha', 'beta']);
+    // A manual operation holds 'alpha'; the bulk deploy must not race it.
+    StackOpLockService.getInstance().tryAcquire(label.node_id, 'alpha', 'update', 'admin');
+
+    const res = await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'deploy' });
+
+    expect(res.status).toBe(200);
+    const alpha = res.body.results.find((r: { stackName: string }) => r.stackName === 'alpha');
+    const beta = res.body.results.find((r: { stackName: string }) => r.stackName === 'beta');
+    expect(alpha).toMatchObject({ stackName: 'alpha', success: false });
+    expect(alpha.error).toContain('another operation (update) is already in progress');
+    expect(beta).toEqual({ stackName: 'beta', success: true });
+    // 'alpha' was skipped; only 'beta' reached ComposeService.
+    expect(deployStack).toHaveBeenCalledTimes(1);
+    expect(deployStack).toHaveBeenCalledWith('beta', undefined, false);
   });
 
   it('dry-run deploy runs the policy gate and reports blocked stacks honestly', async () => {

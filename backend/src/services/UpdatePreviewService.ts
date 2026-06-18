@@ -76,6 +76,17 @@ export function parseSemverTag(tag: string): SemverParts | null {
     };
 }
 
+/**
+ * A tag is "moving" when restoring the compose file would not revert the image
+ * behind it: `latest`, a branch name, or an unpinned major/minor like `1.25`.
+ * Only a fully-pinned semver tag (X.Y.Z, optionally `v`-prefixed and/or with a
+ * `-prerelease` suffix) is treated as immutable, matching how a file rollback
+ * restores the exact tag.
+ */
+export function isMovingTag(tag: string): boolean {
+    return parseSemverTag(tag) === null;
+}
+
 function compareSemver(a: SemverParts, b: SemverParts): number {
     if (a.major !== b.major) return a.major - b.major;
     if (a.minor !== b.minor) return a.minor - b.minor;

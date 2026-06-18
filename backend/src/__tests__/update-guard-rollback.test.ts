@@ -30,7 +30,7 @@ const baseInputs = (over: Partial<RollbackInputs> = {}): RollbackInputs => ({
   backup: { exists: true, timestamp: NOW - 3_600_000 },
   envSummary: { exists: true, envPresent: true, keys: ['DB_HOST', 'DB_PASS'] },
   stackHasEnv: true,
-  rollbackTarget: { target: 'nginx:1.27.1' },
+  rollbackTarget: { target: 'nginx:1.27.1', moving: false },
   lastDeployAt: NOW - 3_600_000,
   containers: [{
     name: 'app-web-1', state: 'running', health: 'healthy', exitCode: null,
@@ -89,15 +89,22 @@ describe('buildRollbackItems', () => {
   });
 
   it('marks the previous image unknown when no rollback target is known', () => {
-    expect(itemById(baseInputs({ rollbackTarget: { target: null } }), 'previous_images').state).toBe('unknown');
+    expect(itemById(baseInputs({ rollbackTarget: { target: null, moving: false } }), 'previous_images').state).toBe('unknown');
     expect(itemById(baseInputs({ rollbackTarget: 'error' }), 'previous_images').state).toBe('unknown');
     const known = itemById(baseInputs(), 'previous_images');
     expect(known.state).toBe('ready');
     expect(known.detail).toContain('nginx:1.27.1');
   });
 
+  it('downgrades the previous image to not_covered for a moving tag', () => {
+    const item = itemById(baseInputs({ rollbackTarget: { target: 'nginx:latest', moving: true } }), 'previous_images');
+    expect(item.state).toBe('not_covered');
+    expect(item.detail).toContain('moving image tag');
+    expect(item.detail).toContain('nginx:latest');
+  });
+
   it('does not mistake an image literally named error for a failed preview', () => {
-    const item = itemById(baseInputs({ rollbackTarget: { target: 'error' } }), 'previous_images');
+    const item = itemById(baseInputs({ rollbackTarget: { target: 'error', moving: false } }), 'previous_images');
     expect(item.state).toBe('ready');
     expect(item.detail).toContain('error');
   });
@@ -128,7 +135,12 @@ describe('aggregateRollbackOverall', () => {
   });
 
   it('is partial when the previous image tag is unknown', () => {
-    const items = buildRollbackItems(baseInputs({ rollbackTarget: { target: null } }), NOW);
+    const items = buildRollbackItems(baseInputs({ rollbackTarget: { target: null, moving: false } }), NOW);
+    expect(aggregateRollbackOverall(items)).toBe('partial');
+  });
+
+  it('is partial when the rollback target is a moving tag', () => {
+    const items = buildRollbackItems(baseInputs({ rollbackTarget: { target: 'nginx:latest', moving: true } }), NOW);
     expect(aggregateRollbackOverall(items)).toBe('partial');
   });
 

@@ -4,6 +4,7 @@ import fs from 'fs/promises';
 import { EventEmitter } from 'events';
 import * as YAML from 'yaml';
 import { ComposeService } from './ComposeService';
+import { StackOpLockService } from './StackOpLockService';
 import { DatabaseService, type NodeMode } from './DatabaseService';
 import DockerController from './DockerController';
 import { FileSystemService } from './FileSystemService';
@@ -2380,7 +2381,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     auditPath: `/api/mesh/nodes/${nodeId}/stacks/${stackName}/redeploy`,
                 }),
             );
-            await ComposeService.getInstance(nodeId).deployStack(stackName);
+            const lock = await StackOpLockService.getInstance().runExclusive(
+                nodeId, stackName, 'deploy', 'system',
+                () => ComposeService.getInstance(nodeId).deployStack(stackName),
+            );
+            if (!lock.ran) {
+                throw new Error(`Cannot redeploy "${stackName}": another operation (${lock.existing.action}) is already in progress.`);
+            }
             this.logActivity({
                 source: 'mesh', level: 'info', type: 'mesh.enable',
                 nodeId,
