@@ -1,8 +1,8 @@
 /**
  * MobileReadinessCard is the one-up phone card for the Updates readiness board.
- * Its Apply button must stay disabled when the update is blocked (major bump),
- * while in flight, or when no schedule covers the stack; enabled only when a
- * covering schedule exists and the preview loaded without a block.
+ * Its Apply button is disabled only when the update is blocked (major bump) or
+ * already in flight; manual apply works regardless of schedule. The Auto: Off
+ * pill still reflects the absence of a covering auto-update schedule.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
@@ -16,7 +16,7 @@ vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ nodes: [{ id: 1, name: 'Local', type: 'local', status: 'online' }] }),
 }));
 
-import { apiFetch } from '@/lib/api';
+import { apiFetch, fetchForNode } from '@/lib/api';
 import AutoUpdateReadinessView, { MobileReadinessCard, CadenceStrip, type StackCard } from '../AutoUpdateReadinessView';
 
 function card(over: Partial<StackCard> = {}): StackCard {
@@ -49,7 +49,7 @@ function card(over: Partial<StackCard> = {}): StackCard {
 
 const apply = () => screen.getByRole('button', { name: /Apply now/i });
 
-it('enables Apply when a covering schedule exists and the update is not blocked', () => {
+it('enables Apply for a safe, non-blocked update', () => {
   render(<MobileReadinessCard card={card()} onApply={vi.fn()} />);
   expect(apply()).toBeEnabled();
 });
@@ -72,9 +72,56 @@ it('disables Apply when the update is blocked (major bump)', () => {
   expect(apply()).toBeDisabled();
 });
 
-it('disables Apply when auto-update is off for the stack', () => {
+it('disables Apply while an update is in flight', () => {
+  render(<MobileReadinessCard card={card({ applying: true })} onApply={vi.fn()} />);
+  // While applying the button label switches to "Applying...".
+  expect(screen.getByRole('button', { name: /Applying/i })).toBeDisabled();
+});
+
+it('enables Apply when no schedule covers the stack', () => {
   render(<MobileReadinessCard card={card({ autoUpdateEnabled: false })} onApply={vi.fn()} />);
-  expect(apply()).toBeDisabled();
+  expect(apply()).toBeEnabled();
+});
+
+/**
+ * The desktop StackReadinessCard is not exported, so its Apply-now gating is
+ * covered through a full-view render (useIsMobile is mocked false). A safe
+ * update with no covering schedule must still offer an enabled Apply now: the
+ * button is manual and schedule-independent, while the Auto: Off pill keeps
+ * reflecting the missing schedule.
+ */
+describe('AutoUpdateReadinessView desktop Apply now', () => {
+  const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
+  const mockedFetchForNode = fetchForNode as unknown as ReturnType<typeof vi.fn>;
+
+  afterEach(() => {
+    mockedFetch.mockReset();
+    mockedFetchForNode.mockReset();
+  });
+
+  it('enables Apply for a safe update with no covering schedule', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => card().preview });
+
+    render(<AutoUpdateReadinessView />);
+
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    expect(applyBtn).toBeEnabled();
+    // A non-blocked card carries no title at all; the old schedule tooltip is gone.
+    expect(applyBtn).not.toHaveAttribute('title');
+    expect(screen.getByText(/Auto: Off/)).toBeInTheDocument();
+    // The stack is enabled to apply manually but must NOT count as "ready to
+    // apply automatically": that still requires a covering schedule.
+    expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
+  });
 });
 
 /**
