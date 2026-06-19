@@ -10,7 +10,7 @@
  * zero-stack preview, and a non-ok suggestions response is non-fatal.
  */
 import { it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({
@@ -56,12 +56,14 @@ it('disables both actions until a label name is entered', () => {
   expect(screen.getByRole('button', { name: 'Dry run' })).toBeDisabled();
 });
 
-it('enables the actions once a label is typed', async () => {
+it('enables Dry run on a label name but gates Stop fleet until the blast radius resolves', async () => {
   const user = userEvent.setup();
+  // The default mocks 404 every endpoint, so the match-preview never resolves.
   render(<LabelFleetStopCard />);
   await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
-  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeEnabled();
   expect(screen.getByRole('button', { name: 'Dry run' })).toBeEnabled();
+  // No resolved preview (or dry run) yet, so the destructive Stop stays disabled.
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeDisabled();
 });
 
 it('labels the target as a stack label and explains node labels are excluded', () => {
@@ -132,7 +134,7 @@ it('populates the input when a suggestion is selected', async () => {
   await user.click(input);
   await user.click(await screen.findByRole('button', { name: /production/ }));
   expect(input.value).toBe('production');
-  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Dry run' })).toBeEnabled();
 });
 
 it('shows a zero-stack preview when a node-only name is typed', async () => {
@@ -161,7 +163,7 @@ it('keeps the card usable when the suggestions endpoint returns 403', async () =
   render(<LabelFleetStopCard />);
   // No crash, no suggestions, and the operator can still type a name by hand.
   await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
-  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Dry run' })).toBeEnabled();
 });
 
 it('dry run calls fleet-stop with dryRun:true and never opens the confirm modal', async () => {
@@ -187,9 +189,15 @@ it('dry run calls fleet-stop with dryRun:true and never opens the confirm modal'
   await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
 });
 
-it('stop fleet opens the confirm modal, and confirming runs a real stop that renders per-node results', async () => {
+it('gates Stop fleet on a resolved preview, carries the node/stack list into the modal, then runs a real stop', async () => {
   const user = userEvent.setup();
   mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(jsonResponse(200, {
+        matchedNodes: 1, matchedStacks: 1, unreachableNodes: 0,
+        perNode: [{ nodeId: 1, nodeName: 'central', reachable: true, labelExists: true, stackCount: 1, stackNames: ['web'] }],
+      }));
+    }
     if (url === '/fleet/labels/fleet-stop') {
       return Promise.resolve(jsonResponse(200, {
         results: [
@@ -202,12 +210,20 @@ it('stop fleet opens the confirm modal, and confirming runs a real stop that ren
   });
   render(<LabelFleetStopCard />);
   await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
-  await user.click(screen.getByRole('button', { name: 'Stop fleet' }));
+
+  // Stop fleet only enables once the live preview resolves the blast radius.
+  const stopBtn = screen.getByRole('button', { name: 'Stop fleet' });
+  await waitFor(() => expect(stopBtn).toBeEnabled(), { timeout: 2000 });
+  await user.click(stopBtn);
 
   const dialog = await screen.findByRole('alertdialog');
   expect(within(dialog).getByText('Stop all stacks with the stack label "prod"?')).toBeInTheDocument();
+  // The modal carries the resolved node/stack list, not just the label name.
+  expect(within(dialog).getByText(/Will stop 1 stack across 1 node/)).toBeInTheDocument();
+  expect(within(dialog).getByText('central')).toBeInTheDocument();
+  expect(within(dialog).getByText('web')).toBeInTheDocument();
 
-  // The real stop must not have fired yet.
+  // The real stop must not have fired yet (only the preview hit the network).
   expect(mockedFetch.mock.calls.find(c => c[0] === '/fleet/labels/fleet-stop')).toBeFalsy();
 
   await user.click(within(dialog).getByRole('button', { name: 'Stop fleet' }));
@@ -216,8 +232,39 @@ it('stop fleet opens the confirm modal, and confirming runs a real stop that ren
     const stopCall = mockedFetch.mock.calls.find(c => c[0] === '/fleet/labels/fleet-stop');
     expect(JSON.parse(stopCall![1].body)).toEqual({ labelName: 'prod', dryRun: false });
   });
-  expect(await screen.findByText('web')).toBeInTheDocument();
+  // Per-node results render in the card (the "· 1 stack" label is unique to the
+  // results list, distinguishing it from the preview well).
+  expect(await screen.findByText('central · 1 stack')).toBeInTheDocument();
   await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+});
+
+it('lists every node and stack in the confirm modal and sums them across nodes', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(jsonResponse(200, {
+        matchedNodes: 2, matchedStacks: 3, unreachableNodes: 0,
+        perNode: [
+          { nodeId: 1, nodeName: 'central', reachable: true, labelExists: true, stackCount: 1, stackNames: ['web'] },
+          { nodeId: 2, nodeName: 'edge-1', reachable: true, labelExists: true, stackCount: 2, stackNames: ['api', 'db'] },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop fleet' });
+  await waitFor(() => expect(stopBtn).toBeEnabled(), { timeout: 2000 });
+  await user.click(stopBtn);
+
+  const dialog = await screen.findByRole('alertdialog');
+  // The reduce + pluralization across nodes is the only computed display logic.
+  expect(within(dialog).getByText(/Will stop 3 stacks across 2 nodes/)).toBeInTheDocument();
+  expect(within(dialog).getByText('central')).toBeInTheDocument();
+  expect(within(dialog).getByText('edge-1')).toBeInTheDocument();
+  expect(within(dialog).getByText('web')).toBeInTheDocument();
+  expect(within(dialog).getByText('api, db')).toBeInTheDocument();
 });
 
 it('surfaces an error toast when fleet-stop returns a non-ok response', async () => {
@@ -259,8 +306,123 @@ it('degrades to "preview unavailable" when match-preview returns a malformed 200
   render(<LabelFleetStopCard />);
   await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
   expect(await screen.findByText('preview endpoint did not respond', undefined, { timeout: 2000 })).toBeInTheDocument();
-  // The card stays interactive; no crash from the missing perNode array.
-  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeEnabled();
+  // The card stays interactive (no crash from the missing perNode array), but the
+  // destructive Stop stays gated while the preview is unavailable; Dry run is the
+  // escape hatch that can still resolve the blast radius.
+  expect(screen.getByRole('button', { name: 'Dry run' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeDisabled();
+});
+
+it('keeps Stop fleet disabled when the preview resolves to zero matching stacks', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(jsonResponse(200, { matchedNodes: 0, matchedStacks: 0, unreachableNodes: 0, perNode: [] }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'edge');
+  await waitFor(() => expect(screen.getByText('0 matching stacks')).toBeInTheDocument(), { timeout: 2000 });
+  // A resolved-but-empty preview is nothing to stop, so the destructive Stop
+  // stays disabled even though the blast radius is fully resolved.
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeDisabled();
+});
+
+it('lets a successful dry run unblock Stop fleet when the match-preview endpoint is unavailable', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true, dryRun: true }] }],
+      }));
+    }
+    // match-preview (and everything else) is unavailable.
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop fleet' });
+  expect(stopBtn).toBeDisabled();
+
+  // A dry run resolves the blast radius even with no live preview.
+  await user.click(screen.getByRole('button', { name: 'Dry run' }));
+  await waitFor(() => expect(stopBtn).toBeEnabled());
+
+  // And the confirm modal it opens carries the dry-run-resolved targets.
+  await user.click(stopBtn);
+  const dialog = await screen.findByRole('alertdialog');
+  expect(within(dialog).getByText('central')).toBeInTheDocument();
+  expect(within(dialog).getByText('web')).toBeInTheDocument();
+});
+
+it('invalidates a dry-run snapshot when the label is edited, even back to the same name', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true, dryRun: true }] }],
+      }));
+    }
+    // match-preview stays unavailable, so only the dry-run snapshot can resolve.
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  const input = screen.getByPlaceholderText('e.g. production');
+  await user.type(input, 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop fleet' });
+
+  // Resolve via dry run, then edit away and back to the same label.
+  await user.click(screen.getByRole('button', { name: 'Dry run' }));
+  await waitFor(() => expect(stopBtn).toBeEnabled());
+  await user.clear(input);
+  await user.type(input, 'prod');
+
+  // The stale snapshot must not re-enable Stop; a fresh dry run/preview is required.
+  await waitFor(() => expect(stopBtn).toBeDisabled());
+});
+
+it('ignores a stale in-flight preview response that resolves after the label changed', async () => {
+  const user = userEvent.setup();
+  let resolveProd: ((r: Response) => void) | null = null;
+  mockedFetch.mockImplementation((url: string, init?: { body?: string }) => {
+    if (url === '/fleet/labels/match-preview') {
+      const label = JSON.parse(init?.body ?? '{}').labelName;
+      if (label === 'prod') {
+        // Hold the prod preview open so it resolves AFTER the label changes.
+        return new Promise<Response>((resolve) => { resolveProd = resolve; });
+      }
+      if (label === 'qa') {
+        return Promise.resolve(jsonResponse(200, { matchedNodes: 0, matchedStacks: 0, unreachableNodes: 0, perNode: [] }));
+      }
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  const input = screen.getByPlaceholderText('e.g. production');
+
+  // Type prod and wait for its debounced preview request to actually go in-flight.
+  await user.type(input, 'prod');
+  await waitFor(() => expect(resolveProd).not.toBeNull(), { timeout: 2000 });
+
+  // Switch to qa; its preview resolves to zero matches, so Stop is disabled.
+  await user.clear(input);
+  await user.type(input, 'qa');
+  await waitFor(() => expect(screen.getByText('0 matching stacks')).toBeInTheDocument(), { timeout: 2000 });
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeDisabled();
+
+  // The stale prod preview now resolves with a matching stack. It must not gate
+  // Stop for qa, nor leak prod's targets into the readout/preview.
+  await act(async () => {
+    resolveProd!(jsonResponse(200, {
+      matchedNodes: 1, matchedStacks: 1, unreachableNodes: 0,
+      perNode: [{ nodeId: 1, nodeName: 'central', reachable: true, labelExists: true, stackCount: 1, stackNames: ['web'] }],
+    }));
+    await new Promise(r => setTimeout(r, 0));
+  });
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeDisabled();
+  expect(screen.getByText('0 matching stacks')).toBeInTheDocument();
+  expect(screen.queryByText('web')).not.toBeInTheDocument();
 });
 
 it('does not crash when fleet-stop returns a malformed 200 body', async () => {
