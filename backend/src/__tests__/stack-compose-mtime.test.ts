@@ -209,6 +209,24 @@ describe('PUT /api/stacks/:stackName/env optimistic concurrency', () => {
     expect(fs.readFileSync(envPath, 'utf-8')).toBe('FOO=2');
   });
 
+  it('returns a clean 404 (not a 500) when the stack has no env file yet', async () => {
+    // Compose exists with no env_file directive and no .env on disk, so
+    // resolveAllEnvFilePaths filters the synthesized default out and returns [],
+    // leaving the env path undefined. The save must surface a handled response
+    // rather than crashing on a write to an undefined path.
+    seedStack(STACK, 'services:\n  web:\n    image: nginx\n');
+
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}/env`)
+      .set('Cookie', authCookie)
+      .send({ content: 'FOO=1' });
+
+    expect(putRes.status).toBe(404);
+    expect(putRes.body.error).toMatch(/no env file/i);
+    // The guard must short-circuit before any write touches disk.
+    expect(fs.existsSync(path.join(composeDir, STACK, '.env'))).toBe(false);
+  });
+
   it('returns 412 on env-file mtime mismatch', async () => {
     seedStack(STACK, 'services: {}');
     const envPath = seedEnv(STACK, 'FOO=1');

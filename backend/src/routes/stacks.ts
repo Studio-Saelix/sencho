@@ -644,6 +644,14 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       }
     }
 
+    // No env file resolved: the stack has no .env yet and the editor only edits
+    // an existing env file. GET treats this same case as an empty 200; PUT cannot,
+    // since there is no resolved path to write. Reply with a clean, handled response
+    // instead of writing to an undefined path, which would otherwise surface as an opaque 500.
+    if (!envPath) {
+      return res.status(404).json({ error: 'No env file exists for this stack' });
+    }
+
     const fsService = FileSystemService.getInstance(req.nodeId);
     const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
     const result = await fsService.writeFileIfUnchanged(envPath, content, expectedMtimeMs);
