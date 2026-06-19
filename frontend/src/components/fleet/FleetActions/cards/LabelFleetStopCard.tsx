@@ -116,6 +116,12 @@ export function LabelFleetStopCard() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const trimmed = labelName.trim();
+    // `cancelled` guards against an out-of-order response: once the debounce
+    // timer fires, the request is in-flight and clearing the timer no longer
+    // stops it. If the label changes before it resolves, this effect's cleanup
+    // flips `cancelled` so the stale response cannot set `preview` for a label
+    // that is no longer current and gate Stop against the wrong blast radius.
+    let cancelled = false;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     // Any edit to the label invalidates a prior dry run's snapshot, so editing
     // away and back to the same name cannot re-enable Stop from a stale blast
@@ -132,6 +138,7 @@ export function LabelFleetStopCard() {
           method: 'POST',
           body: JSON.stringify({ labelName: trimmed }),
         });
+        if (cancelled) return;
         if (res.status === 404) {
           setPreview({ kind: 'unavailable' });
           return;
@@ -141,6 +148,7 @@ export function LabelFleetStopCard() {
           return;
         }
         const data = await res.json().catch(() => null);
+        if (cancelled) return;
         if (!isMatchPreviewResponse(data)) {
           // A 200 with a shape we can't render is a server/contract bug, not a
           // transport miss; log it like the catch path so it's diagnosable.
@@ -150,6 +158,7 @@ export function LabelFleetStopCard() {
         }
         setPreview({ kind: 'ready', data });
       } catch (err) {
+        if (cancelled) return;
         // Non-destructive readout: the operator can still type a name and run the
         // stop, so we degrade to "unavailable" rather than toasting, but leave a
         // console trail so a recurring preview failure is diagnosable.
@@ -158,6 +167,7 @@ export function LabelFleetStopCard() {
       }
     }, 500);
     return () => {
+      cancelled = true;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [labelName]);

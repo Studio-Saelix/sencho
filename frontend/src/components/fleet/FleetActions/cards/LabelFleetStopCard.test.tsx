@@ -10,7 +10,7 @@
  * zero-stack preview, and a non-ok suggestions response is non-fatal.
  */
 import { it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({
@@ -380,6 +380,49 @@ it('invalidates a dry-run snapshot when the label is edited, even back to the sa
 
   // The stale snapshot must not re-enable Stop; a fresh dry run/preview is required.
   await waitFor(() => expect(stopBtn).toBeDisabled());
+});
+
+it('ignores a stale in-flight preview response that resolves after the label changed', async () => {
+  const user = userEvent.setup();
+  let resolveProd: ((r: Response) => void) | null = null;
+  mockedFetch.mockImplementation((url: string, init?: { body?: string }) => {
+    if (url === '/fleet/labels/match-preview') {
+      const label = JSON.parse(init?.body ?? '{}').labelName;
+      if (label === 'prod') {
+        // Hold the prod preview open so it resolves AFTER the label changes.
+        return new Promise<Response>((resolve) => { resolveProd = resolve; });
+      }
+      if (label === 'qa') {
+        return Promise.resolve(jsonResponse(200, { matchedNodes: 0, matchedStacks: 0, unreachableNodes: 0, perNode: [] }));
+      }
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  const input = screen.getByPlaceholderText('e.g. production');
+
+  // Type prod and wait for its debounced preview request to actually go in-flight.
+  await user.type(input, 'prod');
+  await waitFor(() => expect(resolveProd).not.toBeNull(), { timeout: 2000 });
+
+  // Switch to qa; its preview resolves to zero matches, so Stop is disabled.
+  await user.clear(input);
+  await user.type(input, 'qa');
+  await waitFor(() => expect(screen.getByText('0 matching stacks')).toBeInTheDocument(), { timeout: 2000 });
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeDisabled();
+
+  // The stale prod preview now resolves with a matching stack. It must not gate
+  // Stop for qa, nor leak prod's targets into the readout/preview.
+  await act(async () => {
+    resolveProd!(jsonResponse(200, {
+      matchedNodes: 1, matchedStacks: 1, unreachableNodes: 0,
+      perNode: [{ nodeId: 1, nodeName: 'central', reachable: true, labelExists: true, stackCount: 1, stackNames: ['web'] }],
+    }));
+    await new Promise(r => setTimeout(r, 0));
+  });
+  expect(screen.getByRole('button', { name: 'Stop fleet' })).toBeDisabled();
+  expect(screen.getByText('0 matching stacks')).toBeInTheDocument();
+  expect(screen.queryByText('web')).not.toBeInTheDocument();
 });
 
 it('does not crash when fleet-stop returns a malformed 200 body', async () => {
