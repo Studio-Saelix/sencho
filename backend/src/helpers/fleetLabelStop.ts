@@ -28,6 +28,28 @@ export interface LabelLocalStopResponse {
   results: StackStopResult[];
 }
 
+function isStackStopResult(value: unknown): value is StackStopResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return typeof r.stackName === 'string' && typeof r.success === 'boolean';
+}
+
+/**
+ * Validate a remote node's `local-stop` 200 body before the control trusts it.
+ * A response that is not this exact shape (a missing/non-boolean `matched`, a
+ * non-array `results`, or a malformed result element) is a remote contract
+ * failure, not an empty stop. The control-side fan-out fails that node rather
+ * than defaulting `matched` to true and `results` to [], which the UI would
+ * otherwise render as a successful zero-stack node and hide the failure.
+ */
+export function isLabelLocalStopResponse(value: unknown): value is LabelLocalStopResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return typeof r.matched === 'boolean'
+    && Array.isArray(r.results)
+    && r.results.every(isStackStopResult);
+}
+
 /**
  * Run a label-name-matched container stop against one node's own local Docker.
  *

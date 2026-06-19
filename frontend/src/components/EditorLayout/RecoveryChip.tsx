@@ -62,7 +62,7 @@ export function RecoveryChip({
                     </p>
                     <p className="mt-0.5 break-words text-xs text-muted-foreground">
                         {result.errorMessage ?? 'The operation did not complete.'}
-                        {result.rolledBack && ' · rolled back to previous version'}
+                        {result.rolledBack && ' · restored previous compose and env files'}
                     </p>
                     <div className="mt-1.5">
                         <RecoveryClassification result={result} />

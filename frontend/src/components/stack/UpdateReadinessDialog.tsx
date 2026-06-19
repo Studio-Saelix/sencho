@@ -9,7 +9,6 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
@@ -92,6 +91,12 @@ const UNKNOWN_FALLBACK = (detail: string): UpdateReadinessReport => ({
 interface UpdateReadinessDialogProps {
   open: boolean;
   stackName: string;
+  /**
+   * Node captured when the dialog opened. The readiness fetch and snapshot
+   * coverage run against this node, not the live active node, so a node switch
+   * while the dialog is open cannot mismatch the readiness from the update.
+   */
+  nodeId: number | null;
   onCancel: () => void;
   /** Caller closes the dialog and starts the update. */
   onProceed: () => void;
@@ -103,10 +108,8 @@ interface UpdateReadinessDialogProps {
  * the single hard block. A slow or failed readiness fetch degrades to an
  * unknown verdict so this dialog can never strand the update path.
  */
-export function UpdateReadinessDialog({ open, stackName, onCancel, onProceed }: UpdateReadinessDialogProps) {
-  const { activeNode } = useNodes();
+export function UpdateReadinessDialog({ open, stackName, nodeId, onCancel, onProceed }: UpdateReadinessDialogProps) {
   const { isAdmin } = useAuth();
-  const nodeId = activeNode?.id ?? null;
 
   const [report, setReport] = useState<UpdateReadinessReport | null>(null);
   const [snapshotAt, setSnapshotAt] = useState<number | null>(null);
@@ -133,7 +136,7 @@ export function UpdateReadinessDialog({ open, stackName, onCancel, onProceed }: 
 
     const load = async () => {
       try {
-        const res = await apiFetch(`/stacks/${stackName}/update-readiness`, { signal: controller.signal });
+        const res = await apiFetch(`/stacks/${stackName}/update-readiness`, { nodeId, signal: controller.signal });
         if (!res.ok) {
           const unreachable = res.status === 502 || res.status === 503 || res.status === 504;
           setReport(UNKNOWN_FALLBACK(unreachable

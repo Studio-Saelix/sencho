@@ -1174,7 +1174,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessMessage"
               example:
-                message: Stack rolled back successfully.
+                message: 'Stack rolled back: compose and env files restored.'
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { ComposeService } from './ComposeService';
+import { StackOpLockService, stackOpSkipMessage, type StackOpAction } from './StackOpLockService';
 import { DatabaseService, type Webhook } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { GitSourceService } from './GitSourceService';
@@ -16,6 +17,16 @@ type ExecutionResult = { success: boolean; error?: string; duration_ms: number }
 type ExecutionStatus = 'success' | 'failure';
 
 const REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS = 30_000;
+
+// Maps a webhook lifecycle action to the per-stack lock action. 'pull' updates,
+// so it locks as 'update'; 'git-pull' is excluded (it locks inside GitSourceService).
+const WEBHOOK_LOCK_ACTION: Record<string, StackOpAction | undefined> = {
+    deploy: 'deploy',
+    restart: 'restart',
+    stop: 'stop',
+    start: 'start',
+    pull: 'update',
+};
 
 export class WebhookService {
     private static instance: WebhookService;
@@ -125,42 +136,57 @@ export class WebhookService {
 
         const startTime = Date.now();
         try {
-            const compose = ComposeService.getInstance(nodeId);
-            switch (action) {
-                case 'deploy':
-                    await assertPolicyGateAllows(
-                        stackName,
-                        nodeId,
-                        buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
-                    );
-                    await compose.deployStack(stackName, undefined, atomic);
-                    HealthGateService.getInstance().begin(nodeId, stackName, 'deploy', 'system:webhook');
-                    break;
-                case 'restart':
-                    await compose.runCommand(stackName, 'restart');
-                    break;
-                case 'stop':
-                    await compose.runCommand(stackName, 'stop');
-                    break;
-                case 'start':
-                    await compose.runCommand(stackName, 'start');
-                    break;
-                case 'pull':
-                    await assertPolicyGateAllows(
-                        stackName,
-                        nodeId,
-                        buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
-                    );
-                    await compose.updateStack(stackName, undefined, atomic);
-                    HealthGateService.getInstance().begin(nodeId, stackName, 'update', 'system:webhook');
-                    break;
-                case 'git-pull':
-                    return this.executeLocalGitPull(webhookId, stackName, action, triggerSource, startTime);
-                default:
-                    throw new Error(`Unknown action: ${action}`);
+            // git-pull pulls then deploys through GitSourceService, which holds
+            // the per-stack lock itself; locking here too would self-conflict.
+            if (action === 'git-pull') {
+                return this.executeLocalGitPull(webhookId, stackName, action, triggerSource, startTime);
             }
+            const lockAction = WEBHOOK_LOCK_ACTION[action];
+            if (!lockAction) throw new Error(`Unknown action: ${action}`);
+            const compose = ComposeService.getInstance(nodeId);
+            // Run the lifecycle op under the per-stack lock so a webhook cannot
+            // race a manual deploy/update/rollback/backup on the same stack.
+            const lock = await StackOpLockService.getInstance().runExclusive(
+                nodeId, stackName, lockAction, 'system',
+                async () => {
+                    switch (action) {
+                        case 'deploy':
+                            await assertPolicyGateAllows(
+                                stackName,
+                                nodeId,
+                                buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
+                            );
+                            await compose.deployStack(stackName, undefined, atomic);
+                            HealthGateService.getInstance().begin(nodeId, stackName, 'deploy', 'system:webhook');
+                            break;
+                        case 'restart':
+                            await compose.runCommand(stackName, 'restart');
+                            break;
+                        case 'stop':
+                            await compose.runCommand(stackName, 'stop');
+                            break;
+                        case 'start':
+                            await compose.runCommand(stackName, 'start');
+                            break;
+                        case 'pull':
+                            await assertPolicyGateAllows(
+                                stackName,
+                                nodeId,
+                                buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
+                            );
+                            await compose.updateStack(stackName, undefined, atomic);
+                            HealthGateService.getInstance().begin(nodeId, stackName, 'update', 'system:webhook');
+                            break;
+                    }
+                },
+            );
 
             const durationMs = Date.now() - startTime;
+            if (!lock.ran) {
+                const error = stackOpSkipMessage(stackName, lock.existing.action);
+                this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, error);
+                return { success: false, error, duration_ms: durationMs };
+            }
             this.recordExecution(webhookId, action, 'success', triggerSource, durationMs, null);
             return { success: true, duration_ms: durationMs };
         } catch (err) {

@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
+import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
 import DockerController from '../services/DockerController';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
@@ -234,7 +235,16 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               results.push({ stackName, success: true, dryRun: true });
               continue;
             }
-            await ComposeService.getInstance(req.nodeId).deployStack(stackName, undefined, false);
+            // Per-stack lock so a bulk deploy cannot race a manual
+            // deploy/update/rollback/backup on the same stack and node.
+            const lock = await StackOpLockService.getInstance().runExclusive(
+              req.nodeId, stackName, 'deploy', 'system',
+              () => ComposeService.getInstance(req.nodeId).deployStack(stackName, undefined, false),
+            );
+            if (!lock.ran) {
+              results.push({ stackName, success: false, error: stackOpSkipMessage(stackName, lock.existing.action) });
+              continue;
+            }
           } else {
             // stop / restart have no pre-action policy gate; dry-run just
             // confirms the stack would be reached.
@@ -242,12 +252,21 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               results.push({ stackName, success: true, dryRun: true });
               continue;
             }
-            const dockerController = DockerController.getInstance(req.nodeId);
-            const containers = await dockerController.getContainersByStack(stackName);
-            if (action === 'stop') {
-              await Promise.all(containers.map(c => dockerController.stopContainer(c.Id)));
-            } else {
-              await Promise.all(containers.map(c => dockerController.restartContainer(c.Id)));
+            const lock = await StackOpLockService.getInstance().runExclusive(
+              req.nodeId, stackName, action === 'stop' ? 'stop' : 'restart', 'system',
+              async () => {
+                const dockerController = DockerController.getInstance(req.nodeId);
+                const containers = await dockerController.getContainersByStack(stackName);
+                if (action === 'stop') {
+                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id)));
+                } else {
+                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id)));
+                }
+              },
+            );
+            if (!lock.ran) {
+              results.push({ stackName, success: false, error: stackOpSkipMessage(stackName, lock.existing.action) });
+              continue;
             }
           }
           results.push({ stackName, success: true });

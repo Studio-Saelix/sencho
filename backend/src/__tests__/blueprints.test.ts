@@ -24,6 +24,7 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 let BlueprintReconciler: typeof import('../services/BlueprintReconciler').BlueprintReconciler;
 let NodeLabelService: typeof import('../services/NodeLabelService').NodeLabelService;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
+let StackOpLockService: typeof import('../services/StackOpLockService').StackOpLockService;
 let counter = 0;
 
 beforeAll(async () => {
@@ -32,6 +33,7 @@ beforeAll(async () => {
     ({ BlueprintReconciler } = await import('../services/BlueprintReconciler'));
     ({ NodeLabelService } = await import('../services/NodeLabelService'));
     ({ BlueprintService } = await import('../services/BlueprintService'));
+    ({ StackOpLockService } = await import('../services/StackOpLockService'));
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -43,6 +45,7 @@ beforeEach(() => {
     db.prepare('DELETE FROM node_labels').run();
     db.prepare("DELETE FROM nodes WHERE is_default = 0").run();
     db.prepare("UPDATE global_settings SET value = '0' WHERE key = 'developer_mode'").run();
+    StackOpLockService.resetForTests();
     vi.restoreAllMocks();
 });
 
@@ -390,6 +393,67 @@ describe('BlueprintReconciler developer-mode diagnostics', () => {
         await BlueprintReconciler.getInstance().reconcileOne(bp.id);
 
         expect(infoSpy.mock.calls.some(([message]) => String(message).includes('[BlueprintReconciler:diag]'))).toBe(true);
+    });
+});
+
+describe('BlueprintService per-stack lock', () => {
+    it('deploy under a free lock writes compose then marker, then deploys', async () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        // Spy the file/deploy primitives so the locked critical section runs
+        // without touching the real filesystem or Docker.
+        vi.spyOn(FileSystemService.prototype, 'createStack').mockResolvedValue(undefined);
+        const writeSpy = vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockResolvedValue(undefined);
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
+
+        const outcome = await BlueprintService.getInstance().deployToNode(bp, node);
+
+        expect(outcome.status).toBe('active');
+        expect(deploySpy).toHaveBeenCalledWith(bp.name, undefined, false);
+        // Compose is written first, then the marker, both before the deploy.
+        expect(writeSpy).toHaveBeenCalledTimes(2);
+        expect(writeSpy.mock.calls[0][2]).toBe(bp.compose_content);
+        expect(writeSpy.mock.calls[1][2]).toContain('"blueprintId"');
+        const [composeOrder, markerOrder] = writeSpy.mock.invocationCallOrder;
+        const [deployOrder] = deploySpy.mock.invocationCallOrder;
+        expect(composeOrder).toBeLessThan(markerOrder);
+        expect(markerOrder).toBeLessThan(deployOrder);
+    });
+
+    it('deploy skips, writes no stack files, and records failed when the stack lock is held', async () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        // A manual operation holds the lock; the reconcile deploy must not race
+        // it, and must not mutate compose/marker files before owning the lock.
+        StackOpLockService.getInstance().tryAcquire(nodeId, bp.name, 'update', 'admin');
+
+        const outcome = await BlueprintService.getInstance().deployToNode(bp, node);
+
+        expect(outcome.status).toBe('failed');
+        expect(outcome.error).toContain('already in progress');
+        // No marker file was written (the lock guards the file writes too).
+        expect(await BlueprintService.getInstance().readMarker(bp.name, node)).toBeNull();
+        // The manual op still holds the lock; the deploy never acquired it.
+        expect(StackOpLockService.getInstance().get(nodeId, bp.name)?.action).toBe('update');
+    });
+
+    it('withdraw skips and records failed when a manual operation holds the stack lock', async () => {
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        // A manual operation holds the lock; the withdraw must not race it.
+        StackOpLockService.getInstance().tryAcquire(nodeId, bp.name, 'update', 'admin');
+
+        const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
+
+        expect(outcome.status).toBe('failed');
+        expect(outcome.error).toContain('already in progress');
+        // The lock is still held by the manual op (the withdraw never acquired it).
+        expect(StackOpLockService.getInstance().get(nodeId, bp.name)?.action).toBe('update');
     });
 });
 

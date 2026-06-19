@@ -86,7 +86,16 @@ test.describe('Dossier documentation drift', () => {
   test('warns for an unpublished access-URL port and clears when it matches', async ({ page }) => {
     await createStackViaApi(page, STACK, COMPOSE);
     await openStack(page, STACK);
-    await page.getByRole('tab', { name: 'Dossier' }).click();
+    // Wait for the dossier GET to land before typing: it resolves by setting
+    // `fields` from the server (empty access_urls) and only then flips the
+    // doc-drift gate on, so a fill that races ahead of it would be overwritten.
+    await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes(`/api/stacks/${STACK}/dossier`) && r.request().method() === 'GET' && r.ok(),
+        { timeout: 10_000 },
+      ),
+      page.getByRole('tab', { name: 'Dossier' }).click(),
+    ]);
     await expect(page.getByTestId('dossier-panel')).toBeVisible();
 
     const field = page.getByTestId('dossier-field-access_urls');

@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('./stack/StackActivityTimeline', () => ({
@@ -335,6 +336,83 @@ describe('StackAnatomyPanel exposed footer', () => {
     renderWithPorts('services:\n  web:\n    image: x\n    ports:\n      - "8989:8989"\n');
     expect(await screen.findByText(/:8989/)).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /:8989/ })).toBeNull();
+  });
+});
+
+describe('StackAnatomyPanel effective dossier (multi-file Git)', () => {
+  const ROOT_NO_PORTS = 'services:\n  web:\n    image: nginx:1.25\n';
+
+  function renderPanel(content = ROOT_NO_PORTS) {
+    return render(
+      <StackAnatomyPanel
+        stackName="web"
+        content={content}
+        envContent=""
+        selectedEnvFile=".env"
+        gitSourcePending={false}
+        onEditCompose={vi.fn()}
+        onOpenGitSource={vi.fn()}
+        onApplyUpdate={vi.fn()}
+        canEdit
+        applying={false}
+      />,
+    );
+  }
+
+  it('reads override-published ports from the effective model, so the dossier shows them and doc-drift does not false-warn', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) return jsonRes(previewBody(false));
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      // Multi-file source: two configured compose paths.
+      if (url.includes('/git-source')) return jsonRes({
+        repo_url: 'https://github.com/org/repo.git', branch: 'main',
+        compose_path: 'compose.yaml', compose_paths: ['compose.yaml', 'infra/override.yaml'],
+      });
+      // An override publishes :9000, absent from the root file above.
+      if (url.includes('/effective-anatomy')) return jsonRes({
+        renderable: true, services: ['web'],
+        ports: { web: [{ host: '9000', container: '9000', proto: 'tcp', published: true }] },
+        volumes: {}, restart: null, networks: ['default'],
+      });
+      // The operator documented the override's port.
+      if (url.includes('/dossier')) return jsonRes({ access_urls: 'http://192.168.1.5:9000' });
+      return jsonRes(null, false);
+    });
+
+    renderPanel();
+    await userEvent.click(await screen.findByRole('tab', { name: 'Dossier' }));
+    await screen.findByTestId('dossier-panel');
+
+    // The generated-facts ports row counts the override-published port, proving the
+    // dossier read the merged effective model rather than the port-less root file.
+    // (Scoped to the SPAN so it does not also match the access_urls value below.)
+    await screen.findByText((content, el) => el?.tagName === 'SPAN' && content.startsWith('1 published'));
+    // And doc-drift stays silent: the documented :9000 is published in the effective
+    // model, so a root-only parse would false-warn here but the effective view must not.
+    await waitFor(() => expect(screen.queryByTestId('dossier-doc-drift')).not.toBeInTheDocument());
+    expect(vi.mocked(apiFetch).mock.calls.some(([u]) => String(u).includes('/effective-anatomy'))).toBe(true);
+  });
+
+  it('does not fetch the effective model for a single-file Git stack', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) return jsonRes(previewBody(false));
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      if (url.includes('/git-source')) return jsonRes({
+        repo_url: 'https://github.com/org/repo.git', branch: 'main',
+        compose_path: 'compose.yaml', compose_paths: ['compose.yaml'],
+      });
+      if (url.includes('/dossier')) return jsonRes({});
+      return jsonRes(null, false);
+    });
+
+    renderPanel();
+    await userEvent.click(await screen.findByRole('tab', { name: 'Dossier' }));
+    await screen.findByText(/github\.com\/org\/repo#main/);
+    // Give any (incorrect) effective fetch a chance to fire before asserting absence.
+    await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.some(([u]) => String(u).includes('/git-source'))).toBe(true));
+    expect(vi.mocked(apiFetch).mock.calls.some(([u]) => String(u).includes('/effective-anatomy'))).toBe(false);
   });
 });
 

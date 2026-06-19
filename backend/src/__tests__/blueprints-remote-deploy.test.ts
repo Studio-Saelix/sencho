@@ -73,7 +73,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('BlueprintService remote deploy', () => {
-    it('creates the stack, writes compose then marker, then deploys, in order', async () => {
+    it('applies atomically via the remote apply-local endpoint in a single call', async () => {
         const node = seedRemoteNode();
         const bp = seedBlueprint([node.id]);
         const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
@@ -81,32 +81,27 @@ describe('BlueprintService remote deploy', () => {
 
         vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] }); // hasNameConflict: no stacks
         const putSpy = vi.spyOn(axios, 'put').mockResolvedValue({ status: 200, data: {} });
-        const postSpy = vi.spyOn(axios, 'post')
-            .mockResolvedValueOnce({ status: 201, data: {} }) // create stack
-            .mockResolvedValueOnce({ status: 200, data: {} }); // deploy
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { deployed: true } });
 
         const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);
 
         expect(result.status).toBe('active');
-        expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/stacks$/);
-        expect(putSpy.mock.calls[0][0]).toContain('docker-compose.yml');
-        expect(putSpy.mock.calls[1][0]).toContain('.blueprint.json');
-        expect(postSpy.mock.calls[1][0]).toMatch(/\/deploy$/);
-        // Assert global interleaving across spies, not just per-method order:
-        // create < compose < marker < deploy. (mock.calls indices alone would not
-        // catch the deploy POST firing before the file PUTs.)
-        const [createOrder, deployOrder] = postSpy.mock.invocationCallOrder;
-        const [composeOrder, markerOrder] = putSpy.mock.invocationCallOrder;
-        expect(createOrder).toBeLessThan(composeOrder);
-        expect(composeOrder).toBeLessThan(markerOrder);
-        expect(markerOrder).toBeLessThan(deployOrder);
+        // One atomic call to the remote (create + write + deploy run under the
+        // remote's lock); no separate file PUTs from the hub.
+        expect(postSpy).toHaveBeenCalledTimes(1);
+        expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/blueprints\/apply-local$/);
+        expect(putSpy).not.toHaveBeenCalled();
+        const payload = postSpy.mock.calls[0][1] as { stackName: string; composeContent: string; markerContent: string };
+        expect(payload.stackName).toBe(bpObj.name);
+        expect(typeof payload.composeContent).toBe('string');
+        expect(typeof payload.markerContent).toBe('string');
 
         const dep = DatabaseService.getInstance().getDeployment(bp.id, node.id);
         expect(dep?.status).toBe('active');
         expect(dep?.applied_revision).toBe(bpObj.revision);
     });
 
-    it('treats a 409 on stack create as already-exists and proceeds', async () => {
+    it('falls back to the legacy create/write/deploy flow when the remote lacks apply-local (404)', async () => {
         const node = seedRemoteNode();
         const bp = seedBlueprint([node.id]);
         const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
@@ -115,17 +110,40 @@ describe('BlueprintService remote deploy', () => {
         vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
         const putSpy = vi.spyOn(axios, 'put').mockResolvedValue({ status: 200, data: {} });
         const postSpy = vi.spyOn(axios, 'post')
-            .mockResolvedValueOnce({ status: 409, data: { error: 'already exists' } })
-            .mockResolvedValueOnce({ status: 200, data: {} });
+            .mockResolvedValueOnce({ status: 404, data: {} })   // apply-local missing on older node
+            .mockResolvedValueOnce({ status: 201, data: {} })   // legacy create stack
+            .mockResolvedValueOnce({ status: 200, data: {} });  // legacy deploy
 
         const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);
 
         expect(result.status).toBe('active');
-        expect(putSpy).toHaveBeenCalledTimes(2);
-        expect(postSpy).toHaveBeenCalledTimes(2);
+        expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/blueprints\/apply-local$/);
+        expect(postSpy.mock.calls[1][0]).toMatch(/\/api\/stacks$/);
+        expect(putSpy).toHaveBeenCalledTimes(2); // compose + marker
+        expect(postSpy.mock.calls[2][0]).toMatch(/\/deploy$/);
     });
 
-    it('maps a remote deploy failure to status=failed with the HTTP error', async () => {
+    it('maps a remote apply lock-conflict (409) to status=failed', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
+        const putSpy = vi.spyOn(axios, 'put').mockResolvedValue({ status: 200, data: {} });
+        vi.spyOn(axios, 'post').mockResolvedValue({
+            status: 409,
+            data: { error: 'web is busy: another operation (update) is already in progress' },
+        });
+
+        const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('failed');
+        expect(result.error).toContain('already in progress');
+        expect(putSpy).not.toHaveBeenCalled(); // no legacy file writes on conflict
+    });
+
+    it('maps a remote apply failure to status=failed with the HTTP error', async () => {
         const node = seedRemoteNode();
         const bp = seedBlueprint([node.id]);
         const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
@@ -133,9 +151,7 @@ describe('BlueprintService remote deploy', () => {
 
         vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
         vi.spyOn(axios, 'put').mockResolvedValue({ status: 200, data: {} });
-        vi.spyOn(axios, 'post')
-            .mockResolvedValueOnce({ status: 201, data: {} })
-            .mockResolvedValueOnce({ status: 500, data: { error: 'boom' } });
+        vi.spyOn(axios, 'post').mockResolvedValue({ status: 500, data: { error: 'boom' } });
 
         const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);
 

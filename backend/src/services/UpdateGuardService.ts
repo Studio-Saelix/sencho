@@ -3,7 +3,7 @@ import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeDoctorService } from './ComposeDoctorService';
-import { UpdatePreviewService } from './UpdatePreviewService';
+import { UpdatePreviewService, isMovingTag } from './UpdatePreviewService';
 import { withTimeout } from '../utils/withTimeout';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -140,7 +140,14 @@ export class UpdateGuardService {
       backup,
       envSummary,
       stackHasEnv,
-      rollbackTarget: preview === 'error' ? 'error' : { target: preview.rollback_target },
+      rollbackTarget: preview === 'error'
+        ? 'error'
+        : {
+            target: preview.rollback_target,
+            // Any image on a moving tag means restoring files cannot guarantee
+            // the image reverts, so the rollback target is not a true revert.
+            moving: preview.images.some(img => isMovingTag(img.current_tag)),
+          },
       lastDeployAt,
       containers,
     }, now);

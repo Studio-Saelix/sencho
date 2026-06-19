@@ -7,11 +7,6 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
-const nodesState = { activeNode: { id: 1, type: 'local', name: 'local' } };
-vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => nodesState,
-}));
-
 const authState = { isAdmin: true };
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => authState,
@@ -55,6 +50,7 @@ function setup(props: Partial<Parameters<typeof UpdateReadinessDialog>[0]> = {})
   const base = {
     open: true,
     stackName: 'web',
+    nodeId: 1,
     onCancel: vi.fn(),
     onProceed: vi.fn(),
     ...props,
@@ -86,6 +82,17 @@ describe('UpdateReadinessDialog', () => {
     expect(screen.getByTestId('readiness-proceed')).toBeEnabled();
   });
 
+  it('fetches readiness and coverage against the captured node, not the active node', async () => {
+    routeApi();
+    setup({ nodeId: 7 });
+    await waitFor(() => expect(screen.getByTestId('readiness-verdict')).toBeInTheDocument());
+    const readinessCall = vi.mocked(apiFetch).mock.calls.find(c => String(c[0]).includes('/update-readiness'));
+    expect(readinessCall).toBeDefined();
+    expect((readinessCall![1] as { nodeId?: number | null } | undefined)?.nodeId).toBe(7);
+    const coverageCall = vi.mocked(apiFetch).mock.calls.find(c => String(c[0]).includes('/snapshots/coverage'));
+    expect(String(coverageCall?.[0])).toContain('nodeId=7');
+  });
+
   it('degrades to unknown on a plain network failure, and stays non-blocking', async () => {
     routeApi({ readiness: () => Promise.reject(new Error('connection refused')) });
     const props = setup();
@@ -107,7 +114,7 @@ describe('UpdateReadinessDialog', () => {
         }
         return Promise.resolve(new Response(JSON.stringify({ latestAt: null }), { status: 200 }));
       });
-      render(<UpdateReadinessDialog open stackName="web" onCancel={vi.fn()} onProceed={vi.fn()} />);
+      render(<UpdateReadinessDialog open stackName="web" nodeId={1} onCancel={vi.fn()} onProceed={vi.fn()} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(4_100); });
       expect(screen.getByTestId('readiness-verdict')).toHaveAttribute('data-verdict', 'unknown');
       expect(screen.getByText(/did not respond in time/)).toBeInTheDocument();
@@ -134,7 +141,7 @@ describe('UpdateReadinessDialog', () => {
       return Promise.resolve(new Response(JSON.stringify({ latestAt: null }), { status: 200 }));
     });
 
-    const props = { stackName: 'web', onCancel: vi.fn(), onProceed: vi.fn() };
+    const props = { stackName: 'web', nodeId: 1, onCancel: vi.fn(), onProceed: vi.fn() };
     const { rerender } = render(<UpdateReadinessDialog open {...props} />);
     rerender(<UpdateReadinessDialog open={false} {...props} />);
     rerender(<UpdateReadinessDialog open {...props} />);

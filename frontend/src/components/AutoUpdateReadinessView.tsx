@@ -52,7 +52,8 @@ export interface StackCard {
   applying: boolean;
   // True when at least one enabled action='update' scheduled task covers this
   // stack on this node (per-stack row or fleet row). Drives the Auto: Off pill
-  // and the Apply now button's disabled state.
+  // and the hero "ready to apply automatically" count. Manual Apply now is
+  // schedule-independent and does not read this field.
   autoUpdateEnabled: boolean;
 }
 
@@ -284,12 +285,8 @@ function StackReadinessCard({
                 <Button
                   size="sm"
                   onClick={() => onApply(stack, nodeId)}
-                  disabled={blocked || applying || !autoUpdateEnabled}
-                  title={
-                    !autoUpdateEnabled
-                      ? 'No schedule covers this stack. Create one in Schedules → Auto-update Stack.'
-                      : (blocked ? (blockedReason ?? undefined) : undefined)
-                  }
+                  disabled={blocked || applying}
+                  title={blocked ? (blockedReason ?? undefined) : undefined}
                   className="gap-1.5"
                 >
                   <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
@@ -467,9 +464,9 @@ export function MobileReadinessCard({ card, onApply }: { card: StackCard; onAppl
             </span>
             <Button
               size="sm"
-              variant={blocked || !autoUpdateEnabled ? 'outline' : 'default'}
+              variant={blocked ? 'outline' : 'default'}
               onClick={() => onApply(stack, nodeId)}
-              disabled={blocked || applying || !autoUpdateEnabled}
+              disabled={blocked || applying}
               className="gap-1.5"
             >
               <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />

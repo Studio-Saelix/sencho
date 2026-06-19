@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.92.0](https://github.com/Studio-Saelix/sencho/compare/v0.91.1...v0.92.0) (2026-06-19)
+
+
+### Added
+
+* add a compact icon-only top navigation toggle ([#1363](https://github.com/Studio-Saelix/sencho/issues/1363)) ([1b96f3b](https://github.com/Studio-Saelix/sencho/commit/1b96f3b9803f37ae6f120e1bb0181ae67f88751f))
+* add an inline deploy-progress style for the stack detail ([#1355](https://github.com/Studio-Saelix/sencho/issues/1355)) ([e20f1fe](https://github.com/Studio-Saelix/sencho/commit/e20f1fe415ab887261f97d31040ada90c70c6220))
+* add an on-demand node-wide security scan with live progress ([#1367](https://github.com/Studio-Saelix/sencho/issues/1367)) ([ef5a3f0](https://github.com/Studio-Saelix/sencho/commit/ef5a3f00a7f2a304a6f17073932e29433e506980))
+* add Compose Doctor preflight checks for stacks ([#1348](https://github.com/Studio-Saelix/sencho/issues/1348)) ([52ff072](https://github.com/Studio-Saelix/sencho/commit/52ff0725f414fdebebd5cd18c8ba044211b68e0c))
+* add dedicated Security page and policy-pack foundation ([#1362](https://github.com/Studio-Saelix/sencho/issues/1362)) ([2a4955f](https://github.com/Studio-Saelix/sencho/commit/2a4955f56d4f6c29614cb450ac16bd2bb82128e4))
+* chart-led Security overview with sortable Images and History tables ([#1364](https://github.com/Studio-Saelix/sencho/issues/1364)) ([3d39d85](https://github.com/Studio-Saelix/sencho/commit/3d39d856a376f6e68a202d20560c5f0ef5ca9154))
+* Compose Network Inspector and exposure intent guard ([#1360](https://github.com/Studio-Saelix/sencho/issues/1360)) ([77f1611](https://github.com/Studio-Saelix/sencho/commit/77f161197193198c4a10e4a8348fa4521172dea1))
+* detect stalled stack updates and add in-app recovery actions ([#1347](https://github.com/Studio-Saelix/sencho/issues/1347)) ([d369b03](https://github.com/Studio-Saelix/sencho/commit/d369b03a38e19d1e2fa7ee98f4e6738fce5da3ef))
+* **editor:** enable mobile compose and env editing ([#1371](https://github.com/Studio-Saelix/sencho/issues/1371)) ([a5109e7](https://github.com/Studio-Saelix/sencho/commit/a5109e7916d926f1a99191c4bc1789d9ec62a0f0))
+* **files:** move files and folders across directories in the stack explorer ([#1373](https://github.com/Studio-Saelix/sencho/issues/1373)) ([888f658](https://github.com/Studio-Saelix/sencho/commit/888f658a7a2406a7f059d08fe4d81a078a423f0b))
+* flag documentation drift in the stack dossier ([#1349](https://github.com/Studio-Saelix/sencho/issues/1349)) ([739bbf9](https://github.com/Studio-Saelix/sencho/commit/739bbf990e97fd67d4c61192561c043c44f36fff))
+* **fleet:** refine the Fleet Overview toolbar ([#1376](https://github.com/Studio-Saelix/sencho/issues/1376)) ([02c3b00](https://github.com/Studio-Saelix/sencho/commit/02c3b006eba3852ec37324b9d7611047a8ff1a9d))
+* **fleet:** reorder Overview toolbar actions so Add node sits far right ([#1381](https://github.com/Studio-Saelix/sencho/issues/1381)) ([f166a53](https://github.com/Studio-Saelix/sencho/commit/f166a537c390f790b1e2aa579f0f562ed82de916))
+* **fleet:** tidy the Overview toolbar and shorten tab labels ([#1361](https://github.com/Studio-Saelix/sencho/issues/1361)) ([bef51a9](https://github.com/Studio-Saelix/sencho/commit/bef51a979f0add0b3deeff7e9bde78c91b967dd6))
+* health-gated updates and rollback readiness ([#1354](https://github.com/Studio-Saelix/sencho/issues/1354)) ([38aabe7](https://github.com/Studio-Saelix/sencho/commit/38aabe70648e6c8d1252f753022b72f908819480))
+* link container images to registry and source metadata ([#1358](https://github.com/Studio-Saelix/sencho/issues/1358)) ([e394429](https://github.com/Studio-Saelix/sencho/commit/e3944295f2291516e070f67ff440e5c4ad83ddf9))
+* make image-update check cadence configurable and visible ([#1377](https://github.com/Studio-Saelix/sencho/issues/1377)) ([058cf8f](https://github.com/Studio-Saelix/sencho/commit/058cf8f2c7caf5e2c76111ce2c79e8adfd9376ec))
+* match the Security masthead to the primary-page hero and make History search realtime ([#1365](https://github.com/Studio-Saelix/sencho/issues/1365)) ([6cbab66](https://github.com/Studio-Saelix/sencho/commit/6cbab661a07a180d7aec52d9c6ea07acad4bea4a))
+* **mobile:** standardize secondary pages and the stack list on the status masthead ([#1374](https://github.com/Studio-Saelix/sencho/issues/1374)) ([6cc66fa](https://github.com/Studio-Saelix/sencho/commit/6cc66faa8c5cbb39351d2056b3bd94d6149d85fe))
+* ordered multi-file Compose for Git sources ([#1380](https://github.com/Studio-Saelix/sencho/issues/1380)) ([f23b7e1](https://github.com/Studio-Saelix/sencho/commit/f23b7e1bacb6f2f6c1863cc8d64ec3791e9fd860))
+* pre-deploy scan visibility and pinned scanner version ([#1378](https://github.com/Studio-Saelix/sencho/issues/1378)) ([7ce045a](https://github.com/Studio-Saelix/sencho/commit/7ce045accb3872e4aad57e5f0dbf2296fb7a3d5c))
+* **security:** reflow the node Security page for mobile ([#1372](https://github.com/Studio-Saelix/sencho/issues/1372)) ([0066887](https://github.com/Studio-Saelix/sencho/commit/0066887ceeb8ecbd8b41a5b72c3df4f2249527de))
+* **settings:** add Stacks section for stack workflow preferences ([#1366](https://github.com/Studio-Saelix/sencho/issues/1366)) ([ebf66fd](https://github.com/Studio-Saelix/sencho/commit/ebf66fd92a2c1e93c36257b34f7524f78be41013))
+
+
+### Fixed
+
+* base Git multi-file Compose deploy env and dossier on the effective config ([#1391](https://github.com/Studio-Saelix/sencho/issues/1391)) ([ba09e6f](https://github.com/Studio-Saelix/sencho/commit/ba09e6f69e544cfd8c922e6bd4db215957d3e5f9))
+* bind deploy progress, request, and health gate to the captured node ([#1357](https://github.com/Studio-Saelix/sencho/issues/1357)) ([48cebf9](https://github.com/Studio-Saelix/sencho/commit/48cebf9501e2444b03e8b6ec6f16545ef30a8fdf))
+* **deps:** bump form-data, protobufjs, and vite to clear high-severity CVEs ([#1379](https://github.com/Studio-Saelix/sencho/issues/1379)) ([770bead](https://github.com/Studio-Saelix/sencho/commit/770bead8890e3c04d132e8caba567332f4d6a24b))
+* **fleet:** resolve Stop-by-label stack labels across all nodes ([#1382](https://github.com/Studio-Saelix/sencho/issues/1382)) ([cb58cc4](https://github.com/Studio-Saelix/sencho/commit/cb58cc423f659675aea2b240877deee1c506e829))
+* **fleet:** scope Stop-by-label to stack labels with a typed suggestion source ([#1368](https://github.com/Studio-Saelix/sencho/issues/1368)) ([4610a43](https://github.com/Studio-Saelix/sencho/commit/4610a433e667499a83cddbb0d491c7b29b87e635))
+* gate fleet stop-by-label on a resolved preview and validate remote stop responses ([#1392](https://github.com/Studio-Saelix/sencho/issues/1392)) ([2821e87](https://github.com/Studio-Saelix/sencho/commit/2821e87d3f5e95185c5e9d6845e2287c83d66b28))
+* harden deploy/update concurrency and node-targeting safety ([#1390](https://github.com/Studio-Saelix/sencho/issues/1390)) ([5f1baa7](https://github.com/Studio-Saelix/sencho/commit/5f1baa752225d6d466e46e65dd4da858d08d6972))
+* make published port links open reliably ([#1359](https://github.com/Studio-Saelix/sencho/issues/1359)) ([f253276](https://github.com/Studio-Saelix/sencho/commit/f25327630317ca59af7ab58a0bf0872e12763ffc))
+* **mobile:** keep the bottom tab bar visible with dynamic viewport height ([#1375](https://github.com/Studio-Saelix/sencho/issues/1375)) ([85bcd13](https://github.com/Studio-Saelix/sencho/commit/85bcd1341e2e96ff3ad9d4b11d78dced993f980d))
+* **settings:** clear stale pending and unsaved indicators after save ([#1370](https://github.com/Studio-Saelix/sencho/issues/1370)) ([49f1b49](https://github.com/Studio-Saelix/sencho/commit/49f1b49ac6c5f7bdb2986ef285c91b48f3ece7ad))
+* **sidebar:** skip the auto-update next-run poll for non-admins ([#1388](https://github.com/Studio-Saelix/sencho/issues/1388)) ([2960f9f](https://github.com/Studio-Saelix/sencho/commit/2960f9f85381723c420690b4004bb91a07db1095))
+* **stacks:** return a handled response when saving env to a stack with no env file ([#1393](https://github.com/Studio-Saelix/sencho/issues/1393)) ([29c599d](https://github.com/Studio-Saelix/sencho/commit/29c599d370f4beed4bd9c5b8934405323bcf2771))
+* **updates:** allow "Apply now" on the readiness board without a schedule ([#1394](https://github.com/Studio-Saelix/sencho/issues/1394)) ([de87c41](https://github.com/Studio-Saelix/sencho/commit/de87c41b782ae3c040d4930f4987896822111198))
+
 ## [0.91.1](https://github.com/Studio-Saelix/sencho/compare/v0.91.0...v0.91.1) (2026-06-10)
 
 

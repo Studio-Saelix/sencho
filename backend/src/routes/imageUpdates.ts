@@ -7,6 +7,7 @@ import { CacheService } from '../services/CacheService';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
+import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
 import { NotificationService } from '../services/NotificationService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { HealthGateService } from '../services/HealthGateService';
@@ -321,7 +322,14 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           continue;
         }
 
-        await compose.updateStack(stackName, undefined, atomic);
+        const lock = await StackOpLockService.getInstance().runExclusive(
+          req.nodeId, stackName, 'update', 'system',
+          () => compose.updateStack(stackName, undefined, atomic),
+        );
+        if (!lock.ran) {
+          results.push(stackOpSkipMessage(stackName, lock.existing.action));
+          continue;
+        }
         db.clearStackUpdateStatus(req.nodeId, stackName);
         HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`);
 

@@ -8,6 +8,7 @@ import { CryptoService } from './CryptoService';
 import { DatabaseService, type StackGitSource, type GitSourceAuthType, type GitSourceAppliedSpec } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeService } from './ComposeService';
+import { StackOpLockService } from './StackOpLockService';
 import { HealthGateService } from './HealthGateService';
 import { NodeRegistry } from './NodeRegistry';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
@@ -1315,7 +1316,15 @@ export class GitSourceService {
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
                     }),
                 );
-                await ComposeService.getInstance().deployStack(stackName);
+                const lock = await StackOpLockService.getInstance().runExclusive(
+                    nodeId, stackName, 'deploy', 'system',
+                    () => ComposeService.getInstance(nodeId).deployStack(stackName),
+                );
+                if (!lock.ran) {
+                    const busy = `Auto-deploy skipped: another operation (${lock.existing.action}) is already in progress for ${stackName}.`;
+                    console.warn(`[GitSource] ${busy}`);
+                    return { applied: true, deployed: false, deployError: busy };
+                }
                 HealthGateService.getInstance().begin(nodeId, stackName, 'deploy', 'system:git-source');
                 console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
                 return { applied: true, deployed: true };

@@ -47,8 +47,9 @@ Stop every stack assigned a given **stack label** on every node where that stack
 
 1. Open **Fleet → Actions**.
 2. Type a name in the **Stack label** field. The picker queries each reachable node for its own stack labels and lists each name once with its combined stack and node counts (and the carrying node names), so the scope is unmistakable. A stack label that exists only on a remote node still appears. When a node cannot be reached, the picker notes that the suggestions may be incomplete. You can also type a name by hand.
-3. Click **Stop fleet**.
-4. A confirmation appears with the kicker **Fleet stop** and the title `Stop all stacks with the stack label "<name>"?`. Click **Stop fleet** to commit.
+3. As you type, a live preview resolves the blast radius across the fleet and the card lists which nodes and stacks match. **Stop fleet** stays disabled until that preview resolves to at least one matching stack, so the action can never run before you can see what it will hit. If the live preview is unavailable, **Dry run** rehearses the same fan-out without stopping anything and resolves the blast radius the same way.
+4. Click **Stop fleet**.
+5. A confirmation appears with the kicker **Fleet stop**, the title `Stop all stacks with the stack label "<name>"?`, and the resolved list of nodes and stacks that will be stopped. Review it, then click **Stop fleet** to commit.
 
 <Frame>
   <img src="/images/fleet-actions/fleet-actions-stop-confirm.png" alt="Fleet stop confirmation dialog. Kicker 'Fleet stop' in red mono, italic title 'Stop all stacks with the stack label &quot;docs-preview&quot;?', Cancel and Stop fleet buttons in the footer." />
