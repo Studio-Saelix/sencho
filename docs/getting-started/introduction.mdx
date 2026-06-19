@@ -34,7 +34,7 @@ The **Home** view is the default landing page. It is designed for a fast operati
 - The activity panel shows **Fleet Heartbeat** when remote nodes exist, or **Stack Restarts (7d)** on a local-only install.
 - **Recent Alerts** shows the latest notification feed and includes **Clear All Notifications** when there is anything to clear.
 
-The top navigation includes **Home**, **Fleet**, **Resources**, **App Store**, and **Logs** on the standard dashboard surface. Depending on license, role, and node context, it can also include **Update**, **Schedules**, **Console**, and **Audit**.
+The top navigation strip starts with **Home**, **Fleet**, **Resources**, **Security**, and **App Store**. Additional operator views (**Logs**, **Update**, **Schedules**, **Console**, and **Audit**) appear based on your role and license tier. Fleet-wide views describe the control instance, so they are hidden while a remote node is active.
 
 ## Stack workspace
 
@@ -64,7 +64,7 @@ The **Fleet** view is the multi-node command center. The masthead summarizes onl
 
 The Fleet toolbar includes **Check Updates**, **Refresh**, and **Add node** for admins. The **Overview** tab supports search, sort, status filters, label filters, and a Grid or Topology view. Node cards show online state, resource use, container counts, version state, update actions, and direct drill-down into stacks on that node.
 
-Fleet also provides dedicated tabs for snapshots, node status, blueprint deployments, traffic management, federation, fleet actions, and secrets. Some fleet features require Admiral. See [Licensing](/features/licensing) for the full tier breakdown.
+Beyond **Overview**, Fleet provides tabs for **Snapshots**, node **Status**, a dependency **Map**, blueprint **Deployments**, mesh **Routing**, **Federation**, fleet **Actions**, and **Secrets**. Some fleet tabs require Admiral. See [Licensing](/features/licensing) for the full tier breakdown.
 
 ## Resources, templates, and logs
 
@@ -78,11 +78,21 @@ The **App Store** lets you search templates, filter by category, open a deploy s
 
 The **Logs** view aggregates logs across stacks on the active node. It includes a live masthead, event counters, search, stack filters, stream filters, level filters, pause and resume controls, and download support for the filtered buffer.
 
-## Settings and security
+## Security
 
-Settings are grouped by **Personal**, **Access**, **Infrastructure**, **Monitoring**, **Notifications**, **Automation**, **Organization**, **Security**, **Operations**, and **Help**. Some sections are global to the control instance, while others are scoped to the active node.
+The **Security** view is a node-scoped review surface for the container images on the active node. The masthead reports the overall posture, how many images have been scanned, and whether the scanner is installed.
 
-Use Settings to manage account security, licensing, users, SSO, API tokens, host thresholds, node registration, alert delivery, security scanning, template registry settings, diagnostics, and build metadata. The [Configuration](/getting-started/configuration) guide covers the host and environment settings that matter before first deploy.
+<Frame>
+  <img src="/images/introduction/security-overview.png" alt="Sencho Security view with the posture masthead, severity trend and distribution charts, top-image and findings breakdowns, and the tab strip" />
+</Frame>
+
+Tabs cover the **Overview** charts, per-image findings under **Images**, **Compose risks** read from your Compose files, embedded **Secrets** detection, deploy-blocking **Policies**, **Suppressions** for findings you have accepted, scan **History**, and **Scanner setup**. Scanning is powered by Trivy and installs from **Scanner setup** in one step. Policies require Admiral. See [Vulnerability Scanning](/features/vulnerability-scanning) for the full workflow.
+
+## Settings
+
+Settings are grouped by **Personal**, **Access**, **Infrastructure**, **Monitoring**, **Notifications**, **Automation**, **Organization**, **Operations**, and **Help**. Some groups are global to the control instance, while others, such as **Monitoring**, are scoped to the active node.
+
+Use Settings to manage account security, licensing, users, SSO, API tokens, host thresholds, node registration, alert delivery, template registry settings, diagnostics, and build metadata. The [Configuration](/getting-started/configuration) guide covers the host and environment settings that matter before first deploy.
 
 ## Typical workflow
 
