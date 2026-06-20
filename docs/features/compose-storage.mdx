@@ -1,0 +1,60 @@
+---
+title: Storage Portability
+description: See every mount a stack depends on, learn whether it is portable or tied to this node, and find out what will break if you move or restore it, all before you deploy.
+---
+
+The **Storage** tab in the right-hand **Anatomy** panel answers a Compose-first question: *what storage does this stack depend on, and what happens to it if I move or restore the stack?* It renders the effective Compose model, the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied, lists every mount, and gives the stack a single portability verdict.
+
+The view is read-only with respect to the stack and the host: it never changes a mount, and it never reads, moves, or changes the ownership of any file. It inspects structure only, mount type, source and target paths, the read-only flag, and a host path's existence, type, and owner, so nothing inside a volume or bind mount is ever opened.
+
+## Storage inventory
+
+Each service lists its mounts, grouped by service:
+
+- **bind** mounts a host path into the container. For a path inside the stack directory, Sencho also shows whether it exists, whether it is a file, directory, socket, or symlink, and its owner on Linux hosts.
+- **named** uses a Docker-managed volume. An **external** chip marks a volume the stack expects to already exist on the node.
+- **anonymous** is an unnamed volume. Because it has no name, it is easy to miss when backing up and is orphaned when the container is recreated.
+- **tmpfs** is an in-memory mount that holds nothing on disk.
+- A **socket** chip marks a mount of the Docker socket.
+
+Every mount also shows whether it is **read-only** or **read-write**.
+
+## Portability
+
+The top of the tab gives the stack one verdict, with the reasons behind it:
+
+| Status | Meaning |
+|--------|---------|
+| **Portable** | Every mount is inside the stack directory, or there is no persistent storage, so the stack moves cleanly with its files. |
+| **Partially portable** | The Compose structure moves cleanly, but named or anonymous volume data lives on this node and is not carried by moving the files. Back that data up separately. |
+| **Node-bound** | The stack binds host paths outside its directory, or mounts the Docker socket, so it is tied to this specific host. Those paths must exist on any node you move it to. |
+| **Unknown** | The effective model could not be rendered, so portability cannot be determined. |
+
+A read-only bind to an outside path is still node-bound: read-only lowers the risk of a change, not the need for the path to exist on the target. A bind that is a symlink pointing outside the stack directory is treated as node-bound as well.
+
+## Snapshot coverage
+
+A stack with persistent storage is only as safe as its backups. Sencho shows administrators whether a recent fleet snapshot covers the stack, and warns when a stack that holds data has not been snapshotted in the last seven days.
+
+Fleet snapshots capture Compose and env files, not the data inside named volumes or bind mounts. The tab states this plainly so a snapshot is never mistaken for an application-data backup. Back up volume data separately before moving or restoring a stack.
+
+## Findings in Doctor
+
+Storage risk findings live in the **Doctor** tab, which reads the same model: a missing bind-mount path, a mount whose ownership is likely to mismatch the container user, a mounted Docker socket, a required external volume that does not exist, and an anonymous volume whose data has no name to back up by.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The Storage tab is not there">
+    The tab appears once the node advertises support for it. A node running an older Sencho version hides the tab until it is updated.
+  </Accordion>
+  <Accordion title="A bind path shows no existence or owner">
+    Existence, type, and owner are resolved only for paths inside the stack directory. A host path elsewhere on the machine is outside Sencho's view, so it is listed but left unverified, and it counts toward a node-bound verdict.
+  </Accordion>
+  <Accordion title="It says the model cannot render">
+    `docker compose config` could not produce an effective model, usually a YAML error, an unresolved include or merge, or a required variable with no value. Fix the reported problem and reopen the tab.
+  </Accordion>
+  <Accordion title="There is no snapshot coverage shown">
+    Snapshot coverage is shown to administrators. The warning and the last-snapshot line appear for a stack that holds persistent data once a snapshot has run on its node.
+  </Accordion>
+</AccordionGroup>

@@ -17,6 +17,7 @@ import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } f
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
+import { buildStorageInventory } from '../services/storage/inventory';
 import { buildEffectiveAnatomy } from '../services/effectiveAnatomy';
 import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
 import { UpdateGuardService } from '../services/UpdateGuardService';
@@ -1148,6 +1149,24 @@ stacksRouter.get('/:stackName/networking', async (req: Request, res: Response) =
     console.error('[Stacks] Failed to build networking facts for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build networking facts' });
+  }
+});
+
+// Storage inventory: per-stack mount inventory (binds, named/anonymous volumes,
+// tmpfs, docker socket; read-only vs read-write; host-path existence/type/owner)
+// and a portability verdict derived from the effective model + within-stack
+// host-path probes. Read-only and advisory; auto-proxies to the active node.
+// Never returns raw render stderr or any environment value.
+stacksRouter.get('/:stackName/storage', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildStorageInventory(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to build storage inventory for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to build storage inventory' });
   }
 });
 

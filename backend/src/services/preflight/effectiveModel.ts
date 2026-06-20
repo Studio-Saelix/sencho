@@ -21,6 +21,21 @@ export interface EffBind {
   target: string;
 }
 
+/**
+ * One mount declared by a service, classified for the storage inventory. Unlike
+ * `EffBind`/`namedVolumes` (which the preflight rules consume), this captures the
+ * full mount taxonomy the Storage tab needs: every type, the read-only flag, and
+ * anonymous/tmpfs mounts the rule-facing fields deliberately omit.
+ */
+export interface EffStorageMount {
+  /** bind = host path; named = top-level volume key; anonymous = unnamed volume; tmpfs = ephemeral RAM mount. */
+  type: 'bind' | 'named' | 'anonymous' | 'tmpfs';
+  /** Host path (bind) or volume key (named); absent for anonymous and tmpfs mounts. */
+  source?: string;
+  target: string;
+  readOnly: boolean;
+}
+
 /** A service's membership in one top-level network, keyed by the network KEY
  *  (not the resolved docker name) so it lines up with the `networks` map and
  *  with the authored `DeclaredService.networks`. */
@@ -35,6 +50,8 @@ export interface EffService {
   ports: EffPortSpec[];
   binds: EffBind[];
   namedVolumes: string[];
+  /** Full per-mount inventory (every type, read-only flag, anonymous/tmpfs). Consumed by the storage feature, not the preflight rules. */
+  storageMounts: EffStorageMount[];
   privileged: boolean;
   networkMode?: string;
   restart?: string;
@@ -135,6 +152,90 @@ function parseVolumes(volumes: unknown): { binds: EffBind[]; named: string[] } {
   return { binds, named };
 }
 
+/** Leading Windows drive (`C:\` or `C:/`), whose own colon must not split a short-form source. */
+const WIN_DRIVE = /^[A-Za-z]:[\\/]/;
+
+/** A short-form source is a bind when it looks like a host path, otherwise a named volume. */
+function isHostPathSource(source: string): boolean {
+  return source.startsWith('/') || source.startsWith('.') || source.startsWith('~') || WIN_DRIVE.test(source);
+}
+
+/**
+ * Parse one short-form `volumes:` entry (`[SOURCE:]TARGET[:OPTIONS]`) into a
+ * storage mount. Windows-drive aware (the drive's colon does not split the
+ * source) and tolerant of comma-joined options (`ro,Z`). A single token is an
+ * anonymous volume mounted at that container path. `docker compose config`
+ * normalizes to long form, so this is a defensive fallback.
+ */
+function parseShortVolume(s: string): EffStorageMount | null {
+  if (!s) return null;
+  let source: string;
+  let target: string;
+  let optionTokens: string[];
+
+  if (WIN_DRIVE.test(s)) {
+    const parts = s.split(':');
+    source = `${parts[0]}:${parts[1]}`; // rejoin the drive (e.g. C:\data)
+    const rest = parts.slice(2);
+    if (rest.length === 0) return null; // a drive path with no container target is not a classifiable mount
+    target = rest[0];
+    optionTokens = rest.slice(1);
+  } else {
+    const parts = s.split(':');
+    if (parts.length < 2) {
+      // A bare token is an anonymous volume only when it is a container path;
+      // anything else is unparseable, so drop it rather than invent a mount that
+      // would skew the deterministic portability verdict.
+      return parts[0].startsWith('/') ? { type: 'anonymous', target: parts[0], readOnly: false } : null;
+    }
+    source = parts[0];
+    target = parts[1];
+    optionTokens = parts.slice(2);
+  }
+
+  const readOnly = optionTokens.flatMap(o => o.split(',')).includes('ro');
+  return { type: isHostPathSource(source) ? 'bind' : 'named', source, target, readOnly };
+}
+
+/**
+ * Build the full per-mount storage inventory for a service from its `volumes:`
+ * list and the separate service-level `tmpfs:` field (a string or string[],
+ * distinct from a `volumes:` tmpfs mount). Captures every mount type plus the
+ * read-only flag; never reads a mount's content.
+ */
+function parseStorageMounts(volumes: unknown, tmpfs: unknown): EffStorageMount[] {
+  const mounts: EffStorageMount[] = [];
+  if (Array.isArray(volumes)) {
+    for (const v of volumes) {
+      if (v && typeof v === 'object') {
+        const o = v as Record<string, unknown>;
+        const type = str(o.type);
+        const source = str(o.source);
+        const target = str(o.target) ?? '';
+        const readOnly = o.read_only === true;
+        if (type === 'bind' && source) mounts.push({ type: 'bind', source, target, readOnly });
+        else if (type === 'volume' && source) mounts.push({ type: 'named', source, target, readOnly });
+        else if (type === 'volume') mounts.push({ type: 'anonymous', target, readOnly });
+        else if (type === 'tmpfs') mounts.push({ type: 'tmpfs', target, readOnly: false });
+        continue;
+      }
+      const s = str(v);
+      if (!s) continue;
+      const m = parseShortVolume(s);
+      if (m) mounts.push(m);
+    }
+  }
+  if (typeof tmpfs === 'string') {
+    mounts.push({ type: 'tmpfs', target: tmpfs, readOnly: false });
+  } else if (Array.isArray(tmpfs)) {
+    for (const t of tmpfs) {
+      const tt = str(t);
+      if (tt) mounts.push({ type: 'tmpfs', target: tt, readOnly: false });
+    }
+  }
+  return mounts;
+}
+
 /** Environment KEY names only. Never returns a value. */
 function envKeysOf(env: unknown): string[] {
   if (Array.isArray(env)) {
@@ -219,6 +320,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       ? svc.ports.map(parsePortSpec).filter((p): p is EffPortSpec => p !== null)
       : [];
     const { binds, named } = parseVolumes(svc.volumes);
+    const storageMounts = parseStorageMounts(svc.volumes, svc.tmpfs);
     const healthcheck = svc.healthcheck;
     const hasHealthcheck = !!healthcheck
       && typeof healthcheck === 'object'
@@ -229,6 +331,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       ports,
       binds,
       namedVolumes: named,
+      storageMounts,
       privileged: svc.privileged === true,
       networkMode: str(svc.network_mode),
       restart: str(svc.restart),

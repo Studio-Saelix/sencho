@@ -455,6 +455,29 @@ const newVolume: PreflightRule = {
   },
 };
 
+const anonymousVolume: PreflightRule = {
+  id: 'anonymous-volume',
+  run(ctx) {
+    if (!ctx.model) return [];
+    const findings: PreflightFinding[] = [];
+    for (const svc of ctx.model.services) {
+      const anon = (svc.storageMounts ?? []).filter(m => m.type === 'anonymous');
+      if (anon.length === 0) continue;
+      const targets = anon.map(m => m.target).filter(Boolean);
+      findings.push({
+        ruleId: 'anonymous-volume',
+        severity: 'info',
+        title: 'Anonymous volume in use',
+        message: `Service "${svc.name}" mounts ${anon.length > 1 ? `${anon.length} anonymous volumes` : 'an anonymous volume'}${targets.length ? ` at ${targets.join(', ')}` : ''}. Anonymous volumes have no name, so they are easy to miss when backing up and are orphaned when the container is recreated.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Give the volume a name so it can be referenced, backed up, and reattached.',
+      });
+    }
+    return findings;
+  },
+};
+
 const containerNameInternalDup: PreflightRule = {
   id: 'container-name-internal-dup',
   run(ctx) {
@@ -688,6 +711,7 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   externalVolumeMissing,
   newNetwork,
   newVolume,
+  anonymousVolume,
   containerNameInternalDup,
   containerNameCollision,
   exposureInternalPublished,

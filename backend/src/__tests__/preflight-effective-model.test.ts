@@ -159,3 +159,77 @@ describe('parseEffectiveModel', () => {
     expect(empty.networks).toEqual({});
   });
 });
+
+describe('parseStorageMounts (storage inventory field)', () => {
+  it('captures every long-form mount type with the read-only flag', () => {
+    const m = parseEffectiveModel({
+      services: {
+        app: {
+          volumes: [
+            { type: 'bind', source: '/srv/data', target: '/data', read_only: true },
+            { type: 'volume', source: 'cache', target: '/var/cache' },
+            { type: 'volume', target: '/anon' }, // anonymous: a volume with no source
+            { type: 'tmpfs', target: '/run' },
+          ],
+        },
+      },
+    }, 'p');
+    expect(m.services[0].storageMounts).toEqual([
+      { type: 'bind', source: '/srv/data', target: '/data', readOnly: true },
+      { type: 'named', source: 'cache', target: '/var/cache', readOnly: false },
+      { type: 'anonymous', target: '/anon', readOnly: false },
+      { type: 'tmpfs', target: '/run', readOnly: false },
+    ]);
+  });
+
+  it('captures the service-level tmpfs field in string and array form', () => {
+    const single = parseEffectiveModel({ services: { s: { tmpfs: '/tmp' } } }, 'p');
+    expect(single.services[0].storageMounts).toEqual([{ type: 'tmpfs', target: '/tmp', readOnly: false }]);
+    const many = parseEffectiveModel({ services: { s: { tmpfs: ['/tmp', '/run'] } } }, 'p');
+    expect(many.services[0].storageMounts).toEqual([
+      { type: 'tmpfs', target: '/tmp', readOnly: false },
+      { type: 'tmpfs', target: '/run', readOnly: false },
+    ]);
+  });
+
+  it('parses short-form binds, named volumes, and read-only / comma options', () => {
+    const m = parseEffectiveModel({
+      services: { s: { volumes: ['/host:/data:ro', './rel:/rel', 'vol:/v:rw,Z'] } },
+    }, 'p');
+    expect(m.services[0].storageMounts).toEqual([
+      { type: 'bind', source: '/host', target: '/data', readOnly: true },
+      { type: 'bind', source: './rel', target: '/rel', readOnly: false },
+      { type: 'named', source: 'vol', target: '/v', readOnly: false },
+    ]);
+  });
+
+  it('treats a single-token short volume as an anonymous mount at that container path', () => {
+    const m = parseEffectiveModel({ services: { s: { volumes: ['/data'] } } }, 'p');
+    expect(m.services[0].storageMounts).toEqual([{ type: 'anonymous', target: '/data', readOnly: false }]);
+  });
+
+  it('drops an unparseable single-token short volume rather than inventing a mount', () => {
+    const m = parseEffectiveModel({ services: { s: { volumes: ['notapath'] } } }, 'p');
+    expect(m.services[0].storageMounts).toEqual([]);
+  });
+
+  it('splits a Windows-drive short-form source without the drive colon breaking it', () => {
+    const m = parseEffectiveModel({ services: { s: { volumes: ['C:\\data:/data:ro'] } } }, 'p');
+    expect(m.services[0].storageMounts).toEqual([{ type: 'bind', source: 'C:\\data', target: '/data', readOnly: true }]);
+  });
+
+  it('records a named volume by its compose key even when the top-level name differs', () => {
+    const m = parseEffectiveModel({
+      services: { s: { volumes: [{ type: 'volume', source: 'cache', target: '/c' }] } },
+      volumes: { cache: { name: 'myapp_cache' } },
+    }, 'p');
+    expect(m.services[0].storageMounts).toEqual([{ type: 'named', source: 'cache', target: '/c', readOnly: false }]);
+    expect(m.volumes.cache).toEqual({ name: 'myapp_cache', external: false, internal: false });
+  });
+
+  it('leaves the rule-facing binds and namedVolumes byte-identical', () => {
+    const m = parseEffectiveModel(render(), 'fallback');
+    expect(m.services[0].binds).toEqual([{ source: '/srv/data', target: '/data' }]);
+    expect(m.services[0].namedVolumes).toEqual(['cache']);
+  });
+});

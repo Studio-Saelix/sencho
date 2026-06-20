@@ -12,6 +12,7 @@
 
 import { buildStackAnatomyMarkdown, type AnatomyMarkdownInput } from './anatomyMarkdown';
 import { networkExposureSection, type NetworkExposureSummary } from './networkExposureSummary';
+import { storageSection, type StorageSummary } from './storageSummary';
 
 /**
  * Operator-authored dossier fields. Mirrors the backend `StackDossierFields`
@@ -86,10 +87,12 @@ export function buildStackDossierMarkdown(
   anatomy: AnatomyMarkdownInput,
   dossier: StackDossierFields,
   networking?: NetworkExposureSummary | null,
+  storage?: StorageSummary | null,
 ): string {
   const sections = [
     buildStackAnatomyMarkdown(anatomy),
     networkExposureSection(networking ?? null),
+    storageSection(storage ?? null),
     operatorNotesSection(dossier),
   ].filter((s): s is string => s !== null && s !== '');
   return sections.join('\n\n');

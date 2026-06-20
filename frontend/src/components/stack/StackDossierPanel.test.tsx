@@ -8,11 +8,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
+const caps = vi.hoisted(() => ({ enabled: new Set<string>() }));
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
-// hasCapability false keeps the rollback readiness section (tested in its own
-// file) out of these dossier-focused tests.
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 1 }, hasCapability: () => false }) }));
+// No capabilities by default, which keeps the rollback readiness section (tested
+// in its own file) out of these dossier-focused tests; individual tests enable
+// the capability for the gated storage export.
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 1 }, hasCapability: (c: string) => caps.enabled.has(c) }) }));
 vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('@/lib/download', () => ({ downloadTextFile: vi.fn() }));
 
@@ -35,6 +37,7 @@ function jsonRes(body: unknown, ok = true) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  caps.enabled.clear();
 });
 
 describe('StackDossierPanel', () => {
@@ -177,6 +180,49 @@ describe('StackDossierPanel', () => {
     const section = await screen.findByTestId('dossier-doc-drift');
     expect(section).toHaveTextContent(':9000');
     expect(section).toHaveTextContent(':9001');
+  });
+
+  it('does not fetch the storage inventory on export when compose-storage is absent', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...EMPTY_DOSSIER_FIELDS }));
+    render(<StackDossierPanel stackName="web" anatomy={anatomy} canEdit />);
+    await screen.findByTestId('dossier-panel');
+    fireEvent.click(screen.getByTestId('dossier-copy-btn'));
+    await waitFor(() => expect(copyToClipboard).toHaveBeenCalled());
+    const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
+    expect(urls.some(u => u.includes('/storage'))).toBe(false);
+    expect(vi.mocked(copyToClipboard).mock.calls[0][0]).not.toContain('## Storage portability');
+  });
+
+  it('includes the storage section when the inventory loads, and omits it when the fetch fails', async () => {
+    caps.enabled.add('compose-storage');
+    const inventory = {
+      renderable: true, stateful: true,
+      mounts: [{ service: 'web', type: 'bind', source: '/srv/data', target: '/data', readOnly: false }],
+      portability: { status: 'partially-portable', reasons: ['data lives on this node'] },
+    };
+    vi.mocked(apiFetch).mockImplementation(async (input: string) => {
+      const url = String(input);
+      if (url.includes('/storage')) return jsonRes(inventory);
+      if (url.includes('/dossier')) return jsonRes({ ...EMPTY_DOSSIER_FIELDS });
+      return jsonRes(null, false); // networking + exposure: omitted
+    });
+    render(<StackDossierPanel stackName="web" anatomy={anatomy} canEdit />);
+    await screen.findByTestId('dossier-panel');
+    fireEvent.click(screen.getByTestId('dossier-copy-btn'));
+    await waitFor(() => expect(copyToClipboard).toHaveBeenCalled());
+    expect(vi.mocked(copyToClipboard).mock.calls[0][0]).toContain('## Storage portability');
+
+    // Now the inventory fetch fails: the section must be omitted, not error the export.
+    vi.mocked(copyToClipboard).mockClear();
+    vi.mocked(apiFetch).mockImplementation(async (input: string) => {
+      const url = String(input);
+      if (url.includes('/storage')) return jsonRes(null, false);
+      if (url.includes('/dossier')) return jsonRes({ ...EMPTY_DOSSIER_FIELDS });
+      return jsonRes(null, false);
+    });
+    fireEvent.click(screen.getByTestId('dossier-copy-btn'));
+    await waitFor(() => expect(copyToClipboard).toHaveBeenCalled());
+    expect(vi.mocked(copyToClipboard).mock.calls[0][0]).not.toContain('## Storage portability');
   });
 
   it('suppresses the warning when a reload fails, never showing the previous stack stale', async () => {
