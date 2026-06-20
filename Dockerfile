@@ -153,10 +153,13 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 #
 # Compose v5.1.3 also pins github.com/containerd/containerd/v2 v2.2.3, which
 # carries CVE-2026-46680 (runAsNonRoot evasion in containerd's runtime
-# executor). The same go get step bumps containerd/v2 to v2.2.4 to clear it.
-# v2.2.3 to v2.2.4 is a patch-level fix; the release notes name CVE-2026-46680
-# as the headline item. The vulnerable code path is daemon-side and not reached
-# by compose at all, so this is defense-in-depth rather than a live exposure.
+# executor). v2.2.4 cleared that one, but a later containerd advisory cluster
+# (CVE-2026-53488, CVE-2026-53489, CVE-2026-53492, all CRI checkpoint/restore
+# and restart-monitor issues) affects v2.2.4 and is fixed in v2.2.5. The go get
+# step below bumps containerd/v2 to v2.2.5 to clear all four. These are
+# patch-level fixes with no breaking API changes. Every vulnerable code path is
+# daemon-side (containerd's CRI service) and is not reached by compose at all,
+# so this is defense-in-depth rather than a live exposure.
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
 FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:f1ddd9fe14fffc091dd98cb4bfa999f32c5fc77d2f2305ea9f0e2595c5437c14 AS compose-builder
@@ -179,9 +182,9 @@ WORKDIR /src/docker-compose
 RUN mkdir -p /build
 
 # Patch otel/sdk and exporters from v1.42.0 → v1.43.0 to clear CVE-2026-39883
-# and CVE-2026-39882, and bump containerd/v2 from v2.2.3 → v2.2.4 to clear
-# CVE-2026-46680. Both are targeted patch-level security bumps with no
-# breaking API changes.
+# and CVE-2026-39882, and bump containerd/v2 from v2.2.3 → v2.2.5 to clear
+# CVE-2026-46680 plus the CVE-2026-53488 / 53489 / 53492 cluster. All are
+# targeted patch-level security bumps with no breaking API changes.
 RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
     go get go.opentelemetry.io/otel@v1.43.0 \
            go.opentelemetry.io/otel/sdk@v1.43.0 \
@@ -193,7 +196,7 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
            go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.43.0 \
            go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc@v1.43.0 \
            go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@v1.43.0 \
-           github.com/containerd/containerd/v2@v2.2.4 && \
+           github.com/containerd/containerd/v2@v2.2.5 && \
     go mod tidy
 
 # Build target is ./cmd (the package main with plugin.Run), per docker/compose's
