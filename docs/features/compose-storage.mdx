@@ -46,7 +46,7 @@ Storage risk findings live in the **Doctor** tab, which reads the same model: a 
 
 <AccordionGroup>
   <Accordion title="The Storage tab is not there">
-    The tab appears once the node advertises support for it. A node running an older Sencho version hides the tab until it is updated.
+    The Storage tab appears on nodes that support storage portability. A node that does not advertise the capability does not show the tab.
   </Accordion>
   <Accordion title="A bind path shows no existence or owner">
     Existence, type, and owner are resolved only for paths inside the stack directory. A host path elsewhere on the machine is outside Sencho's view, so it is listed but left unverified, and it counts toward a node-bound verdict.
