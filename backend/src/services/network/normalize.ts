@@ -24,9 +24,13 @@ export function isLoopback(ip: string): boolean {
 }
 
 /** Resolved runtime name of a top-level network/volume: a `name:` override wins,
- *  otherwise compose prefixes the project (`<project>_<key>`). */
-export function runtimeResourceName(projectName: string, key: string, declaredName: string | undefined): string {
-  return declaredName && declaredName !== key ? declaredName : `${projectName}_${key}`;
+ *  otherwise compose prefixes the project (`<project>_<key>`). An external
+ *  resource is never project-prefixed: it references a pre-existing network/volume
+ *  by its real name (the key, or a `name:` override), so prefixing it would invent
+ *  a `<project>_<key>` that no runtime resource matches and read as foreign drift. */
+export function runtimeResourceName(projectName: string, key: string, declaredName: string | undefined, external = false): string {
+  if (declaredName && declaredName !== key) return declaredName;
+  return external ? key : `${projectName}_${key}`;
 }
 
 /** Extract host port numbers referenced by free-text access URLs, for the
@@ -67,7 +71,7 @@ export function fromEffectiveModel(m: EffectiveModel): NormalizedNetworkModel {
 export function fromDeclaredCompose(m: DeclaredCompose, projectName: string): NormalizedNetworkModel {
   const networks: NormalizedNetworkModel['networks'] = {};
   for (const [key, res] of Object.entries(m.networks)) {
-    networks[key] = { runtimeName: runtimeResourceName(projectName, key, res.name), external: res.external };
+    networks[key] = { runtimeName: runtimeResourceName(projectName, key, res.name, res.external), external: res.external };
   }
   return {
     projectName,
