@@ -12,6 +12,7 @@ import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
 import PreflightPanel from './stack/PreflightPanel';
+import StoragePanel from './stack/StoragePanel';
 import EnvironmentPanel from './stack/EnvironmentPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
@@ -93,6 +94,7 @@ export default function StackAnatomyPanel({
   const { hasCapability, activeNode } = useNodes();
   const doctorEnabled = hasCapability('compose-doctor');
   const networkingEnabled = hasCapability('compose-networking');
+  const storageEnabled = hasCapability('compose-storage');
   const envInventoryEnabled = hasCapability('env-inventory');
 
   const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo; multiFile: boolean } | null>(null);
@@ -370,6 +372,9 @@ export default function StackAnatomyPanel({
                 </span>
               </TabsTrigger>
             )}
+            {storageEnabled && (
+              <TabsTrigger value="storage" data-testid="storage-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Storage</TabsTrigger>
+            )}
           </TabsList>
         </ScrollableTabRow>
         <div className="flex items-center gap-3 shrink-0">
@@ -606,6 +611,11 @@ export default function StackAnatomyPanel({
       {doctorEnabled && (
         <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
           <PreflightPanel stackName={stackName} />
+        </TabsContent>
+      )}
+      {storageEnabled && (
+        <TabsContent value="storage" className="flex flex-col flex-1 min-h-0 mt-0">
+          <StoragePanel stackName={stackName} />
         </TabsContent>
       )}
       </Tabs>

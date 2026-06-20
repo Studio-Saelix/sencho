@@ -15,7 +15,7 @@ import { assembleStackNetworkFacts } from '../services/network/composeNetworkIns
 
 function effSvc(over: Partial<EffService> = {}): EffService {
   return {
-    name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [],
+    name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [], storageMounts: [],
     privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [],
     networks: [], extraHosts: [], labelKeys: [], ...over,
   };

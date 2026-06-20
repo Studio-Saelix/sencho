@@ -39,6 +39,7 @@ export const CAPABILITIES = [
   'update-guard',
   'compose-networking',
   'env-inventory',
+  'compose-storage',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

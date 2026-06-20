@@ -12,7 +12,7 @@ import type { PreflightContext, PreflightFinding } from '../services/preflight/t
 
 function svc(over: Partial<EffService> = {}): EffService {
   return {
-    name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [],
+    name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [], storageMounts: [],
     privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [],
     networks: [], extraHosts: [], labelKeys: [], ...over,
   };
@@ -210,6 +210,14 @@ describe('network / volume rules', () => {
     expect(ids(f, 'new-network')[0].severity).toBe('info');
     expect(ids(f, 'new-volume')[0].message).toContain('proj_data');
   });
+  it('flags an anonymous volume as info and stays silent without one', () => {
+    const anon = model([svc({ storageMounts: [{ type: 'anonymous', target: '/data', readOnly: false }] })]);
+    const f = runRules(ctx({ model: anon }));
+    expect(ids(f, 'anonymous-volume')[0].severity).toBe('info');
+    expect(ids(f, 'anonymous-volume')[0].message).toContain('/data');
+    const named = model([svc({ storageMounts: [{ type: 'named', source: 'db', target: '/db', readOnly: false }] })]);
+    expect(ids(runRules(ctx({ model: named })), 'anonymous-volume')).toHaveLength(0);
+  });
 });
 
 describe('container_name rules', () => {
@@ -341,7 +349,7 @@ describe('rule registry completeness', () => {
     'render-failed', 'env-unset', 'env-file-missing', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
     'bind-path-missing', 'bind-path-permission', 'docker-socket-mount', 'privileged', 'network-mode-host',
     'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck', 'deploy-swarm-only',
-    'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume',
+    'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',
     'exposure-internal-published', 'sensitive-service-broad-exposure', 'exposure-unclassified',
     'exposure-port-vs-dossier', 'reverse-proxy-undocumented', 'effective-model-expanded',

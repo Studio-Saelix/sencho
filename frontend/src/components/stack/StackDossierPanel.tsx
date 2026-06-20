@@ -13,6 +13,7 @@ import {
 } from '@/lib/dossierMarkdown';
 import type { AnatomyMarkdownInput } from '@/lib/anatomyMarkdown';
 import { buildNetworkExposureSummary, type NetworkExposureSummary } from '@/lib/networkExposureSummary';
+import { buildStorageSummary, type StorageSummary } from '@/lib/storageSummary';
 import { computeDocDrift, type DocDriftFinding } from '@/lib/docDrift';
 import { RollbackReadinessSection } from './RollbackReadinessSection';
 import { useNodes } from '@/context/NodeContext';
@@ -152,8 +153,9 @@ function DocDriftWarnings({ findings }: { findings: DocDriftFinding[] }) {
 }
 
 export default function StackDossierPanel({ stackName, anatomy, canEdit }: StackDossierPanelProps) {
-  const { activeNode } = useNodes();
+  const { activeNode, hasCapability } = useNodes();
   const nodeId = activeNode?.id;
+  const storageEnabled = hasCapability('compose-storage');
   // Identifies the dossier currently in view. Doc-drift renders only once the
   // load for *this* key has succeeded (see loadedKey), so a switch-in-flight or
   // a failed load never diffs new anatomy against the prior stack's fields.
@@ -219,6 +221,19 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
     }
   };
 
+  // Fetched only on export, and only when the node advertises the capability.
+  // Fail-soft: an unavailable inventory simply omits the storage section.
+  const loadStorageSummary = async (): Promise<StorageSummary | null> => {
+    if (!storageEnabled) return null;
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/storage`);
+      return res.ok ? buildStorageSummary(await res.json()) : null;
+    } catch (err) {
+      console.warn(`[Dossier] storage summary load failed for "${stackName}":`, err);
+      return null;
+    }
+  };
+
   const dirty = useMemo(
     () => FIELD_KEYS.some(k => fields[k] !== serverFields[k]),
     [fields, serverFields],
@@ -265,8 +280,8 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
   const handleCopy = async () => {
     if (!anatomy) return;
     try {
-      const networking = await loadNetworkingSummary();
-      await copyToClipboard(buildStackDossierMarkdown(anatomy, fields, networking));
+      const [networking, storage] = await Promise.all([loadNetworkingSummary(), loadStorageSummary()]);
+      await copyToClipboard(buildStackDossierMarkdown(anatomy, fields, networking, storage));
       toast.success('Stack dossier copied as Markdown.');
     } catch {
       toast.error('Failed to copy to clipboard.');
@@ -276,11 +291,11 @@ export default function StackDossierPanel({ stackName, anatomy, canEdit }: Stack
   const handleDownload = async () => {
     if (!anatomy) return;
     try {
-      const networking = await loadNetworkingSummary();
+      const [networking, storage] = await Promise.all([loadNetworkingSummary(), loadStorageSummary()]);
       // Stack names are already constrained, but sanitize defensively so the
       // file always has a coherent, safe name ending in .md.
       const base = stackName.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'stack';
-      downloadTextFile(`${base}-dossier.md`, buildStackDossierMarkdown(anatomy, fields, networking));
+      downloadTextFile(`${base}-dossier.md`, buildStackDossierMarkdown(anatomy, fields, networking, storage));
     } catch {
       toast.error('Failed to download the dossier.');
     }
