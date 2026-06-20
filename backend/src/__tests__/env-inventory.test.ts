@@ -101,6 +101,21 @@ describe('buildEnvInventory status derivation', () => {
     expect(shared).toMatchObject({ usedForInterpolation: true, injectedIntoService: true });
   });
 
+  it('reconciles inline provenance per service: an override-dropped inline key in one service is not inline because another service injects the same name', async () => {
+    writeStack('invx', {
+      'compose.yaml': 'services:\n  web:\n    image: nginx\n    environment:\n      FOO: "1"\n  db:\n    image: postgres\n    env_file:\n      - ./db.env\n',
+      'db.env': 'FOO=2\n',
+    });
+    // web's effective env dropped FOO (e.g. an override); db injects FOO via env_file.
+    stubRender({ web: {}, db: { FOO: '2' } });
+    const inv = await buildEnvInventory(nodeId, 'invx');
+    const foo = itemFor(inv, 'FOO');
+    expect(foo?.sources).toContain('env-file');
+    expect(foo?.sources).not.toContain('compose-inline');
+    expect(foo?.status).not.toBe('duplicate');
+    expect(foo?.injectedIntoService).toBe(true);
+  });
+
   it('reports duplicate when a key is defined inline and in a separate file', async () => {
     writeStack('inv6', {
       'compose.yaml': 'services:\n  web:\n    image: nginx\n    environment:\n      DUP: "1"\n    env_file:\n      - ./other.env\n',

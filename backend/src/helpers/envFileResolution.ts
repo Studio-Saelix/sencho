@@ -200,7 +200,11 @@ export async function resolveStackEnvSources(nodeId: number, stackName: string):
 
       for (const entry of normalizeEnvFileField(svc.env_file)) {
         const interpolated = entry.rawPath.includes('${');
-        const abs = interpolated ? null : path.resolve(stackDir, entry.rawPath);
+        // Resolve relative to the directory of the compose file that declared it,
+        // so an env_file in a nested multi-file override (e.g. infra/prod.yml ->
+        // ./prod.env) lands next to that file, not at the stack root. For the root
+        // compose file this dir is the stack dir, so the common case is unchanged.
+        const abs = interpolated ? null : path.resolve(path.dirname(file), entry.rawPath);
         const within = abs !== null && isPathWithinBase(abs, stackDir);
         const resolvedPath = within ? abs : null;
 

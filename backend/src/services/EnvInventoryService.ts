@@ -76,11 +76,16 @@ export async function buildEnvInventory(nodeId: number, stackName: string): Prom
   let renderable = false;
   let unsetVars = new Set<string>();
   const effectiveKeys = new Set<string>();
+  const effectiveKeysByService = new Map<string, Set<string>>();
   if (result.rendered !== null) {
     unsetVars = new Set(parseUnsetEnvVars(result.stderr));
     try {
       const model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
-      for (const svc of model.services) for (const k of svc.envKeys) effectiveKeys.add(k);
+      for (const svc of model.services) {
+        const svcKeys = new Set(svc.envKeys);
+        effectiveKeysByService.set(svc.name, svcKeys);
+        for (const k of svc.envKeys) effectiveKeys.add(k);
+      }
       renderable = true;
     } catch {
       renderable = false;
@@ -128,15 +133,19 @@ export async function buildEnvInventory(nodeId: number, stackName: string): Prom
     }
   }
 
-  // Inline `environment:` keys, reconciled against the effective model so an
-  // override that removed a key is not reported as still injected.
+  // Inline `environment:` keys, reconciled against the effective model PER SERVICE
+  // so a key an override removed from one service is not reported as inline just
+  // because another service defines the same name elsewhere.
   const inlineAll = new Set<string>();
   for (const keys of Object.values(sources.inlineEnvKeysByService)) for (const k of keys) inlineAll.add(k);
-  for (const key of inlineAll) {
-    if (renderable && !effectiveKeys.has(key)) continue;
-    names.add(key);
-    addLocation(key, 'inline');
-    addSource(key, 'compose-inline');
+  for (const [service, keys] of Object.entries(sources.inlineEnvKeysByService)) {
+    const svcEffective = effectiveKeysByService.get(service);
+    for (const key of keys) {
+      if (renderable && !svcEffective?.has(key)) continue;
+      names.add(key);
+      addLocation(key, 'inline');
+      addSource(key, 'compose-inline');
+    }
   }
 
   for (const key of effectiveKeys) names.add(key);

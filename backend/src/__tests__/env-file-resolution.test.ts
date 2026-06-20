@@ -95,4 +95,19 @@ describe('resolveStackEnvSources', () => {
     expect(r.composeFiles).toHaveLength(2);
     expect(r.envFiles.some(f => f.rawPaths.includes('./override.env') && f.existence === 'present')).toBe(true);
   });
+
+  it('resolves a nested override env_file relative to its compose file, not the stack root', async () => {
+    writeStack('s6', {
+      'compose.yaml': 'services:\n  web:\n    image: nginx\n',
+      'infra/prod.yml': 'services:\n  web:\n    env_file:\n      - ./prod.env\n',
+      'infra/prod.env': 'NESTED=1\n',
+    });
+    vi.spyOn(DatabaseService.getInstance(), 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['compose.yaml', 'infra/prod.yml'], contextDir: null },
+    } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
+    const r = await resolveStackEnvSources(nodeId, 's6');
+    const f = r.envFiles.find(x => x.rawPaths.includes('./prod.env'));
+    expect(f).toMatchObject({ existence: 'present', isInjectionSource: true });
+    expect(f?.resolvedPath?.endsWith(path.join('infra', 'prod.env'))).toBe(true);
+  });
 });
