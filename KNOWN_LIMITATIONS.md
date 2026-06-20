@@ -1,15 +1,17 @@
 # Known limitations
 
 > [!NOTE]
-> Sencho is currently in public beta on the path to v1.0. Core workflows are actively tested, but early users should review the known limitations and avoid deploying it blindly on critical infrastructure without testing in their own environment first.
+> Sencho is used in production for day-to-day Docker Compose and fleet management. As a pre-1.0 project it still evolves quickly, so review the limitations below and validate against your own setup before deploying it on critical infrastructure.
 
 Below are the limitations we know about today. If you hit something that is not here, please file a bug.
 
 ## Scale
 
-- Single-instance use: not benchmarked yet beyond typical homelab loads. Expect comfortable operation on tens of stacks and a few hundred containers per node; very large nodes may show UI slowdowns.
-- Fleet: not benchmarked yet. Comfortably tested with small fleets (a handful of nodes); larger fleets work but are less exercised.
-- Container log streaming: not benchmarked yet at sustained high log rates; very chatty containers may lag the UI.
+Sencho's core workflows are validated through QA, repeated security and code audits, and end-to-end journey testing, so day-to-day correctness is well exercised. What is not yet characterized is performance at large scale: the figures below are ranges we have run comfortably, not hard ceilings.
+
+- Single instance: comfortable at typical homelab and small-team loads (tens of stacks and a few hundred containers per node). Very large nodes are not yet benchmarked and may show UI slowdowns.
+- Fleet: validated on small fleets (a handful of nodes). Larger fleets work but are less exercised, and fleet-wide operations are not yet benchmarked at scale.
+- Container log streaming: handles normal log volumes smoothly. Sustained high log rates are not yet benchmarked, and very chatty containers may lag the UI.
 
 ## Platform support
 
