@@ -34,11 +34,13 @@ vi.mock('@/lib/stackFilesApi', () => {
     readonly code = 'PRECONDITION_FAILED' as const;
     readonly currentContent: string;
     readonly currentMtimeMs: number;
-    constructor(message: string, currentContent: string, currentMtimeMs: number) {
+    readonly currentVersion: string | null;
+    constructor(message: string, currentContent: string, currentMtimeMs: number, currentVersion: string | null) {
       super(message);
       this.name = 'FileConflictError';
       this.currentContent = currentContent;
       this.currentMtimeMs = currentMtimeMs;
+      this.currentVersion = currentVersion;
     }
   }
   return {
@@ -96,7 +98,7 @@ const mockReadFile = readStackFile as unknown as ReturnType<typeof vi.fn>;
 const mockWriteFile = writeStackFile as unknown as ReturnType<typeof vi.fn>;
 
 function textResult(content = 'hello world'): FileContentResult {
-  return { content, binary: false, oversized: false, size: content.length, mime: 'text/plain', mtimeMs: 1_700_000_000_000 };
+  return { content, binary: false, oversized: false, size: content.length, mime: 'text/plain', mtimeMs: 1_700_000_000_000, version: 'W/"1700000000000"' };
 }
 
 function binaryResult(): FileContentResult {
@@ -142,7 +144,7 @@ describe('FileViewer', () => {
 
     render(<FileViewer {...defaultProps} selectedPath="src/index.ts" />);
 
-    await waitFor(() => expect(mockReadFile).toHaveBeenCalledWith('my-stack', 'src/index.ts'));
+    await waitFor(() => expect(mockReadFile).toHaveBeenCalledWith('my-stack', 'src/index.ts', { rootId: undefined }));
   });
 
   it('renders binary panel (not Monaco) for a binary file', async () => {
@@ -190,7 +192,7 @@ describe('FileViewer', () => {
 
     rerender(<FileViewer {...defaultProps} selectedPath="b.txt" />);
     await waitFor(() => expect(mockReadFile).toHaveBeenCalledTimes(2));
-    expect(mockReadFile).toHaveBeenNthCalledWith(2, 'my-stack', 'b.txt');
+    expect(mockReadFile).toHaveBeenNthCalledWith(2, 'my-stack', 'b.txt', { rootId: undefined });
   });
 
   it('reports clean dirty state on initial load of a text file', async () => {
@@ -217,9 +219,9 @@ describe('FileViewer', () => {
     expect(onDirtyChange).toHaveBeenCalledWith(false);
   });
 
-  it('sends If-Match with the loaded mtime on save and updates the local mtime from the response', async () => {
+  it('sends If-Match with the loaded version on save and updates the local version from the response', async () => {
     mockReadFile.mockResolvedValue(textResult('hello'));
-    mockWriteFile.mockResolvedValue({ mtimeMs: 1_700_000_000_999 });
+    mockWriteFile.mockResolvedValue({ version: 'W/"1700000000999"', mtimeMs: 1_700_000_000_999 });
 
     render(<FileViewer {...defaultProps} selectedPath="config.txt" />);
     await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
@@ -235,7 +237,7 @@ describe('FileViewer', () => {
     expect(s).toBe('my-stack');
     expect(p).toBe('config.txt');
     expect(c).toBe('edited content');
-    expect(opts).toEqual({ ifMatchMtimeMs: 1_700_000_000_000 });
+    expect(opts).toEqual({ ifMatchVersion: 'W/"1700000000000"', rootId: undefined });
   });
 
   it('binary panel offers "Open as text anyway"; click refetches with forceText and renders Monaco', async () => {
@@ -298,11 +300,11 @@ describe('FileViewer', () => {
     expect(screen.queryByTestId('monaco-editor')).not.toBeInTheDocument();
   });
 
-  it('updates baseline on FileConflictError without discarding the user buffer; follow-up save uses new mtime', async () => {
+  it('updates baseline on FileConflictError without discarding the user buffer; follow-up save uses the fresh version', async () => {
     mockReadFile.mockResolvedValue(textResult('stale local copy'));
     mockWriteFile
-      .mockRejectedValueOnce(new FileConflictError('changed elsewhere', 'SERVER NOW', 1_700_000_999_000))
-      .mockResolvedValueOnce({ mtimeMs: 1_700_001_000_000 });
+      .mockRejectedValueOnce(new FileConflictError('changed elsewhere', 'SERVER NOW', 1_700_000_999_000, 'W/"1700000999000"'))
+      .mockResolvedValueOnce({ version: 'W/"1700001000000"', mtimeMs: 1_700_001_000_000 });
 
     render(<FileViewer {...defaultProps} selectedPath="config.txt" />);
     await waitFor(() => expect(screen.getByTestId('monaco-editor')).toBeInTheDocument());
@@ -319,6 +321,6 @@ describe('FileViewer', () => {
     saveBtn.click();
     await waitFor(() => expect(mockWriteFile).toHaveBeenCalledTimes(2));
     expect(mockWriteFile.mock.calls[1][2]).toBe('edited content');
-    expect(mockWriteFile.mock.calls[1][3]).toEqual({ ifMatchMtimeMs: 1_700_000_999_000 });
+    expect(mockWriteFile.mock.calls[1][3]).toEqual({ ifMatchVersion: 'W/"1700000999000"', rootId: undefined });
   });
 });

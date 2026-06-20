@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Trash2, FolderPlus, Download, Loader2 } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Trash2, FolderPlus, Download, Loader2, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
-import { downloadStackFile, listStackDirectory, renameStackPath } from '@/lib/stackFilesApi';
+import { downloadStackFile, listStackDirectory, listFileRoots, renameStackPath, STACK_SOURCE_ROOT_ID } from '@/lib/stackFilesApi';
 import { FileTree } from './FileTree';
 import { FileViewer } from './FileViewer';
 import { FileUploadDropzone } from './FileUploadDropzone';
@@ -13,7 +13,7 @@ import { DeleteFileConfirm } from './DeleteFileConfirm';
 import { RenameDialog } from './RenameDialog';
 import { MoveFileDialog } from './MoveFileDialog';
 import { FilePermissionsDialog } from './FilePermissionsDialog';
-import type { FileEntry } from '@/lib/stackFilesApi';
+import type { FileEntry, FileRoot } from '@/lib/stackFilesApi';
 
 interface StackFileExplorerProps {
   stackName: string;
@@ -21,6 +21,33 @@ interface StackFileExplorerProps {
   isDarkMode: boolean;
   onNavigateToCompose?: () => void;
   onNavigateToEnv?: () => void;
+}
+
+/** The synthetic stack-source root used before roots load or if discovery fails. */
+const STACK_SOURCE_FALLBACK: FileRoot = {
+  id: STACK_SOURCE_ROOT_ID,
+  kind: 'stack-source',
+  label: 'Stack source',
+  hostPathOrName: '',
+  mounts: [],
+  readonly: false,
+  accessible: true,
+  browsable: true,
+  writable: true,
+  chmodable: true,
+  dangerous: false,
+  managedSourceOverlap: false,
+  warning: null,
+  backend: 'fs',
+};
+
+/** Short label for a root option: container path (or volume name) + how many service mounts. */
+function rootOptionLabel(root: FileRoot): string {
+  if (root.kind === 'stack-source') return 'Stack source';
+  const primary = root.mounts[0]?.containerPath || root.label;
+  const count = root.mounts.length > 1 ? ` · ${root.mounts.length} mounts` : '';
+  const ro = root.readonly ? ' · read-only' : '';
+  return `${primary}${count}${ro}`;
 }
 
 export function StackFileExplorer({
@@ -35,6 +62,22 @@ export function StackFileExplorer({
   const [currentDir, setCurrentDir] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
+
+  // ── file roots (Volumes + Stack source) ──
+  const [roots, setRoots] = useState<FileRoot[]>([STACK_SOURCE_FALLBACK]);
+  const [selectedRootId, setSelectedRootId] = useState<string>(STACK_SOURCE_ROOT_ID);
+  // When a root switch is requested while the viewer has unsaved edits, hold it
+  // here until the user confirms or cancels in the guard modal.
+  const [pendingRootId, setPendingRootId] = useState<string | null>(null);
+
+  const selectedRoot = useMemo(
+    () => roots.find((r) => r.id === selectedRootId) ?? STACK_SOURCE_FALLBACK,
+    [roots, selectedRootId],
+  );
+  const volumeRoots = useMemo(() => roots.filter((r) => r.kind !== 'stack-source'), [roots]);
+  const isStackSource = selectedRoot.kind === 'stack-source';
+  // Edits are allowed only when the user can edit AND the selected root is writable.
+  const rootCanEdit = canEdit && selectedRoot.writable;
 
   // ── toolbar delete (existing behaviour) ──
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -77,9 +120,50 @@ export function StackFileExplorer({
     setCurrentDir('');
     setIsViewerDirty(false);
     setPendingSelection(null);
+    setRoots([STACK_SOURCE_FALLBACK]);
+    setSelectedRootId(STACK_SOURCE_ROOT_ID);
+    setPendingRootId(null);
+  }, [stackName]);
+
+  // Discover the stack's file roots and default to the first browsable volume
+  // root when one exists, otherwise the stack source.
+  useEffect(() => {
+    let cancelled = false;
+    listFileRoots(stackName)
+      .then((fetched) => {
+        if (cancelled) return;
+        const list = fetched.length ? fetched : [STACK_SOURCE_FALLBACK];
+        setRoots(list);
+        const defaultVolume = list.find((r) => r.kind !== 'stack-source' && r.browsable);
+        setSelectedRootId(defaultVolume?.id ?? STACK_SOURCE_ROOT_ID);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRoots([STACK_SOURCE_FALLBACK]);
+        setSelectedRootId(STACK_SOURCE_ROOT_ID);
+      });
+    return () => { cancelled = true; };
   }, [stackName]);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  // Apply a root switch: reset the open file/tree to the new root's contents.
+  const applyRootSwitch = useCallback((rootId: string) => {
+    setSelectedRootId(rootId);
+    setSelectedPath(null);
+    setSelectedEntry(null);
+    setCurrentDir('');
+  }, []);
+
+  // Switch roots, guarding unsaved edits in the viewer first.
+  const handleRootChange = useCallback((rootId: string) => {
+    if (rootId === selectedRootId) return;
+    if (isViewerDirty) {
+      setPendingRootId(rootId);
+      return;
+    }
+    applyRootSwitch(rootId);
+  }, [selectedRootId, isViewerDirty, applyRootSwitch]);
 
   const applySelection = useCallback((relPath: string, entry: FileEntry) => {
     setSelectedPath(relPath);
@@ -108,7 +192,7 @@ export function StackFileExplorer({
     if (!selectedPath) return;
     setIsDownloading(true);
     try {
-      const res = await downloadStackFile(stackName, selectedPath);
+      const res = await downloadStackFile(stackName, selectedPath, selectedRootId);
       if (!res.ok) {
         toast.error('Download failed.');
         return;
@@ -146,7 +230,7 @@ export function StackFileExplorer({
       return false;
     }
     try {
-      await renameStackPath(stackName, fromRel, toRel);
+      await renameStackPath(stackName, fromRel, toRel, selectedRootId);
       toast.success('Moved successfully.');
       if (affectsOpen) handleDeleted();
       else refresh();
@@ -155,7 +239,7 @@ export function StackFileExplorer({
       toast.error(e instanceof Error ? e.message : 'Move failed.');
       return false;
     }
-  }, [stackName, selectedPath, isViewerDirty, handleDeleted, refresh]);
+  }, [stackName, selectedRootId, selectedPath, isViewerDirty, handleDeleted, refresh]);
 
   // ── Context menu callbacks ──
 
@@ -196,18 +280,52 @@ export function StackFileExplorer({
 
   return (
     <div className="flex h-full min-h-0">
-      {/* Left pane: tree + upload + new folder */}
+      {/* Left pane: root switcher + tree + upload + new folder */}
       <div className="flex flex-col w-56 shrink-0 border-r border-glass-border min-h-0">
+        <div className="flex flex-col gap-1 px-2 py-1.5 border-b border-glass-border shrink-0">
+          <span className="text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Browsing</span>
+          <select
+            className="w-full bg-transparent border border-glass-border rounded px-1.5 py-1 text-xs text-foreground font-mono"
+            value={selectedRootId}
+            onChange={(e) => handleRootChange(e.target.value)}
+            aria-label="File root"
+          >
+            {volumeRoots.length > 0 && (
+              <optgroup label="Volumes">
+                {volumeRoots.map((r) => (
+                  <option key={r.id} value={r.id} disabled={!r.browsable}>
+                    {rootOptionLabel(r)}{r.browsable ? '' : ' (unavailable)'}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            <optgroup label="Stack source">
+              <option value={STACK_SOURCE_ROOT_ID}>Stack source</option>
+            </optgroup>
+          </select>
+          {selectedRoot.warning && (
+            <p className="flex items-start gap-1 text-[10px] text-stat-subtitle">
+              <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" strokeWidth={1.5} />
+              <span>{selectedRoot.warning}</span>
+            </p>
+          )}
+          {volumeRoots.length === 0 && (
+            <p className="text-[10px] text-stat-subtitle italic">
+              No browsable stack volumes detected. Sencho can only browse mounted folders declared by this stack.
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-glass-border shrink-0">
           <div className="flex-1 min-w-0">
             <FileUploadDropzone
               stackName={stackName}
               currentDir={currentDir}
-              canEdit={canEdit}
+              canEdit={rootCanEdit}
+              rootId={selectedRootId}
               onUploaded={refresh}
             />
           </div>
-          {canEdit && (
+          {rootCanEdit && (
             <Button
               variant="ghost"
               size="icon"
@@ -224,15 +342,16 @@ export function StackFileExplorer({
         </div>
         <div className="flex-1 min-h-0 overflow-hidden">
           <FileTree
-            key={`${stackName}:${refreshKey}`}
-            sourceKey={stackName}
-            loadDir={(p) => listStackDirectory(stackName, p)}
+            key={`${stackName}:${selectedRootId}:${refreshKey}`}
+            sourceKey={`${stackName}:${selectedRootId}`}
+            loadDir={(p) => listStackDirectory(stackName, p, selectedRootId)}
             refreshKey={refreshKey}
             selectedPath={selectedPath ?? ''}
             onSelectFile={handleSelectFile}
-            onNavigateToCompose={onNavigateToCompose}
-            onNavigateToEnv={onNavigateToEnv}
-            canEdit={canEdit}
+            onNavigateToCompose={isStackSource ? onNavigateToCompose : undefined}
+            onNavigateToEnv={isStackSource ? onNavigateToEnv : undefined}
+            redirectProtected={isStackSource}
+            canEdit={rootCanEdit}
             onContextMenuRename={handleContextMenuRename}
             onContextMenuMove={handleContextMenuMove}
             onContextMenuNewFile={handleContextMenuNewFile}
@@ -262,7 +381,7 @@ export function StackFileExplorer({
               )}
               Download
             </Button>
-            {canEdit && (
+            {rootCanEdit && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -280,8 +399,9 @@ export function StackFileExplorer({
           <FileViewer
             stackName={stackName}
             selectedPath={selectedPath}
-            canEdit={canEdit}
+            canEdit={rootCanEdit}
             isDarkMode={isDarkMode}
+            rootId={selectedRootId}
             onSaved={refresh}
             onDirtyChange={setIsViewerDirty}
           />
@@ -297,6 +417,7 @@ export function StackFileExplorer({
         stackName={stackName}
         relPath={selectedPath ?? ''}
         entry={selectedEntry}
+        rootId={selectedRootId}
         onDeleted={handleDeleted}
       />
 
@@ -307,6 +428,7 @@ export function StackFileExplorer({
         stackName={stackName}
         relPath={ctxDeletePath}
         entry={ctxDeleteEntry}
+        rootId={selectedRootId}
         onDeleted={() => {
           if (ctxDeletePath === selectedPath) handleDeleted();
           else refresh();
@@ -321,6 +443,7 @@ export function StackFileExplorer({
         onOpenChange={setNewFolderOpen}
         stackName={stackName}
         currentDir={newFolderDir}
+        rootId={selectedRootId}
         onCreated={refresh}
       />
 
@@ -330,6 +453,7 @@ export function StackFileExplorer({
         onOpenChange={setNewFileOpen}
         stackName={stackName}
         currentDir={newFileDir}
+        rootId={selectedRootId}
         onCreated={refresh}
       />
 
@@ -340,6 +464,7 @@ export function StackFileExplorer({
         stackName={stackName}
         relPath={renameRelPath}
         currentName={renameCurrentName}
+        rootId={selectedRootId}
         onRenamed={() => {
           // If the renamed item was selected, deselect since the path changed.
           if (renameRelPath === selectedPath) handleDeleted();
@@ -354,6 +479,7 @@ export function StackFileExplorer({
         stackName={stackName}
         relPath={moveRelPath}
         entry={moveEntry}
+        rootId={selectedRootId}
         onMove={handleMove}
       />
 
@@ -364,7 +490,8 @@ export function StackFileExplorer({
         stackName={stackName}
         relPath={permissionsRelPath}
         entryName={permissionsEntryName}
-        canEdit={canEdit}
+        rootId={selectedRootId}
+        canEdit={rootCanEdit}
       />
 
       {/* Unsaved-changes guard on file switch */}
@@ -385,6 +512,27 @@ export function StackFileExplorer({
       >
         <p className="text-sm text-muted-foreground">
           You have unsaved changes in the current file. Switching to another file will discard them.
+        </p>
+      </ConfirmModal>
+
+      {/* Unsaved-changes guard on root switch */}
+      <ConfirmModal
+        open={pendingRootId !== null}
+        onOpenChange={(next) => { if (!next) setPendingRootId(null); }}
+        onCancel={() => setPendingRootId(null)}
+        kicker="FILES · UNSAVED CHANGES"
+        title="Discard unsaved changes?"
+        description="Switching roots will discard the edits in the current viewer."
+        confirmLabel="Discard and switch"
+        onConfirm={() => {
+          if (pendingRootId) {
+            applyRootSwitch(pendingRootId);
+            setPendingRootId(null);
+          }
+        }}
+      >
+        <p className="text-sm text-muted-foreground">
+          You have unsaved changes in the current file. Switching to another root will discard them.
         </p>
       </ConfirmModal>
     </div>

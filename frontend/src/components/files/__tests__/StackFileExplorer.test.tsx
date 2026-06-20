@@ -22,7 +22,9 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/stackFilesApi', () => ({
+  STACK_SOURCE_ROOT_ID: 'stack-source',
   listStackDirectory: vi.fn().mockResolvedValue([]),
+  listFileRoots: vi.fn().mockResolvedValue([]),
   downloadStackFile: vi.fn(),
   readStackFile: vi.fn(),
   writeStackFile: vi.fn(),
@@ -160,7 +162,7 @@ describe('StackFileExplorer move handling', () => {
 
     h.onMove?.('other.txt', 'other.txt', 'sub');
 
-    await waitFor(() => expect(h.renameMock).toHaveBeenCalledWith('my-stack', 'other.txt', 'sub/other.txt'));
+    await waitFor(() => expect(h.renameMock).toHaveBeenCalledWith('my-stack', 'other.txt', 'sub/other.txt', 'stack-source'));
     await waitFor(() => expect(h.toastSuccess).toHaveBeenCalledWith('Moved successfully.'));
     // The open file was not the one moved, so the viewer keeps its selection.
     expect(screen.getByTestId('viewer-selected').textContent).toBe('a.txt');
@@ -186,7 +188,7 @@ describe('StackFileExplorer move handling', () => {
 
     h.onMove?.('a.txt', 'a.txt', 'sub');
 
-    await waitFor(() => expect(h.renameMock).toHaveBeenCalledWith('my-stack', 'a.txt', 'sub/a.txt'));
+    await waitFor(() => expect(h.renameMock).toHaveBeenCalledWith('my-stack', 'a.txt', 'sub/a.txt', 'stack-source'));
     await waitFor(() => expect(screen.getByTestId('viewer-selected').textContent).toBe('(none)'));
   });
 
@@ -198,7 +200,7 @@ describe('StackFileExplorer move handling', () => {
 
     h.onMove?.('dir', 'dir', 'other');
 
-    await waitFor(() => expect(h.renameMock).toHaveBeenCalledWith('my-stack', 'dir', 'other/dir'));
+    await waitFor(() => expect(h.renameMock).toHaveBeenCalledWith('my-stack', 'dir', 'other/dir', 'stack-source'));
     await waitFor(() => expect(screen.getByTestId('viewer-selected').textContent).toBe('(none)'));
   });
 

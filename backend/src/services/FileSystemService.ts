@@ -18,6 +18,21 @@ export interface FileEntry {
 }
 
 /**
+ * Optional scope for a file-explorer operation. When `rootAbsDir` is set, the
+ * operation resolves and is contained within that absolute directory instead of
+ * the stack source dir, so the same primitives serve volume-aware bind-mount
+ * roots. `protectedEnabled` (compose/.env protection) defaults to true and is
+ * set false by the route for non-stack-source roots, where a file named
+ * compose.yaml/.env is just an ordinary editable file. The caller is
+ * responsible for pre-authorizing `rootAbsDir` (it may legitimately sit outside
+ * the compose base dir); this service only enforces containment within it.
+ */
+export interface FileRootScope {
+  rootAbsDir?: string;
+  protectedEnabled?: boolean;
+}
+
+/**
  * Resolves the writable Sencho data directory (same one DatabaseService /
  * CryptoService use). Recomputed lazily so test harnesses that override
  * `process.env.DATA_DIR` after module load still take effect.
@@ -1008,15 +1023,18 @@ export class FileSystemService {
     return MIME_MAP[ext] ?? 'text/plain';
   }
 
-  private async resolveSafeStackPath(stackName: string, relPath: string): Promise<string> {
-    const stackDir = path.join(this.baseDir, stackName);
-    if (!isPathWithinBase(stackDir, this.baseDir)) {
-      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
-    }
-    const target = relPath === '' ? stackDir : path.resolve(stackDir, relPath);
+  /**
+   * Resolve `relPath` within an arbitrary absolute root directory, applying the
+   * same containment + symlink-escape protection used for stack-source paths.
+   * Serves both the stack source dir (via resolveSafeStackPath) and volume-aware
+   * bind-mount roots, which may legitimately resolve outside the compose base dir
+   * (the caller pre-authorizes the root and passes its canonical realpath).
+   */
+  private async resolveSafePathWithin(rootAbsDir: string, relPath: string): Promise<string> {
+    const target = relPath === '' ? rootAbsDir : path.resolve(rootAbsDir, relPath);
 
-    if (!isPathWithinBase(target, stackDir)) {
-      throw Object.assign(new Error('Path escapes stack directory'), { code: 'INVALID_PATH' });
+    if (!isPathWithinBase(target, rootAbsDir)) {
+      throw Object.assign(new Error('Path escapes root directory'), { code: 'INVALID_PATH' });
     }
 
     let realTarget: string;
@@ -1033,14 +1051,14 @@ export class FileSystemService {
         const parent = path.dirname(existing);
         if (parent === existing) {
           // Reached filesystem root without finding an existing path.
-          throw Object.assign(new Error('Path escapes stack directory'), { code: 'INVALID_PATH' });
+          throw Object.assign(new Error('Path escapes root directory'), { code: 'INVALID_PATH' });
         }
         suffix.unshift(path.basename(existing));
         existing = parent;
         try {
           const realExisting = await fsPromises.realpath(existing);
-          if (!isPathWithinBase(realExisting, stackDir)) {
-            throw Object.assign(new Error('Symlink escapes stack directory'), { code: 'SYMLINK_ESCAPE' });
+          if (!isPathWithinBase(realExisting, rootAbsDir)) {
+            throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
           }
           realTarget = path.join(realExisting, ...suffix);
           break;
@@ -1052,15 +1070,40 @@ export class FileSystemService {
       }
     }
 
-    if (!isPathWithinBase(realTarget, stackDir)) {
-      throw Object.assign(new Error('Symlink escapes stack directory'), { code: 'SYMLINK_ESCAPE' });
+    if (!isPathWithinBase(realTarget, rootAbsDir)) {
+      throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
     }
 
     return realTarget;
   }
 
-  async listStackDirectory(stackName: string, relPath: string): Promise<FileEntry[]> {
-    const page = await this.listStackDirectoryPage(stackName, relPath, {});
+  private async resolveSafeStackPath(stackName: string, relPath: string): Promise<string> {
+    const stackDir = path.join(this.baseDir, stackName);
+    if (!isPathWithinBase(stackDir, this.baseDir)) {
+      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    return this.resolveSafePathWithin(stackDir, relPath);
+  }
+
+  /**
+   * Resolve the effective path for an operation that may target the stack source
+   * dir (default) or a pre-authorized bind-mount root (`scope.rootAbsDir`).
+   */
+  private async resolveScopedPath(stackName: string, relPath: string, scope?: FileRootScope): Promise<string> {
+    return scope?.rootAbsDir !== undefined
+      ? this.resolveSafePathWithin(scope.rootAbsDir, relPath)
+      : this.resolveSafeStackPath(stackName, relPath);
+  }
+
+  /** Leaf-path variant of resolveScopedPath (does not follow a symlink leaf). */
+  private async resolveScopedLeafPath(stackName: string, relPath: string, scope?: FileRootScope): Promise<string> {
+    return scope?.rootAbsDir !== undefined
+      ? this.resolveSafeLeafPathWithin(scope.rootAbsDir, relPath)
+      : this.resolveSafeStackLeafPath(stackName, relPath);
+  }
+
+  async listStackDirectory(stackName: string, relPath: string, scope?: FileRootScope): Promise<FileEntry[]> {
+    const page = await this.listStackDirectoryPage(stackName, relPath, { scope });
     return page.entries;
   }
 
@@ -1074,9 +1117,10 @@ export class FileSystemService {
   async listStackDirectoryPage(
     stackName: string,
     relPath: string,
-    opts: { limit?: number },
+    opts: { limit?: number; scope?: FileRootScope },
   ): Promise<{ entries: FileEntry[]; total: number; truncated: boolean }> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    const safePath = await this.resolveScopedPath(stackName, relPath, opts.scope);
+    const protectedEnabled = opts.scope?.protectedEnabled ?? true;
     const dirents = await fsPromises.readdir(safePath, { withFileTypes: true });
     const total = dirents.length;
 
@@ -1102,7 +1146,7 @@ export class FileSystemService {
           type,
           size,
           mtime,
-          isProtected: PROTECTED_STACK_FILES.has(dirent.name),
+          isProtected: protectedEnabled && PROTECTED_STACK_FILES.has(dirent.name),
         };
       })
     );
@@ -1123,9 +1167,9 @@ export class FileSystemService {
     stackName: string,
     relPath: string,
     maxBytes: number = 2 * 1024 * 1024,
-    opts: { forceText?: boolean } = {},
+    opts: { forceText?: boolean; scope?: FileRootScope } = {},
   ): Promise<{ content?: string; binary: boolean; oversized: boolean; size: number; mime: string; mtimeMs: number }> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    const safePath = await this.resolveScopedPath(stackName, relPath, opts.scope);
     const mime = this.guessMime(safePath);
 
     // Open once and stat+read through the same handle so the mtime returned to
@@ -1166,9 +1210,10 @@ export class FileSystemService {
 
   async streamStackFile(
     stackName: string,
-    relPath: string
+    relPath: string,
+    scope?: FileRootScope,
   ): Promise<{ stream: Readable; size: number; filename: string; mime: string }> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    const safePath = await this.resolveScopedPath(stackName, relPath, scope);
     const stat = await fsPromises.stat(safePath);
 
     if (stat.isDirectory()) {
@@ -1253,9 +1298,9 @@ export class FileSystemService {
     stackName: string,
     relPath: string,
     buffer: Buffer,
-    opts?: { exclusive?: boolean },
+    opts?: { exclusive?: boolean; scope?: FileRootScope },
   ): Promise<void> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    const safePath = await this.resolveScopedPath(stackName, relPath, opts?.scope);
     await this.writeStackFileAtomic(safePath, buffer, opts);
   }
 
@@ -1265,8 +1310,8 @@ export class FileSystemService {
    * so callers do not silently treat a malformed path as 'available for write'.
    * Callers should validate inputs upstream before invoking this helper.
    */
-  async pathKind(stackName: string, relPath: string): Promise<'file' | 'directory' | null> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+  async pathKind(stackName: string, relPath: string, scope?: FileRootScope): Promise<'file' | 'directory' | null> {
+    const safePath = await this.resolveScopedPath(stackName, relPath, scope);
     try {
       const stat = await fsPromises.lstat(safePath);
       if (stat.isDirectory()) return 'directory';
@@ -1296,11 +1341,12 @@ export class FileSystemService {
     relPath: string,
     content: string,
     expectedMtimeMs: number | null,
+    scope?: FileRootScope,
   ): Promise<
     | { ok: true; mtimeMs: number }
     | { ok: false; currentMtimeMs: number; currentContent: string }
   > {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+    const safePath = await this.resolveScopedPath(stackName, relPath, scope);
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
 
     if (expectedMtimeMs !== null) {
@@ -1339,22 +1385,30 @@ export class FileSystemService {
    * target) for operations where following would mutate a file other than
    * the one the user clicked on.
    */
-  private async resolveSafeStackLeafPath(stackName: string, relPath: string): Promise<string> {
+  private async resolveSafeLeafPathWithin(rootAbsDir: string, relPath: string): Promise<string> {
     if (relPath === '' || relPath === '.') {
-      return this.resolveSafeStackPath(stackName, '');
+      return this.resolveSafePathWithin(rootAbsDir, '');
     }
     const parentRel = path.dirname(relPath);
     const baseName = path.basename(relPath);
     if (!baseName || baseName === '.' || baseName === '..') {
       throw Object.assign(new Error('Invalid path'), { code: 'INVALID_PATH' });
     }
-    const safeParent = await this.resolveSafeStackPath(stackName, parentRel === '.' ? '' : parentRel);
+    const safeParent = await this.resolveSafePathWithin(rootAbsDir, parentRel === '.' ? '' : parentRel);
     return path.join(safeParent, baseName);
   }
 
-  async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false): Promise<void> {
-    if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
-    const leafPath = await this.resolveSafeStackLeafPath(stackName, relPath);
+  private async resolveSafeStackLeafPath(stackName: string, relPath: string): Promise<string> {
+    const stackDir = path.join(this.baseDir, stackName);
+    if (!isPathWithinBase(stackDir, this.baseDir)) {
+      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    return this.resolveSafeLeafPathWithin(stackDir, relPath);
+  }
+
+  async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false, scope?: FileRootScope): Promise<void> {
+    if ((scope?.protectedEnabled ?? true) && isProtectedRelPath(relPath)) throw protectedFileError(relPath);
+    const leafPath = await this.resolveScopedLeafPath(stackName, relPath, scope);
 
     // Branch on whether the leaf is a symlink BEFORE following it. Deleting
     // a symlink should remove the link entry the user clicked on; following
@@ -1390,8 +1444,8 @@ export class FileSystemService {
     }
   }
 
-  async mkdirStackPath(stackName: string, relPath: string): Promise<void> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+  async mkdirStackPath(stackName: string, relPath: string, scope?: FileRootScope): Promise<void> {
+    const safePath = await this.resolveScopedPath(stackName, relPath, scope);
     await fsPromises.mkdir(safePath, { recursive: true });
   }
 
@@ -1403,11 +1457,13 @@ export class FileSystemService {
    * the delete/chmod policy. fs.rename fails with EXDEV across a filesystem
    * boundary (e.g. a bind-mounted subdirectory); the route surfaces that as a 409.
    */
-  async renameStackPath(stackName: string, fromRel: string, toRel: string): Promise<void> {
-    if (isProtectedRelPath(fromRel)) throw protectedFileError(fromRel);
-    if (isProtectedRelPath(toRel)) throw protectedFileError(toRel);
-    const fromPath = await this.resolveSafeStackLeafPath(stackName, fromRel);
-    const toPath = await this.resolveSafeStackLeafPath(stackName, toRel);
+  async renameStackPath(stackName: string, fromRel: string, toRel: string, scope?: FileRootScope): Promise<void> {
+    if (scope?.protectedEnabled ?? true) {
+      if (isProtectedRelPath(fromRel)) throw protectedFileError(fromRel);
+      if (isProtectedRelPath(toRel)) throw protectedFileError(toRel);
+    }
+    const fromPath = await this.resolveScopedLeafPath(stackName, fromRel, scope);
+    const toPath = await this.resolveScopedLeafPath(stackName, toRel, scope);
     const toName = path.basename(toPath);
     if (!toName || toName === '.' || toName === '..') {
       throw Object.assign(new Error('Invalid destination name'), { code: 'INVALID_PATH' });
@@ -1437,19 +1493,19 @@ export class FileSystemService {
     await fsPromises.rename(fromPath, toPath);
   }
 
-  async getStackEntryMode(stackName: string, relPath: string): Promise<{ mode: number; octal: string }> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+  async getStackEntryMode(stackName: string, relPath: string, scope?: FileRootScope): Promise<{ mode: number; octal: string }> {
+    const safePath = await this.resolveScopedPath(stackName, relPath, scope);
     const stat = await fsPromises.stat(safePath);
     const mode = stat.mode & 0o777;
     return { mode, octal: mode.toString(8).padStart(3, '0') };
   }
 
-  async chmodStackPath(stackName: string, relPath: string, mode: number): Promise<void> {
+  async chmodStackPath(stackName: string, relPath: string, mode: number, scope?: FileRootScope): Promise<void> {
     if (!Number.isInteger(mode) || mode < 0 || mode > 0o777) {
       throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
     }
-    if (isProtectedRelPath(relPath)) throw protectedFileError(relPath);
-    const leafPath = await this.resolveSafeStackLeafPath(stackName, relPath);
+    if ((scope?.protectedEnabled ?? true) && isProtectedRelPath(relPath)) throw protectedFileError(relPath);
+    const leafPath = await this.resolveScopedLeafPath(stackName, relPath, scope);
 
     // chmod on a symlink is rejected. Following the link would silently
     // mutate permissions on a file with a different name than the entry the
@@ -1466,8 +1522,8 @@ export class FileSystemService {
     await fsPromises.chmod(leafPath, mode);
   }
 
-  async statStackEntry(stackName: string, relPath: string): Promise<FileEntry> {
-    const safePath = await this.resolveSafeStackPath(stackName, relPath);
+  async statStackEntry(stackName: string, relPath: string, scope?: FileRootScope): Promise<FileEntry> {
+    const safePath = await this.resolveScopedPath(stackName, relPath, scope);
     // Use lstat so symlinks are reported as 'symlink' rather than resolved to target type.
     const stat = await fsPromises.lstat(safePath);
     const name = path.basename(safePath);
@@ -1483,7 +1539,7 @@ export class FileSystemService {
       type,
       size: stat.isDirectory() ? 0 : stat.size,
       mtime: stat.mtimeMs,
-      isProtected: PROTECTED_STACK_FILES.has(name),
+      isProtected: (scope?.protectedEnabled ?? true) && PROTECTED_STACK_FILES.has(name),
     };
   }
 }

@@ -1,31 +1,63 @@
 ---
-title: Stack File Explorer
-description: Browse, view, edit, upload, rename, and chmod every file inside a stack's directory from the dashboard.
+title: Files & Volumes
+description: Browse and safely edit the config files inside a stack's mounted volumes, plus the files in the stack's own directory, from the dashboard.
 ---
 
-The file explorer gives you direct access to everything inside a stack's directory: configuration files, certificates, scripts, static assets, and any other files your containers depend on. It lives on the **Files** tab inside the stack editor, alongside the dedicated `compose.yaml` and `.env` editors.
+Files & Volumes gives you direct access to the files your containers actually read at runtime: the configuration inside a stack's **mounted volumes** (bind mounts and named Docker volumes), as well as the files in the stack's own source directory. A typical use is editing the Nginx and proxy configuration inside a reverse proxy's `/config` volume without leaving the dashboard. It lives on the **Files & Volumes** tab inside the stack editor, alongside the dedicated `compose.yaml` and `.env` editors.
 
 <Frame>
-  <img src="/images/stack-file-explorer/overview.png" alt="Files tab open with a populated tree on the left, a YAML file open in the editor on the right, and the Anatomy panel in the background" />
+  <img src="/images/stack-file-explorer/overview.png" alt="Files & Volumes tab open with the root switcher and a populated tree on the left and a config file open in the editor on the right" />
 </Frame>
 
 <Note>
-  The explorer is scoped to the stack's own directory. You cannot browse other stacks or navigate above the stack root.
+  Browsing is limited to the roots the stack itself declares: its source directory and the volumes mounted by its services. You cannot browse other stacks or arbitrary locations on the host.
 </Note>
 
-## Opening the file explorer
+## Opening Files & Volumes
 
 1. Click any stack in the left sidebar.
 2. Click **edit** in the right-hand Anatomy panel header to open the editor.
-3. Switch to the **Files** tab.
+3. Switch to the **Files & Volumes** tab.
 
-The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files tab in one click.
+The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files & Volumes tab in one click.
 
-The file explorer is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) require **stack read** permission, which every signed-in role has by default. Write actions (upload, edit, create, rename, move, change permissions, delete) require **stack edit** permission on your account.
+Files & Volumes is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) require **stack read** permission, which every signed-in role has by default. Write actions (upload, edit, create, rename, move, change permissions, delete) require **stack edit** permission on your account.
+
+## File roots: Volumes and stack source
+
+The left pane opens with a **Browsing** selector that lists the roots Sencho discovered for the stack, grouped into **Volumes** and **Stack source**. When the stack declares at least one browsable volume, the explorer defaults to it; otherwise it opens on the stack source.
+
+<Frame>
+  <img src="/images/stack-file-explorer/root-switcher.png" alt="The Browsing selector showing a Volumes group with the swag /config bind mount and a Stack source group" />
+</Frame>
+
+Each volume root is labelled by its container path (for example `/config`) and the type of mount behind it:
+
+- **Bind mounts** map a host directory into a service (for example `./config:/config`). When the directory is reachable by Sencho, the root is fully browsable and editable.
+- **Named volumes** are Docker-managed volumes. Sencho browses and edits them through a short-lived, locked-down helper container, so they work even though their on-disk location is not directly visible to the dashboard.
+
+The same source mounted by more than one service is shown as a single root, summarised as `N mounts`. A root that any service mounts read/write is editable; a root that every service mounts read-only is browse-only.
+
+<Note>
+  Editing a config file does not restart the service that reads it. After you save, restart the relevant service so it picks up the new content.
+</Note>
+
+### When a volume cannot be browsed
+
+A volume root is shown with a short explanation and is not browsable when:
+
+- the bind mount points at a host path Sencho cannot reach (mount that path into the Sencho container to browse it),
+- the mount targets a protected host location such as `/`, `/etc`, `/proc`, `/sys`, `/dev`, or the Docker socket,
+- the mount overlaps Sencho's own managed stack area (browse the owning stack's source instead), or
+- a named volume cannot be resolved on the node that owns the stack.
+
+### Named-volume editing details
+
+Named-volume editing is best-effort and bound by file ownership. The helper container writes as an unprivileged user, so a file owned by `root` or a specific application user may not be writable; Sencho returns a clear permission error in that case. New files created in a named volume are owned by the helper user, while edits to an existing file keep that file's owner and mode. Named-volume saves are written in place and are not atomic, so a save interrupted mid-write can leave the file partially written; the files involved are small config files, which keeps the window tiny.
 
 ## Layout
 
-The Files tab splits into two panes. The left pane holds the upload affordance, the new-folder button, and the directory tree. The right pane is the action bar plus the file viewer.
+The Files & Volumes tab splits into two panes. The left pane holds the Browsing selector, the upload affordance, the new-folder button, and the directory tree for the selected root. The right pane is the action bar plus the file viewer.
 
 <Frame>
   <img src="/images/stack-file-explorer/layout-panes.png" alt="Files tab two-pane layout showing the upload widget and tree on the left and the file viewer on the right" />
@@ -41,7 +73,9 @@ Click a folder to expand or collapse it. Click a file to open it in the viewer o
 
 ## Protected files
 
-The amber dot in the tree marks the five canonical stack files: `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, and `.env`.
+Protection applies to the **Stack source** root. On a volume root a file named `compose.yaml` or `.env` is an ordinary config file: it opens directly in the viewer and has no delete restriction, because it is the application's own file rather than the stack's compose definition.
+
+On the stack source root, the amber dot in the tree marks the five canonical stack files: `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, and `.env`.
 
 <Frame>
   <img src="/images/stack-file-explorer/protected-tree-marker.png" alt="File tree with amber dot markers next to compose.yaml and .env" />
@@ -183,8 +217,20 @@ The Permissions dialog opens for everyone; only users with stack edit permission
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Files tab is empty or returns a 403">
+  <Accordion title="Files & Volumes tab is empty or returns a 403">
     The signed-in role lacks **stack read** permission for this stack. Ask an admin to grant the permission on your account, or sign in with a role that already has it.
+  </Accordion>
+  <Accordion title="No browsable stack volumes detected">
+    The stack declares no volume Sencho can reach, so the explorer opens on the stack source. This happens when the stack uses only anonymous or `tmpfs` mounts, when its bind mounts point at host paths that are not mounted into the Sencho container, or when its named volumes have not been created yet. Deploy the stack so its named volumes exist, or mount the relevant host path into the Sencho container, then reopen the tab.
+  </Accordion>
+  <Accordion title="A volume is shown but cannot be browsed">
+    The root carries a short explanation. A bind mount to a host path Sencho cannot reach needs that path mounted into the Sencho container. A mount that targets a protected host location (`/`, `/etc`, `/proc`, `/sys`, `/dev`, the Docker socket) or that overlaps Sencho's managed stack area is intentionally not browsable. A named volume that cannot be resolved on the owning node is not browsable until it exists.
+  </Accordion>
+  <Accordion title="Saving a file in a named volume returns a permission error">
+    Sencho writes to named volumes as an unprivileged helper user. A file owned by `root` or a specific application user may not be writable by that helper. Adjust the file's ownership or permissions on the host, or edit the file from a context that owns it, then try again.
+  </Accordion>
+  <Accordion title="A volume is read-only">
+    Every service that mounts the volume declares it read-only (for example `./config:/config:ro`). The explorer browses it but disables the edit, upload, delete, and rename controls. Change the mount to read/write in the compose file and redeploy if you need to edit its contents from Sencho.
   </Accordion>
   <Accordion title="Cannot delete compose.yaml or .env">
     The five canonical stack files (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, `.env`) are protected because removing them mid-life breaks the stack. To delete a stack entirely, use **Delete stack** in the stack toolbar's overflow menu rather than removing these files individually.

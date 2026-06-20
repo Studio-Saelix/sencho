@@ -20,6 +20,7 @@ interface RenameDialogProps {
   relPath: string;
   /** Current basename of the entry */
   currentName: string;
+  rootId?: string;
   onRenamed: () => void;
 }
 
@@ -29,6 +30,7 @@ export function RenameDialog({
   stackName,
   relPath,
   currentName,
+  rootId,
   onRenamed,
 }: RenameDialogProps) {
   const [name, setName] = useState('');
@@ -62,7 +64,7 @@ export function RenameDialog({
     const parentDir = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : '';
     const toRel = parentDir ? `${parentDir}/${trimmed}` : trimmed;
     try {
-      await renameStackPath(stackName, relPath, toRel);
+      await renameStackPath(stackName, relPath, toRel, rootId);
       toast.success('Renamed successfully.');
       onRenamed();
       onOpenChange(false);

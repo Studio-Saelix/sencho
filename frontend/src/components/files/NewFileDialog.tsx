@@ -18,6 +18,7 @@ interface NewFileDialogProps {
   stackName: string;
   /** Directory within the stack where the file will be created */
   currentDir: string;
+  rootId?: string;
   onCreated: () => void;
 }
 
@@ -26,6 +27,7 @@ export function NewFileDialog({
   onOpenChange,
   stackName,
   currentDir,
+  rootId,
   onCreated,
 }: NewFileDialogProps) {
   const [name, setName] = useState('');
@@ -51,7 +53,7 @@ export function NewFileDialog({
     setCreating(true);
     const relPath = currentDir ? `${currentDir}/${trimmed}` : trimmed;
     try {
-      await writeStackFile(stackName, relPath, '');
+      await writeStackFile(stackName, relPath, '', { rootId });
       toast.success('File created.');
       onCreated();
       onOpenChange(false);

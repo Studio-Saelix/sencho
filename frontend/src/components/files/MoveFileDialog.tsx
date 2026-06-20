@@ -21,6 +21,8 @@ interface MoveFileDialogProps {
   relPath: string;
   /** The entry being moved (null until a source is chosen). */
   entry: FileEntry | null;
+  /** The selected file root; the destination tree is loaded within it. */
+  rootId?: string;
   /** Relocate `fromRel` into `destDir` (''=stack root). Resolves true only when
    *  the entry actually moved, so the dialog stays open on a blocked/failed move. */
   onMove: (fromRel: string, entryName: string, destDir: string) => boolean | Promise<boolean>;
@@ -32,6 +34,7 @@ export function MoveFileDialog({
   stackName,
   relPath,
   entry,
+  rootId,
   onMove,
 }: MoveFileDialogProps) {
   // Loaded directory children, keyed by directory rel path ('' = stack root).
@@ -66,7 +69,7 @@ export function MoveFileDialog({
       next.delete(dir);
       return next;
     });
-    listStackDirectory(stackName, dir)
+    listStackDirectory(stackName, dir, rootId)
       .then((entries) => {
         if (requestSeqRef.current !== seq) return;
         setDirChildren((prev) => new Map(prev).set(dir, entries.filter((e) => e.type === 'directory')));

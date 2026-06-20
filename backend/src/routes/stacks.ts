@@ -5,6 +5,8 @@ import { inspect } from 'node:util';
 import YAML from 'yaml';
 import multer from 'multer';
 import { FileSystemService } from '../services/FileSystemService';
+import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
+import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
@@ -480,6 +482,7 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
       });
     }
     invalidateNodeCaches(req.nodeId);
+    StackFileRootsService.invalidate(req.nodeId, stackName);
     dlog(`[Stacks] Compose file saved: ${sanitizeForLog(stackName)}`);
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
     res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs });
@@ -609,6 +612,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       });
     }
     invalidateNodeCaches(req.nodeId);
+    StackFileRootsService.invalidate(req.nodeId, stackName);
     const envFileName = path.basename(envPath);
     dlog(`[Stacks] Env file saved: ${sanitizeForLog(stackName)}/${sanitizeForLog(envFileName)}`);
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
@@ -1697,6 +1701,10 @@ stacksRouter.get('/:stackName/scan-status', (req: Request, res: Response): void 
 type FsErrorCode =
   | 'INVALID_PATH'
   | 'SYMLINK_ESCAPE'
+  | 'INVALID_ROOT'
+  | 'READONLY_ROOT'
+  | 'ROOT_UNAVAILABLE'
+  | 'UNSUPPORTED_ON_ROOT'
   | 'IS_DIRECTORY'
   | 'NOT_EMPTY'
   | 'NOT_FOUND'
@@ -1742,8 +1750,84 @@ function sendFsError(
   if (e.code === 'ENOENT') {
     return res.status(404).json({ error: opts.notFoundMessage ?? 'File not found', code: 'NOT_FOUND' });
   }
+  if (e.code === 'UNSUPPORTED_ON_ROOT') {
+    return res.status(400).json({ error: e.message, code: 'UNSUPPORTED_ON_ROOT' satisfies FsErrorCode });
+  }
+  if (e.code === 'FILE_EXISTS') {
+    return res.status(409).json({ error: e.message, code: 'FILE_EXISTS' satisfies FsErrorCode });
+  }
+  // Helper-backed (named-volume) ops throw an ExecError carrying an HTTP status;
+  // honour it (403 permission-denied, 409 conflict, 413 too-large, 504 timeout).
+  // A 4xx message is a self-explanatory client error and is forwarded as-is; a
+  // 5xx is a server-side failure, so log the detail and return a clean message.
+  const status = (err as { status?: unknown }).status;
+  if (typeof status === 'number' && status >= 400 && status < 600) {
+    if (status >= 500) {
+      console.error(`[files] ${fallback} (helper ${status}):`, sanitizeForLog(e.message));
+      return res.status(status).json({ error: fallback });
+    }
+    return res.status(status).json({ error: e.message });
+  }
   console.error(`[files] ${fallback}:`, sanitizeForLog(e.message));
   return res.status(500).json({ error: fallback });
+}
+
+const ROOT_ID_RE = /^[A-Za-z0-9:_-]{1,80}$/;
+
+function readRootId(req: Request): string {
+  const raw = req.query.rootId;
+  return typeof raw === 'string' && raw ? raw : STACK_SOURCE_ROOT_ID;
+}
+
+/**
+ * Resolve the client's rootId to a server-derived root, enforcing browsability
+ * for reads and writability for writes. Sends the error response and returns
+ * null when the root is unknown, read-only, or not browsable, so the caller
+ * just does `if (!root) return;`. Writes resolve fresh (cache bypass) so a
+ * removed mount cannot be written through a stale allowlist.
+ */
+async function resolveRootForOp(
+  req: Request,
+  res: Response,
+  stackName: string,
+  mode: 'read' | 'write',
+): Promise<StackFileRoot | null> {
+  const rootId = readRootId(req);
+  // Back-compat fast path: no rootId (or the stack-source root) is exactly the
+  // legacy behaviour. Return a synthetic stack-source root without touching the
+  // roots service, so plain stack-source ops never trigger a compose render.
+  if (rootId === STACK_SOURCE_ROOT_ID) {
+    return stackSourceFileRoot();
+  }
+  if (!ROOT_ID_RE.test(rootId)) {
+    res.status(400).json({ error: 'Invalid root', code: 'INVALID_ROOT' satisfies FsErrorCode });
+    return null;
+  }
+  let root: StackFileRoot;
+  try {
+    root = await StackFileRootsService.getInstance(req.nodeId).resolveRoot(stackName, rootId, { fresh: mode === 'write' });
+  } catch (err) {
+    if ((err as { code?: string }).code === 'INVALID_ROOT') {
+      res.status(400).json({ error: 'Unknown file root', code: 'INVALID_ROOT' satisfies FsErrorCode });
+      return null;
+    }
+    sendFsError(res, err, 'Failed to resolve file root');
+    return null;
+  }
+  if (mode === 'write' && !root.writable) {
+    res.status(403).json({ error: root.warning ?? 'This location is read-only.', code: 'READONLY_ROOT' satisfies FsErrorCode });
+    return null;
+  }
+  if (mode === 'read' && !root.browsable) {
+    res.status(400).json({ error: root.warning ?? 'This location cannot be browsed.', code: 'ROOT_UNAVAILABLE' satisfies FsErrorCode });
+    return null;
+  }
+  return root;
+}
+
+/** Drop the cached root allowlist after a stack-source mutation that can change declared mounts. */
+function afterStackMutation(req: Request, stackName: string): void {
+  StackFileRootsService.invalidate(req.nodeId, stackName);
 }
 
 function logFileOperation(level: 'info' | 'warn', message: string, details: Record<string, unknown>): void {
@@ -1816,6 +1900,17 @@ function isSafeUploadFilename(rawName: string): boolean {
 
 const DIR_LIST_LIMIT = 1000;
 
+stacksRouter.get('/:stackName/file-roots', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  try {
+    const roots = await StackFileRootsService.getInstance(req.nodeId).listRoots(stackName);
+    return res.json(roots);
+  } catch (err: unknown) {
+    return sendFsError(res, err, 'Failed to list file roots');
+  }
+});
+
 stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
@@ -1823,10 +1918,12 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('list start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('list start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).listStackDirectoryPage(stackName, relPath, { limit: DIR_LIST_LIMIT });
+    const result = await FileRootGateway.getInstance(req.nodeId).listDir(root, stackName, relPath, DIR_LIST_LIMIT);
     // Expose pagination context via headers; the JSON body stays
     // FileEntry[] for backward compatibility with any direct API caller.
     res.setHeader('X-Total-Count', String(result.total));
@@ -1859,14 +1956,17 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
   const forceText = req.query.force === 'text';
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId, forceText });
+  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId, forceText, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath, undefined, { forceText });
-    // ETag is the integer mtimeMs the file was stat'd with, so the matching
-    // PUT can compare millisecond-equal even though some filesystems return
-    // float mtimeMs.
-    res.setHeader('ETag', stackFileEtag(result.mtimeMs));
+    const result = await FileRootGateway.getInstance(req.nodeId).read(root, stackName, relPath, forceText);
+    // ETag carries the opaque version token the matching PUT compares. For fs
+    // roots it is the weak ETag over the integer mtimeMs (unchanged); for helper
+    // roots it is a composite token. The body also carries `version` so the
+    // client round-trips it verbatim as If-Match.
+    res.setHeader('ETag', result.version);
     logFileDiag('read complete', {
       stackName,
       relPath,
@@ -1893,15 +1993,27 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('download start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('download start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).streamStackFile(stackName, relPath);
-    res.setHeader('Content-Type', result.mime);
-    res.setHeader('Content-Length', result.size);
-    const encodedFilename = encodeURIComponent(result.filename);
-    const safeFilename = result.filename.replace(/[\\"]/g, '');
-    res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
+    const result = await FileRootGateway.getInstance(req.nodeId).download(root, stackName, relPath);
+    const setDownloadHeaders = (filename: string, size: number, mime: string): void => {
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Content-Length', size);
+      const encodedFilename = encodeURIComponent(filename);
+      const safeFilename = filename.replace(/[\\"]/g, '');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
+    };
+    // Helper-backed (named-volume) downloads come back as a bounded buffer; send
+    // it directly rather than through the file-stream lifecycle below.
+    if (result.kind === 'buffer') {
+      setDownloadHeaders(result.filename, result.size, 'application/octet-stream');
+      recordFileOp(req.nodeId, 'download', startedAt, true);
+      return res.end(result.buffer);
+    }
+    setDownloadHeaders(result.filename, result.size, result.mime);
     // Track download completion off both the file stream's lifecycle and the
     // response close. Under the in-process supertest transport, request close
     // events can race ahead of normal stream completion. End/error are the
@@ -2018,6 +2130,8 @@ stacksRouter.post(
     if (!isSafeUploadFilename(originalName)) {
       return res.status(400).json({ error: 'Invalid filename' });
     }
+    const root = await resolveRootForOp(req, res, stackName, 'write');
+    if (!root) return;
     const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
     const overwrite = String(req.query.overwrite) === '1';
     // The multer wrapper stashed the route-entry timestamp on the request so
@@ -2026,7 +2140,8 @@ stacksRouter.post(
     const startedAt = (req as UploadStartedReq)._fileUploadStartedAt ?? Date.now();
     logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
     try {
-      const existing = await FileSystemService.getInstance(req.nodeId).pathKind(stackName, targetRelPath);
+      const gateway = FileRootGateway.getInstance(req.nodeId);
+      const existing = await gateway.pathKind(root, stackName, targetRelPath);
       if (existing === 'directory') {
         // A directory can never be replaced by an upload; surface a distinct code
         // so the UI does not offer a useless "Replace" button.
@@ -2058,7 +2173,8 @@ stacksRouter.post(
           },
         });
       }
-      await FileSystemService.getInstance(req.nodeId).writeStackFileBuffer(stackName, targetRelPath, req.file.buffer);
+      await gateway.writeBuffer(root, stackName, targetRelPath, req.file.buffer, false);
+      afterStackMutation(req, stackName);
       logFileOperation('info', 'mutate', {
         nodeId: req.nodeId,
         op: 'upload',
@@ -2066,6 +2182,8 @@ stacksRouter.post(
         path: targetRelPath,
         bytes: req.file.size,
         overwrite,
+        rootKind: root.kind,
+        backend: root.backend,
       });
       logFileDiag('upload timing', { stackName, relPath: targetRelPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
       recordFileOp(req.nodeId, 'upload', startedAt, true);
@@ -2097,23 +2215,19 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
   if (typeof content !== 'string') {
     return res.status(400).json({ error: '"content" must be a string' });
   }
-  const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
+  const expectedVersion = req.header('if-match') || undefined;
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8'), hasIfMatch: expectedMtimeMs !== null });
+  logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8'), hasIfMatch: expectedVersion !== undefined, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).writeStackFileIfUnchanged(
-      stackName,
-      relPath,
-      content,
-      expectedMtimeMs,
-    );
+    const result = await FileRootGateway.getInstance(req.nodeId).writeIfUnchanged(root, stackName, relPath, content, expectedVersion);
     if (!result.ok) {
-      // Stale ETag: surface the current content + mtime so the client can
-      // show a "file changed elsewhere" diff and let the user reconcile.
-      // Real FS work ran (the if-unchanged stat compare); record the
-      // attempted-and-rejected write so operators chasing concurrent-edit
-      // patterns can see them in the snapshot.
-      res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      // Stale version: surface the current content + token so the client can
+      // show a "file changed elsewhere" diff and retry with the fresh version.
+      // Real work ran (the if-unchanged compare); record the attempted-and-
+      // rejected write so concurrent-edit patterns show in the snapshot.
+      res.setHeader('ETag', result.currentVersion);
       return rejectFileMutation(req, res, {
         op: 'write',
         stack: stackName,
@@ -2125,16 +2239,20 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
           error: 'File has been modified since you last read it. Reload to see the current version.',
           currentMtimeMs: result.currentMtimeMs,
           currentContent: result.currentContent,
+          currentVersion: result.currentVersion,
         },
       });
     }
-    res.setHeader('ETag', stackFileEtag(result.mtimeMs));
+    res.setHeader('ETag', result.version);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'write',
       stack: stackName,
       path: relPath,
       bytes: Buffer.byteLength(content, 'utf-8'),
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('write timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'write', startedAt, true);
@@ -2161,16 +2279,21 @@ stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => 
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
   const recursive = req.query.recursive === '1';
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('delete start', { stackName, relPath, recursive, nodeId: req.nodeId });
+  logFileDiag('delete start', { stackName, relPath, recursive, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    await FileSystemService.getInstance(req.nodeId).deleteStackPath(stackName, relPath, recursive);
+    await FileRootGateway.getInstance(req.nodeId).deletePath(root, stackName, relPath, recursive);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'delete',
       stack: stackName,
       path: relPath,
       recursive,
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('delete timing', { stackName, relPath, recursive, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'delete', startedAt, true);
@@ -2197,15 +2320,20 @@ stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('mkdir start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('mkdir start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    await FileSystemService.getInstance(req.nodeId).mkdirStackPath(stackName, relPath);
+    await FileRootGateway.getInstance(req.nodeId).mkdir(root, stackName, relPath);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'mkdir',
       stack: stackName,
       path: relPath,
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('mkdir timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'mkdir', startedAt, true);
@@ -2239,16 +2367,21 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
   if (!isValidRelativeStackPath(to)) {
     return res.status(400).json({ error: 'Invalid destination path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('rename start', { stackName, from, to, nodeId: req.nodeId });
+  logFileDiag('rename start', { stackName, from, to, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    await FileSystemService.getInstance(req.nodeId).renameStackPath(stackName, from, to);
+    await FileRootGateway.getInstance(req.nodeId).rename(root, stackName, from, to);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'rename',
       stack: stackName,
       path: from,
       toPath: to,
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('rename timing', { stackName, from, to, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'rename', startedAt, true);
@@ -2275,10 +2408,12 @@ stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Resp
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('permissions read start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('permissions read start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).getStackEntryMode(stackName, relPath);
+    const result = await FileRootGateway.getInstance(req.nodeId).getMode(root, stackName, relPath);
     logFileDiag('permissions read complete', { stackName, relPath, nodeId: req.nodeId, mode: result.octal, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'permissionsRead', startedAt, true);
     return res.json(result);
@@ -2301,16 +2436,21 @@ stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Resp
   if (typeof mode !== 'number') {
     return res.status(400).json({ error: '"mode" must be a number' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('chmod start', { stackName, relPath, nodeId: req.nodeId, mode });
+  logFileDiag('chmod start', { stackName, relPath, nodeId: req.nodeId, mode, rootKind: root.kind });
   try {
-    await FileSystemService.getInstance(req.nodeId).chmodStackPath(stackName, relPath, mode);
+    await FileRootGateway.getInstance(req.nodeId).chmod(root, stackName, relPath, mode);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'chmod',
       stack: stackName,
       path: relPath,
       mode: mode.toString(8).padStart(3, '0'),
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('chmod timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'chmod', startedAt, true);
