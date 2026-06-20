@@ -5343,6 +5343,33 @@ export class DatabaseService {
         txn();
     }
 
+    /**
+     * Add labels to a stack without disturbing its existing assignments. Unlike
+     * `setStackLabels` (replace), this is additive: validation and
+     * `INSERT OR IGNORE` run in one transaction and the
+     * `(label_id, stack_name, node_id)` primary key makes re-adds idempotent, so
+     * two additive writes to the same stack never drop each other's labels. A
+     * concurrent `setStackLabels` (replace) still wins last-writer, which is the
+     * intended replace semantics, not a lost update.
+     */
+    public addStackLabels(stackName: string, nodeId: number, labelIds: number[]): void {
+        if (labelIds.length === 0) return;
+        const txn = this.db.transaction(() => {
+            const placeholders = labelIds.map(() => '?').join(',');
+            const validCount = this.db.prepare(
+                `SELECT COUNT(*) as cnt FROM stack_labels WHERE id IN (${placeholders}) AND node_id = ?`
+            ).get(...labelIds, nodeId) as { cnt: number };
+            if (validCount.cnt !== labelIds.length) {
+                throw new Error('One or more label IDs are invalid for this node');
+            }
+            const insert = this.db.prepare('INSERT OR IGNORE INTO stack_label_assignments (label_id, stack_name, node_id) VALUES (?, ?, ?)');
+            for (const labelId of labelIds) {
+                insert.run(labelId, stackName, nodeId);
+            }
+        });
+        txn();
+    }
+
     public getLabelsForStacks(nodeId: number): Record<string, Label[]> {
         const rows = this.db.prepare(`
             SELECT a.stack_name, l.id, l.node_id, l.name, l.color
