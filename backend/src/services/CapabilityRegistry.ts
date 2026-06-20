@@ -38,6 +38,7 @@ export const CAPABILITIES = [
   'compose-doctor',
   'update-guard',
   'compose-networking',
+  'env-inventory',
   'compose-storage',
 ] as const;
 

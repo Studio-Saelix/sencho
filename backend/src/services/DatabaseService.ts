@@ -1493,6 +1493,7 @@ export class DatabaseService {
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
         stmt.run('image_update_check_interval_minutes', '120');
+        stmt.run('env_block_deploy_on_missing_required', '0');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
@@ -5336,6 +5337,33 @@ export class DatabaseService {
             }
             this.db.prepare('DELETE FROM stack_label_assignments WHERE stack_name = ? AND node_id = ?').run(stackName, nodeId);
             const insert = this.db.prepare('INSERT INTO stack_label_assignments (label_id, stack_name, node_id) VALUES (?, ?, ?)');
+            for (const labelId of labelIds) {
+                insert.run(labelId, stackName, nodeId);
+            }
+        });
+        txn();
+    }
+
+    /**
+     * Add labels to a stack without disturbing its existing assignments. Unlike
+     * `setStackLabels` (replace), this is additive: validation and
+     * `INSERT OR IGNORE` run in one transaction and the
+     * `(label_id, stack_name, node_id)` primary key makes re-adds idempotent, so
+     * two additive writes to the same stack never drop each other's labels. A
+     * concurrent `setStackLabels` (replace) still wins last-writer, which is the
+     * intended replace semantics, not a lost update.
+     */
+    public addStackLabels(stackName: string, nodeId: number, labelIds: number[]): void {
+        if (labelIds.length === 0) return;
+        const txn = this.db.transaction(() => {
+            const placeholders = labelIds.map(() => '?').join(',');
+            const validCount = this.db.prepare(
+                `SELECT COUNT(*) as cnt FROM stack_labels WHERE id IN (${placeholders}) AND node_id = ?`
+            ).get(...labelIds, nodeId) as { cnt: number };
+            if (validCount.cnt !== labelIds.length) {
+                throw new Error('One or more label IDs are invalid for this node');
+            }
+            const insert = this.db.prepare('INSERT OR IGNORE INTO stack_label_assignments (label_id, stack_name, node_id) VALUES (?, ?, ?)');
             for (const labelId of labelIds) {
                 insert.run(labelId, stackName, nodeId);
             }

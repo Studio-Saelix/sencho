@@ -87,6 +87,21 @@ const envUnset: PreflightRule = {
   },
 };
 
+const envFileMissing: PreflightRule = {
+  id: 'env-file-missing',
+  run(ctx) {
+    return ctx.missingEnvFiles.map(f => ({
+      ruleId: 'env-file-missing',
+      severity: 'high' as const,
+      title: `Missing env file ${f.rawPath}`,
+      message: `The Compose file declares env_file "${f.rawPath}"${f.services.length ? ` for service ${f.services.join(', ')}` : ''}, but no such file exists in the stack directory. Compose fails to start the stack when a required env_file is absent.`,
+      sourcePath: f.rawPath,
+      remediation: `Create ${f.rawPath} in the stack directory, fix the path, or mark the entry optional with "required: false".`,
+      service: f.services[0],
+    }));
+  },
+};
+
 const portConflictNode: PreflightRule = {
   id: 'port-conflict-node',
   run(ctx) {
@@ -694,6 +709,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
 export const PREFLIGHT_RULES: PreflightRule[] = [
   renderFailed,
   envUnset,
+  envFileMissing,
   portConflictNode,
   portConflictInternal,
   portExposedAllInterfaces,

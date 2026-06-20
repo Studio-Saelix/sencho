@@ -1,125 +1,217 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Button } from '@/components/ui/button';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
 import { FleetActionCard } from '@/components/ui/fleet-action-card';
 import { SheetSection } from '@/components/ui/system-sheet';
 import { LabelPill } from '@/components/LabelPill';
-import { fetchForNode } from '@/lib/api';
+import { apiFetch, fetchForNode } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import type { FleetNode } from '@/components/FleetView/types';
-import type { Label } from '@/components/label-types';
+import { type Label, type LabelColor, LABEL_COLORS } from '@/components/label-types';
 import { ResultsList, type ResultRow } from '../ResultsList';
 
 interface NodeStackResult { stackName: string; success: boolean; error?: string }
+interface AssignNodeResult {
+  nodeId: number;
+  nodeName: string;
+  reachable?: boolean;
+  error?: string;
+  created: boolean;
+  stackResults: NodeStackResult[];
+}
+
+interface NodeData {
+  node: FleetNode;
+  reachable: boolean;
+  stacks: string[];
+  labels: Label[];
+}
+
+// A label name that exists somewhere in the fleet, with a deterministic color
+// to propagate. `colorConflict` flags names whose stored color differs across
+// nodes (the local node's color wins, then the most common, then the first).
+interface LabelTemplate {
+  name: string;
+  color: LabelColor;
+  colorConflict: boolean;
+}
 
 interface Props {
   nodes: FleetNode[];
 }
 
+const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
+
 export function BulkLabelAssignCard({ nodes }: Props) {
-  const [selectedNodeId, setSelectedNodeId] = useState<number>(() => {
-    const local = nodes.find(n => n.type === 'local');
-    return Number(local?.id ?? nodes[0]?.id ?? 0);
-  });
-  const [stacks, setStacks] = useState<string[]>([]);
-  const [labels, setLabels] = useState<Label[]>([]);
-  const [loadingLists, setLoadingLists] = useState(false);
-  const [selectedStacks, setSelectedStacks] = useState<Set<string>>(new Set());
-  const [selectedLabels, setSelectedLabels] = useState<Set<number>>(new Set());
+  const [nodeData, setNodeData] = useState<NodeData[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<LabelTemplate | null>(null);
+  // nodeId -> selected stack names on that node.
+  const [selected, setSelected] = useState<Map<number, Set<string>>>(new Map());
+  const [search, setSearch] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
 
-  const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [nodes, selectedNodeId]);
+  // Re-fetch only when the set of node ids changes, not on every parent render
+  // (the nodes array is a fresh reference each render, e.g. on each fleet poll).
+  // The latest nodes are read through a ref so the load effect can rebuild
+  // per-node state without taking the array as a reactive dependency.
+  const nodesRef = useRef(nodes);
+  useEffect(() => { nodesRef.current = nodes; });
+  const nodeIds = nodes.map(n => n.id).join(',');
 
   useEffect(() => {
-    if (!selectedNodeId) return;
     let cancelled = false;
     async function load() {
-      setLoadingLists(true);
-      setSelectedStacks(new Set());
-      setSelectedLabels(new Set());
+      setLoading(true);
+      setSelected(new Map());
+      setSelectedTemplate(null);
       setResults([]);
-      try {
-        const [stacksRes, labelsRes] = await Promise.all([
-          fetchForNode(`/fleet/node/${selectedNodeId}/stacks`, selectedNodeId),
-          fetchForNode('/labels', selectedNodeId),
-        ]);
-        const stacksList = stacksRes.ok ? ((await stacksRes.json()) as string[]) : [];
-        const labelsList = labelsRes.ok ? ((await labelsRes.json()) as Label[]) : [];
-        if (!cancelled) {
-          setStacks(stacksList);
-          setLabels(labelsList);
+      const entries = await Promise.all(nodesRef.current.map(async (node): Promise<NodeData> => {
+        try {
+          const [stacksRes, labelsRes] = await Promise.all([
+            fetchForNode(`/fleet/node/${node.id}/stacks`, node.id),
+            fetchForNode('/labels', node.id),
+          ]);
+          const stacks = stacksRes.ok ? ((await stacksRes.json()) as string[]) : [];
+          const labels = labelsRes.ok ? ((await labelsRes.json()) as Label[]) : [];
+          if (!stacksRes.ok || !labelsRes.ok) {
+            console.warn(`[BulkLabelAssign] node ${node.id} (${node.name}) load incomplete: stacks ${stacksRes.status}, labels ${labelsRes.status}`);
+          }
+          return { node, reachable: stacksRes.ok && labelsRes.ok, stacks, labels };
+        } catch (err) {
+          console.error(`[BulkLabelAssign] failed to load node ${node.id} (${node.name}):`, err);
+          return { node, reachable: false, stacks: [], labels: [] };
         }
-      } catch {
-        if (!cancelled) {
-          setStacks([]);
-          setLabels([]);
-        }
-      } finally {
-        if (!cancelled) setLoadingLists(false);
+      }));
+      if (!cancelled) {
+        setNodeData(entries);
+        setLoading(false);
       }
     }
     load();
     return () => { cancelled = true; };
-  }, [selectedNodeId]);
+  }, [nodeIds]);
 
-  function toggleStack(stackName: string) {
-    setSelectedStacks(prev => {
-      const next = new Set(prev);
-      if (next.has(stackName)) next.delete(stackName);
-      else next.add(stackName);
+  // Distinct label templates across the fleet (name + deterministic color).
+  const templates = useMemo<LabelTemplate[]>(() => {
+    const byName = new Map<string, { colors: Map<string, number>; localColor?: string }>();
+    for (const entry of nodeData) {
+      const isLocal = entry.node.type === 'local';
+      for (const label of entry.labels) {
+        const t = byName.get(label.name) ?? { colors: new Map<string, number>() };
+        t.colors.set(label.color, (t.colors.get(label.color) ?? 0) + 1);
+        if (isLocal) t.localColor = label.color;
+        byName.set(label.name, t);
+      }
+    }
+    return Array.from(byName.entries())
+      .map(([name, t]) => {
+        let color = t.localColor;
+        if (!color) {
+          let best = -1;
+          for (const [c, count] of t.colors) {
+            if (count > best) { best = count; color = c; }
+          }
+        }
+        const safe: LabelColor = typeof color === 'string' && (LABEL_COLORS as string[]).includes(color) ? (color as LabelColor) : 'slate';
+        return { name, color: safe, colorConflict: t.colors.size > 1 };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [nodeData]);
+
+  const totalSelected = useMemo(() => {
+    let n = 0;
+    for (const set of selected.values()) n += set.size;
+    return n;
+  }, [selected]);
+  const nodesWithSelection = useMemo(
+    () => Array.from(selected.values()).filter(s => s.size > 0).length,
+    [selected],
+  );
+
+  function toggleStack(nodeId: number, stackName: string) {
+    setSelected(prev => {
+      const next = new Map(prev);
+      const set = new Set(next.get(nodeId) ?? []);
+      if (set.has(stackName)) set.delete(stackName);
+      else set.add(stackName);
+      next.set(nodeId, set);
       return next;
     });
   }
-  function toggleLabel(labelId: number) {
-    setSelectedLabels(prev => {
-      const next = new Set(prev);
-      if (next.has(labelId)) next.delete(labelId);
-      else next.add(labelId);
+  function toggleAllForNode(nodeId: number, stacks: string[]) {
+    setSelected(prev => {
+      const next = new Map(prev);
+      const set = new Set(next.get(nodeId) ?? []);
+      const allSelected = stacks.length > 0 && stacks.every(s => set.has(s));
+      if (allSelected) stacks.forEach(s => set.delete(s));
+      else stacks.forEach(s => set.add(s));
+      next.set(nodeId, set);
       return next;
     });
   }
-  function toggleAllStacks() {
-    if (selectedStacks.size === stacks.length) setSelectedStacks(new Set());
-    else setSelectedStacks(new Set(stacks));
-  }
-  function clearSelection() {
-    setSelectedStacks(new Set());
-    setSelectedLabels(new Set());
+  function reset() {
+    setSelected(new Map());
+    setSelectedTemplate(null);
     setResults([]);
+    setSearch('');
+  }
+
+  const filterQuery = search.trim().toLowerCase();
+  function filteredStacks(stacks: string[]): string[] {
+    if (!filterQuery) return stacks;
+    return stacks.filter(s => s.toLowerCase().includes(filterQuery));
   }
 
   async function run() {
-    if (selectedStacks.size === 0) return;
-    const labelIds = Array.from(selectedLabels);
-    const assignments = Array.from(selectedStacks).map(stackName => ({ stackName, labelIds }));
-    const toastId = toast.loading(`Assigning labels to ${assignments.length} stack${assignments.length === 1 ? '' : 's'}…`);
+    if (!selectedTemplate || totalSelected === 0) return;
+    const targets = Array.from(selected.entries())
+      .filter(([, set]) => set.size > 0)
+      .map(([nodeId, set]) => ({ nodeId, stackNames: Array.from(set) }));
+    const toastId = toast.loading(`Assigning "${selectedTemplate.name}" to ${totalSelected} stack${totalSelected === 1 ? '' : 's'} across ${targets.length} node${targets.length === 1 ? '' : 's'}…`);
     setRunning(true);
+    setResults([]);
     try {
-      const res = await fetchForNode('/fleet-actions/labels/bulk-assign', selectedNodeId, {
+      const res = await apiFetch('/fleet/labels/bulk-assign', {
         method: 'POST',
-        body: JSON.stringify({ assignments }),
+        body: JSON.stringify({ label: { name: selectedTemplate.name, color: selectedTemplate.color }, targets }),
       });
       const body = await res.json().catch(() => ({}));
       toast.dismiss(toastId);
       if (!res.ok) {
-        toast.error(body.error || 'Bulk label assignment failed');
+        toast.error(body.error || 'Bulk label assign failed');
         return;
       }
-      const rows: ResultRow[] = (body.results as NodeStackResult[] ?? []).map((r, i) => ({
-        key: `${r.stackName}-${i}`,
-        label: r.stackName || '(unnamed)',
-        success: r.success,
-        error: r.error,
-      }));
+      const apiResults = (body.results as AssignNodeResult[]) ?? [];
+      const rows: ResultRow[] = apiResults.map((node) => {
+        const unreachable = node.reachable === false;
+        const ok = node.stackResults.filter(s => s.success).length;
+        return {
+          key: `node-${node.nodeId}`,
+          label: unreachable
+            ? `${node.nodeName} (unreachable)`
+            : `${node.nodeName} · ${node.created ? 'label created' : 'label reused'} · ${ok}/${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}`,
+          success: !unreachable && node.stackResults.length > 0 && node.stackResults.every(s => s.success),
+          error: unreachable ? (node.error ?? 'Node unreachable') : undefined,
+          sub: node.stackResults.map((s, i) => ({
+            key: `${node.nodeId}-${s.stackName}-${i}`,
+            label: s.stackName,
+            success: s.success,
+            error: s.error,
+          })),
+        };
+      });
       setResults(rows);
-      const ok = rows.filter(r => r.success).length;
-      const failed = rows.length - ok;
-      if (failed === 0) toast.success(`Updated labels on ${ok} stack${ok === 1 ? '' : 's'}.`);
-      else toast.warning(`${ok} updated, ${failed} failed. See results below.`);
+      const allStacks = apiResults.flatMap(n => n.stackResults);
+      const ok = allStacks.filter(s => s.success).length;
+      const failed = allStacks.length - ok;
+      const unreachableCount = apiResults.filter(n => n.reachable === false).length;
+      if (failed === 0 && unreachableCount === 0) toast.success(`Assigned "${selectedTemplate.name}" to ${ok} stack${ok === 1 ? '' : 's'} across ${apiResults.length} node${apiResults.length === 1 ? '' : 's'}.`);
+      else toast.warning(`${ok} assigned, ${failed} failed${unreachableCount > 0 ? `, ${unreachableCount} node${unreachableCount === 1 ? '' : 's'} unreachable` : ''}. See results below.`);
     } catch (err) {
       toast.dismiss(toastId);
       toast.error(err instanceof Error ? err.message : 'Network error');
@@ -130,108 +222,167 @@ export function BulkLabelAssignCard({ nodes }: Props) {
   }
 
   const blastValue = useMemo(() => {
-    if (selectedStacks.size === 0 || selectedLabels.size === 0 || !selectedNode) return 'awaiting target';
-    const stackLabel = `${selectedStacks.size} ${selectedStacks.size === 1 ? 'stack' : 'stacks'}`;
-    // "local · " prefix triggers the primitive's cyan-dot path per §18.5.
-    if (selectedNode.type === 'local') return `local · ${stackLabel}`;
-    return `${selectedNode.name} · ${stackLabel}`;
-  }, [selectedNode, selectedStacks.size, selectedLabels.size]);
+    if (!selectedTemplate || totalSelected === 0) return 'awaiting target';
+    return `${totalSelected} stack${totalSelected === 1 ? '' : 's'} · ${nodesWithSelection} node${nodesWithSelection === 1 ? '' : 's'}`;
+  }, [selectedTemplate, totalSelected, nodesWithSelection]);
+
+  const previewNodes = useMemo(() => {
+    if (!selectedTemplate) return [];
+    return nodeData
+      .map(entry => {
+        const set = selected.get(entry.node.id);
+        const stacks = set ? Array.from(set) : [];
+        if (stacks.length === 0) return null;
+        const willCreate = !entry.labels.some(l => l.name === selectedTemplate.name);
+        return { nodeId: entry.node.id, nodeName: entry.node.name, willCreate, stacks };
+      })
+      .filter((n): n is { nodeId: number; nodeName: string; willCreate: boolean; stacks: string[] } => n !== null);
+  }, [nodeData, selected, selectedTemplate]);
 
   return (
     <>
       <FleetActionCard
         crumb={['Fleet', 'Actions', 'Bulk label assign']}
         name="Bulk label assign."
-        meta="one node · multi-stack · replaces existing label set"
+        meta="cross-node · adds label · creates it where missing · preserves existing"
         actionClass="transformative"
         blastRadius={{ value: blastValue }}
         secondaryAction={{
           label: 'Reset',
-          onClick: clearSelection,
-          disabled: running || (selectedStacks.size === 0 && selectedLabels.size === 0),
+          onClick: reset,
+          disabled: running || (totalSelected === 0 && !selectedTemplate),
         }}
         primaryAction={{
           label: 'Apply',
           onClick: () => setConfirmOpen(true),
           variant: 'primary',
-          disabled: running || selectedStacks.size === 0 || selectedLabels.size === 0,
+          disabled: running || !selectedTemplate || totalSelected === 0,
         }}
         footerContext="Reversible · yes · reassign anytime"
       >
-        <SheetSection title="Node" meta={loadingLists ? 'loading…' : undefined}>
-          <NodeSegmented
-            nodes={nodes}
-            value={selectedNodeId}
-            onChange={setSelectedNodeId}
-            disabled={running}
-          />
-        </SheetSection>
-
         <SheetSection
-          title={`Stacks · ${selectedStacks.size} / ${stacks.length}`}
-          meta={stacks.length > 0
-            ? (selectedStacks.size === stacks.length ? 'all selected' : 'multi-select')
-            : undefined}
+          title="Label · source"
+          meta={loading ? 'loading…' : `${templates.length} label${templates.length === 1 ? '' : 's'}`}
         >
-          <div className="grid gap-0.5 max-h-44 overflow-auto pr-1 border border-card-border/40 rounded-md p-2">
-            {stacks.length === 0 && (
+          <p className={cn(KICKER, 'text-stat-subtitle mb-2 normal-case tracking-normal text-[11px]')}>
+            Pick a stack label from anywhere in the fleet. It is added to the selected stacks on each node, and created there with this color if the node does not have it yet.
+          </p>
+          <div className="flex flex-wrap gap-1.5 max-h-32 overflow-auto p-2 border border-card-border/40 rounded-md">
+            {templates.length === 0 && (
               <span className="text-xs text-stat-subtitle">
-                {loadingLists ? 'Loading…' : selectedNode ? `No stacks on ${selectedNode.name}.` : 'Pick a node.'}
+                {loading ? 'Loading…' : 'No stack labels defined across the fleet.'}
               </span>
             )}
-            {stacks.map(stackName => (
-              <label
-                key={stackName}
-                className="flex items-center gap-2 py-1 px-1 rounded hover:bg-glass-highlight cursor-pointer"
-              >
-                <Checkbox
-                  checked={selectedStacks.has(stackName)}
-                  onCheckedChange={() => toggleStack(stackName)}
-                  disabled={running}
+            {templates.map(t => {
+              const synthetic: Label = { id: -1, node_id: -1, name: t.name, color: t.color };
+              const active = selectedTemplate?.name === t.name;
+              return (
+                <LabelPill
+                  key={t.name}
+                  label={synthetic}
+                  active={active}
+                  onClick={() => !running && setSelectedTemplate(active ? null : t)}
                 />
-                <span className="text-xs font-mono text-stat-value">{stackName}</span>
-              </label>
-            ))}
+              );
+            })}
           </div>
-          {stacks.length > 0 && (
-            <button
-              type="button"
-              disabled={running}
-              onClick={toggleAllStacks}
-              className="mt-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle hover:text-stat-value disabled:opacity-50"
-            >
-              {selectedStacks.size === stacks.length ? 'Clear all' : 'Select all'}
-            </button>
+          {selectedTemplate?.colorConflict && (
+            <p className="mt-2 text-[11px] text-stat-subtitle">
+              This label uses different colors on different nodes. The shown color is applied where it is created.
+            </p>
           )}
         </SheetSection>
 
         <SheetSection
-          title={`Labels · ${selectedLabels.size} / ${labels.length}`}
-          meta="replaces existing"
+          title={`Target stacks · ${totalSelected} selected`}
+          meta={nodesWithSelection > 0 ? `${nodesWithSelection} node${nodesWithSelection === 1 ? '' : 's'}` : undefined}
         >
-          <div className="flex flex-wrap gap-1.5 max-h-32 overflow-auto p-2 border border-card-border/40 rounded-md">
-            {labels.length === 0 && (
-              <span className="text-xs text-stat-subtitle">
-                {loadingLists ? 'Loading…' : selectedNode ? `No labels defined on ${selectedNode.name}.` : ''}
-              </span>
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter stacks…"
+            className="h-9 text-sm mb-2"
+            disabled={running}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <div className="grid gap-2 max-h-64 overflow-auto pr-1">
+            {nodeData.length === 0 && (
+              <span className="text-xs text-stat-subtitle">{loading ? 'Loading…' : 'No nodes in the fleet.'}</span>
             )}
-            {labels.map(label => (
-              <LabelPill
-                key={label.id}
-                label={label}
-                active={selectedLabels.has(label.id)}
-                onClick={() => !running && toggleLabel(label.id)}
-              />
-            ))}
+            {nodeData.map(entry => {
+              const stacks = filteredStacks(entry.stacks);
+              const set = selected.get(entry.node.id) ?? new Set<string>();
+              const allSelected = stacks.length > 0 && stacks.every(s => set.has(s));
+              return (
+                <div key={entry.node.id} className="border border-card-border/40 rounded-md p-2">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className={cn(KICKER, 'text-stat-value')}>
+                      {entry.node.name}{entry.node.type === 'local' ? ' · local' : ''}
+                    </span>
+                    {entry.reachable && stacks.length > 0 ? (
+                      <button
+                        type="button"
+                        disabled={running}
+                        onClick={() => toggleAllForNode(entry.node.id, stacks)}
+                        className={cn(KICKER, 'text-stat-subtitle hover:text-stat-value disabled:opacity-50')}
+                      >
+                        {allSelected ? 'Clear' : 'Select all'}
+                      </button>
+                    ) : (
+                      <span className={cn(KICKER, entry.reachable ? 'text-stat-icon' : 'text-destructive')}>
+                        {entry.reachable ? (filterQuery ? 'no matches' : 'no stacks') : 'unreachable'}
+                      </span>
+                    )}
+                  </div>
+                  {stacks.map(stackName => (
+                    <label
+                      key={stackName}
+                      className="flex items-center gap-2 py-1 px-1 rounded hover:bg-glass-highlight cursor-pointer"
+                    >
+                      <Checkbox
+                        checked={set.has(stackName)}
+                        onCheckedChange={() => toggleStack(entry.node.id, stackName)}
+                        disabled={running}
+                      />
+                      <span className="text-xs font-mono text-stat-value">{stackName}</span>
+                    </label>
+                  ))}
+                </div>
+              );
+            })}
           </div>
-          <p className="mt-2 text-[11px] text-stat-subtitle">
-            Selected labels replace each chosen stack's existing label set on this node.
-            Selecting no labels clears assignments.
-          </p>
         </SheetSection>
 
+        {selectedTemplate && previewNodes.length > 0 && (
+          <SheetSection
+            title={`Preview · ${totalSelected} stack${totalSelected === 1 ? '' : 's'}`}
+            meta={`across ${previewNodes.length} node${previewNodes.length === 1 ? '' : 's'}`}
+          >
+            <div className="rounded border border-card-border/60 bg-card/40 shadow-[inset_0_2px_4px_0_oklch(0_0_0_/_0.35)] p-2 space-y-1">
+              {previewNodes.map(n => (
+                <div key={n.nodeId} className="flex items-center gap-2">
+                  <span className={cn(
+                    KICKER,
+                    'inline-flex items-center px-1 py-0.5 rounded-sm border shrink-0',
+                    n.willCreate
+                      ? 'border-amber-400/40 bg-amber-400/10 text-amber-400'
+                      : 'border-success/40 bg-success/10 text-success',
+                  )}>
+                    {n.willCreate ? 'create' : 'reuse'}
+                  </span>
+                  <span className="flex-1 min-w-0 truncate text-[11px] text-stat-value">{n.nodeName}</span>
+                  <span className={cn(KICKER, 'shrink-0 text-stat-subtitle')}>
+                    {n.stacks.length} stack{n.stacks.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </SheetSection>
+        )}
+
         {results.length > 0 && (
-          <SheetSection title="Per-stack results">
+          <SheetSection title="Per-node breakdown">
             <ResultsList results={results} />
           </SheetSection>
         )}
@@ -242,46 +393,12 @@ export function BulkLabelAssignCard({ nodes }: Props) {
         onOpenChange={(open) => { if (!open) setConfirmOpen(false); }}
         variant="default"
         kicker="Bulk label assign"
-        title={`Apply ${selectedLabels.size} label${selectedLabels.size === 1 ? '' : 's'} to ${selectedStacks.size} stack${selectedStacks.size === 1 ? '' : 's'}?`}
-        description={
-          selectedLabels.size === 0
-            ? 'No labels selected, this will clear existing assignments on the selected stacks.'
-            : `Each selected stack's existing label set on ${selectedNode?.name ?? 'this node'} will be replaced with the chosen labels.`
-        }
+        title={`Assign "${selectedTemplate?.name ?? ''}" to ${totalSelected} stack${totalSelected === 1 ? '' : 's'} across ${nodesWithSelection} node${nodesWithSelection === 1 ? '' : 's'}?`}
+        description="The label is added to each selected stack, preserving its existing labels. On nodes that do not have this label yet, Sencho creates it with the chosen color."
         confirmLabel="Apply"
         confirming={running}
         onConfirm={run}
       />
     </>
-  );
-}
-
-interface NodeSegmentedProps {
-  nodes: FleetNode[];
-  value: number;
-  onChange: (id: number) => void;
-  disabled: boolean;
-}
-
-function NodeSegmented({ nodes, value, onChange, disabled }: NodeSegmentedProps) {
-  return (
-    <div className="inline-flex flex-wrap rounded-md border border-card-border/60 overflow-hidden">
-      {nodes.map(n => {
-        const active = n.id === value;
-        return (
-          <Button
-            key={n.id}
-            type="button"
-            variant={active ? 'default' : 'outline'}
-            size="sm"
-            disabled={disabled}
-            onClick={() => onChange(n.id)}
-            className={cn('rounded-none border-0 h-8 px-3 text-xs', active && 'pointer-events-none')}
-          >
-            {n.name}{n.type === 'local' ? ' (local)' : ''}
-          </Button>
-        );
-      })}
-    </div>
   );
 }

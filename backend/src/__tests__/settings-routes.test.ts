@@ -298,6 +298,45 @@ describe('health gate settings', () => {
   });
 });
 
+describe('env_block_deploy_on_missing_required setting', () => {
+  it('seeds to "0" (opt-in) in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('0');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.env_block_deploy_on_missing_required).toBeDefined();
+  });
+
+  it('rejects a non-admin write with 403', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'env_block_deploy_on_missing_required', value: '1' });
+    expect(res.status).toBe(403);
+  });
+
+  it('accepts a well-formed write and rejects a non-enum value', async () => {
+    const ok = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'env_block_deploy_on_missing_required', value: '1' });
+    expect(ok.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
+
+    const bad = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'env_block_deploy_on_missing_required', value: 'banana' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
+
+    DatabaseService.getInstance().updateGlobalSetting('env_block_deploy_on_missing_required', '0');
+  });
+});
+
 describe('PATCH /api/settings (bulk update)', () => {
   it('rejects unauthenticated requests with 401', async () => {
     const res = await request(app).patch('/api/settings').send({ host_cpu_limit: 50 });

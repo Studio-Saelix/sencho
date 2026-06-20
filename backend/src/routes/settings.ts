@@ -29,6 +29,7 @@ const ALLOWED_SETTING_KEYS = new Set([
   'snapshot_documentation',
   'health_gate_enabled',
   'health_gate_window_seconds',
+  'env_block_deploy_on_missing_required',
 ]);
 
 // Keys whose write requires a paid license, not just an admin role.
@@ -56,6 +57,7 @@ const SettingsPatchSchema = z.object({
   snapshot_documentation: z.enum(['0', '1']),
   health_gate_enabled: z.enum(['0', '1']),
   health_gate_window_seconds: z.coerce.number().int().min(15).max(600).transform(String),
+  env_block_deploy_on_missing_required: z.enum(['0', '1']),
 }).partial();
 
 export const settingsRouter = Router();

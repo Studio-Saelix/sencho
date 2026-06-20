@@ -43,6 +43,12 @@ export interface PreflightReport {
   findings: PreflightFinding[];
 }
 
+/** A declared `env_file:` that is required and absent on disk (names only). */
+export interface MissingEnvFile {
+  rawPath: string;
+  services: string[];
+}
+
 /** A host port bound by a running container on the target node. */
 export interface NodePortBinding {
   publishedPort: number;
@@ -83,6 +89,8 @@ export interface PreflightContext {
   renderError: string | null;
   /** Variable names Compose reported as unset (defaulted to empty string). */
   unsetEnvVars: string[];
+  /** Declared `env_file:` paths that are required but absent on disk (names only). */
+  missingEnvFiles: MissingEnvFile[];
   /** Service names parsed from the literal source file (pre-render). */
   sourceServiceNames: string[];
   /** Whether the source file could be read; gates source-derived checks so an

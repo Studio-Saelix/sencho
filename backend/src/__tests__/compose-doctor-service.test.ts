@@ -17,8 +17,6 @@ const SECRET = 'pw-7Q2x-never-store';
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let ComposeDoctorService: typeof import('../services/ComposeDoctorService').ComposeDoctorService;
-let parseUnsetEnvVars: typeof import('../services/ComposeDoctorService').parseUnsetEnvVars;
-let parseMissingRequiredVars: typeof import('../services/ComposeDoctorService').parseMissingRequiredVars;
 let nodeId: number;
 
 function db() { return DatabaseService.getInstance(); }
@@ -50,36 +48,15 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   await import('../index');
   ({ DatabaseService } = await import('../services/DatabaseService'));
-  ({ ComposeDoctorService, parseUnsetEnvVars, parseMissingRequiredVars } = await import('../services/ComposeDoctorService'));
+  ({ ComposeDoctorService } = await import('../services/ComposeDoctorService'));
   nodeId = (db().getDb().prepare('SELECT id FROM nodes WHERE is_default = 1').get() as { id: number }).id;
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
 afterEach(() => vi.restoreAllMocks());
 
-describe('parseUnsetEnvVars', () => {
-  it('extracts variable names from Compose stderr (real escaped, quoted, and bare forms)', () => {
-    // The escaped form is exactly what `docker compose config` emits in logfmt.
-    const stderr =
-      'time="2026-06-10T00:36:15-04:00" level=warning msg="The \\"DB_HOST\\" variable is not set. Defaulting to a blank string."\n'
-      + 'The "TOKEN" variable is not set.\n'
-      + 'The PLAIN variable is not set.';
-    expect(parseUnsetEnvVars(stderr).sort()).toEqual(['DB_HOST', 'PLAIN', 'TOKEN']);
-  });
-  it('returns nothing for clean stderr', () => {
-    expect(parseUnsetEnvVars('')).toEqual([]);
-  });
-  it('ignores lines that do not match the unset-variable phrase', () => {
-    expect(parseUnsetEnvVars('the DB connection variable is configured\nNODE_ENV is not set elsewhere')).toEqual([]);
-  });
-});
-
-describe('parseMissingRequiredVars', () => {
-  it('extracts the name from the real required-variable error (unquoted)', () => {
-    const stderr = 'error while interpolating services.web.environment.TOKEN: required variable REQ_TOKEN is missing a value: must be provided';
-    expect(parseMissingRequiredVars(stderr)).toEqual(['REQ_TOKEN']);
-  });
-});
+// parseUnsetEnvVars / parseMissingRequiredVars now live in helpers/envVarParse and
+// are covered by env-var-parse.test.ts.
 
 describe('ComposeService.renderConfig path guard', () => {
   it('rejects an invalid stack name without spawning docker', async () => {
@@ -112,6 +89,26 @@ describe('runPreflight', () => {
     const latest = doctor().getLatest(nodeId, STACK);
     expect(latest.findings.length).toBe(report.findings.length);
     expect(latest.ranBy).toBe('tester');
+  });
+
+  it('surfaces a missing required env_file as a finding and ignores an optional one', async () => {
+    const stack = 'envfilemissing';
+    const dir = path.join(process.env.COMPOSE_DIR as string, stack);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:1.27\n    env_file:\n      - ./gone.env\n      - path: ./optional.env\n        required: false\n',
+    );
+    try {
+      stubDocker({ name: stack, services: { web: { image: 'nginx:1.27' } }, networks: {}, volumes: {} }, '');
+      const report = await doctor().runPreflight(nodeId, stack, 'tester');
+      const envFile = report.findings.filter(f => f.ruleId === 'env-file-missing');
+      expect(envFile).toHaveLength(1);
+      expect(envFile[0].sourcePath).toBe('./gone.env');
+      expect(envFile[0].severity).toBe('high');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('never stores an environment value', async () => {

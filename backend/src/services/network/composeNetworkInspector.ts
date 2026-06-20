@@ -10,7 +10,7 @@ import DockerController, { type DependencySnapshot } from '../DockerController';
 import { ComposeService } from '../ComposeService';
 import { FileSystemService } from '../FileSystemService';
 import { parseEffectiveModel, type EffectiveModel } from '../preflight/effectiveModel';
-import { parseMissingRequiredVars } from '../ComposeDoctorService';
+import { parseMissingRequiredVars } from '../../helpers/envVarParse';
 import {
   compareStackNetworks, fromEffectiveModel, isAllInterfaces, isLoopback,
 } from './normalize';

@@ -10,7 +10,7 @@ import path from 'path';
 import { ComposeService } from '../ComposeService';
 import { FileSystemService } from '../FileSystemService';
 import { parseEffectiveModel, type EffectiveModel } from '../preflight/effectiveModel';
-import { parseMissingRequiredVars } from '../ComposeDoctorService';
+import { parseMissingRequiredVars } from '../../helpers/envVarParse';
 import { probeHostPath } from './probeHostPath';
 import { isDockerSocketMount } from './types';
 import type { HostPathProbe, PortabilityVerdict, StorageInventory, StorageMount } from './types';

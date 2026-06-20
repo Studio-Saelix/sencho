@@ -13,7 +13,7 @@
  * resolved secret VALUE in the rendered model can never reach this payload.
  */
 import { ComposeService } from './ComposeService';
-import { parseMissingRequiredVars } from './ComposeDoctorService';
+import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 

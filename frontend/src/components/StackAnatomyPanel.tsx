@@ -13,6 +13,7 @@ import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
 import PreflightPanel from './stack/PreflightPanel';
 import StoragePanel from './stack/StoragePanel';
+import EnvironmentPanel from './stack/EnvironmentPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from '@/components/dashboard/types';
@@ -94,6 +95,7 @@ export default function StackAnatomyPanel({
   const doctorEnabled = hasCapability('compose-doctor');
   const networkingEnabled = hasCapability('compose-networking');
   const storageEnabled = hasCapability('compose-storage');
+  const envInventoryEnabled = hasCapability('env-inventory');
 
   const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo; multiFile: boolean } | null>(null);
   // Merged effective facts (services/ports/volumes/networks/restart) for a
@@ -351,6 +353,9 @@ export default function StackAnatomyPanel({
             <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
             <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
             <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
+            {envInventoryEnabled && (
+              <TabsTrigger value="environment" data-testid="environment-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Environment</TabsTrigger>
+            )}
             {networkingEnabled && (
               <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
             )}
@@ -596,6 +601,11 @@ export default function StackAnatomyPanel({
       {networkingEnabled && (
         <TabsContent value="networking" className="flex flex-col flex-1 min-h-0 mt-0">
           <StackNetworkingPanel stackName={stackName} canEdit={canEdit} doctorEnabled={doctorEnabled} />
+        </TabsContent>
+      )}
+      {envInventoryEnabled && (
+        <TabsContent value="environment" className="flex flex-col flex-1 min-h-0 mt-0">
+          <EnvironmentPanel stackName={stackName} />
         </TabsContent>
       )}
       {doctorEnabled && (

@@ -26,6 +26,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
   const m = over.model !== undefined ? over.model : model([]);
   return {
     stackName: 'proj', platform: 'linux', model: m, renderable: true, renderError: null, unsetEnvVars: [],
+    missingEnvFiles: [],
     sourceServiceNames: m ? m.services.map(s => s.name) : [], sourceReadable: true,
     nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
     existingContainers: [], bindChecks: [],
@@ -53,6 +54,19 @@ describe('env-unset', () => {
     expect(f).toHaveLength(2);
     expect(f[0].severity).toBe('high');
     expect(f.map(x => x.sourcePath)).toEqual(['FOO', 'BAR']);
+  });
+});
+
+describe('env-file-missing', () => {
+  it('emits one high finding per missing required env file', () => {
+    const f = ids(runRules(ctx({ missingEnvFiles: [{ rawPath: './db.env', services: ['db'] }] })), 'env-file-missing');
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('high');
+    expect(f[0].sourcePath).toBe('./db.env');
+    expect(f[0].service).toBe('db');
+  });
+  it('stays silent when there are no missing env files (optional/unverifiable are pre-filtered)', () => {
+    expect(ids(runRules(ctx({ missingEnvFiles: [] })), 'env-file-missing')).toHaveLength(0);
   });
 });
 
@@ -332,7 +346,7 @@ describe('rule registry completeness', () => {
   // The canonical rule set. Adding or removing a rule must update this list,
   // which forces a deliberate pass over the docs and the frontend severity map.
   const EXPECTED_RULE_IDS = [
-    'render-failed', 'env-unset', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
+    'render-failed', 'env-unset', 'env-file-missing', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
     'bind-path-missing', 'bind-path-permission', 'docker-socket-mount', 'privileged', 'network-mode-host',
     'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck', 'deploy-swarm-only',
     'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',

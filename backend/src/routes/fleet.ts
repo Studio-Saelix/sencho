@@ -39,6 +39,8 @@ import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cach
 import { activeBulkActions } from './labels';
 import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
+import { runLocalLabelAssign, validateLabelTemplate, failAllAssign, type LabelLocalAssignResponse, type AssignNodeResult } from '../helpers/fleetLabelAssign';
+import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
@@ -1348,6 +1350,133 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
   } catch (error) {
     console.error('[Fleet] fleet-stop error:', error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to run fleet stop') });
+  }
+});
+
+// Fleet-wide bulk label assign. Propagates a label template (name + color) to
+// stacks across one or more nodes: for each target node the label is resolved or
+// created by name on that node, then assigned to the given stacks preserving
+// their existing labels (add semantics). Labels are node-local, so the control
+// never reuses a local label id on a remote; the local node runs in-process and
+// each remote runs its own `/api/fleet-actions/labels/local-assign` receiver.
+// Per-node failures (unknown node, no proxy target, unreachable, mixed-version
+// remote, malformed response) degrade that node only and never discard the rest
+// of the fan-out.
+// Tier: requireAdmin (admin-only fleet plumbing; available on every license).
+fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body as { label?: unknown; targets?: unknown } | undefined;
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Request body is required' });
+    return;
+  }
+  const validated = validateLabelTemplate(body.label);
+  if (!validated.ok) {
+    res.status(400).json({ error: validated.error });
+    return;
+  }
+  if (!Array.isArray(body.targets) || body.targets.length === 0) {
+    res.status(400).json({ error: 'targets must be a non-empty array' });
+    return;
+  }
+  // Normalize targets: each must name a node and carry a string array of stacks.
+  // Stack names are deduped per node and empty groups are dropped, so the cap
+  // measures real assignments rather than padded input.
+  const targets: { nodeId: number; stackNames: string[] }[] = [];
+  let totalStacks = 0;
+  for (const raw of body.targets as unknown[]) {
+    if (!raw || typeof raw !== 'object') {
+      res.status(400).json({ error: 'each target must be an object' });
+      return;
+    }
+    const { nodeId, stackNames } = raw as { nodeId?: unknown; stackNames?: unknown };
+    if (typeof nodeId !== 'number' || !Number.isInteger(nodeId)) {
+      res.status(400).json({ error: 'target.nodeId must be an integer' });
+      return;
+    }
+    if (!Array.isArray(stackNames) || !stackNames.every(s => typeof s === 'string')) {
+      res.status(400).json({ error: 'target.stackNames must be an array of strings' });
+      return;
+    }
+    const unique = Array.from(new Set(stackNames as string[]));
+    if (unique.length === 0) continue;
+    totalStacks += unique.length;
+    targets.push({ nodeId, stackNames: unique });
+  }
+  if (targets.length === 0) {
+    res.status(400).json({ error: 'no target stacks provided' });
+    return;
+  }
+  if (totalStacks > MAX_ASSIGNMENTS) {
+    res.status(400).json({ error: `targets may not exceed ${MAX_ASSIGNMENTS} stack assignments` });
+    return;
+  }
+  const { template } = validated;
+  try {
+    const db = DatabaseService.getInstance();
+    const nodesById = new Map(db.getNodes().map(n => [n.id, n]));
+    if (isDebugEnabled()) console.debug('[Fleet:debug] bulk-assign:', { label: template.name, targets: targets.length, totalStacks });
+    const results: AssignNodeResult[] = await Promise.all(targets.map(async (target): Promise<AssignNodeResult> => {
+      const node = nodesById.get(target.nodeId);
+      if (!node) {
+        return {
+          nodeId: target.nodeId, nodeName: `Node ${target.nodeId}`, reachable: false, created: false, error: 'Unknown node',
+          stackResults: failAllAssign(target.stackNames, 'Unknown node'),
+        };
+      }
+      if (node.type === 'local') {
+        try {
+          const outcome = await runLocalLabelAssign(node.id, template, target.stackNames);
+          return { nodeId: node.id, nodeName: node.name, reachable: true, created: outcome.created, stackResults: outcome.stackResults };
+        } catch (err) {
+          return {
+            nodeId: node.id, nodeName: node.name, reachable: true, created: false,
+            stackResults: failAllAssign(target.stackNames, getErrorMessage(err, 'Failed to assign labels')),
+          };
+        }
+      }
+
+      const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
+      if (!proxyTarget) {
+        const error = formatNoTargetError(node);
+        return { nodeId: node.id, nodeName: node.name, reachable: false, created: false, error, stackResults: failAllAssign(target.stackNames, error) };
+      }
+      try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
+        const response = await fetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/fleet-actions/labels/local-assign`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ label: template, stackNames: target.stackNames }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!response.ok) {
+          const err = (await response.json().catch(() => ({}))) as { error?: string };
+          const message = err.error || `Remote returned ${response.status}`;
+          return { nodeId: node.id, nodeName: node.name, reachable: false, created: false, error: message, stackResults: failAllAssign(target.stackNames, message) };
+        }
+        // A 200 whose body is not the expected { created, results } shape is a
+        // degraded node, not a clean no-op: report it as a per-node failure so a
+        // malformed remote cannot read as a successful zero-stack assign.
+        const remote = (await response.json().catch(() => null)) as Partial<LabelLocalAssignResponse> | null;
+        if (!remote || typeof remote.created !== 'boolean' || !Array.isArray(remote.results)) {
+          const message = 'Remote returned a malformed response';
+          return { nodeId: node.id, nodeName: node.name, reachable: false, created: false, error: message, stackResults: failAllAssign(target.stackNames, message) };
+        }
+        return {
+          nodeId: node.id, nodeName: node.name, reachable: true,
+          created: remote.created,
+          stackResults: remote.results,
+        };
+      } catch (err) {
+        const errorMsg = getErrorMessage(err, 'Failed to reach remote node');
+        return { nodeId: node.id, nodeName: node.name, reachable: false, created: false, error: errorMsg, stackResults: failAllAssign(target.stackNames, errorMsg) };
+      }
+    }));
+    res.json({ results });
+  } catch (error) {
+    console.error('[Fleet] bulk-assign error:', error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to run bulk label assign') });
   }
 });
 
