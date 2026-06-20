@@ -87,12 +87,14 @@ describe('readEnvFileKeys', () => {
   });
 
   it('marks a path escaping the base directory as unverifiable', async () => {
-    const outside = path.join(os.tmpdir(), `outside-${process.pid}.env`);
+    // A secure temp dir that is a sibling of `base`, so the file is outside it.
+    const otherBase = fs.mkdtempSync(path.join(os.tmpdir(), 'envkeys-out-'));
+    const outside = path.join(otherBase, 'x.env');
     fs.writeFileSync(outside, 'X=1');
     const res = await readEnvFileKeys(outside, base);
     expect(res.unverifiable).toBe(true);
     expect(res.keys).toEqual([]);
-    fs.rmSync(outside, { force: true });
+    fs.rmSync(otherBase, { recursive: true, force: true });
   });
 
   it('marks a missing file as unverifiable', async () => {

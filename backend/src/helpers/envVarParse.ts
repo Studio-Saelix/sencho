@@ -104,11 +104,13 @@ export async function readEnvFileKeys(
 
   let handle: fsp.FileHandle | undefined;
   try {
-    const stat = await fsp.stat(resolved);
+    // Open first, then fstat the open handle (not the path), so there is no
+    // check-then-use window between a path stat and the open.
+    handle = await fsp.open(resolved, 'r');
+    const stat = await handle.stat();
     if (!stat.isFile()) return { keys: [], truncated: false, unverifiable: true };
     const truncated = stat.size > limits.maxBytes;
     const len = Math.min(stat.size, limits.maxBytes);
-    handle = await fsp.open(resolved, 'r');
     const buf = Buffer.alloc(len);
     if (len > 0) await handle.read(buf, 0, len, 0);
 
