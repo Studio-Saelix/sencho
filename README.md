@@ -28,7 +28,7 @@
 </picture>
 
 > [!NOTE]
-> Sencho is currently in public beta on the path to v1.0. Core workflows are actively tested, but early users should review the known limitations and avoid deploying it blindly on critical infrastructure without testing in their own environment first.
+> Sencho is used in production for day-to-day Docker Compose and fleet management. As a pre-1.0 project it still evolves quickly, so review the known limitations and validate against your own setup before deploying it on critical infrastructure.
 
 ---
 
@@ -62,17 +62,20 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 ### Stacks
 - Full Compose lifecycle: create, deploy, restart, stop, pull
 - Monaco editor with diff preview before save and one-click rollback
-- [Git-sourced stacks](https://docs.sencho.io/features/git-sources) pulled and synced from any repository
-- File explorer for compose, env, and supporting files
+- [Health-gated updates](https://docs.sencho.io/features/health-gated-updates) that hold a rollout until health checks pass, with stalled-update detection and in-app recovery
+- [Git-sourced stacks](https://docs.sencho.io/features/git-sources) pulled and synced from any repository, with ordered multi-file Compose
+- [File explorer](https://docs.sencho.io/features/stack-file-explorer) for compose, env, and supporting files, with move and rename across directories
+- [Compose Doctor](https://docs.sencho.io/features/compose-doctor) preflight checks that catch compose problems before deploy
 - [Stack labels](https://docs.sencho.io/features/stack-labels) for grouping and bulk operations
 - [App Store](https://docs.sencho.io/features/app-store) with LinuxServer.io templates
 
 ### Observability
 - Aggregated [log search and stream](https://docs.sencho.io/features/global-observability) across every container in the fleet
-- Live container stats, health checks, and image-update notifications
+- Live container stats, health checks, and image-update notifications on a configurable cadence, with links from each image to its registry and source
 - Threshold alerts for CPU, memory, and network
 - Read-only [audit log](https://docs.sencho.io/features/audit-log) of every action **(Admiral)**
 - [Network topology](https://docs.sencho.io/features/fleet-view) view of containers, networks, and nodes
+- Documentation-drift flags when a [stack dossier](https://docs.sencho.io/features/stack-dossier) diverges from the running stack
 
 ### Fleet
 - Multi-node management via authenticated HTTP and WebSocket proxy
@@ -93,7 +96,10 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 - [SSO](https://docs.sencho.io/features/sso): custom OIDC, presets for Google, GitHub, and Okta, plus LDAP and Active Directory
 - [Two-factor authentication](https://docs.sencho.io/features/two-factor-authentication) with TOTP and backup codes
 - [RBAC](https://docs.sencho.io/features/rbac) with admin (full control) and viewer (read-only) roles; deployer, node-admin, and auditor roles plus scoped permissions **(Admiral)**
-- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy on every tier with VEX-based suppression; SARIF export and SBOM upload **(Admiral)**
+- [Security overview](https://docs.sencho.io/features/security) with a chart-led scan summary, sortable images, and searchable scan history
+- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy on every tier, with on-demand node-wide scans and VEX-based suppression; SARIF export and SBOM upload **(Admiral)**
+- [Compose network inspector](https://docs.sencho.io/features/compose-networking) with an exposure-intent guard for unintended published ports
+- Scan policy packs for reusable security rules **(Admiral)**
 - [Private registries](https://docs.sencho.io/features/private-registries) and [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) for non-compliant images **(Admiral)**
 - [API tokens](https://docs.sencho.io/features/api-tokens) for automation
 

@@ -17,7 +17,9 @@ import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } f
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
+import { buildStorageInventory } from '../services/storage/inventory';
 import { buildEffectiveAnatomy } from '../services/effectiveAnatomy';
+import { buildEnvInventory } from '../services/EnvInventoryService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
 import { UpdateGuardService } from '../services/UpdateGuardService';
 import { HealthGateService } from '../services/HealthGateService';
@@ -27,7 +29,7 @@ import { NotificationService, type NotificationCategory } from '../services/Noti
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
 import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
 import { FileExplorerMetricsService, type FileExplorerOp } from '../services/FileExplorerMetricsService';
-import { isValidGitSourcePath, isValidStackName, isValidServiceName, isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
+import { isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -36,6 +38,7 @@ import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '..
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
+import { resolveStackEnvSources } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
@@ -135,80 +138,21 @@ async function requireStackExists(nodeId: number, stackName: string, res: Respon
   return true;
 }
 
+// Thin wrapper over the shared env-source resolver. Returns the absolute paths of
+// the env files Compose would consult for this stack: the existing declared
+// `env_file:` paths when any are declared (no project `.env` fallback in that
+// case), otherwise the project `.env` when it exists. The multi-file Git case and
+// path validation live in resolveStackEnvSources so every consumer agrees.
 export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
-  const fsService = FileSystemService.getInstance(nodeId);
-  const stackDir = path.join(fsService.getBaseDir(), stackName);
-  const defaultEnvPath = path.join(stackDir, '.env');
-
-  try {
-    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-    let composeContent: string | null = null;
-
-    for (const file of composeFiles) {
-      try {
-        composeContent = await fsService.readFile(path.join(stackDir, file), 'utf-8');
-        break;
-      } catch {
-        // Try next file
-      }
-    }
-
-    if (!composeContent) return [defaultEnvPath];
-
-    if (composeContent.length > MAX_COMPOSE_PARSE_BYTES) {
-      console.warn(`[Stacks] Compose for ${sanitizeForLog(stackName)} exceeds ${MAX_COMPOSE_PARSE_BYTES} bytes; skipping env_file resolution`);
-      return [defaultEnvPath];
-    }
-
-    const parsed = YAML.parse(composeContent);
-    if (!parsed?.services) return [defaultEnvPath];
-
-    const envFiles = new Set<string>();
-
-    for (const serviceName of Object.keys(parsed.services)) {
-      const service = parsed.services[serviceName];
-      if (!service?.env_file) continue;
-
-      const addEnvPath = (rawPath: string) => {
-        const resolved = path.resolve(stackDir, rawPath);
-        if (!isPathWithinBase(resolved, stackDir)) return;
-        envFiles.add(resolved);
-      };
-
-      if (typeof service.env_file === 'string') {
-        addEnvPath(service.env_file);
-      } else if (Array.isArray(service.env_file)) {
-        for (const entry of service.env_file) {
-          const entryPath = typeof entry === 'string' ? entry : (entry?.path || '');
-          if (entryPath) addEnvPath(entryPath);
-        }
-      }
-    }
-
-    if (envFiles.size === 0) {
-      envFiles.add(defaultEnvPath);
-    }
-
-    const existing: string[] = [];
-    for (const f of envFiles) {
-      try {
-        await fsService.access(f);
-        existing.push(f);
-      } catch {
-        // File does not exist, skip
-      }
-    }
-    return existing;
-  } catch (error) {
-    console.warn('Could not parse compose.yaml for env_file resolution in stack "%s":', sanitizeForLog(stackName), error);
+  const sources = await resolveStackEnvSources(nodeId, stackName);
+  const injection = sources.envFiles.filter(f => f.isInjectionSource);
+  if (injection.length > 0) {
+    return injection
+      .filter(f => f.existence === 'present' && f.resolvedPath)
+      .map(f => f.resolvedPath as string);
   }
-
-  try {
-    await fsService.access(defaultEnvPath);
-    return [defaultEnvPath];
-  } catch {
-    return [];
-  }
+  const dotenv = sources.envFiles.find(f => f.isInterpolationSource && f.existence === 'present' && f.resolvedPath);
+  return dotenv ? [dotenv.resolvedPath as string] : [];
 }
 
 const upload = multer({
@@ -1151,6 +1095,24 @@ stacksRouter.get('/:stackName/networking', async (req: Request, res: Response) =
   }
 });
 
+// Storage inventory: per-stack mount inventory (binds, named/anonymous volumes,
+// tmpfs, docker socket; read-only vs read-write; host-path existence/type/owner)
+// and a portability verdict derived from the effective model + within-stack
+// host-path probes. Read-only and advisory; auto-proxies to the active node.
+// Never returns raw render stderr or any environment value.
+stacksRouter.get('/:stackName/storage', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildStorageInventory(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to build storage inventory for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to build storage inventory' });
+  }
+});
+
 // Effective Stack Anatomy: structural facts (services, ports, volumes, networks,
 // restart) from the fully-merged effective model, so a multi-file Git source's
 // dossier and doc-drift reflect every override file, not just the root compose.
@@ -1167,6 +1129,24 @@ stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Resp
     console.error('[Stacks] Failed to build effective anatomy for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build effective anatomy' });
+  }
+});
+
+// Environment inventory: per-stack env vars with their source, scope (Compose
+// interpolation vs container injection), and status (present/missing/unused/
+// duplicate/unpersisted), plus likely-secret classification. Read-only and
+// advisory; auto-proxies to the active node. Names only: an env value is never
+// read into the payload, so stack:read is the correct gate.
+stacksRouter.get('/:stackName/env-inventory', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildEnvInventory(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to build env inventory for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to build env inventory' });
   }
 });
 

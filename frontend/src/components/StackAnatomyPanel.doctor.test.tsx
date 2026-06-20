@@ -76,4 +76,10 @@ describe('StackAnatomyPanel Doctor tab (capability on)', () => {
     render(panel());
     expect(await screen.findByTestId('networking-tab')).toBeInTheDocument();
   });
+
+  it('renders the Storage tab when the capability is present', async () => {
+    badgeSeverity = 'warning';
+    render(panel());
+    expect(await screen.findByTestId('storage-tab')).toBeInTheDocument();
+  });
 });

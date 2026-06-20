@@ -12,7 +12,7 @@ import type { PreflightContext, PreflightFinding } from '../services/preflight/t
 
 function svc(over: Partial<EffService> = {}): EffService {
   return {
-    name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [],
+    name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [], storageMounts: [],
     privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [],
     networks: [], extraHosts: [], labelKeys: [], ...over,
   };
@@ -26,6 +26,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
   const m = over.model !== undefined ? over.model : model([]);
   return {
     stackName: 'proj', platform: 'linux', model: m, renderable: true, renderError: null, unsetEnvVars: [],
+    missingEnvFiles: [],
     sourceServiceNames: m ? m.services.map(s => s.name) : [], sourceReadable: true,
     nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
     existingContainers: [], bindChecks: [],
@@ -53,6 +54,19 @@ describe('env-unset', () => {
     expect(f).toHaveLength(2);
     expect(f[0].severity).toBe('high');
     expect(f.map(x => x.sourcePath)).toEqual(['FOO', 'BAR']);
+  });
+});
+
+describe('env-file-missing', () => {
+  it('emits one high finding per missing required env file', () => {
+    const f = ids(runRules(ctx({ missingEnvFiles: [{ rawPath: './db.env', services: ['db'] }] })), 'env-file-missing');
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('high');
+    expect(f[0].sourcePath).toBe('./db.env');
+    expect(f[0].service).toBe('db');
+  });
+  it('stays silent when there are no missing env files (optional/unverifiable are pre-filtered)', () => {
+    expect(ids(runRules(ctx({ missingEnvFiles: [] })), 'env-file-missing')).toHaveLength(0);
   });
 });
 
@@ -196,6 +210,14 @@ describe('network / volume rules', () => {
     expect(ids(f, 'new-network')[0].severity).toBe('info');
     expect(ids(f, 'new-volume')[0].message).toContain('proj_data');
   });
+  it('flags an anonymous volume as info and stays silent without one', () => {
+    const anon = model([svc({ storageMounts: [{ type: 'anonymous', target: '/data', readOnly: false }] })]);
+    const f = runRules(ctx({ model: anon }));
+    expect(ids(f, 'anonymous-volume')[0].severity).toBe('info');
+    expect(ids(f, 'anonymous-volume')[0].message).toContain('/data');
+    const named = model([svc({ storageMounts: [{ type: 'named', source: 'db', target: '/db', readOnly: false }] })]);
+    expect(ids(runRules(ctx({ model: named })), 'anonymous-volume')).toHaveLength(0);
+  });
 });
 
 describe('container_name rules', () => {
@@ -324,10 +346,10 @@ describe('rule registry completeness', () => {
   // The canonical rule set. Adding or removing a rule must update this list,
   // which forces a deliberate pass over the docs and the frontend severity map.
   const EXPECTED_RULE_IDS = [
-    'render-failed', 'env-unset', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
+    'render-failed', 'env-unset', 'env-file-missing', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
     'bind-path-missing', 'bind-path-permission', 'docker-socket-mount', 'privileged', 'network-mode-host',
     'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck', 'deploy-swarm-only',
-    'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume',
+    'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',
     'exposure-internal-published', 'sensitive-service-broad-exposure', 'exposure-unclassified',
     'exposure-port-vs-dossier', 'reverse-proxy-undocumented', 'effective-model-expanded',

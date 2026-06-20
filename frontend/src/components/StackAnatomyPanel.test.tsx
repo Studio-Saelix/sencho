@@ -417,11 +417,12 @@ describe('StackAnatomyPanel effective dossier (multi-file Git)', () => {
 });
 
 describe('StackAnatomyPanel capability gating (capability off)', () => {
-  it('hides the Networking and Doctor tabs when the capabilities are absent', async () => {
+  it('hides the Networking, Doctor, and Storage tabs when the capabilities are absent', async () => {
     render(panel(false));
     // The always-on Anatomy tab confirms the panel mounted.
     expect(await screen.findByRole('tab', { name: 'Anatomy' })).toBeInTheDocument();
     expect(screen.queryByTestId('networking-tab')).not.toBeInTheDocument();
     expect(screen.queryByTestId('doctor-tab')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('storage-tab')).not.toBeInTheDocument();
   });
 });

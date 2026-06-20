@@ -14,6 +14,11 @@ export const BCRYPT_SALT_ROUNDS = 10;
 export const VALID_LABEL_COLORS = ['teal', 'blue', 'purple', 'rose', 'amber', 'green', 'orange', 'pink', 'cyan', 'slate'] as const;
 export type LabelColor = typeof VALID_LABEL_COLORS[number];
 export const MAX_LABELS_PER_NODE = 50;
+// Hard cap on stack assignments a single bulk-assign request may carry, summed
+// across all target nodes. A node typically has tens of stacks, not thousands;
+// the cap bounds the DB writes one request can force. Shared by the per-node
+// receiver and the fleet orchestrator so they cannot drift.
+export const MAX_ASSIGNMENTS = 1000;
 
 // Session cookies
 export const COOKIE_NAME = 'sencho_token';

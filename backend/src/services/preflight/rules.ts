@@ -87,6 +87,21 @@ const envUnset: PreflightRule = {
   },
 };
 
+const envFileMissing: PreflightRule = {
+  id: 'env-file-missing',
+  run(ctx) {
+    return ctx.missingEnvFiles.map(f => ({
+      ruleId: 'env-file-missing',
+      severity: 'high' as const,
+      title: `Missing env file ${f.rawPath}`,
+      message: `The Compose file declares env_file "${f.rawPath}"${f.services.length ? ` for service ${f.services.join(', ')}` : ''}, but no such file exists in the stack directory. Compose fails to start the stack when a required env_file is absent.`,
+      sourcePath: f.rawPath,
+      remediation: `Create ${f.rawPath} in the stack directory, fix the path, or mark the entry optional with "required: false".`,
+      service: f.services[0],
+    }));
+  },
+};
+
 const portConflictNode: PreflightRule = {
   id: 'port-conflict-node',
   run(ctx) {
@@ -455,6 +470,29 @@ const newVolume: PreflightRule = {
   },
 };
 
+const anonymousVolume: PreflightRule = {
+  id: 'anonymous-volume',
+  run(ctx) {
+    if (!ctx.model) return [];
+    const findings: PreflightFinding[] = [];
+    for (const svc of ctx.model.services) {
+      const anon = (svc.storageMounts ?? []).filter(m => m.type === 'anonymous');
+      if (anon.length === 0) continue;
+      const targets = anon.map(m => m.target).filter(Boolean);
+      findings.push({
+        ruleId: 'anonymous-volume',
+        severity: 'info',
+        title: 'Anonymous volume in use',
+        message: `Service "${svc.name}" mounts ${anon.length > 1 ? `${anon.length} anonymous volumes` : 'an anonymous volume'}${targets.length ? ` at ${targets.join(', ')}` : ''}. Anonymous volumes have no name, so they are easy to miss when backing up and are orphaned when the container is recreated.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Give the volume a name so it can be referenced, backed up, and reattached.',
+      });
+    }
+    return findings;
+  },
+};
+
 const containerNameInternalDup: PreflightRule = {
   id: 'container-name-internal-dup',
   run(ctx) {
@@ -671,6 +709,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
 export const PREFLIGHT_RULES: PreflightRule[] = [
   renderFailed,
   envUnset,
+  envFileMissing,
   portConflictNode,
   portConflictInternal,
   portExposedAllInterfaces,
@@ -688,6 +727,7 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   externalVolumeMissing,
   newNetwork,
   newVolume,
+  anonymousVolume,
   containerNameInternalDup,
   containerNameCollision,
   exposureInternalPublished,
