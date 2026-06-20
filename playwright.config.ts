@@ -19,6 +19,10 @@ export default defineConfig({
   expect: { timeout: 5_000 },
   // Run tests serially - Sencho is a single-user app and tests share DB state
   workers: 1,
+  // Retry only in CI: the deploy/health-gate specs drive real Docker container
+  // runs, so image-pull and gate-window timing varies on shared runners. A retry
+  // absorbs the transient blip; trace: 'on-first-retry' captures the retried run.
+  retries: process.env.CI ? 2 : 0,
   reporter: [['list'], ['html', { outputFolder: 'e2e/report', open: 'never' }]],
 
   use: {
