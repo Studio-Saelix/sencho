@@ -1493,6 +1493,7 @@ export class DatabaseService {
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
         stmt.run('image_update_check_interval_minutes', '120');
+        stmt.run('env_block_deploy_on_missing_required', '0');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
