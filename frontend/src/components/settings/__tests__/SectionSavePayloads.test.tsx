@@ -67,6 +67,7 @@ describe('split section save payloads', () => {
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
         expect(patchedKeys()).toEqual([
+            'env_block_deploy_on_missing_required',
             'global_crash',
             'health_gate_enabled',
             'health_gate_window_seconds',

@@ -13,37 +13,16 @@ import { parseAccessUrlPorts } from './network/normalize';
 import type { ExposureIntent } from './network/types';
 import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID } from './preflight/rules';
 import type {
-  BindCheck, NodePortBinding, PreflightContext, PreflightFinding, PreflightReport, PreflightSeverity, PreflightStatus,
+  BindCheck, NodePortBinding, PreflightContext, PreflightFinding, PreflightReport, PreflightSeverity, PreflightStatus, MissingEnvFile,
 } from './preflight/types';
 
 import { isPathWithinBase } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { parseUnsetEnvVars, parseMissingRequiredVars } from '../helpers/envVarParse';
+import { resolveStackEnvSources } from '../helpers/envFileResolution';
 
 const MAX_RENDER_ERROR = 600; // chars kept from a (redacted) render error
-
-/** Collect the deduplicated capture-group-1 matches of a global regex over stderr. */
-function collectNames(stderr: string, re: RegExp): string[] {
-  const names = new Set<string>();
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(stderr)) !== null) names.add(m[1]);
-  return [...names];
-}
-
-/**
- * Pull the names of variables Compose reported as unset from its stderr.
- * Compose prints this in logfmt (`msg="The \"VAR\" variable is not set..."`),
- * so the name is wrapped in an escaped quote; the pattern tolerates the
- * escaped, plain-quoted, and unquoted forms across Compose versions.
- */
-export function parseUnsetEnvVars(stderr: string): string[] {
-  return collectNames(stderr, /([A-Za-z_][A-Za-z0-9_]*)\\?"?\s+variable is not set/gi);
-}
-
-/** Names of required (${VAR:?...}) variables Compose reported as missing. Names only, never values. */
-export function parseMissingRequiredVars(stderr: string): string[] {
-  return collectNames(stderr, /required variable\s+\\?"?([A-Za-z_][A-Za-z0-9_]*)\\?"?\s+is missing/gi);
-}
 
 const ruleOrder = new Map(RULE_IDS.map((id, i) => [id, i]));
 /** Severity descending, then registry order, so output is deterministic. */
@@ -200,6 +179,20 @@ export class ComposeDoctorService {
     const bindChecks = model ? await this.resolveBindChecks(model, baseDir) : [];
     const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls } = this.exposureState(nodeId, stackName);
 
+    // Required `env_file:` declarations whose file is absent. Optional
+    // (required: false) and interpolated/escaping paths are excluded. Fail-soft:
+    // a resolution error simply yields no env-file findings.
+    let missingEnvFiles: MissingEnvFile[] = [];
+    try {
+      const envSources = await resolveStackEnvSources(nodeId, stackName);
+      missingEnvFiles = envSources.envFiles
+        .filter(f => f.isInjectionSource && f.required && f.existence === 'missing')
+        .map(f => ({ rawPath: f.rawPaths[0], services: f.declaringServices }));
+    } catch (err) {
+      console.warn('[ComposeDoctor] env-file resolution failed for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+    }
+
     return {
       stackName,
       platform: process.platform,
@@ -207,6 +200,7 @@ export class ComposeDoctorService {
       renderable,
       renderError,
       unsetEnvVars,
+      missingEnvFiles,
       sourceServiceNames,
       sourceReadable,
       nodePorts,

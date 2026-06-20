@@ -30,7 +30,7 @@ function SectionSkeleton() {
     );
 }
 
-type HostAlertFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'global_crash' | 'health_gate_enabled' | 'health_gate_window_seconds'>;
+type HostAlertFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'global_crash' | 'health_gate_enabled' | 'health_gate_window_seconds' | 'env_block_deploy_on_missing_required'>;
 
 const DEFAULT_HOST_ALERTS: HostAlertFields = {
     host_cpu_limit: DEFAULT_SETTINGS.host_cpu_limit,
@@ -40,6 +40,7 @@ const DEFAULT_HOST_ALERTS: HostAlertFields = {
     global_crash: DEFAULT_SETTINGS.global_crash,
     health_gate_enabled: DEFAULT_SETTINGS.health_gate_enabled,
     health_gate_window_seconds: DEFAULT_SETTINGS.health_gate_window_seconds,
+    env_block_deploy_on_missing_required: DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
 };
 
 export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
@@ -80,6 +81,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                     global_crash: (nodeData.global_crash as '0' | '1') ?? DEFAULT_SETTINGS.global_crash,
                     health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
                     health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
+                    env_block_deploy_on_missing_required: (nodeData.env_block_deploy_on_missing_required as '0' | '1') ?? DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
                 };
                 reset(safe);
             } catch (e) {
@@ -208,6 +210,18 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         suffix="s"
                         min={15}
                         max={600}
+                    />
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsSection title="Deploy guardrails">
+                <SettingsField
+                    label="Block deploy on missing required env vars"
+                    helper="When on, a deploy or update is refused before it starts if a required ${VAR:?message} variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. Off by default."
+                >
+                    <TogglePill
+                        checked={settings.env_block_deploy_on_missing_required === '1'}
+                        onChange={(next) => onSettingChange('env_block_deploy_on_missing_required', next ? '1' : '0')}
                     />
                 </SettingsField>
             </SettingsSection>

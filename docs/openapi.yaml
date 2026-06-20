@@ -820,6 +820,104 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/stacks/{stackName}/env-inventory:
+    get:
+      operationId: getStackEnvInventory
+      tags: [Stacks]
+      summary: Get environment inventory
+      description: >-
+        Returns a per-stack inventory of environment variables: each variable's
+        source, whether Compose interpolates it or injects it into a container,
+        and a status (present, missing, unused, duplicate, or unpersisted), plus
+        likely-secret classification. Names only: a variable value is never read
+        or returned. When the effective model cannot be rendered, `renderable` is
+        false and the inventory is derived from the authored source alone.
+        Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: The environment inventory.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stackName, renderable, items, envFiles, summary]
+                properties:
+                  stackName:
+                    type: string
+                  renderable:
+                    type: boolean
+                    description: False when the effective model could not be rendered; the inventory is then partial.
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, sources, usedForInterpolation, injectedIntoService, required, hasDefault, likelySecret, status]
+                      properties:
+                        key:
+                          type: string
+                        sources:
+                          type: array
+                          items:
+                            type: string
+                            enum: [compose-inline, env-file, dotenv, process-env, compose-ref]
+                        usedForInterpolation:
+                          type: boolean
+                        injectedIntoService:
+                          type: boolean
+                        required:
+                          type: boolean
+                        hasDefault:
+                          type: boolean
+                        likelySecret:
+                          type: boolean
+                        status:
+                          type: string
+                          enum: [present, missing, unused, duplicate, unpersisted]
+                  envFiles:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        rawPaths:
+                          type: array
+                          items:
+                            type: string
+                        existence:
+                          type: string
+                          enum: [present, missing, unverifiable]
+                        required:
+                          type: boolean
+                        isInterpolationSource:
+                          type: boolean
+                        isInjectionSource:
+                          type: boolean
+                        declaringServices:
+                          type: array
+                          items:
+                            type: string
+                  summary:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      missing: { type: integer }
+                      unused: { type: integer }
+                      duplicate: { type: integer }
+                      unpersisted: { type: integer }
+                      likelySecret: { type: integer }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Stack not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/stacks/{stackName}/env:
     get:
       operationId: getStackEnv

@@ -17,6 +17,7 @@ import { getErrorMessage } from '../utils/errors';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
 export class ComposeRollbackError extends Error {
@@ -364,7 +365,34 @@ export class ComposeService {
     await this.execute('docker', await this.authoredComposeArgs(stackName, [action]), stackDir, ws);
   }
 
+  /**
+   * Opt-in guard: when `env_block_deploy_on_missing_required` is enabled, refuse a
+   * deploy whose required `${VAR:?err}` variables are unset OR empty, before any
+   * backup, cleanup, pull, or `up` runs. Compose's own resolution is authoritative
+   * (it passes process.env), and on the failing path it emits no rendered model, so
+   * no env value is materialized. Default off and any settings-read failure both
+   * fall through without blocking.
+   */
+  private async assertRequiredEnvPresent(stackName: string): Promise<void> {
+    let enabled = false;
+    try {
+      enabled = DatabaseService.getInstance().getGlobalSettings()['env_block_deploy_on_missing_required'] === '1';
+    } catch {
+      return; // safe default: a settings-read failure never blocks a deploy
+    }
+    if (!enabled) return;
+    const result = await this.renderConfig(stackName);
+    const missing = parseMissingRequiredVars(result.stderr);
+    if (missing.length === 0) return;
+    const plural = missing.length > 1;
+    throw new Error(
+      `Deploy blocked: required environment variable${plural ? 's' : ''} ${missing.join(', ')} ` +
+      `${plural ? 'are' : 'is'} missing. Define ${plural ? 'them' : 'it'} in a .env or env_file, then deploy again.`,
+    );
+  }
+
   async deployStack(stackName: string, ws?: WebSocket, atomic?: boolean): Promise<void> {
+    await this.assertRequiredEnvPresent(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
     const t0 = Date.now();
@@ -541,6 +569,7 @@ export class ComposeService {
   }
 
   async updateStack(stackName: string, ws?: WebSocket, atomic?: boolean): Promise<void> {
+    await this.assertRequiredEnvPresent(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
     const t0 = Date.now();
