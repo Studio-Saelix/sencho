@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Trash2, FolderPlus, Download, Loader2, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/components/ui/toast-store';
 import { downloadStackFile, listStackDirectory, listFileRoots, renameStackPath, STACK_SOURCE_ROOT_ID } from '@/lib/stackFilesApi';
 import { FileTree } from './FileTree';
@@ -284,25 +285,27 @@ export function StackFileExplorer({
       <div className="flex flex-col w-56 shrink-0 border-r border-glass-border min-h-0">
         <div className="flex flex-col gap-1 px-2 py-1.5 border-b border-glass-border shrink-0">
           <span className="text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Browsing</span>
-          <select
-            className="w-full bg-transparent border border-glass-border rounded px-1.5 py-1 text-xs text-foreground font-mono"
-            value={selectedRootId}
-            onChange={(e) => handleRootChange(e.target.value)}
-            aria-label="File root"
-          >
-            {volumeRoots.length > 0 && (
-              <optgroup label="Volumes">
-                {volumeRoots.map((r) => (
-                  <option key={r.id} value={r.id} disabled={!r.browsable}>
-                    {rootOptionLabel(r)}{r.browsable ? '' : ' (unavailable)'}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            <optgroup label="Stack source">
-              <option value={STACK_SOURCE_ROOT_ID}>Stack source</option>
-            </optgroup>
-          </select>
+          <Select value={selectedRootId} onValueChange={handleRootChange}>
+            <SelectTrigger className="h-8 px-2 text-xs font-mono" aria-label="File root">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {volumeRoots.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel className="text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Volumes</SelectLabel>
+                  {volumeRoots.map((r) => (
+                    <SelectItem key={r.id} value={r.id} disabled={!r.browsable} className="text-xs font-mono">
+                      {rootOptionLabel(r)}{r.browsable ? '' : ' (unavailable)'}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+              <SelectGroup>
+                <SelectLabel className="text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Stack source</SelectLabel>
+                <SelectItem value={STACK_SOURCE_ROOT_ID} className="text-xs font-mono">Stack source</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
           {selectedRoot.warning && (
             <p className="flex items-start gap-1 text-[10px] text-stat-subtitle">
               <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" strokeWidth={1.5} />
