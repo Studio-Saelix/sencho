@@ -88,4 +88,33 @@ describe('DriftScanService', () => {
     await svc.tick(); // within the 60-minute interval => skipped
     expect(spy).toHaveBeenCalledTimes(localNodeCount()); // not doubled
   });
+
+  it('drops a tick that fires while a scan is already running', async () => {
+    db().updateGlobalSetting('drift_scan_enabled', '1');
+    db().updateGlobalSetting('drift_scan_interval_minutes', '60');
+    let release!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const spy = vi.spyOn(DriftLedgerService.getInstance(), 'reconcileNode').mockImplementation(async () => {
+      await gate; // hold the scan open so a second tick overlaps it
+      return { stacks: 0, detected: 0, resolved: 0 };
+    });
+    const svc = DriftScanService.getInstance();
+    const first = svc.tick();      // starts a scan and suspends on the gate (isScanning is now true)
+    await Promise.resolve();
+    await svc.tick();              // fires mid-scan => dropped by the isScanning guard
+    release();
+    await first;
+    expect(spy).toHaveBeenCalledTimes(localNodeCount()); // only the first tick scanned
+  });
+
+  it('falls back to the default interval for an out-of-range or malformed stored value', () => {
+    const svc = DriftScanService.getInstance() as unknown as { intervalMs(): number };
+    const defaultMs = 60 * 60_000;
+    db().updateGlobalSetting('drift_scan_interval_minutes', '99999'); // above the 1440 cap
+    expect(svc.intervalMs()).toBe(defaultMs);
+    db().updateGlobalSetting('drift_scan_interval_minutes', '5'); // below the 15 floor
+    expect(svc.intervalMs()).toBe(defaultMs);
+    db().updateGlobalSetting('drift_scan_interval_minutes', 'banana'); // not a number
+    expect(svc.intervalMs()).toBe(defaultMs);
+  });
 });
