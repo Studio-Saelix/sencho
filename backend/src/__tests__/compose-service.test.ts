@@ -118,6 +118,7 @@ vi.mock('../services/MeshService', () => ({
 }));
 
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
+import { DriftLedgerService } from '../services/DriftLedgerService';
 
 const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
 const originalStallTimeout = process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS;
@@ -619,6 +620,36 @@ describe('ComposeService - updateStack prune-on-update', () => {
 });
 
 // ── withRegistryAuth ───────────────────────────────────────────────────
+
+describe('ComposeService - drift reconcile hook', () => {
+  it('reconciles the drift ledger after a successful update', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    const spy = vi.spyOn(DriftLedgerService.getInstance(), 'reconcileStack').mockResolvedValue({ detected: 0, resolved: 0 });
+
+    const promise = ComposeService.getInstance(1).updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(spy).toHaveBeenCalledWith(1, 'my-stack');
+    spy.mockRestore();
+  });
+
+  it('reconciles the drift ledger after a successful deploy', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    const spy = vi.spyOn(DriftLedgerService.getInstance(), 'reconcileStack').mockResolvedValue({ detected: 0, resolved: 0 });
+
+    const promise = ComposeService.getInstance(1).deployStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(spy).toHaveBeenCalledWith(1, 'my-stack');
+    spy.mockRestore();
+  });
+});
 
 describe('ComposeService - withRegistryAuth', () => {
   it('passes default env when no registries configured', async () => {

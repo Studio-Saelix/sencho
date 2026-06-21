@@ -90,6 +90,8 @@ export interface StackDossier extends StackDossierFields {
     source_hash?: string | null;
     /** SHA-256 of the parsed compose model at the last deploy (ignores comments/whitespace). */
     rendered_hash?: string | null;
+    /** When the drift ledger was last reconciled for this stack (re-check, deploy, or background scan); null if never. */
+    last_drift_check_at?: number | null;
     created_at: number;
     updated_at: number;
 }
@@ -1284,6 +1286,7 @@ export class DatabaseService {
         custom_notes TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
+        last_drift_check_at INTEGER,
         UNIQUE(node_id, stack_name)
       );
 
@@ -1669,6 +1672,7 @@ export class DatabaseService {
     private migrateStackDossierHashes(): void {
         this.tryAddColumn('stack_dossiers', 'source_hash', 'TEXT');
         this.tryAddColumn('stack_dossiers', 'rendered_hash', 'TEXT');
+        this.tryAddColumn('stack_dossiers', 'last_drift_check_at', 'INTEGER');
     }
 
     private migrateGitSourceMultiFile(): void {
@@ -2336,6 +2340,22 @@ export class DatabaseService {
                 source_hash = excluded.source_hash,
                 rendered_hash = excluded.rendered_hash`
         ).run(nodeId, stackName, sourceHash, renderedHash, now, now);
+    }
+
+    /**
+     * Stamp when the drift ledger was last reconciled for a stack (re-check, deploy,
+     * or background scan). Mirrors setStackDossierHashes: creates a notes-empty row
+     * if none exists, otherwise updates only this column so operator notes and their
+     * updated_at are left untouched.
+     */
+    public setStackDossierDriftCheck(nodeId: number, stackName: string, checkedAt: number): void {
+        const now = Date.now();
+        this.db.prepare(
+            `INSERT INTO stack_dossiers (node_id, stack_name, last_drift_check_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, stack_name) DO UPDATE SET
+                last_drift_check_at = excluded.last_drift_check_at`
+        ).run(nodeId, stackName, checkedAt, now, now);
     }
 
     // --- Stack Drift Findings (the persisted drift ledger) ---

@@ -47,6 +47,9 @@ interface StackDriftReport {
   // Optional so a report from an older remote node (no ledger layer) still renders.
   temporal?: DriftTemporal;
   ledger?: DriftLedgerEntry[];
+  // When the ledger was last reconciled (re-check, deploy, or background scan); null
+  // if never. The history is "as of" this time, not the live status above it.
+  lastCheckedAt?: number | null;
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -229,6 +232,10 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   const temporal = report?.temporal ? temporalMeta(report.temporal) : null;
   const TemporalIcon = temporal?.icon;
   const ledger = report?.ledger ?? [];
+  // The ledger only moves on a reconcile (re-check, deploy, or background scan), so
+  // label the history with when that last happened: a "resolved"/"open" row then
+  // reads as the state at that check, not a claim about the live status above it.
+  const lastChecked = report?.lastCheckedAt != null ? formatTimeAgo(report.lastCheckedAt) : null;
   const busy = loading || rechecking;
 
   return (
@@ -306,7 +313,12 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
 
           {ledger.length > 0 && (
             <section>
-              <div className={cn(LABEL_CLASS, 'mb-1.5')}>drift history</div>
+              <div className={cn(LABEL_CLASS, 'mb-1.5 flex items-center gap-1.5')}>
+                <span>drift history</span>
+                {lastChecked && (
+                  <span className="tracking-normal normal-case text-stat-subtitle/70">· checked {lastChecked}</span>
+                )}
+              </div>
               <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
                 {ledger.map((e, i) => (
                   <LedgerRow key={`${e.service}-${e.kind}-${e.detectedAt}-${i}`} entry={e} />
