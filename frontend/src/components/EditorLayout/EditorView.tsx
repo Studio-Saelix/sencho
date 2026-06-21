@@ -415,7 +415,7 @@ export function EditorView(props: EditorViewProps) {
                                                 <TabsHighlightItem value="files">
                                                     <TabsTrigger value="files">
                                                         <FolderOpen className="w-3.5 h-3.5 mr-1" strokeWidth={1.5} />
-                                                        Files
+                                                        Files &amp; Volumes
                                                     </TabsTrigger>
                                                 </TabsHighlightItem>
                                             )}

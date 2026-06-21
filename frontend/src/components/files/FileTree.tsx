@@ -23,6 +23,10 @@ interface FileTreeProps {
   onSelectFile: (relPath: string, entry: FileEntry) => void;
   onNavigateToCompose?: () => void;
   onNavigateToEnv?: () => void;
+  /** When true (stack source only), clicking compose/.env redirects to their
+   *  dedicated editors. For volume roots a file named .env is just an ordinary
+   *  file and opens in the viewer. */
+  redirectProtected?: boolean;
   // Context menu wiring
   canEdit?: boolean;
   onContextMenuRename?: (relPath: string) => void;
@@ -50,6 +54,7 @@ export function FileTree({
   onSelectFile,
   onNavigateToCompose,
   onNavigateToEnv,
+  redirectProtected = true,
   canEdit = false,
   onContextMenuRename = () => undefined,
   onContextMenuMove = () => undefined,
@@ -166,12 +171,14 @@ export function FileTree({
   }
 
   function handleFileClick(relPath: string, entry: FileEntry) {
-    if (COMPOSE_NAMES.has(entry.name)) {
+    // Only the stack source root redirects compose/.env to their dedicated
+    // editors; on a volume root these are ordinary files opened in the viewer.
+    if (redirectProtected && relPath === entry.name && COMPOSE_NAMES.has(entry.name)) {
       if (onNavigateToCompose) onNavigateToCompose();
       else toast.info('Open the Compose tab to edit this file.');
       return;
     }
-    if (ENV_NAMES.has(entry.name)) {
+    if (redirectProtected && relPath === entry.name && ENV_NAMES.has(entry.name)) {
       if (onNavigateToEnv) onNavigateToEnv();
       else toast.info('Open the Env tab to edit this file.');
       return;

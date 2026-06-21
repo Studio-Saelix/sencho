@@ -12,6 +12,7 @@ interface NewFolderDialogProps {
   onOpenChange: (open: boolean) => void;
   stackName: string;
   currentDir: string;
+  rootId?: string;
   onCreated: () => void;
 }
 
@@ -25,6 +26,7 @@ export function NewFolderDialog({
   onOpenChange,
   stackName,
   currentDir,
+  rootId,
   onCreated,
 }: NewFolderDialogProps) {
   const [name, setName] = useState('');
@@ -50,7 +52,7 @@ export function NewFolderDialog({
     setCreating(true);
     const relPath = currentDir ? `${currentDir}/${trimmed}` : trimmed;
     try {
-      await mkdirStackPath(stackName, relPath);
+      await mkdirStackPath(stackName, relPath, rootId);
       toast.success('Folder created.');
       onCreated();
       onOpenChange(false);

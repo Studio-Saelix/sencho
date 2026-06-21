@@ -1,5 +1,8 @@
 import { apiFetch } from './api';
 
+/** The id of the stack source directory root (mirrors the backend constant). */
+export const STACK_SOURCE_ROOT_ID = 'stack-source';
+
 /**
  * Mirrors backend/src/utils/validation.ts::isValidRelativeStackPath. Client
  * defense-in-depth: the backend rejects path-traversal attempts, but catching
@@ -111,22 +114,60 @@ export interface FileContentResult {
   size: number;
   mime: string;
   mtimeMs: number;
+  /**
+   * Opaque optimistic-concurrency token, round-tripped verbatim as If-Match on
+   * save. For stack-source/bind roots it is the weak ETag over the mtime; for
+   * named-volume roots it is a composite token. Optional for back-compat with a
+   * server that has not yet been upgraded (falls back to the mtime ETag).
+   */
+  version?: string;
+}
+
+/**
+ * A browsable/editable file root for a stack: the stack source, a bind mount, or
+ * a named volume. Wire mirror of the backend `StackFileRoot`
+ * (backend/src/services/StackFileRootsService.ts); keep the two shapes in sync.
+ */
+export interface FileRootMount {
+  service: string;
+  containerPath: string;
+  readOnly: boolean;
+}
+
+export interface FileRoot {
+  id: string;
+  kind: 'stack-source' | 'bind' | 'volume';
+  label: string;
+  hostPathOrName: string;
+  mounts: FileRootMount[];
+  readonly: boolean;
+  accessible: boolean;
+  browsable: boolean;
+  writable: boolean;
+  chmodable: boolean;
+  dangerous: boolean;
+  managedSourceOverlap: boolean;
+  warning: string | null;
+  backend: 'fs' | 'helper';
 }
 
 /**
  * Thrown by writeStackFile when the server reports the target file has been
  * modified since the caller's last read (HTTP 412). The current server-side
- * content and mtime are attached so callers can prompt the user to reconcile.
+ * content, mtime, and version token are attached so callers can prompt the user
+ * to reconcile and retry with the fresh token.
  */
 export class FileConflictError extends Error {
   readonly code = 'PRECONDITION_FAILED' as const;
   readonly currentContent: string;
   readonly currentMtimeMs: number;
-  constructor(message: string, currentContent: string, currentMtimeMs: number) {
+  readonly currentVersion: string | null;
+  constructor(message: string, currentContent: string, currentMtimeMs: number, currentVersion: string | null) {
     super(message);
     this.name = 'FileConflictError';
     this.currentContent = currentContent;
     this.currentMtimeMs = currentMtimeMs;
+    this.currentVersion = currentVersion;
   }
 }
 
@@ -143,12 +184,25 @@ function stackFilesUrl(stackName: string, suffix: string): string {
   return `/stacks/${encodeURIComponent(stackName)}/files${suffix}`;
 }
 
+/** `&rootId=...` to append onto an existing query string, or '' for the default stack-source root. */
+function rootParam(rootId?: string): string {
+  return rootId ? `&rootId=${encodeURIComponent(rootId)}` : '';
+}
+
+/** Discover the browsable/editable file roots for a stack (Volumes + Stack source). */
+export async function listFileRoots(stackName: string): Promise<FileRoot[]> {
+  const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/file-roots`);
+  if (!res.ok) throw new Error(await parseApiError(res));
+  return res.json() as Promise<FileRoot[]>;
+}
+
 export async function listStackDirectory(
   stackName: string,
-  relPath: string
+  relPath: string,
+  rootId?: string,
 ): Promise<FileEntry[]> {
   assertSafeRelPath(relPath);
-  const res = await apiFetch(stackFilesUrl(stackName, `?path=${encodeURIComponent(relPath)}`));
+  const res = await apiFetch(stackFilesUrl(stackName, `?path=${encodeURIComponent(relPath)}${rootParam(rootId)}`));
   if (!res.ok) throw new Error(await parseApiError(res));
   return res.json() as Promise<FileEntry[]>;
 }
@@ -156,12 +210,12 @@ export async function listStackDirectory(
 export async function readStackFile(
   stackName: string,
   relPath: string,
-  options?: { forceText?: boolean }
+  options?: { forceText?: boolean; rootId?: string }
 ): Promise<FileContentResult> {
   assertSafeRelPath(relPath);
   const forceSuffix = options?.forceText ? '&force=text' : '';
   const res = await apiFetch(
-    stackFilesUrl(stackName, `/content?path=${encodeURIComponent(relPath)}${forceSuffix}`)
+    stackFilesUrl(stackName, `/content?path=${encodeURIComponent(relPath)}${forceSuffix}${rootParam(options?.rootId)}`)
   );
   if (!res.ok) throw new Error(await parseApiError(res));
   return res.json() as Promise<FileContentResult>;
@@ -169,10 +223,11 @@ export async function readStackFile(
 
 export async function downloadStackFile(
   stackName: string,
-  relPath: string
+  relPath: string,
+  rootId?: string,
 ): Promise<Response> {
   assertSafeRelPath(relPath);
-  return apiFetch(stackFilesUrl(stackName, `/download?path=${encodeURIComponent(relPath)}`));
+  return apiFetch(stackFilesUrl(stackName, `/download?path=${encodeURIComponent(relPath)}${rootParam(rootId)}`));
 }
 
 /**
@@ -192,7 +247,7 @@ export async function uploadStackFile(
   stackName: string,
   targetDir: string,
   file: File,
-  options?: { localOnly?: boolean; overwrite?: boolean }
+  options?: { localOnly?: boolean; overwrite?: boolean; rootId?: string }
 ): Promise<void> {
   assertSafeRelPath(targetDir, 'target directory');
   const fd = new FormData();
@@ -209,7 +264,7 @@ export async function uploadStackFile(
   // which breaks multipart boundary negotiation. The 401 side-effects are
   // replicated manually below.
   const res = await fetch(
-    `/api${stackFilesUrl(stackName, `/upload?path=${encodeURIComponent(targetDir)}${overwriteSuffix}`)}`,
+    `/api${stackFilesUrl(stackName, `/upload?path=${encodeURIComponent(targetDir)}${overwriteSuffix}${rootParam(options?.rootId)}`)}`,
     { method: 'POST', credentials: 'include', headers, body: fd }
   );
 
@@ -249,57 +304,67 @@ export async function writeStackFile(
   stackName: string,
   relPath: string,
   content: string,
-  options?: { ifMatchMtimeMs?: number }
-): Promise<{ mtimeMs: number | null }> {
+  options?: { ifMatchVersion?: string; rootId?: string }
+): Promise<{ version: string | null; mtimeMs: number | null }> {
   assertSafeRelPath(relPath);
   const headers: Record<string, string> = {};
-  if (options?.ifMatchMtimeMs !== undefined) {
-    headers['If-Match'] = `"${Math.floor(options.ifMatchMtimeMs)}"`;
+  if (options?.ifMatchVersion) {
+    // Send the opaque version token verbatim (it is already a valid quoted
+    // If-Match value for both fs and helper roots).
+    headers['If-Match'] = options.ifMatchVersion;
   }
   const res = await apiFetch(
-    stackFilesUrl(stackName, `/content?path=${encodeURIComponent(relPath)}`),
+    stackFilesUrl(stackName, `/content?path=${encodeURIComponent(relPath)}${rootParam(options?.rootId)}`),
     { method: 'PUT', headers, body: JSON.stringify({ content }) }
   );
   if (res.status === 412) {
-    let body: { currentContent?: string; currentMtimeMs?: number; error?: string } = {};
+    let body: { currentContent?: string; currentMtimeMs?: number; currentVersion?: string; error?: string } = {};
     try { body = await res.clone().json(); } catch { /* ignore */ }
     throw new FileConflictError(
       body.error ?? 'File has been modified since you last read it.',
       typeof body.currentContent === 'string' ? body.currentContent : '',
       typeof body.currentMtimeMs === 'number' ? body.currentMtimeMs : 0,
+      typeof body.currentVersion === 'string'
+        ? body.currentVersion
+        : res.headers.get('ETag'),
     );
   }
   if (!res.ok) throw new Error(await parseApiError(res));
-  // Parse the ETag the server set so callers can update their local mtime.
-  const etag = res.headers.get('ETag');
-  if (etag) {
-    const stripped = etag.replace(/^W\//i, '').trim().replace(/^"(.*)"$/, '$1');
+  // The ETag is the opaque version token for the new content; round-trip it
+  // verbatim on the next save. mtimeMs is parsed for display only.
+  const version = res.headers.get('ETag');
+  let mtimeMs: number | null = null;
+  if (version) {
+    const stripped = version.replace(/^W\//i, '').trim().replace(/^"(.*)"$/, '$1');
     const parsed = Number(stripped);
-    if (Number.isFinite(parsed)) return { mtimeMs: parsed };
+    if (Number.isFinite(parsed)) mtimeMs = parsed;
   }
-  return { mtimeMs: null };
+  return { version, mtimeMs };
 }
 
 export async function deleteStackPath(
   stackName: string,
   relPath: string,
-  recursive?: boolean
+  recursive?: boolean,
+  rootId?: string,
 ): Promise<void> {
   assertSafeRelPath(relPath);
-  const qs = recursive
-    ? `path=${encodeURIComponent(relPath)}&recursive=1`
-    : `path=${encodeURIComponent(relPath)}`;
-  const res = await apiFetch(stackFilesUrl(stackName, `?${qs}`), { method: 'DELETE' });
+  const recursiveSuffix = recursive ? '&recursive=1' : '';
+  const res = await apiFetch(
+    stackFilesUrl(stackName, `?path=${encodeURIComponent(relPath)}${recursiveSuffix}${rootParam(rootId)}`),
+    { method: 'DELETE' },
+  );
   if (!res.ok) throw new Error(await parseApiError(res));
 }
 
 export async function mkdirStackPath(
   stackName: string,
-  relPath: string
+  relPath: string,
+  rootId?: string,
 ): Promise<void> {
   assertSafeRelPath(relPath);
   const res = await apiFetch(
-    stackFilesUrl(stackName, `/folder?path=${encodeURIComponent(relPath)}`),
+    stackFilesUrl(stackName, `/folder?path=${encodeURIComponent(relPath)}${rootParam(rootId)}`),
     { method: 'POST', body: JSON.stringify({}) }
   );
   if (!res.ok) throw new Error(await parseApiError(res));
@@ -308,12 +373,13 @@ export async function mkdirStackPath(
 export async function renameStackPath(
   stackName: string,
   fromRel: string,
-  toRel: string
+  toRel: string,
+  rootId?: string,
 ): Promise<void> {
   assertSafeRelPath(fromRel, 'source path');
   assertSafeRelPath(toRel, 'destination path');
   const res = await apiFetch(
-    stackFilesUrl(stackName, '/rename'),
+    stackFilesUrl(stackName, `/rename${rootId ? `?rootId=${encodeURIComponent(rootId)}` : ''}`),
     { method: 'PATCH', body: JSON.stringify({ from: fromRel, to: toRel }) }
   );
   if (!res.ok) throw new Error(await parseApiError(res));
@@ -326,10 +392,11 @@ export interface EntryPermissions {
 
 export async function getStackEntryPermissions(
   stackName: string,
-  relPath: string
+  relPath: string,
+  rootId?: string,
 ): Promise<EntryPermissions> {
   assertSafeRelPath(relPath);
-  const res = await apiFetch(stackFilesUrl(stackName, `/permissions?path=${encodeURIComponent(relPath)}`));
+  const res = await apiFetch(stackFilesUrl(stackName, `/permissions?path=${encodeURIComponent(relPath)}${rootParam(rootId)}`));
   if (!res.ok) throw new Error(await parseApiError(res));
   return res.json() as Promise<EntryPermissions>;
 }
@@ -337,11 +404,12 @@ export async function getStackEntryPermissions(
 export async function setStackEntryPermissions(
   stackName: string,
   relPath: string,
-  mode: number
+  mode: number,
+  rootId?: string,
 ): Promise<void> {
   assertSafeRelPath(relPath);
   const res = await apiFetch(
-    stackFilesUrl(stackName, `/permissions?path=${encodeURIComponent(relPath)}`),
+    stackFilesUrl(stackName, `/permissions?path=${encodeURIComponent(relPath)}${rootParam(rootId)}`),
     { method: 'PUT', body: JSON.stringify({ mode }) }
   );
   if (!res.ok) throw new Error(await parseApiError(res));

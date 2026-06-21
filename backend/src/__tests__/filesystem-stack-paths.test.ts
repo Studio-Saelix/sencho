@@ -723,3 +723,68 @@ describe('FileSystemService stack methods', () => {
     });
   });
 });
+
+// Root-scoped (bind-mount) behaviour: the file methods accept an arbitrary
+// absolute root that may sit OUTSIDE the compose dir, contain paths within it,
+// and disable compose/.env protection.
+describe('FileSystemService root-scoped methods', () => {
+  let tmpBase: string;
+  let rootDir: string;
+
+  beforeEach(async () => {
+    tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-fsr-'));
+    // A bind root that is deliberately not under the compose dir.
+    mockState.composeDir = path.join(tmpBase, 'compose');
+    rootDir = path.join(tmpBase, 'volume-root');
+    await fs.mkdir(rootDir, { recursive: true });
+    await fs.mkdir(mockState.composeDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  });
+
+  it('lists, reads, and writes within an arbitrary root outside the compose dir', async () => {
+    await fs.writeFile(path.join(rootDir, 'app.conf'), 'listen 80;');
+    const scope = { rootAbsDir: rootDir, protectedEnabled: false };
+    const service = FileSystemService.getInstance();
+
+    const entries = await service.listStackDirectory('ignored', '', scope);
+    expect(entries.map(e => e.name)).toContain('app.conf');
+
+    const read = await service.readStackFile('ignored', 'app.conf', undefined, { scope });
+    expect(read.content).toBe('listen 80;');
+
+    const write = await service.writeStackFileIfUnchanged('ignored', 'app.conf', 'listen 8080;', read.mtimeMs, scope);
+    expect(write.ok).toBe(true);
+    expect(await fs.readFile(path.join(rootDir, 'app.conf'), 'utf-8')).toBe('listen 8080;');
+  });
+
+  it('rejects a path that escapes the root via ..', async () => {
+    const scope = { rootAbsDir: rootDir, protectedEnabled: false };
+    const service = FileSystemService.getInstance();
+    await expect(service.readStackFile('ignored', '../compose/secret', undefined, { scope }))
+      .rejects.toMatchObject({ code: 'INVALID_PATH' });
+  });
+
+  it('does not mark a volume compose.yaml/.env as protected when protection is disabled', async () => {
+    await fs.writeFile(path.join(rootDir, 'compose.yaml'), '');
+    await fs.writeFile(path.join(rootDir, '.env'), '');
+    const service = FileSystemService.getInstance();
+    const entries = await service.listStackDirectory('ignored', '', { rootAbsDir: rootDir, protectedEnabled: false });
+    expect(entries.every(e => !e.isProtected)).toBe(true);
+    // A delete of a volume .env is allowed (not blocked as a protected stack file).
+    await service.deleteStackPath('ignored', '.env', false, { rootAbsDir: rootDir, protectedEnabled: false });
+    await expect(fs.lstat(path.join(rootDir, '.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a symlink leaf whose target escapes the root', async () => {
+    if (isWindows) return; // POSIX symlink semantics
+    const outside = path.join(tmpBase, 'outside.txt');
+    await fs.writeFile(outside, 'secret');
+    await fs.symlink(outside, path.join(rootDir, 'escape'));
+    const service = FileSystemService.getInstance();
+    await expect(service.readStackFile('ignored', 'escape', undefined, { scope: { rootAbsDir: rootDir, protectedEnabled: false } }))
+      .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+  });
+});
