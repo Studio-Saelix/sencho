@@ -121,20 +121,21 @@ export function isDangerousHostPath(p: string): boolean {
  * The realpath/stat run ONLY for a source that lexically resolves inside
  * `baseDir`: in the containerized deployment that is the only host area the
  * Sencho process can reach, so a source outside it is unreachable anyway and is
- * reported non-accessible without touching the filesystem. Gating the sinks
- * behind `isPathWithinBase` (the same containment `probeHostPath` uses) keeps an
- * unvalidated host path off the realpath/stat calls. Returns the canonical
- * realpath so the route can pass it to FileSystemService as the containment root.
+ * reported non-accessible without touching the filesystem. The containment is
+ * an INLINE path.resolve + startsWith guard at each filesystem sink (the
+ * realpath of a within-base symlink can still escape, so the resolved canonical
+ * is re-checked before stat). Returns the canonical realpath so the route can
+ * pass it to FileSystemService as the containment root.
  */
 export async function probeBindRootAccess(
   absPath: string,
   baseDir: string,
 ): Promise<{ canonical: string; accessible: boolean; isDir: boolean }> {
+  const base = path.resolve(baseDir);
   const resolved = path.resolve(absPath);
-  // Containment barrier before the filesystem sinks: only probe within baseDir.
   // Out-of-base sources keep their original path for the dangerous/overlap
   // classification the caller does, but are never statted.
-  if (!isPathWithinBase(resolved, baseDir)) {
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) {
     return { canonical: absPath, accessible: false, isDir: false };
   }
   // A missing path (ENOENT) is the common, expected "not reachable" outcome and
@@ -153,6 +154,11 @@ export async function probeBindRootAccess(
   } catch (err) {
     logNonEnoent('realpath', err);
     return { canonical: resolved, accessible: false, isDir: false };
+  }
+  // A within-base source can be a symlink whose target escapes the base; re-check
+  // the resolved canonical inline before the stat sink.
+  if (canonical !== base && !canonical.startsWith(base + path.sep)) {
+    return { canonical, accessible: false, isDir: false };
   }
   try {
     const st = await fsPromises.stat(canonical);
