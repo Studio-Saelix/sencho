@@ -225,4 +225,20 @@ describe('StackFileRootsService.listRoots', () => {
     const src = await svc.resolveRoot(STACK, STACK_SOURCE_ROOT_ID);
     expect(src.kind).toBe('stack-source');
   });
+
+  it('invalidateNode clears the cached allowlist so a recreated stack cannot serve old roots', async () => {
+    await fs.mkdir(path.join(stackDir, 'config'));
+    stub({ rendered: renderModel({ web: [{ type: 'bind', source: './config', target: '/config' }] }) });
+    expect((await StackFileRootsService.getInstance(1).listRoots(STACK)).some((r) => r.kind === 'bind')).toBe(true);
+
+    // Stack deleted + recreated under the same name with no declared volume; a
+    // node-level invalidation (as the lifecycle routes trigger) must drop the
+    // cached bind root rather than serve it from the TTL cache.
+    vi.restoreAllMocks();
+    stub({ rendered: renderModel({}) });
+    StackFileRootsService.invalidateNode(1);
+    const after = await StackFileRootsService.getInstance(1).listRoots(STACK);
+    expect(after.some((r) => r.kind === 'bind')).toBe(false);
+    expect(after).toHaveLength(1);
+  });
 });

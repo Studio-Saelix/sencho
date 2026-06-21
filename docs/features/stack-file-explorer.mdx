@@ -27,10 +27,6 @@ Files & Volumes is available on every Sencho tier. Read actions (browse, preview
 
 The left pane opens with a **Browsing** selector that lists the roots Sencho discovered for the stack, grouped into **Volumes** and **Stack source**. When the stack declares at least one browsable volume, the explorer defaults to it; otherwise it opens on the stack source.
 
-<Frame>
-  <img src="/images/stack-file-explorer/root-switcher.png" alt="The Browsing selector showing a Volumes group with the swag /config bind mount and a Stack source group" />
-</Frame>
-
 Each volume root is labelled by its container path (for example `/config`) and the type of mount behind it:
 
 - **Bind mounts** map a host directory into a service (for example `./config:/config`). When the directory is reachable by Sencho, the root is fully browsable and editable.
@@ -84,7 +80,7 @@ On the stack source root, the amber dot in the tree marks the five canonical sta
 Two behaviours follow from the marker:
 
 - **Dedicated tab redirect.** Clicking `compose.yaml`, `compose.yml`, or `.env` jumps you to the matching **compose.yaml** or **.env** tab so the save-and-deploy controls stay in front of you. `docker-compose.yaml` and `docker-compose.yml` are still flagged as protected, but they open in the regular file viewer because they are not the canonical Sencho file.
-- **Type-to-confirm delete.** All five protected names require typing the filename to confirm a delete. See the Deleting section below.
+- **Delete is blocked at the stack root.** The five canonical files at the stack root cannot be deleted through the explorer: the delete is rejected. Remove the whole stack via Stack Actions instead. A same-named file nested in a subdirectory is an ordinary file and can be deleted after the type-to-confirm step.
 
 ## Viewing files
 

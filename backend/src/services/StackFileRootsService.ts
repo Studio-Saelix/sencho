@@ -195,6 +195,18 @@ export class StackFileRootsService {
     rootsCache.delete(`${nodeId}:${stackName}`);
   }
 
+  /**
+   * Drop every cached allowlist for a node. Called on stack lifecycle changes
+   * (create / delete / import / from-git) so a stack deleted and recreated under
+   * the same name cannot serve the old stack's roots from the TTL cache.
+   */
+  static invalidateNode(nodeId: number): void {
+    const prefix = `${nodeId}:`;
+    for (const key of rootsCache.keys()) {
+      if (key.startsWith(prefix)) rootsCache.delete(key);
+    }
+  }
+
   invalidate(stackName: string): void {
     StackFileRootsService.invalidate(this.nodeId, stackName);
   }

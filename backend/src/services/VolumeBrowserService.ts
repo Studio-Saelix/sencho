@@ -25,7 +25,7 @@ const ROOT_GUARD =
 // it before iterating, so user input never lands as an argv element to a
 // command that might interpret it as a flag.
 const LIST_SCRIPT = `set -e
-cd -- "$1" 2>/dev/null || { echo "cd: $1: No such file or directory" >&2; exit 1; }
+cd -- "$1" || exit 1
 ${ROOT_GUARD}
 for entry in * .[!.]* ..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -45,7 +45,7 @@ done`;
 const STAT_SCRIPT = `set -e
 p="$1"
 d=$(dirname -- "$p"); b=$(basename -- "$p")
-cd -- "$d" 2>/dev/null || { echo "cannot access $p" >&2; exit 1; }
+cd -- "$d" || exit 1
 ${ROOT_GUARD}
 target="$b"
 [ -e "$target" ] || [ -L "$target" ] || { echo "cannot access $target" >&2; exit 1; }
@@ -67,7 +67,7 @@ printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$t" "$size" "$mtime" "$name" "$link"`;
 const WRITE_SCRIPT = `set -e
 p="$1"
 d=$(dirname -- "$p"); f=$(basename -- "$p")
-cd -- "$d" 2>/dev/null || { echo "cannot access $p" >&2; exit 1; }
+cd -- "$d" || exit 1
 ${ROOT_GUARD}
 [ -L "$f" ] && { echo "refusing to write through a symlink" >&2; exit 8; }
 [ -d "$f" ] && { echo "target is a directory" >&2; exit 9; }
@@ -77,7 +77,7 @@ cat > "$f"`;
 const MKDIR_SCRIPT = `set -e
 p="$1"
 d=$(dirname -- "$p"); f=$(basename -- "$p")
-cd -- "$d" 2>/dev/null || { echo "cannot access $p" >&2; exit 1; }
+cd -- "$d" || exit 1
 ${ROOT_GUARD}
 mkdir -- "$f"`;
 
@@ -86,7 +86,7 @@ mkdir -- "$f"`;
 const DELETE_SCRIPT = `set -e
 p="$1"; recursive="$2"
 d=$(dirname -- "$p"); f=$(basename -- "$p")
-cd -- "$d" 2>/dev/null || { echo "cannot access $p" >&2; exit 1; }
+cd -- "$d" || exit 1
 ${ROOT_GUARD}
 [ -e "$f" ] || [ -L "$f" ] || { echo "no such path" >&2; exit 1; }
 if [ -d "$f" ] && [ ! -L "$f" ]; then
@@ -108,7 +108,7 @@ mv -- "$from" "$to"`;
 const PATHKIND_SCRIPT = `set -e
 p="$1"
 d=$(dirname -- "$p"); f=$(basename -- "$p")
-cd -- "$d" 2>/dev/null || { echo none; exit 0; }
+cd -- "$d" || exit 2
 ${ROOT_GUARD}
 if [ -d "$f" ] && [ ! -L "$f" ]; then echo directory
 elif [ -e "$f" ] || [ -L "$f" ]; then echo file
@@ -246,6 +246,7 @@ export class VolumeBrowserService {
     ]);
     if (exitCode !== 0) {
       const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
       if (/No such file or directory|cannot access/i.test(msg)) throw new ExecError('Path not found', 404);
       throw new ExecError(`Stat failed: ${msg.substring(0, 200) || 'unknown error'}`);
     }
@@ -283,7 +284,7 @@ export class VolumeBrowserService {
     // follow a link out of the volume.
     const { stdout, stderr, exitCode } = await this.runHelper(volumeName, [
       'sh', '-c',
-      `p="$1"; d=$(dirname -- "$p"); b=$(basename -- "$p"); cd -- "$d" 2>/dev/null || { echo "cannot access $p" >&2; exit 1; }; ${ROOT_GUARD}; [ -L "$b" ] && { echo "refusing to follow symlink" >&2; exit 8; }; head -c ${maxBytes + 1} -- "$b"`,
+      `p="$1"; d=$(dirname -- "$p"); b=$(basename -- "$p"); cd -- "$d" || exit 1; ${ROOT_GUARD}; [ -L "$b" ] && { echo "refusing to follow symlink" >&2; exit 8; }; head -c ${maxBytes + 1} -- "$b"`,
       'sh', `./${safe}`,
     ]);
     if (exitCode !== 0) {
@@ -328,7 +329,7 @@ export class VolumeBrowserService {
 
     const { stdout, stderr, exitCode } = await this.runHelper(volumeName, [
       'sh', '-c',
-      `p="$1"; d=$(dirname -- "$p"); b=$(basename -- "$p"); cd -- "$d" 2>/dev/null || { echo "cannot access $p" >&2; exit 1; }; ${ROOT_GUARD}; [ -L "$b" ] && { echo "refusing to follow symlink" >&2; exit 8; }; head -c ${DOWNLOAD_MAX_BYTES + 1} -- "$b"`,
+      `p="$1"; d=$(dirname -- "$p"); b=$(basename -- "$p"); cd -- "$d" || exit 1; ${ROOT_GUARD}; [ -L "$b" ] && { echo "refusing to follow symlink" >&2; exit 8; }; head -c ${DOWNLOAD_MAX_BYTES + 1} -- "$b"`,
       'sh', `./${safe}`,
     ]);
     if (exitCode !== 0) {
@@ -348,7 +349,14 @@ export class VolumeBrowserService {
     if (!safe) return 'directory';
     await this.assertVolumeExists(volumeName);
     await this.ensureHelperImage();
-    const { stdout } = await this.runHelper(volumeName, ['sh', '-c', PATHKIND_SCRIPT, 'sh', `./${safe}`]);
+    const { stdout, stderr, exitCode } = await this.runHelper(volumeName, ['sh', '-c', PATHKIND_SCRIPT, 'sh', `./${safe}`]);
+    if (exitCode !== 0) {
+      // A permission failure on the parent must not be reported as "absent"
+      // (which would let an exclusive create proceed); surface it as 403. A
+      // genuinely missing parent (ENOENT) means nothing exists at this path.
+      if (/Permission denied/i.test(stderr.toString('utf-8'))) throw new ExecError('Permission denied', 403);
+      return null;
+    }
     const kind = stdout.toString('utf-8').trim();
     if (kind === 'directory') return 'directory';
     if (kind === 'file') return 'file';

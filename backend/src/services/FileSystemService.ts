@@ -1029,6 +1029,18 @@ export class FileSystemService {
    * Serves both the stack source dir (via resolveSafeStackPath) and volume-aware
    * bind-mount roots, which may legitimately resolve outside the compose base dir
    * (the caller pre-authorizes the root and passes its canonical realpath).
+   *
+   * KNOWN LIMITATION (TOCTOU): this realpath-validates the path, then the caller
+   * opens/streams/writes it by name, so a process that can write inside the root
+   * (e.g. a container writing its own bind-mounted config volume) could swap a
+   * validated regular file for a symlink between this check and the open and
+   * escape the root. Closing it fully requires per-component openat/O_RESOLVE
+   * traversal; plain O_NOFOLLOW is not viable because config volumes
+   * legitimately contain symlinks (e.g. nginx sites-enabled). This is a
+   * pre-existing property of every FileSystemService file op (not specific to
+   * volume roots); the bind root is contained to the compose dir and the op
+   * requires stack:edit, which already grants equivalent host access via
+   * compose. Tracked as a follow-up hardening, not a per-root regression.
    */
   private async resolveSafePathWithin(rootAbsDir: string, relPath: string): Promise<string> {
     const target = relPath === '' ? rootAbsDir : path.resolve(rootAbsDir, relPath);

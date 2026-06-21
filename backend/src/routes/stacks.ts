@@ -2175,7 +2175,11 @@ stacksRouter.post(
           },
         });
       }
-      await gateway.writeBuffer(root, stackName, targetRelPath, req.file.buffer, false);
+      // Use the atomic exclusive create for the non-overwrite case so a file
+      // created by another writer after the pathKind check above is not
+      // silently clobbered (a race surfaces as FILE_EXISTS -> 409, same as the
+      // pre-emptive check). overwrite=true intentionally allows the clobber.
+      await gateway.writeBuffer(root, stackName, targetRelPath, req.file.buffer, !overwrite);
       afterStackMutation(req, stackName);
       logFileOperation('info', 'mutate', {
         nodeId: req.nodeId,
