@@ -222,6 +222,15 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         scope: 'node',
     },
     {
+        id: 'drift-scan',
+        group: 'automation',
+        label: 'Drift detection',
+        description: 'Periodically reconcile each stack on this node so configuration drift is recorded and surfaced without opening every Drift tab.',
+        keywords: ['drift', 'scan', 'reconcile', 'compose', 'runtime', 'detection', 'background', 'interval', 'ledger', 'history'],
+        tier: null,
+        scope: 'node',
+    },
+    {
         id: 'webhooks',
         group: 'automation',
         label: 'Webhooks',

@@ -18,6 +18,8 @@ export interface PatchableSettings {
     health_gate_enabled?: '0' | '1';
     health_gate_window_seconds?: string;
     env_block_deploy_on_missing_required?: '0' | '1';
+    drift_scan_enabled?: '0' | '1';
+    drift_scan_interval_minutes?: string;
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -40,6 +42,8 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',
     env_block_deploy_on_missing_required: '0',
+    drift_scan_enabled: '0',
+    drift_scan_interval_minutes: '60',
 };
 
 export type SectionId =
@@ -54,6 +58,7 @@ export type SectionId =
     | 'host-alerts'
     | 'docker-storage'
     | 'image-updates'
+    | 'drift-scan'
     | 'fleet-mesh'
     | 'notifications'
     | 'webhooks'

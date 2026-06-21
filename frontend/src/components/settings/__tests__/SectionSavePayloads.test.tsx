@@ -26,6 +26,7 @@ import { DockerStorageSection } from '../DockerStorageSection';
 import { FleetMeshSection } from '../FleetMeshSection';
 import { DataRetentionSection } from '../DataRetentionSection';
 import { DeveloperSection } from '../DeveloperSection';
+import { DriftDetectionSection } from '../DriftDetectionSection';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 const mockedLicense = useLicense as unknown as ReturnType<typeof vi.fn>;
@@ -132,5 +133,14 @@ describe('split section save payloads', () => {
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
         expect(patchedKeys()).toEqual(['developer_mode']);
+    });
+
+    it('DriftDetectionSection patches only the drift scan keys', async () => {
+        render(<DriftDetectionSection />);
+        const save = await screen.findByRole('button', { name: /save settings/i });
+        fireEvent.click(screen.getByRole('switch')); // drift_scan_enabled
+        fireEvent.click(save);
+        await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
+        expect(patchedKeys()).toEqual(['drift_scan_enabled', 'drift_scan_interval_minutes']);
     });
 });

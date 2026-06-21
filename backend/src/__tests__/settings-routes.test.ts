@@ -241,6 +241,60 @@ describe('prune_on_update (auto-prune after updates)', () => {
   });
 });
 
+describe('drift detection scan settings', () => {
+  it('seeds off with a 60 minute interval in a fresh database', () => {
+    const s = DatabaseService.getInstance().getGlobalSettings();
+    expect(s.drift_scan_enabled).toBe('0');
+    expect(s.drift_scan_interval_minutes).toBe('60');
+  });
+
+  it('exposes both keys through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.body.drift_scan_enabled).toBeDefined();
+    expect(res.body.drift_scan_interval_minutes).toBeDefined();
+  });
+
+  it('accepts a well-formed enable + interval write and persists it', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ drift_scan_enabled: '1', drift_scan_interval_minutes: '120' });
+    expect(res.status).toBe(200);
+    const s = DatabaseService.getInstance().getGlobalSettings();
+    expect(s.drift_scan_enabled).toBe('1');
+    expect(s.drift_scan_interval_minutes).toBe('120');
+    // Restore the shipped defaults so later suites observe seeded behavior.
+    DatabaseService.getInstance().updateGlobalSetting('drift_scan_enabled', '0');
+    DatabaseService.getInstance().updateGlobalSetting('drift_scan_interval_minutes', '60');
+  });
+
+  it('rejects a non-enum drift_scan_enabled value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'drift_scan_enabled', value: 'maybe' });
+    expect(res.status).toBe(400);
+    expect(DatabaseService.getInstance().getGlobalSettings().drift_scan_enabled).not.toBe('maybe');
+  });
+
+  it('rejects an out-of-range interval below the 15 minute floor (400)', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'drift_scan_interval_minutes', value: '5' });
+    expect(res.status).toBe(400);
+    expect(DatabaseService.getInstance().getGlobalSettings().drift_scan_interval_minutes).not.toBe('5');
+  });
+
+  it('rejects a non-admin write (403)', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'drift_scan_enabled', value: '1' });
+    expect(res.status).toBe(403);
+  });
+});
+
 describe('health gate settings', () => {
   it('seeds enabled with a 90 second window in a fresh database', () => {
     const settings = DatabaseService.getInstance().getGlobalSettings();

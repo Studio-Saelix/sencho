@@ -1,11 +1,14 @@
 import { DatabaseService } from './DatabaseService';
 import type { StackDriftFindingRow } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
+import DockerController from './DockerController';
+import type { DependencySnapshot } from './DockerController';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
 import type { DeclaredCompose } from '../helpers/composeDependencyParse';
 import { sha256Hex } from '../utils/hashing';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
+import { assembleStackDrift, buildStackDriftReport } from './DriftDetectionService';
 import type { StackDriftReport, StackDriftFinding } from './DriftDetectionService';
 
 /**
@@ -30,6 +33,13 @@ export interface DriftTemporal {
 export interface DriftReconcileResult {
     detected: number;
     resolved: number;
+}
+
+/** A whole-node reconcile outcome: a stack result plus the number of stacks
+ *  scanned cleanly. A stack that throws mid-scan is logged and excluded from the
+ *  count, and the scan continues with the rest. */
+export interface DriftNodeReconcileResult extends DriftReconcileResult {
+    stacks: number;
 }
 
 /** Stable identity for a finding across checks: same service + kind is the same finding. */
@@ -130,6 +140,11 @@ export class DriftLedgerService {
             return { detected: 0, resolved: 0 };
         }
         const db = DatabaseService.getInstance();
+        const now = Date.now();
+        // Stamp every authoritative check (even a no-op that records nothing) so the
+        // Drift tab can show "checked {time ago}"; a stale finding then reads as
+        // history rather than as the current truth it can no longer guarantee.
+        db.setStackDossierDriftCheck(nodeId, stackName, now);
         const openByKey = new Map(db.getOpenDriftFindings(nodeId, stackName).map(r => [findingKey(r.service, r.finding_type), r]));
         const currentByKey = new Map(report.findings.map(f => [findingKey(f.service, f.kind), f]));
 
@@ -145,7 +160,6 @@ export class DriftLedgerService {
             return { detected: 0, resolved: 0 };
         }
 
-        const now = Date.now();
         db.getDb().transaction(() => {
             for (const f of toInsert) {
                 db.insertDriftFinding({
@@ -174,6 +188,65 @@ export class DriftLedgerService {
                 `Drift resolved on ${stackName}: ${toResolve.length} finding${toResolve.length === 1 ? '' : 's'} cleared`, now);
         }
         return { detected: toInsert.length, resolved: toResolve.length };
+    }
+
+    /**
+     * Build the spatial report for one stack and reconcile it into the ledger.
+     * Used by the deploy and update success hooks (and the rollback route, which
+     * re-deploys through deployStack) so a change resolves the findings it fixed and
+     * records what it left behind. Best-effort: a build or reconcile failure is
+     * logged and swallowed so it never fails the deploy that triggered it.
+     */
+    async reconcileStack(nodeId: number, stackName: string): Promise<DriftReconcileResult> {
+        try {
+            const report = await buildStackDriftReport(nodeId, stackName);
+            return this.reconcile(nodeId, stackName, report);
+        } catch (error) {
+            console.error('[DriftLedger] reconcileStack failed for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+            return { detected: 0, resolved: 0 };
+        }
+    }
+
+    /**
+     * Reconcile every stack on a node against a single Docker snapshot. The
+     * background scanner drives this so drift is recorded (and its activity
+     * surfaced) without an operator opening each Drift tab. One snapshot is shared
+     * across all stacks to keep a full-node scan cheap. A Docker-unreachable node is
+     * skipped wholesale rather than falsely resolving open findings; a single stack
+     * failing (unreadable compose, etc.) is logged and the scan moves on.
+     */
+    async reconcileNode(nodeId: number): Promise<DriftNodeReconcileResult> {
+        const fs = FileSystemService.getInstance(nodeId);
+        let stacks: string[];
+        try {
+            stacks = await fs.getStacks();
+        } catch (error) {
+            console.error('[DriftLedger] reconcileNode: failed to list stacks on node %d:', nodeId, sanitizeForLog(getErrorMessage(error, 'unknown')));
+            return { stacks: 0, detected: 0, resolved: 0 };
+        }
+        let snapshot: DependencySnapshot;
+        try {
+            snapshot = await DockerController.getInstance(nodeId).getDependencySnapshot(stacks);
+        } catch (error) {
+            console.warn('[DriftLedger] reconcileNode: snapshot unavailable on node %d; scan skipped:', nodeId, sanitizeForLog(getErrorMessage(error, 'unknown')));
+            return { stacks: 0, detected: 0, resolved: 0 };
+        }
+        let detected = 0, resolved = 0, scanned = 0;
+        for (const stackName of stacks) {
+            try {
+                const content = await fs.getStackContent(stackName);
+                const declared = parseComposeDependencies(content);
+                const containers = snapshot.containers.filter(c => c.stack === stackName);
+                const report = assembleStackDrift({ stack: stackName, declared, containers, networks: snapshot.networks, parseError: declared.parseError });
+                const r = this.reconcile(nodeId, stackName, report);
+                detected += r.detected;
+                resolved += r.resolved;
+                scanned += 1;
+            } catch (error) {
+                console.error('[DriftLedger] reconcileNode: failed for stack %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+            }
+        }
+        return { stacks: scanned, detected, resolved };
     }
 
     /**

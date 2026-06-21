@@ -23,6 +23,7 @@ interface DriftReport {
   parseError?: string;
   temporal?: { hasBaseline: boolean; sourceChanged: boolean; renderedChanged: boolean };
   ledger?: Array<{ service: string; kind: string; message: string; detectedAt: number; resolvedAt: number | null }>;
+  lastCheckedAt?: number | null;
 }
 
 function report(partial: Partial<DriftReport>): DriftReport {
@@ -195,10 +196,11 @@ describe('DriftPanel', () => {
     expect(temporal).toHaveAttribute('data-temporal', 'matches');
   });
 
-  it('renders the persisted drift history with open and resolved entries', async () => {
+  it('renders the persisted drift history with open and resolved entries, labelled with when it was checked', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
       status: 'drifted',
       findings: [{ kind: 'image-mismatch', service: 'web', detail: 'image differs' }],
+      lastCheckedAt: Date.now(),
       ledger: [
         { service: 'web', kind: 'image-mismatch', message: 'image differs', detectedAt: Date.now(), resolvedAt: null },
         { service: 'db', kind: 'service-missing', message: 'db not running', detectedAt: Date.now() - 1000, resolvedAt: Date.now() },
@@ -209,5 +211,21 @@ describe('DriftPanel', () => {
     expect(screen.getByText(/drift history/i)).toBeInTheDocument();
     expect(screen.getByText('open')).toBeInTheDocument();
     expect(screen.getByText('resolved')).toBeInTheDocument();
+    // The history is timestamped so a stale row reads as history, not the live status.
+    expect(screen.getByText(/checked/i)).toBeInTheDocument();
+  });
+
+  it('omits the last-checked label when the stack has never been reconciled', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'drifted',
+      findings: [{ kind: 'image-mismatch', service: 'web', detail: 'image differs' }],
+      lastCheckedAt: null,
+      ledger: [
+        { service: 'web', kind: 'image-mismatch', message: 'image differs', detectedAt: Date.now(), resolvedAt: null },
+      ],
+    })));
+    render(<DriftPanel stackName="web" />);
+    await screen.findByTestId('drift-status');
+    expect(screen.queryByText(/checked/i)).not.toBeInTheDocument();
   });
 });
