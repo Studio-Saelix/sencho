@@ -349,6 +349,21 @@ describe('assembleStackDrift - network drift', () => {
     });
     expect(report.findings.filter(f => f.kind.startsWith('network-'))).toEqual([]);
   });
+
+  it('does not flag an attachment to a declared external network (regression: shared arr-net)', () => {
+    // arr-net is declared `external: true` with no name override, so Docker attaches
+    // the container to the pre-existing network named "arr-net" (no project prefix).
+    // The runtime matches the compose, so this must read as in-sync rather than a
+    // foreign/undeclared-network finding.
+    const report = assembleStackDrift({
+      stack: 'plex',
+      declared: { services: [service({ name: 'plex', networks: ['arr-net'] })], networks: { 'arr-net': { external: true } }, volumes: {} },
+      containers: [container({ id: 'plex', service: 'plex', stack: 'plex', networks: [{ name: 'arr-net', id: 'a', ip: '' }] })],
+      networks: [depNet('arr-net', { composeProject: null, stack: null })],
+    });
+    expect(report.findings.filter(f => f.kind.startsWith('network-'))).toEqual([]);
+    expect(report.status).toBe('in-sync');
+  });
 });
 
 // ── normalizeImageRef ─────────────────────────────────────────────────────
