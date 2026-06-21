@@ -994,7 +994,7 @@ async function buildDriftPayload(
   nodeId: number,
   stackName: string,
   reconcile: boolean,
-): Promise<StackDriftReport & { temporal: DriftTemporal; ledger: DriftLedgerEntry[] }> {
+): Promise<StackDriftReport & { temporal: DriftTemporal; ledger: DriftLedgerEntry[]; lastCheckedAt: number | null }> {
   const report = await buildStackDriftReport(nodeId, stackName);
   // Only the on-disk read is best-effort: an unreadable compose is already surfaced
   // by the report as a parse error, so temporal degrades to neutral. computeTemporal
@@ -1016,7 +1016,11 @@ async function buildDriftPayload(
   const ledger: DriftLedgerEntry[] = DatabaseService.getInstance()
     .getRecentDriftFindings(nodeId, stackName, 20)
     .map(r => ({ service: r.service, kind: r.finding_type as DriftFindingKind, message: r.message, detectedAt: r.detected_at, resolvedAt: r.resolved_at }));
-  return { ...report, temporal, ledger };
+  // The ledger reflects the last reconcile (re-check, deploy, or background scan),
+  // not this passive read, so surface when that was: the Drift tab labels the history
+  // "checked {time ago}" and a stale finding reads as history, not current truth.
+  const lastCheckedAt = DatabaseService.getInstance().getStackDossier(nodeId, stackName)?.last_drift_check_at ?? null;
+  return { ...report, temporal, ledger, lastCheckedAt };
 }
 
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {

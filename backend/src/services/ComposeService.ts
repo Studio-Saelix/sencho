@@ -455,6 +455,13 @@ export class ComposeService {
     // route: bulk, Git-source, App Store, scheduler, and webhook deploys all funnel
     // through this method. Internally guarded; awaited so it cannot race later work.
     await DriftLedgerService.getInstance().recordBaseline(this.nodeId, stackName);
+    // Reconcile the ledger against the just-deployed runtime: findings this deploy
+    // fixed are resolved and any it left are recorded (and surfaced in the activity
+    // feed) now, instead of waiting for someone to open the Drift tab. The rollback
+    // route re-deploys through this method, so it is covered; a failed atomic deploy
+    // instead restores the previous files and throws above, so that recovery path
+    // reconciles on its next deploy or scan, not here. Best-effort internally.
+    await DriftLedgerService.getInstance().reconcileStack(this.nodeId, stackName);
   }
 
   streamLogs(stackName: string, ws: WebSocket) {
@@ -652,8 +659,10 @@ export class ComposeService {
       throw updateError;
     }
     // Reached only on a successful update; re-baseline so temporal drift compares
-    // against what is now deployed (see deployStack for why this lives here).
+    // against what is now deployed (see deployStack for why this lives here), then
+    // reconcile the ledger against the updated runtime.
     await DriftLedgerService.getInstance().recordBaseline(this.nodeId, stackName);
+    await DriftLedgerService.getInstance().reconcileStack(this.nodeId, stackName);
   }
 
   public async downStack(stackName: string): Promise<void> {
