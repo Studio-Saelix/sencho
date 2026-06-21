@@ -117,15 +117,26 @@ export function isDangerousHostPath(p: string): boolean {
 }
 
 /**
- * Browse-accessibility probe for a bind root. Unlike the portability-focused
- * probeHostPath (which refuses sources outside the stack dir), this resolves the
- * canonical realpath of any absolute path visible to the Sencho process and
- * reports whether it is a stat-able directory. Returns the canonical realpath so
- * the route can pass it to FileSystemService as the containment root.
+ * Browse-accessibility probe for a bind root, scoped to the compose base dir.
+ * The realpath/stat run ONLY for a source that lexically resolves inside
+ * `baseDir`: in the containerized deployment that is the only host area the
+ * Sencho process can reach, so a source outside it is unreachable anyway and is
+ * reported non-accessible without touching the filesystem. Gating the sinks
+ * behind `isPathWithinBase` (the same containment `probeHostPath` uses) keeps an
+ * unvalidated host path off the realpath/stat calls. Returns the canonical
+ * realpath so the route can pass it to FileSystemService as the containment root.
  */
 export async function probeBindRootAccess(
   absPath: string,
+  baseDir: string,
 ): Promise<{ canonical: string; accessible: boolean; isDir: boolean }> {
+  const resolved = path.resolve(absPath);
+  // Containment barrier before the filesystem sinks: only probe within baseDir.
+  // Out-of-base sources keep their original path for the dangerous/overlap
+  // classification the caller does, but are never statted.
+  if (!isPathWithinBase(resolved, baseDir)) {
+    return { canonical: absPath, accessible: false, isDir: false };
+  }
   // A missing path (ENOENT) is the common, expected "not reachable" outcome and
   // is left silent; any other code (e.g. EACCES on a path that exists but Sencho
   // cannot read) is logged so an operator chasing "why can't I browse this bind"
@@ -133,15 +144,15 @@ export async function probeBindRootAccess(
   const logNonEnoent = (stage: string, err: unknown): void => {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
-      console.warn('[StackFileRoots] bind %s failed (%s):', stage, code ?? 'unknown', sanitizeForLog(absPath));
+      console.warn('[StackFileRoots] bind %s failed (%s):', stage, code ?? 'unknown', sanitizeForLog(resolved));
     }
   };
   let canonical: string;
   try {
-    canonical = await fsPromises.realpath(absPath);
+    canonical = await fsPromises.realpath(resolved);
   } catch (err) {
     logNonEnoent('realpath', err);
-    return { canonical: absPath, accessible: false, isDir: false };
+    return { canonical: resolved, accessible: false, isDir: false };
   }
   try {
     const st = await fsPromises.stat(canonical);
@@ -288,7 +299,7 @@ export class StackFileRootsService {
           const rawAbs = path.isAbsolute(m.source) ? m.source : path.resolve(stackDir, m.source);
           let probe = probeByRaw.get(rawAbs);
           if (!probe) {
-            probe = await probeBindRootAccess(rawAbs);
+            probe = await probeBindRootAccess(rawAbs, baseDir);
             probeByRaw.set(rawAbs, probe);
           }
           let group = bindByCanonical.get(probe.canonical);

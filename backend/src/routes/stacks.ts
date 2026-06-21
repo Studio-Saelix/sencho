@@ -1763,7 +1763,9 @@ function sendFsError(
   const status = (err as { status?: unknown }).status;
   if (typeof status === 'number' && status >= 400 && status < 600) {
     if (status >= 500) {
-      console.error(`[files] ${fallback} (helper ${status}):`, sanitizeForLog(e.message));
+      // Constant format string + sanitized args (the status is already carried by
+      // the HTTP response, so it is not repeated in the log).
+      console.error('[files] %s (helper failure): %s', sanitizeForLog(fallback), sanitizeForLog(e.message));
       return res.status(status).json({ error: fallback });
     }
     return res.status(status).json({ error: e.message });
