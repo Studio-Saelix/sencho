@@ -132,10 +132,6 @@ export class DriftLedgerService {
         }
         const db = DatabaseService.getInstance();
         const now = Date.now();
-        // Stamp every authoritative check (even a no-op that records nothing) so the
-        // Drift tab can show "checked {time ago}"; a stale finding then reads as
-        // history rather than as the current truth it can no longer guarantee.
-        db.setStackDossierDriftCheck(nodeId, stackName, now);
         const openByKey = new Map(db.getOpenDriftFindings(nodeId, stackName).map(r => [findingKey(r.service, r.finding_type), r]));
         const currentByKey = new Map(report.findings.map(f => [findingKey(f.service, f.kind), f]));
 
@@ -147,11 +143,13 @@ export class DriftLedgerService {
         for (const [key, row] of openByKey) {
             if (!currentByKey.has(key)) toResolve.push(row);
         }
-        if (toInsert.length === 0 && toResolve.length === 0) {
-            return { detected: 0, resolved: 0 };
-        }
-
+        // Stamp the check time and apply any transitions in one transaction, so the
+        // "checked {time ago}" the Drift tab shows can never persist without the ledger
+        // update it describes. The stamp runs even on a no-op authoritative check (no
+        // transitions), so the history's "as of" stays honest while a stale finding
+        // reads as history rather than as live truth.
         db.getDb().transaction(() => {
+            db.setStackDossierDriftCheck(nodeId, stackName, now);
             for (const f of toInsert) {
                 db.insertDriftFinding({
                     node_id: nodeId,

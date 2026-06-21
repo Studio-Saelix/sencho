@@ -649,6 +649,18 @@ describe('ComposeService - drift reconcile hook', () => {
     expect(spy).toHaveBeenCalledWith(1, 'my-stack');
     spy.mockRestore();
   });
+
+  it('does not reconcile the ledger when a deploy fails', async () => {
+    setupAutoCloseSpawn(1); // non-zero exit => the deploy rejects before the post-success hook
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    const spy = vi.spyOn(DriftLedgerService.getInstance(), 'reconcileStack').mockResolvedValue({ detected: 0, resolved: 0 });
+
+    const result = await ComposeService.getInstance(1).deployStack('my-stack').then(() => null, (e: Error) => e);
+    expect(result).toBeInstanceOf(Error);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });
 
 describe('ComposeService - withRegistryAuth', () => {
