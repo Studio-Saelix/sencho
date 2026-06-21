@@ -246,9 +246,11 @@ describe('DriftLedgerService.reconcile', () => {
   });
 });
 
-describe('DriftLedgerService.reconcileStack', () => {
+describe('DriftLedgerService.reconcileStack / reconcileNode', () => {
   const STACK_A = 'recstacka';
+  const STACK_B = 'recstackb';
   let dirA: string;
+  let dirB: string;
 
   const composeDir = () => process.env.COMPOSE_DIR as string;
 
@@ -260,14 +262,19 @@ describe('DriftLedgerService.reconcileStack', () => {
 
   beforeEach(() => {
     clearLedger(STACK_A);
+    clearLedger(STACK_B);
     dirA = path.join(composeDir(), STACK_A);
-    fs.mkdirSync(dirA, { recursive: true });
-    fs.writeFileSync(path.join(dirA, 'compose.yaml'), 'services:\n  web:\n    image: nginx:1.27\n');
+    dirB = path.join(composeDir(), STACK_B);
+    for (const d of [dirA, dirB]) {
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, 'compose.yaml'), 'services:\n  web:\n    image: nginx:1.27\n');
+    }
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     fs.rmSync(dirA, { recursive: true, force: true });
+    fs.rmSync(dirB, { recursive: true, force: true });
   });
 
   it('reconcileStack builds the report, persists drift, and stamps last-checked', async () => {
@@ -278,6 +285,47 @@ describe('DriftLedgerService.reconcileStack', () => {
     expect(res).toEqual({ detected: 1, resolved: 0 });
     expect(db().getOpenDriftFindings(nodeId, STACK_A)).toHaveLength(1);
     expect(typeof db().getStackDossier(nodeId, STACK_A)?.last_drift_check_at).toBe('number');
+  });
+
+  it('reconcileNode reconciles every stack against a single shared snapshot', async () => {
+    const getSnap = vi.fn().mockResolvedValue({
+      containers: [driftedContainer(STACK_A), driftedContainer(STACK_B)], networks: [], volumes: [],
+    });
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({ getDependencySnapshot: getSnap } as unknown as DockerController);
+    const res = await DriftLedgerService.getInstance().reconcileNode(nodeId);
+    expect(getSnap).toHaveBeenCalledTimes(1); // one snapshot for the whole node, not one per stack
+    expect(res.detected).toBe(2);
+    expect(db().getOpenDriftFindings(nodeId, STACK_A)).toHaveLength(1);
+    expect(db().getOpenDriftFindings(nodeId, STACK_B)).toHaveLength(1);
+  });
+
+  it('reconcileNode logs and skips a stack that fails mid-scan, still scanning the rest', async () => {
+    // Make STACK_B unreadable (no compose file); STACK_A stays valid and drifted.
+    fs.rmSync(path.join(dirB, 'compose.yaml'), { force: true });
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [driftedContainer(STACK_A)], networks: [], volumes: [] }),
+    } as unknown as DockerController);
+    const res = await DriftLedgerService.getInstance().reconcileNode(nodeId);
+    // STACK_A scanned and recorded; STACK_B failed and is excluded, the scan continued.
+    expect(db().getOpenDriftFindings(nodeId, STACK_A)).toHaveLength(1);
+    expect(db().getOpenDriftFindings(nodeId, STACK_B)).toHaveLength(0);
+    expect(res.detected).toBe(1);
+  });
+
+  it('reconcileNode skips the whole node when Docker is unreachable (open findings are not falsely resolved)', async () => {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [driftedContainer(STACK_A)], networks: [], volumes: [] }),
+    } as unknown as DockerController);
+    await DriftLedgerService.getInstance().reconcileStack(nodeId, STACK_A);
+    expect(db().getOpenDriftFindings(nodeId, STACK_A)).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockRejectedValue(new Error('docker down')),
+    } as unknown as DockerController);
+    const res = await DriftLedgerService.getInstance().reconcileNode(nodeId);
+    expect(res).toEqual({ stacks: 0, detected: 0, resolved: 0 });
+    expect(db().getOpenDriftFindings(nodeId, STACK_A)).toHaveLength(1);
   });
 });
 
