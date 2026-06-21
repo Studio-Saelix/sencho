@@ -286,6 +286,15 @@ describe('drift detection scan settings', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().drift_scan_interval_minutes).not.toBe('5');
   });
 
+  it('rejects an out-of-range interval above the 1440 minute cap (400)', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'drift_scan_interval_minutes', value: '99999' });
+    expect(res.status).toBe(400);
+    expect(DatabaseService.getInstance().getGlobalSettings().drift_scan_interval_minutes).not.toBe('99999');
+  });
+
   it('rejects a non-admin write (403)', async () => {
     const res = await request(app)
       .post('/api/settings')

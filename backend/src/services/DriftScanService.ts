@@ -24,6 +24,7 @@ const BASE_TICK_MS = 60_000;          // re-read settings and check whether a sc
 const INITIAL_DELAY_MS = 45_000;      // let Docker and the node registry settle before the first scan
 const DEFAULT_INTERVAL_MINUTES = 60;
 const MIN_INTERVAL_MINUTES = 15;
+const MAX_INTERVAL_MINUTES = 1440; // matches the settings-route Zod cap; an over-cap or corrupted DB value falls back to the default rather than deferring scans indefinitely
 
 export class DriftScanService {
     private static instance: DriftScanService;
@@ -70,7 +71,7 @@ export class DriftScanService {
     private intervalMs(): number {
         try {
             const raw = Number(DatabaseService.getInstance().getGlobalSettings()['drift_scan_interval_minutes']);
-            const minutes = Number.isFinite(raw) && raw >= MIN_INTERVAL_MINUTES ? raw : DEFAULT_INTERVAL_MINUTES;
+            const minutes = Number.isFinite(raw) && raw >= MIN_INTERVAL_MINUTES && raw <= MAX_INTERVAL_MINUTES ? raw : DEFAULT_INTERVAL_MINUTES;
             return minutes * 60_000;
         } catch {
             return DEFAULT_INTERVAL_MINUTES * 60_000;
