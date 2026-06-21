@@ -45,11 +45,15 @@ Image references are compared after normalizing the implicit Docker Hub registry
 
 ## Drift history
 
-Each time you **re-check** a stack, and after every deploy, Sencho records the findings it sees. The **Drift history** list under the findings shows recent entries with when each was first **detected** and, once it clears, when it was **resolved**. This turns a point-in-time check into a short ledger of how a stack has drifted and recovered over time.
+Sencho records the findings it sees whenever a stack is checked: each time you **re-check**, after every deploy, and on each background scan when one is enabled. The **Drift history** list under the findings shows recent entries with when each was first **detected** and, once it clears, when it was **resolved**, turning a point-in-time check into a short ledger of how a stack has drifted and recovered over time.
 
 The history is labelled with when it was last checked. The status badge at the top is always live, recomputed each time you open the tab, while the history reflects the last time the ledger was reconciled. When the two differ, re-check to bring the history up to date.
 
 Drift that appears or clears is also written to the stack's **Activity** timeline, so **Drift detected** and **Drift resolved** events sit alongside deploys and restarts.
+
+### Background drift detection
+
+Out of the box the history advances when you re-check a stack or deploy it. To keep it current without opening each tab, turn on **Drift detection** under **Settings → Automation**: each node then reconciles every stack on a schedule, recording drift and surfacing it in the activity feed on its own. Choose how often the scan runs in the same place. The scan only detects and records drift; it never changes a running stack to match its Compose file. It is off by default and configured per node.
 
 ## Accessing the Drift tab
 

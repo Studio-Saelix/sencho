@@ -6,6 +6,7 @@ export { LicenseSection } from './LicenseSection';
 export { HostAlertsSection } from './HostAlertsSection';
 export { DockerStorageSection } from './DockerStorageSection';
 export { UpdatesSection } from './UpdatesSection';
+export { DriftDetectionSection } from './DriftDetectionSection';
 export { FleetMeshSection } from './FleetMeshSection';
 export { NotificationsSection } from './NotificationsSection';
 export { DeveloperSection } from './DeveloperSection';

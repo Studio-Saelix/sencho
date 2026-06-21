@@ -3,6 +3,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import { MonitorService } from '../services/MonitorService';
 import { AutoHealService } from '../services/AutoHealService';
+import { DriftScanService } from '../services/DriftScanService';
 import { HealthGateService } from '../services/HealthGateService';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
@@ -32,6 +33,7 @@ export function installShutdownHandlers(server: Server): void {
         console.warn('[Shutdown] MonitorService cleanup failed:', (e as Error).message);
       }
       try { AutoHealService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] AutoHealService cleanup failed:', (e as Error).message); }
+      try { DriftScanService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] DriftScanService cleanup failed:', (e as Error).message); }
       try { HealthGateService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] HealthGateService cleanup failed:', (e as Error).message); }
       try { FleetSyncRetryService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] FleetSyncRetryService cleanup failed:', (e as Error).message); }
       try { DockerEventManager.getInstance().stop(); } catch (e) {
