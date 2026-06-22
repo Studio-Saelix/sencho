@@ -1,9 +1,10 @@
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { promises as fsPromises, createReadStream } from 'fs';
+import { promises as fsPromises, createReadStream, createWriteStream } from 'fs';
 import type { Dirent } from 'fs';
-import type { Readable } from 'stream';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { NodeRegistry } from './NodeRegistry';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { isBinaryBuffer } from '../utils/binaryDetect';
@@ -1255,7 +1256,7 @@ export class FileSystemService {
    */
   private async writeStackFileAtomic(
     safePath: string,
-    data: string | Buffer,
+    data: string | Buffer | Readable,
     opts: { exclusive?: boolean } = {},
   ): Promise<void> {
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
@@ -1265,13 +1266,28 @@ export class FileSystemService {
     const tmpPath = `${safePath}.sencho-tmp-${suffix}`;
     let stagedTmp = false;
     try {
-      const fh = await fsPromises.open(tmpPath, 'wx');
-      stagedTmp = true;
-      try {
-        await fh.writeFile(data);
-        await fh.sync();
-      } finally {
-        await fh.close();
+      if (data instanceof Readable) {
+        // Stream a temp-file source (an upload spooled to disk) into the staging
+        // file without buffering it in memory. 'wx' exclusively creates the
+        // staging file; the random suffix already guarantees a fresh name.
+        const ws = createWriteStream(tmpPath, { flags: 'wx' });
+        stagedTmp = true;
+        await pipeline(data, ws);
+        const synced = await fsPromises.open(tmpPath, 'r+');
+        try {
+          await synced.sync();
+        } finally {
+          await synced.close();
+        }
+      } else {
+        const fh = await fsPromises.open(tmpPath, 'wx');
+        stagedTmp = true;
+        try {
+          await fh.writeFile(data);
+          await fh.sync();
+        } finally {
+          await fh.close();
+        }
       }
       if (opts.exclusive) {
         // link() is atomic against EEXIST. Tmp and target are guaranteed to live
@@ -1306,14 +1322,22 @@ export class FileSystemService {
     await this.writeStackFileAtomic(safePath, content, opts);
   }
 
-  async writeStackFileBuffer(
+  /**
+   * Atomic, scoped write whose source is a temp file on disk (an upload spooled
+   * by multer's diskStorage). Streams the temp file into a staging sibling in the
+   * target's own directory, fsyncs, then links/renames into place, so a large
+   * upload is never buffered in memory and the temp file's filesystem can differ
+   * from the stack/volume filesystem (no cross-device rename). The caller owns
+   * deleting tempPath.
+   */
+  async writeScopedFileFromTemp(
     stackName: string,
     relPath: string,
-    buffer: Buffer,
+    tempPath: string,
     opts?: { exclusive?: boolean; scope?: FileRootScope },
   ): Promise<void> {
     const safePath = await this.resolveScopedPath(stackName, relPath, opts?.scope);
-    await this.writeStackFileAtomic(safePath, buffer, opts);
+    await this.writeStackFileAtomic(safePath, createReadStream(tempPath), { exclusive: opts?.exclusive });
   }
 
   /**

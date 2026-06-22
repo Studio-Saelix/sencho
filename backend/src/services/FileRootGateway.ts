@@ -13,6 +13,7 @@
  * within the same (seconds-resolution) second.
  */
 import type { Readable } from 'stream';
+import { createReadStream, promises as fsp } from 'fs';
 
 import { FileSystemService, type FileEntry, type FileRootScope } from './FileSystemService';
 import { VolumeBrowserService, makeHelperVersion, type VolumeEntry } from './VolumeBrowserService';
@@ -173,22 +174,29 @@ export class FileRootGateway {
     return this.fs().pathKind(stackName, relPath, this.scopeFor(root));
   }
 
-  /** Upload write. `exclusive` rejects an existing target (no overwrite). */
-  async writeBuffer(
+  /**
+   * Upload write sourced from a temp file spooled to disk (multer diskStorage),
+   * so the upload is never buffered in memory. `exclusive` rejects an existing
+   * target (no overwrite). The caller owns deleting `tempPath`.
+   */
+  async writeFromTemp(
     root: StackFileRoot,
     stackName: string,
     relPath: string,
-    buffer: Buffer,
+    tempPath: string,
     exclusive: boolean,
   ): Promise<void> {
     if (root.backend === 'helper') {
       if (exclusive && (await this.helper().pathKind(root.hostPathOrName, relPath)) !== null) {
         throw Object.assign(new Error('File already exists'), { code: 'FILE_EXISTS' });
       }
-      await this.helper().writeFile(root.hostPathOrName, relPath, buffer);
+      // The helper writes via `cat`, which cannot report a short write; pass the
+      // spooled byte count so writeFileStream can verify the volume got it all.
+      const { size } = await fsp.stat(tempPath);
+      await this.helper().writeFileStream(root.hostPathOrName, relPath, createReadStream(tempPath), size);
       return;
     }
-    await this.fs().writeStackFileBuffer(stackName, relPath, buffer, { exclusive, scope: this.scopeFor(root) });
+    await this.fs().writeScopedFileFromTemp(stackName, relPath, tempPath, { exclusive, scope: this.scopeFor(root) });
   }
 
   async download(

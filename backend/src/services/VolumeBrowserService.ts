@@ -1,4 +1,5 @@
-import { Writable } from 'stream';
+import { Writable, Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import path from 'path';
 import { createHash } from 'crypto';
 import DockerController from './DockerController';
@@ -392,6 +393,39 @@ export class VolumeBrowserService {
     return { mtimeMs: meta.mtime * 1000, size: meta.size };
   }
 
+  /**
+   * Like writeFile but streams the content from a Readable (an upload spooled to
+   * a temp file) straight into the helper's stdin, so a large upload is never
+   * held in memory. Non-atomic in-place write (`cat > file`), matching writeFile
+   * (see writeFile for the ownership-preservation rationale); the caller owns the
+   * source stream's underlying temp file. `expectedSize` is the source byte count:
+   * `cat` cannot report a short write, so the post-write size is checked against
+   * it to catch a truncated transfer that exited cleanly.
+   */
+  async writeFileStream(volumeName: string, relPath: string, source: Readable, expectedSize: number): Promise<{ mtimeMs: number; size: number }> {
+    const safe = sanitizeRelPath(relPath);
+    if (!safe) throw new ExecError('Cannot write the volume root', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', WRITE_SCRIPT, 'sh', `./${safe}`],
+      { writable: true, stdin: source },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg) || exitCode === 8) throw new ExecError('Permission denied', 403);
+      if (exitCode === 9) throw new ExecError('Target is a directory', 400);
+      throw new ExecError(`Write failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+    const meta = await this.stat(volumeName, safe);
+    if (meta.size !== expectedSize) {
+      throw new ExecError('Upload did not fully write to the volume', 500);
+    }
+    return { mtimeMs: meta.mtime * 1000, size: meta.size };
+  }
+
   /** Create a single directory; its parent must already exist. */
   async mkdir(volumeName: string, relPath: string): Promise<void> {
     const safe = sanitizeRelPath(relPath);
@@ -493,7 +527,7 @@ export class VolumeBrowserService {
   private async runHelper(
     volumeName: string,
     cmd: string[],
-    opts: { writable?: boolean; stdin?: Buffer } = {},
+    opts: { writable?: boolean; stdin?: Buffer | Readable } = {},
   ): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
     const docker = DockerController.getInstance(this.nodeId).getDocker();
     const stdoutChunks: Buffer[] = [];
@@ -540,6 +574,7 @@ export class VolumeBrowserService {
       timer = setTimeout(() => reject(new ExecError('Helper exec timed out', 504)), EXEC_TIMEOUT_MS);
     });
 
+    let stdinError: unknown = null;
     const runPromise = (async () => {
       const stream = await container.attach({ stream: true, stdin: wantStdin, stdout: true, stderr: true, hijack: wantStdin });
       const streamEnded = new Promise<void>((resolve) => {
@@ -551,12 +586,29 @@ export class VolumeBrowserService {
       if (wantStdin && opts.stdin) {
         // Feed the file content to the container's stdin, then close it so the
         // helper's `cat > file` sees EOF and exits.
-        stream.write(opts.stdin);
-        stream.end();
+        if (Buffer.isBuffer(opts.stdin)) {
+          stream.write(opts.stdin);
+          stream.end();
+        } else {
+          // A Readable (an upload spooled to a temp file) is piped so a large
+          // upload is never held in memory. pipeline tears the stdin side down
+          // (destroys it) on a source error rather than ending it cleanly, so
+          // cat sees an abnormal close instead of a normal EOF and does not
+          // commit a truncated file as a success. Remember the error so the run
+          // is reported as failed after the container exits.
+          try {
+            await pipeline(opts.stdin, stream);
+          } catch (err) {
+            stdinError = err;
+          }
+        }
       }
       const exitInfo = await container.wait();
       // Wait for the attach stream to finish flushing demuxed output.
       await streamEnded;
+      if (stdinError) {
+        throw new ExecError('Upload stream failed before the volume write completed', 500);
+      }
       return {
         stdout: Buffer.concat(stdoutChunks),
         stderr: Buffer.concat(stderrChunks),

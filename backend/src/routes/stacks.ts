@@ -1,6 +1,9 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import path from 'path';
+import os from 'os';
+import crypto from 'crypto';
+import { promises as fsp } from 'fs';
 import { inspect } from 'node:util';
 import YAML from 'yaml';
 import multer from 'multer';
@@ -157,11 +160,41 @@ export async function resolveAllEnvFilePaths(nodeId: number, stackName: string):
   return dotenv ? [dotenv.resolvedPath as string] : [];
 }
 
+// Uploads spool to disk (not memory) so a 25 MB upload is never held in RAM.
+// The temp dir lives under the OS temp root, deliberately outside COMPOSE_DIR and
+// any browsable volume, so a running container never observes a half-written
+// spool. SENCHO_UPLOAD_DIR relocates it (e.g. onto a larger volume).
+const UPLOAD_TMP_DIR = process.env.SENCHO_UPLOAD_DIR
+  ? path.resolve(process.env.SENCHO_UPLOAD_DIR)
+  : path.join(os.tmpdir(), 'sencho-uploads');
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      fsp.mkdir(UPLOAD_TMP_DIR, { recursive: true })
+        .then(() => cb(null, UPLOAD_TMP_DIR))
+        .catch((err: Error) => cb(err, UPLOAD_TMP_DIR));
+    },
+    filename: (_req, _file, cb) => {
+      cb(null, `up-${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`);
+    },
+  }),
   limits: { fileSize: 25 * 1024 * 1024, files: 1 },
   preservePath: true,
 });
+
+/**
+ * Best-effort cleanup of a spooled upload temp file; never throws (a failed
+ * cleanup must not turn a successful upload into an error). A persistent failure
+ * would silently grow the spool dir, so log it at diagnostic level rather than
+ * swallowing it blind.
+ */
+async function cleanupUploadTemp(req: Request): Promise<void> {
+  const tmp = req.file?.path;
+  if (!tmp) return;
+  await fsp.unlink(tmp).catch((err: unknown) => {
+    logFileDiag('upload temp cleanup failed', { path: tmp, errorCode: fsErrorCode(err) });
+  });
+}
 
 function getRelPath(req: Request): string {
   return typeof req.query.path === 'string' ? req.query.path : '';
@@ -2086,10 +2119,21 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
   }
 });
 
-type UploadStartedReq = Request & { _fileUploadStartedAt?: number };
+type UploadStartedReq = Request & { _fileUploadStartedAt?: number; _fileUploadRoot?: StackFileRoot };
 
 stacksRouter.post(
   '/:stackName/files/upload',
+  // Authorize BEFORE multer touches the body, so an unauthorized caller or a
+  // read-only/non-existent root is rejected without ever spooling a temp file.
+  // The resolved root is stashed for the handler so it is not resolved twice.
+  async (req: Request, res: Response, next: NextFunction) => {
+    const stackName = req.params.stackName as string;
+    if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+    const root = await resolveRootForOp(req, res, stackName, 'write');
+    if (!root) return;
+    (req as UploadStartedReq)._fileUploadRoot = root;
+    next();
+  },
   (req: Request, res: Response, next: NextFunction) => {
     // Capture the time the upload entered the route so every downstream
     // metric reports the same latency window: the body-transfer +
@@ -2107,7 +2151,11 @@ stacksRouter.post(
           errorCode: 'TOO_LARGE',
         });
         recordFileOp(req.nodeId, 'upload', startedAt, false);
-        return res.status(413).json({ error: 'File exceeds 25 MB limit', code: 'TOO_LARGE' });
+        // diskStorage may have spooled a partial file before the limit fired.
+        void cleanupUploadTemp(req).finally(() =>
+          res.status(413).json({ error: 'File exceeds 25 MB limit', code: 'TOO_LARGE' }),
+        );
+        return;
       }
       if (err) {
         logFileOperation('warn', 'upload failed', {
@@ -2117,27 +2165,33 @@ stacksRouter.post(
           errorCode: 'MULTER_ERROR',
         });
         recordFileOp(req.nodeId, 'upload', startedAt, false);
-        return res.status(500).json({ error: 'Upload failed' });
+        void cleanupUploadTemp(req).finally(() => res.status(500).json({ error: 'Upload failed' }));
+        return;
       }
       next();
     });
   },
   async (req: Request, res: Response) => {
     const stackName = req.params.stackName as string;
-    if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+    // The pre-multer middleware already authorized and resolved the root.
+    const root = (req as UploadStartedReq)._fileUploadRoot;
+    if (!root) {
+      await cleanupUploadTemp(req);
+      return res.status(500).json({ error: 'Upload failed' });
+    }
     if (!req.file) {
       return res.status(400).json({ error: 'No file provided' });
     }
     const relPath = getRelPath(req);
     if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
+      await cleanupUploadTemp(req);
       return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
     }
     const originalName = req.file.originalname;
     if (!isSafeUploadFilename(originalName)) {
+      await cleanupUploadTemp(req);
       return res.status(400).json({ error: 'Invalid filename' });
     }
-    const root = await resolveRootForOp(req, res, stackName, 'write');
-    if (!root) return;
     const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
     const overwrite = String(req.query.overwrite) === '1';
     // The multer wrapper stashed the route-entry timestamp on the request so
@@ -2179,11 +2233,12 @@ stacksRouter.post(
           },
         });
       }
-      // Use the atomic exclusive create for the non-overwrite case so a file
-      // created by another writer after the pathKind check above is not
+      // Copy the spooled temp file into place (the spool survives; the finally
+      // removes it). The atomic exclusive create for the non-overwrite case means
+      // a file created by another writer after the pathKind check above is not
       // silently clobbered (a race surfaces as FILE_EXISTS -> 409, same as the
       // pre-emptive check). overwrite=true intentionally allows the clobber.
-      await gateway.writeBuffer(root, stackName, targetRelPath, req.file.buffer, !overwrite);
+      await gateway.writeFromTemp(root, stackName, targetRelPath, req.file.path, !overwrite);
       afterStackMutation(req, stackName);
       logFileOperation('info', 'mutate', {
         nodeId: req.nodeId,
@@ -2209,6 +2264,10 @@ stacksRouter.post(
       });
       recordFileOp(req.nodeId, 'upload', startedAt, false);
       return sendFsError(res, err, 'Failed to upload file', { notFoundMessage: 'Target directory not found' });
+    } finally {
+      // writeFromTemp streams (copies) the spool into place, so the temp file
+      // always remains and must be removed on every exit (success, conflict, error).
+      await cleanupUploadTemp(req);
     }
   },
 );

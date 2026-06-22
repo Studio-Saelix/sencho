@@ -22,6 +22,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { Readable } from 'stream';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import type { StackFileRoot } from '../services/StackFileRootsService';
 
 // On Windows, fs.unlink on a directory returns EPERM instead of EISDIR so the
 // NOT_EMPTY code path in deleteStackPath is never reached. Skip that test case
@@ -35,7 +36,18 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 let adminCookie: string;
 let viewerCookie: string;
 let stacksDir: string;
+let uploadTmpDir: string;
 const STACK = 'teststack';
+
+/** Count files left in the upload spool dir (ENOENT = dir never created = 0). */
+async function uploadTempCount(): Promise<number> {
+  try {
+    return (await fs.readdir(uploadTmpDir)).length;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw err;
+  }
+}
 
 type FileExplorerMetricEntry = {
   op: string;
@@ -90,6 +102,10 @@ async function expectDownloadMetricCounts(count: number, successCount: number, e
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   stacksDir = process.env.COMPOSE_DIR!;
+  // Isolate the upload spool dir per worker so temp-leak assertions are
+  // deterministic (the default is a shared os.tmpdir() subdir).
+  uploadTmpDir = path.join(tmpDir, 'uploads');
+  process.env.SENCHO_UPLOAD_DIR = uploadTmpDir;
 
   // Create stack directory so file operations have something to work with
   await fs.mkdir(path.join(stacksDir, STACK), { recursive: true });
@@ -113,6 +129,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  delete process.env.SENCHO_UPLOAD_DIR;
   cleanupTestDb(tmpDir);
 });
 
@@ -946,6 +963,100 @@ describe('POST /api/stacks/:stackName/files/upload', () => {
     const stat = await fs.stat(dir);
     expect(stat.isDirectory()).toBe(true);
     await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  // The upload spools to a disk temp file (diskStorage); that temp must never be
+  // left behind, on success or on any rejection path.
+  it('leaves no spooled temp file after a successful upload', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('spool-success'), 'spool-success.txt');
+    expect(res.status).toBe(204);
+    expect(await uploadTempCount()).toBe(0);
+    await fs.unlink(path.join(stacksDir, STACK, 'spool-success.txt'));
+  });
+
+  it('leaves no spooled temp file after a 409 conflict', async () => {
+    const target = path.join(stacksDir, STACK, 'spool-conflict.txt');
+    await fs.writeFile(target, 'original');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('replacement'), 'spool-conflict.txt');
+    expect(res.status).toBe(409);
+    expect(await uploadTempCount()).toBe(0);
+    await fs.unlink(target);
+  });
+
+  it('leaves no spooled temp file after exceeding the size limit (413)', async () => {
+    const bigFile = Buffer.alloc(26 * 1024 * 1024, 0x61);
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', bigFile, 'spool-toobig.txt');
+    expect(res.status).toBe(413);
+    expect(await uploadTempCount()).toBe(0);
+  }, 20000);
+
+  it('rejects a viewer before any file is spooled (pre-multer auth gate)', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', viewerCookie)
+      .attach('file', Buffer.from('viewer-data'), 'viewer-spool.txt');
+    expect(res.status).toBe(403);
+    expect(await uploadTempCount()).toBe(0);
+    // And nothing was written into the stack dir.
+    await expect(fs.access(path.join(stacksDir, STACK, 'viewer-spool.txt'))).rejects.toThrow();
+  });
+
+  it('rejects an upload to a read-only root before spooling (pre-multer root gate)', async () => {
+    const readonlyRoot: StackFileRoot = {
+      id: 'bind:readonlybind', kind: 'bind', label: '/ro', hostPathOrName: path.join(stacksDir, 'ro-bind'),
+      mounts: [{ service: 'app', containerPath: '/ro', readOnly: true }],
+      readonly: true, accessible: true, browsable: true, writable: false,
+      chmodable: false, dangerous: false, managedSourceOverlap: false,
+      warning: 'This location is read-only.', backend: 'fs',
+    };
+    const { StackFileRootsService } = await import('../services/StackFileRootsService');
+    const spy = vi.spyOn(StackFileRootsService.prototype, 'resolveRoot').mockResolvedValue(readonlyRoot);
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ rootId: 'bind:readonlybind' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('blocked'), 'ro.txt');
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('READONLY_ROOT');
+    expect(await uploadTempCount()).toBe(0);
+    spy.mockRestore();
+  });
+
+  it('cleans up the spooled temp file when the write throws after spooling', async () => {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const spy = vi.spyOn(FileSystemService.prototype, 'writeScopedFileFromTemp')
+      .mockRejectedValue(Object.assign(new Error('disk gone'), { code: 'EIO' }));
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('boom'), 'wfail-upload.txt');
+    expect(res.status).toBe(500);
+    expect(await uploadTempCount()).toBe(0);
+    await expect(fs.access(path.join(stacksDir, STACK, 'wfail-upload.txt'))).rejects.toThrow();
+    spy.mockRestore();
+  });
+
+  it('leaves no spooled temp file after an overwrite', async () => {
+    const target = path.join(stacksDir, STACK, 'spool-overwrite.txt');
+    await fs.writeFile(target, 'before');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/upload`)
+      .query({ overwrite: '1' })
+      .set('Cookie', adminCookie)
+      .attach('file', Buffer.from('after'), 'spool-overwrite.txt');
+    expect(res.status).toBe(204);
+    expect(await fs.readFile(target, 'utf-8')).toBe('after');
+    expect(await uploadTempCount()).toBe(0);
+    await fs.unlink(target);
   });
 });
 

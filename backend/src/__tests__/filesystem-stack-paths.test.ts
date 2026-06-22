@@ -1,7 +1,7 @@
 /**
  * Tests for isValidRelativeStackPath (pure function) and the stack-scoped
  * file methods on FileSystemService (listStackDirectory, readStackFile,
- * writeStackFile, writeStackFileBuffer, deleteStackPath, mkdirStackPath).
+ * writeStackFile, writeScopedFileFromTemp, deleteStackPath, mkdirStackPath).
  *
  * FileSystemService stack methods are tested against a real temp directory so
  * that realpath, stat, and fs I/O all run with actual OS semantics.
@@ -215,28 +215,6 @@ describe('FileSystemService stack methods', () => {
     });
   });
 
-  // ── writeStackFileBuffer ────────────────────────────────────────────────
-
-  describe('writeStackFileBuffer', () => {
-    it('writes raw bytes correctly', async () => {
-      const data = Buffer.from([0x01, 0x02, 0x03, 0xff]);
-      const service = FileSystemService.getInstance();
-      await service.writeStackFileBuffer(STACK, 'binary.bin', data);
-
-      const read = await fs.readFile(path.join(stackDir, 'binary.bin'));
-      expect(read).toEqual(data);
-    });
-
-    it('creates parent directories when needed', async () => {
-      const payload = Buffer.from([0xde, 0xad]);
-      const service = FileSystemService.getInstance();
-      await service.writeStackFileBuffer(STACK, 'sub/img.bin', payload);
-
-      const read = await fs.readFile(path.join(stackDir, 'sub', 'img.bin'));
-      expect(read).toEqual(payload);
-    });
-  });
-
   // ── atomic write semantics ──────────────────────────────────────────────
 
   describe('atomic write semantics', () => {
@@ -346,6 +324,69 @@ describe('FileSystemService stack methods', () => {
       const dirEntries = await fs.readdir(stackDir);
       const leftovers = dirEntries.filter(name => name.startsWith('race.txt.sencho-tmp-'));
       expect(leftovers).toEqual([]);
+    });
+  });
+
+  // ── writeScopedFileFromTemp (disk-backed upload path) ───────────────────
+
+  describe('writeScopedFileFromTemp', () => {
+    let tempSrcDir: string;
+    beforeEach(async () => {
+      // A separate base dir stands in for the OS upload-spool location, which on
+      // a real host may sit on a different filesystem than the stack dir.
+      tempSrcDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-uptmp-'));
+    });
+    afterEach(async () => {
+      await fs.rm(tempSrcDir, { recursive: true, force: true });
+    });
+
+    it('streams a temp file into the stack and leaves the source temp for the caller', async () => {
+      const src = path.join(tempSrcDir, 'spool-bin');
+      const payload = Buffer.from('streamed upload payload');
+      await fs.writeFile(src, payload);
+
+      const service = FileSystemService.getInstance();
+      await service.writeScopedFileFromTemp(STACK, 'sub/uploaded.bin', src);
+
+      const written = await fs.readFile(path.join(stackDir, 'sub', 'uploaded.bin'));
+      expect(written).toEqual(payload);
+      // The method copies (streams) the source; the caller still owns the temp.
+      await expect(fs.access(src)).resolves.toBeUndefined();
+      const leftovers = (await fs.readdir(path.join(stackDir, 'sub'))).filter(n => n.includes('.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('exclusive write to an existing target throws FILE_EXISTS, preserves the original, and leaks no tmp', async () => {
+      const target = path.join(stackDir, 'keep.txt');
+      await fs.writeFile(target, 'ORIGINAL');
+      const src = path.join(tempSrcDir, 'incoming');
+      await fs.writeFile(src, 'INCOMING');
+
+      const service = FileSystemService.getInstance();
+      await expect(
+        service.writeScopedFileFromTemp(STACK, 'keep.txt', src, { exclusive: true }),
+      ).rejects.toMatchObject({ code: 'FILE_EXISTS' });
+
+      expect(await fs.readFile(target, 'utf-8')).toBe('ORIGINAL');
+      const leftovers = (await fs.readdir(stackDir)).filter(n => n.startsWith('keep.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('cleans up the staging sibling when the rename step throws', async () => {
+      const src = path.join(tempSrcDir, 'incoming2');
+      await fs.writeFile(src, 'NEW');
+      const fsModule = await import('fs');
+      const renameSpy = vi
+        .spyOn(fsModule.promises, 'rename')
+        .mockRejectedValueOnce(Object.assign(new Error('disk yanked'), { code: 'EIO' }));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.writeScopedFileFromTemp(STACK, 'rfail.txt', src)).rejects.toThrow(/disk yanked/);
+
+      const dirEntries = await fs.readdir(stackDir);
+      expect(dirEntries).not.toContain('rfail.txt');
+      expect(dirEntries.filter(n => n.startsWith('rfail.txt.sencho-tmp-'))).toEqual([]);
+      renameSpy.mockRestore();
     });
   });
 
