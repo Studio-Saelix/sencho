@@ -1085,8 +1085,16 @@ export class FileSystemService {
         }
         suffix.unshift(path.basename(existing));
         existing = parent;
+        // Inline js/path-injection barrier for the realpath sink below: existing
+        // is an ancestor of the already-contained target. Resolve the root itself
+        // via the untainted base so the only tainted realpath input is one the
+        // startsWith check has confirmed lives within the root.
+        if (existing !== baseResolved && !existing.startsWith(baseResolved + path.sep)) {
+          throw Object.assign(new Error('Path escapes root directory'), { code: 'INVALID_PATH' });
+        }
+        const probe = existing === baseResolved ? baseResolved : existing;
         try {
-          const realExisting = await fsPromises.realpath(existing);
+          const realExisting = await fsPromises.realpath(probe);
           if (!isPathWithinBase(realExisting, rootAbsDir)) {
             throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
           }
