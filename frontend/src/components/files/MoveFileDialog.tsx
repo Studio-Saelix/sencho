@@ -27,9 +27,15 @@ interface MoveFileDialogProps {
    *  destination rules are identical (the current parent stays disabled in both,
    *  so a same-folder copy goes through Duplicate, not this picker). */
   mode?: 'move' | 'copy';
+  /** Bulk mode: the rel paths of every selected source. When set, the dialog
+   *  validates the destination against all of them and calls onConfirmDestination
+   *  instead of onMove (the single relPath/entry props are ignored). */
+  bulkSourcePaths?: string[];
   /** Relocate or copy `fromRel` into `destDir` (''=stack root). Resolves true only
    *  when the action succeeded, so the dialog stays open on a blocked/failed run. */
   onMove: (fromRel: string, entryName: string, destDir: string) => boolean | Promise<boolean>;
+  /** Bulk confirm: move the whole selection into `destDir`. Resolves true on success. */
+  onConfirmDestination?: (destDir: string) => boolean | Promise<boolean>;
 }
 
 export function MoveFileDialog({
@@ -40,9 +46,13 @@ export function MoveFileDialog({
   entry,
   rootId,
   mode = 'move',
+  bulkSourcePaths,
   onMove,
+  onConfirmDestination,
 }: MoveFileDialogProps) {
   const isCopy = mode === 'copy';
+  // Treat an empty bulk list as not-bulk so the picker never enables a no-op move.
+  const bulkSources = bulkSourcePaths && bulkSourcePaths.length > 0 ? bulkSourcePaths : null;
   // Loaded directory children, keyed by directory rel path ('' = stack root).
   const [dirChildren, setDirChildren] = useState<Map<string, FileEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -59,6 +69,16 @@ export function MoveFileDialog({
   // (a no-op), the entry itself or a descendant (for a directory), or the stack
   // root when the entry's name is reserved at the root (compose/.env files).
   const isValidDest = (dir: string): boolean => {
+    if (bulkSources) {
+      // No destination inside or equal to any selected directory (would move a
+      // folder into its own subtree).
+      if (bulkSources.some((s) => isSameOrDescendantPath(s, dir))) return false;
+      // Not a no-op for the whole selection (every item already lives here).
+      if (bulkSources.every((s) => relPathParentDir(s) === dir)) return false;
+      // The stack root is reserved if any item carries a protected root name.
+      if (dir === '' && bulkSources.some((s) => isProtectedRootRelPath(s.split('/').pop() ?? s))) return false;
+      return true;
+    }
     if (!entry) return false;
     if (dir === currentParent) return false;
     if (entry.type === 'directory' && isSameOrDescendantPath(relPath, dir)) return false;
@@ -129,12 +149,17 @@ export function MoveFileDialog({
   };
 
   const handleMove = async () => {
-    if (!entry || selectedDest === null || !isValidDest(selectedDest)) return;
+    if (selectedDest === null || !isValidDest(selectedDest)) return;
     setMoving(true);
     try {
-      // Close only when the move actually succeeded; a blocked or failed move
+      // Close only when the action actually succeeded; a blocked or failed run
       // (handled and toasted upstream) leaves the picker open to retry.
-      if (await onMove(relPath, entry.name, selectedDest)) onOpenChange(false);
+      const ok = bulkSources
+        ? await onConfirmDestination?.(selectedDest)
+        : entry
+          ? await onMove(relPath, entry.name, selectedDest)
+          : false;
+      if (ok) onOpenChange(false);
     } finally {
       setMoving(false);
     }
@@ -215,7 +240,13 @@ export function MoveFileDialog({
       <ModalHeader
         kicker={`${stackName.toUpperCase()} · ${isCopy ? 'COPY' : 'MOVE'}`}
         title={isCopy ? 'Copy to…' : 'Move to…'}
-        description={entry ? `Choose a destination folder for ${entry.name}.` : 'Choose a destination folder.'}
+        description={
+          bulkSources
+            ? `Choose a destination folder for ${bulkSources.length} ${bulkSources.length === 1 ? 'item' : 'items'}.`
+            : entry
+              ? `Choose a destination folder for ${entry.name}.`
+              : 'Choose a destination folder.'
+        }
       />
       <ModalBody>
         <div className="rounded-md border border-glass-border max-h-72 overflow-y-auto p-1">

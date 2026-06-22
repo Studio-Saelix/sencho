@@ -419,6 +419,67 @@ describe('FileTree accessibility', () => {
   });
 });
 
+// ── bulk selection (checkbox + modifier clicks) ─────────────────────────────
+
+describe('FileTree bulk selection', () => {
+  it('Ctrl/Cmd+click toggles a row into the selection without opening it', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    const onSelectionChange = vi.fn();
+    render(<FileTree {...defaultProps()} selectedPaths={new Set()} onSelectionChange={onSelectionChange} />);
+    await screen.findByText('README.md');
+
+    fireEvent.click(rowFor('README.md'), { ctrlKey: true });
+    expect(onSelectionChange).toHaveBeenCalledWith(new Set(['README.md']));
+    // Modifier-click must not open the file in the viewer.
+    expect(onSelectFile).not.toHaveBeenCalled();
+  });
+
+  it('a checkbox click toggles selection without opening the row', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    const onSelectionChange = vi.fn();
+    const user = userEvent.setup();
+    render(<FileTree {...defaultProps()} selectedPaths={new Set()} onSelectionChange={onSelectionChange} />);
+    await screen.findByText('README.md');
+
+    await user.click(screen.getByLabelText('Select README.md'));
+    expect(onSelectionChange).toHaveBeenCalledWith(new Set(['README.md']));
+    expect(onSelectFile).not.toHaveBeenCalled();
+  });
+
+  it('Shift+click selects the contiguous range from the anchor in visible order', async () => {
+    mockLoadDir.mockReturnValue(fakeOk([makeFile('a.txt'), makeFile('b.txt'), makeFile('c.txt')]));
+    const onSelectionChange = vi.fn();
+    render(<FileTree {...defaultProps()} selectedPaths={new Set()} onSelectionChange={onSelectionChange} />);
+    await screen.findByText('a.txt');
+
+    // Ctrl+click sets the anchor on the first row.
+    fireEvent.click(rowFor('a.txt'), { ctrlKey: true });
+    // Shift+click the third row selects the whole a..c range.
+    fireEvent.click(rowFor('c.txt'), { shiftKey: true });
+    expect(onSelectionChange).toHaveBeenLastCalledWith(new Set(['a.txt', 'b.txt', 'c.txt']));
+    expect(onSelectFile).not.toHaveBeenCalled();
+  });
+
+  it('a plain click still opens the file and does not change the selection', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    const onSelectionChange = vi.fn();
+    render(<FileTree {...defaultProps()} selectedPaths={new Set()} onSelectionChange={onSelectionChange} />);
+    await screen.findByText('README.md');
+
+    fireEvent.click(rowFor('README.md'));
+    expect(onSelectFile).toHaveBeenCalledWith('README.md', expect.objectContaining({ name: 'README.md' }));
+    expect(onSelectionChange).not.toHaveBeenCalled();
+  });
+
+  it('reflects checkbox membership via aria-selected', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} selectedPaths={new Set(['README.md'])} onSelectionChange={vi.fn()} />);
+    await screen.findByText('README.md');
+    expect(rowFor('README.md')).toHaveAttribute('aria-selected', 'true');
+    expect(rowFor('src')).toHaveAttribute('aria-selected', 'false');
+  });
+});
+
 // ── drag-and-drop move ──────────────────────────────────────────────────────
 
 /** A minimal DataTransfer stand-in carrying our custom move payload (or an OS file drag). */

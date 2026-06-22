@@ -3,7 +3,9 @@ import { z } from 'zod';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { promises as fsp } from 'fs';
+import * as tar from 'tar-stream';
 import { inspect } from 'node:util';
 import YAML from 'yaml';
 import multer from 'multer';
@@ -35,6 +37,7 @@ import { StackOpLockService, type StackOpAction } from '../services/StackOpLockS
 import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
 import { FileExplorerMetricsService, type FileExplorerOp } from '../services/FileExplorerMetricsService';
 import { isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRelativeStackPath } from '../utils/validation';
+import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -2515,6 +2518,253 @@ stacksRouter.post('/:stackName/files/copy', async (req: Request, res: Response) 
     });
     recordFileOp(req.nodeId, 'copy', startedAt, false);
     return sendFsError(res, err, 'Failed to copy');
+  }
+});
+
+// ── Bulk file operations (delete / move / download) ─────────────────────────
+
+const MAX_BULK = 100; // selected paths accepted per bulk request
+const MAX_ARCHIVE_ENTRIES = 5000; // files packed into one bulk-download archive
+const MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024; // 1 GiB uncompressed cap
+
+/**
+ * Helper-backed named volumes are Linux containers (case-sensitive). Filesystem
+ * roots follow the host: Windows/macOS fold case, Linux does not.
+ */
+function rootCaseSensitive(root: StackFileRoot): boolean {
+  if (root.backend === 'helper') return true;
+  return process.platform !== 'win32' && process.platform !== 'darwin';
+}
+
+/** Validate a bulk path array; sends the 400 and returns null on any problem. */
+function parseBulkPaths(value: unknown, res: Response): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    res.status(400).json({ error: 'A non-empty list of paths is required' });
+    return null;
+  }
+  if (value.length > MAX_BULK) {
+    res.status(400).json({ error: `Select at most ${MAX_BULK} items at once`, code: 'TOO_MANY' });
+    return null;
+  }
+  const out: string[] = [];
+  for (const p of value) {
+    if (typeof p !== 'string' || p === '' || !isValidRelativeStackPath(p)) {
+      res.status(400).json({ error: 'Invalid path in selection', code: 'INVALID_PATH' satisfies FsErrorCode });
+      return null;
+    }
+    out.push(p);
+  }
+  return out;
+}
+
+/** A clean per-item failure message for a bulk result, mapping the opaque
+ *  filesystem codes that carry no friendly message of their own. */
+function bulkItemError(err: unknown): string {
+  const e = err as Error & { code?: string };
+  switch (e.code) {
+    case 'EXDEV': return 'Cannot move across a storage boundary';
+    case 'EEXIST': return 'A file or folder with that name already exists';
+    case 'ENOENT': return 'No longer exists';
+    case 'EISDIR': case 'ENOTDIR': return 'Path type changed';
+    default: return e.message || e.code || 'Operation failed';
+  }
+}
+
+function archiveTooLargeError(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: 'ARCHIVE_TOO_LARGE' });
+}
+
+/**
+ * Walk the normalized selection and return every file to pack, enforcing the
+ * entry and byte caps. Throws ARCHIVE_TOO_LARGE if either cap is exceeded (or an
+ * fs directory listing is truncated), so the caller can 413 before any archive
+ * byte is streamed. File sizes come from listDir; every directory is stat-ed once
+ * (the walk recurses into each), but individual files in a listing are not re-stat-ed.
+ */
+async function enumerateArchiveFiles(
+  gateway: FileRootGateway,
+  root: StackFileRoot,
+  stackName: string,
+  selection: string[],
+): Promise<string[]> {
+  const files: string[] = [];
+  let totalBytes = 0;
+  const addFile = (relPath: string, size: number): void => {
+    files.push(relPath);
+    totalBytes += size;
+    if (files.length > MAX_ARCHIVE_ENTRIES) throw archiveTooLargeError('The selection has too many files to download');
+    if (totalBytes > MAX_ARCHIVE_BYTES) throw archiveTooLargeError('The selection is too large to download');
+  };
+  const visit = async (relPath: string): Promise<void> => {
+    const st = await gateway.stat(root, stackName, relPath);
+    if (st.type !== 'directory') {
+      addFile(relPath, st.size);
+      return;
+    }
+    // Request one over the remaining budget so a directory that would push us one
+    // entry past the cap is detected: the overflow entry reaches addFile (which
+    // throws on >), or for larger directories the fs listing reports truncated.
+    const remaining = MAX_ARCHIVE_ENTRIES - files.length + 1;
+    const { entries, truncated } = await gateway.listDir(root, stackName, relPath, remaining);
+    if (truncated) throw archiveTooLargeError('A selected folder has too many files to download');
+    for (const entry of entries) {
+      const childRel = `${relPath}/${entry.name}`;
+      if (entry.type === 'directory') await visit(childRel);
+      else addFile(childRel, entry.size);
+    }
+  };
+  for (const p of selection) await visit(p);
+  return files;
+}
+
+stacksRouter.post('/:stackName/files/bulk-delete', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const parsed = parseBulkPaths((req.body as { paths?: unknown }).paths, res);
+  if (!parsed) return;
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
+  const normalized = normalizeBulkPaths(parsed, rootCaseSensitive(root));
+  const gateway = FileRootGateway.getInstance(req.nodeId);
+  const deleted: string[] = [];
+  const failed: { path: string; error: string }[] = [];
+  for (const relPath of normalized) {
+    const startedAt = Date.now();
+    try {
+      await gateway.deletePath(root, stackName, relPath, true);
+      deleted.push(relPath);
+      recordFileOp(req.nodeId, 'delete', startedAt, true);
+    } catch (err: unknown) {
+      failed.push({ path: relPath, error: bulkItemError(err) });
+      recordFileOp(req.nodeId, 'delete', startedAt, false);
+    }
+  }
+  // Partial-success: invalidate the roots cache if anything actually changed.
+  if (deleted.length > 0) afterStackMutation(req, stackName);
+  logFileOperation('info', 'mutate', { nodeId: req.nodeId, op: 'bulkDelete', stack: stackName, deleted: deleted.length, failed: failed.length, rootKind: root.kind, backend: root.backend });
+  return res.json({ deleted, failed });
+});
+
+stacksRouter.post('/:stackName/files/bulk-move', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const body = req.body as { from?: unknown; toDir?: unknown };
+  const parsed = parseBulkPaths(body.from, res);
+  if (!parsed) return;
+  if (typeof body.toDir !== 'string') {
+    return res.status(400).json({ error: '"toDir" must be a string (use "" for the root)' });
+  }
+  const toDir = body.toDir;
+  if (toDir !== '' && !isValidRelativeStackPath(toDir)) {
+    return res.status(400).json({ error: 'Invalid destination', code: 'INVALID_PATH' satisfies FsErrorCode });
+  }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
+  const caseSensitive = rootCaseSensitive(root);
+  const normalized = normalizeBulkPaths(parsed, caseSensitive);
+  // Reject the whole request if the destination is one of the moved folders or
+  // sits inside one (which would move a folder into its own subtree).
+  if (destWithinAnySource(toDir, normalized, caseSensitive)) {
+    return res.status(400).json({ error: 'Cannot move the selection into itself', code: 'INVALID_PATH' satisfies FsErrorCode });
+  }
+  const gateway = FileRootGateway.getInstance(req.nodeId);
+  const moved: string[] = [];
+  const failed: { path: string; error: string }[] = [];
+  for (const fromRel of normalized) {
+    const startedAt = Date.now();
+    const name = fromRel.split('/').pop() as string;
+    const toRel = toDir ? `${toDir}/${name}` : name;
+    try {
+      await gateway.rename(root, stackName, fromRel, toRel);
+      moved.push(fromRel);
+      recordFileOp(req.nodeId, 'rename', startedAt, true);
+    } catch (err: unknown) {
+      failed.push({ path: fromRel, error: bulkItemError(err) });
+      recordFileOp(req.nodeId, 'rename', startedAt, false);
+    }
+  }
+  if (moved.length > 0) afterStackMutation(req, stackName);
+  logFileOperation('info', 'mutate', { nodeId: req.nodeId, op: 'bulkMove', stack: stackName, moved: moved.length, failed: failed.length, rootKind: root.kind, backend: root.backend });
+  return res.json({ moved, failed });
+});
+
+stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  const raw = req.query.path;
+  const list = Array.isArray(raw) ? raw : raw !== undefined ? [raw] : [];
+  const parsed = parseBulkPaths(list, res);
+  if (!parsed) return;
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
+  const gateway = FileRootGateway.getInstance(req.nodeId);
+  const normalized = normalizeBulkPaths(parsed, rootCaseSensitive(root));
+  const startedAt = Date.now();
+
+  // Prewalk + cap enforcement BEFORE any response header is sent, so a too-large
+  // selection fails as a clean 413 rather than a truncated archive.
+  let files: string[];
+  try {
+    files = await enumerateArchiveFiles(gateway, root, stackName, normalized);
+  } catch (err: unknown) {
+    recordFileOp(req.nodeId, 'download', startedAt, false);
+    if ((err as { code?: string }).code === 'ARCHIVE_TOO_LARGE') {
+      return res.status(413).json({ error: (err as Error).message, code: 'TOO_LARGE' });
+    }
+    return sendFsError(res, err, 'Failed to prepare download');
+  }
+  if (files.length === 0) {
+    recordFileOp(req.nodeId, 'download', startedAt, false);
+    return res.status(404).json({ error: 'Nothing to download', code: 'NOT_FOUND' satisfies FsErrorCode });
+  }
+
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Disposition', `attachment; filename="${stackName}-files.tar.gz"`);
+  const pack = tar.pack();
+  const gzip = zlib.createGzip();
+  const onStreamError = (err: Error): void => {
+    logFileOperation('warn', 'bulk download stream error', { nodeId: req.nodeId, stack: stackName, errorCode: fsErrorCode(err) });
+    if (!res.writableEnded) res.destroy();
+  };
+  pack.on('error', onStreamError);
+  gzip.on('error', onStreamError);
+  // If the client aborts mid-download, stop fetching the remaining files (each
+  // helper-volume read is a container exec) instead of streaming into a dead pipe.
+  let aborted = false;
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      aborted = true;
+      pack.destroy();
+    }
+  });
+  pack.pipe(gzip).pipe(res);
+
+  try {
+    for (const relPath of files) {
+      if (aborted) break;
+      const dl = await gateway.download(root, stackName, relPath);
+      if (dl.kind === 'buffer') {
+        await new Promise<void>((resolve, reject) => {
+          pack.entry({ name: relPath }, dl.buffer, (err) => (err ? reject(err) : resolve()));
+        });
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          const entry = pack.entry({ name: relPath, size: dl.size }, (err) => (err ? reject(err) : resolve()));
+          dl.stream.on('error', reject);
+          entry.on('error', reject);
+          dl.stream.pipe(entry);
+        });
+      }
+    }
+    pack.finalize();
+    recordFileOp(req.nodeId, 'download', startedAt, true);
+  } catch (err: unknown) {
+    // Headers are already sent, so surface the failure by tearing the stream
+    // down rather than trying to change the status.
+    logFileOperation('warn', 'bulk download failed mid-stream', { nodeId: req.nodeId, stack: stackName, errorCode: fsErrorCode(err) });
+    recordFileOp(req.nodeId, 'download', startedAt, false);
+    pack.destroy();
+    if (!res.writableEnded) res.destroy();
   }
 });
 

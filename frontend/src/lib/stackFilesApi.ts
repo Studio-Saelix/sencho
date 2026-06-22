@@ -420,6 +420,61 @@ export async function copyStackFile(
   if (!res.ok) throw new Error(await parseApiError(res));
 }
 
+/** A failed item in a partial-success bulk operation. */
+export interface BulkFailure {
+  path: string;
+  error: string;
+}
+export interface BulkDeleteResult {
+  deleted: string[];
+  failed: BulkFailure[];
+}
+export interface BulkMoveResult {
+  moved: string[];
+  failed: BulkFailure[];
+}
+
+export async function bulkDeleteStackPaths(stackName: string, paths: string[], rootId?: string): Promise<BulkDeleteResult> {
+  const res = await apiFetch(
+    stackFilesUrl(stackName, `/bulk-delete${rootId ? `?rootId=${encodeURIComponent(rootId)}` : ''}`),
+    { method: 'POST', body: JSON.stringify({ paths }) }
+  );
+  if (!res.ok) throw new Error(await parseApiError(res));
+  return res.json() as Promise<BulkDeleteResult>;
+}
+
+export async function bulkMoveStackPaths(stackName: string, from: string[], toDir: string, rootId?: string): Promise<BulkMoveResult> {
+  const res = await apiFetch(
+    stackFilesUrl(stackName, `/bulk-move${rootId ? `?rootId=${encodeURIComponent(rootId)}` : ''}`),
+    { method: 'POST', body: JSON.stringify({ from, toDir }) }
+  );
+  if (!res.ok) throw new Error(await parseApiError(res));
+  return res.json() as Promise<BulkMoveResult>;
+}
+
+/** GET the bulk-download archive (repeated ?path= so read-only API tokens work). */
+export async function bulkDownloadStackFiles(stackName: string, paths: string[], rootId?: string): Promise<Response> {
+  const query = paths.map((p) => `path=${encodeURIComponent(p)}`).join('&');
+  const suffix = rootId ? `&rootId=${encodeURIComponent(rootId)}` : '';
+  return apiFetch(stackFilesUrl(stackName, `/bulk-download?${query}${suffix}`));
+}
+
+/**
+ * Drop any selected path whose ancestor is also selected (so a folder and a file
+ * inside it are not both acted on). A UX convenience; the backend re-normalizes
+ * authoritatively (with per-root case-awareness), so this is not the boundary.
+ */
+export function normalizeSelection(paths: string[]): string[] {
+  const set = new Set(paths);
+  return [...set].filter((p) => {
+    const segments = p.split('/');
+    for (let i = 1; i < segments.length; i++) {
+      if (set.has(segments.slice(0, i).join('/'))) return false;
+    }
+    return true;
+  });
+}
+
 export interface EntryPermissions {
   mode: number;
   octal: string;

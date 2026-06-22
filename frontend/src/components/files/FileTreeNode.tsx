@@ -28,6 +28,15 @@ interface FileTreeNodeProps {
   registerRef: (relPath: string, el: HTMLDivElement | null) => void;
   /** Keep the parent's active node in sync when this row gains focus (click/Tab). */
   onFocusNode: (relPath: string) => void;
+  // Bulk selection wiring (checkbox + modifier-clicks; the parent owns the set).
+  /** Whether this row is in the bulk selection. */
+  isChecked: boolean;
+  /** True while any row is selected, so checkboxes stay visible (not hover-only). */
+  selectionActive: boolean;
+  /** Toggle this row in the selection (checkbox click or Ctrl/Cmd+click). */
+  onToggleSelect: () => void;
+  /** Select the range from the selection anchor to this row (Shift+click). */
+  onRangeSelect: () => void;
   // Context menu wiring
   canEdit: boolean;
   onContextMenuRename: (relPath: string) => void;
@@ -53,6 +62,10 @@ export function FileTreeNode({
   isActive,
   registerRef,
   onFocusNode,
+  isChecked,
+  selectionActive,
+  onToggleSelect,
+  onRangeSelect,
   canEdit,
   onContextMenuRename,
   onContextMenuMove,
@@ -126,7 +139,7 @@ export function FileTreeNode({
         ref={(el) => registerRef(relPath, el)}
         role="treeitem"
         aria-level={depth + 1}
-        aria-selected={isSelected}
+        aria-selected={isSelected || isChecked}
         aria-expanded={isDir ? isExpanded : undefined}
         tabIndex={isActive ? 0 : -1}
         draggable={canDrag}
@@ -134,7 +147,19 @@ export function FileTreeNode({
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        onClick={onClick}
+        onClick={(e) => {
+          // Shift / Ctrl / Cmd clicks drive bulk selection (never open the file);
+          // a plain click opens it in the viewer as before.
+          if (e.shiftKey) {
+            e.preventDefault();
+            onRangeSelect();
+          } else if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            onToggleSelect();
+          } else {
+            onClick();
+          }
+        }}
         onFocus={() => onFocusNode(relPath)}
         onKeyDown={(e) => {
           // Enter/Space activate the row; arrow/Home/End navigation is owned by
@@ -145,7 +170,7 @@ export function FileTreeNode({
           }
         }}
         className={cn(
-          'flex items-center gap-1.5 py-0.5 cursor-pointer select-none rounded-sm',
+          'group flex items-center gap-1.5 py-0.5 cursor-pointer select-none rounded-sm',
           isSelected
             ? 'bg-accent text-accent-foreground'
             : 'hover:bg-accent/50 text-foreground',
@@ -153,6 +178,19 @@ export function FileTreeNode({
         )}
         style={{ paddingLeft: depth * 16 + 8 }}
       >
+        <input
+          type="checkbox"
+          checked={isChecked}
+          // Stop the row's click/keydown from also opening or navigating.
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+          onChange={() => onToggleSelect()}
+          aria-label={`Select ${entry.name}`}
+          className={cn(
+            'h-3 w-3 shrink-0 accent-accent-foreground cursor-pointer',
+            !isChecked && !selectionActive && 'opacity-0 group-hover:opacity-100 focus:opacity-100',
+          )}
+        />
         {isDir && (
           isLoading
             ? <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" strokeWidth={1.5} />

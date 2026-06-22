@@ -39,7 +39,14 @@ interface FileTreeProps {
   onContextMenuPermissions?: (relPath: string, entry: FileEntry) => void;
   /** Relocate `fromRel` into `destDir` (''=stack root) via drag-and-drop. */
   onMove?: (fromRel: string, entryName: string, destDir: string) => void;
+  /** Current bulk selection (rel paths). Drives the per-row checkboxes. Read-only
+   *  here; FileTree emits the next set via onSelectionChange. */
+  selectedPaths?: ReadonlySet<string>;
+  /** Emit the next bulk selection after a checkbox click or modifier-click. */
+  onSelectionChange?: (next: Set<string>) => void;
 }
+
+const EMPTY_SELECTION: ReadonlySet<string> = new Set<string>();
 
 const COMPOSE_NAMES = new Set(['compose.yaml', 'compose.yml']);
 const ENV_NAMES = new Set(['.env']);
@@ -67,6 +74,8 @@ export function FileTree({
   onContextMenuDelete = () => undefined,
   onContextMenuPermissions = () => undefined,
   onMove = () => undefined,
+  selectedPaths = EMPTY_SELECTION,
+  onSelectionChange = () => undefined,
 }: FileTreeProps) {
   const [rootEntries, setRootEntries] = useState<FileEntry[] | null>(null);
   const [rootLoading, setRootLoading] = useState(true);
@@ -84,6 +93,8 @@ export function FileTree({
   const [activeRelPath, setActiveRelPath] = useState<string | null>(null);
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const shouldFocusRef = useRef(false);
+  // Anchor for Shift+click range selection (the last row toggled on its own).
+  const selectionAnchorRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (shouldFocusRef.current && activeRelPath) {
@@ -291,6 +302,32 @@ export function FileTree({
     setActiveRelPath(relPath);
   };
 
+  // Toggle one row in the bulk selection (checkbox or Ctrl/Cmd+click) and set the
+  // range anchor to it.
+  const handleToggleSelect = (relPath: string) => {
+    selectionAnchorRef.current = relPath;
+    const next = new Set(selectedPaths);
+    if (next.has(relPath)) next.delete(relPath);
+    else next.add(relPath);
+    onSelectionChange(next);
+  };
+
+  // Add the contiguous range from the anchor (or this row, if none) to this row,
+  // using the flattened visible order so it matches what the user sees.
+  const handleRangeSelect = (relPath: string) => {
+    const order = visibleNodes.map((n) => n.relPath);
+    const anchor = selectionAnchorRef.current && order.includes(selectionAnchorRef.current)
+      ? selectionAnchorRef.current
+      : relPath;
+    const from = order.indexOf(anchor);
+    const to = order.indexOf(relPath);
+    if (from === -1 || to === -1) return;
+    const [lo, hi] = from <= to ? [from, to] : [to, from];
+    const next = new Set(selectedPaths);
+    for (let k = lo; k <= hi; k++) next.add(order[k]);
+    onSelectionChange(next);
+  };
+
   function handleTreeKeyDown(e: KeyboardEvent<HTMLDivElement>) {
     if (visibleNodes.length === 0) return;
     const idx = visibleNodes.findIndex(n => n.relPath === activeKey);
@@ -365,6 +402,10 @@ export function FileTree({
                 isActive={entryRelPath === activeKey}
                 registerRef={registerNodeRef}
                 onFocusNode={handleFocusNode}
+                isChecked={selectedPaths.has(entryRelPath)}
+                selectionActive={selectedPaths.size > 0}
+                onToggleSelect={() => handleToggleSelect(entryRelPath)}
+                onRangeSelect={() => handleRangeSelect(entryRelPath)}
                 isSelected={selectedPath === entryRelPath}
                 isExpanded={isExpanded}
                 isLoading={isLoading}

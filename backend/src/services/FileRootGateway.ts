@@ -174,6 +174,14 @@ export class FileRootGateway {
     return this.fs().pathKind(stackName, relPath, this.scopeFor(root));
   }
 
+  /** Stat a single entry (type + size). Used by bulk download to size the archive. */
+  async stat(root: StackFileRoot, stackName: string, relPath: string): Promise<FileEntry> {
+    if (root.backend === 'helper') {
+      return volumeEntryToFileEntry(await this.helper().stat(root.hostPathOrName, relPath));
+    }
+    return this.fs().statStackEntry(stackName, relPath, this.scopeFor(root));
+  }
+
   /**
    * Upload write sourced from a temp file spooled to disk (multer diskStorage),
    * so the upload is never buffered in memory. `exclusive` rejects an existing

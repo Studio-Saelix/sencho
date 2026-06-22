@@ -20,9 +20,41 @@ import request from 'supertest';
 import bcrypt from 'bcrypt';
 import { promises as fs } from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { Readable } from 'stream';
+import * as tar from 'tar-stream';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import type { StackFileRoot } from '../services/StackFileRootsService';
+
+/** Gunzip + untar a bulk-download response body into a { entryName: contents } map. */
+async function extractTarGz(buf: Buffer): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const extract = tar.extract();
+  await new Promise<void>((resolve, reject) => {
+    extract.on('entry', (header, stream, next) => {
+      const chunks: Buffer[] = [];
+      stream.on('data', (c: Buffer) => chunks.push(c));
+      stream.on('end', () => { out[header.name] = Buffer.concat(chunks).toString('utf-8'); next(); });
+      stream.on('error', reject);
+    });
+    extract.on('finish', () => resolve());
+    extract.on('error', reject);
+    extract.end(zlib.gunzipSync(buf));
+  });
+  return out;
+}
+
+/**
+ * supertest parser that buffers a binary response body. supertest types the
+ * parser's first arg as its Response while passing the raw readable stream at
+ * runtime, so the function is cast to supertest's own parser parameter type.
+ */
+const binaryParser = ((res: NodeJS.ReadableStream, cb: (err: Error | null, body: Buffer) => void): void => {
+  const chunks: Buffer[] = [];
+  res.on('data', (c: Buffer) => chunks.push(Buffer.from(c)));
+  res.on('end', () => cb(null, Buffer.concat(chunks)));
+  res.on('error', (err: Error) => cb(err, Buffer.alloc(0)));
+}) as unknown as Parameters<ReturnType<typeof request>['parse']>[0];
 
 // On Windows, fs.unlink on a directory returns EPERM instead of EISDIR so the
 // NOT_EMPTY code path in deleteStackPath is never reached. Skip that test case
@@ -1392,6 +1424,246 @@ describe('POST /api/stacks/:stackName/files/copy', () => {
       .send({ from: '../escape.txt', to: 'x.txt' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_PATH');
+  });
+});
+
+// ── Bulk operations: delete / move / download ────────────────────────────────
+
+describe('POST /api/stacks/:stackName/files/bulk-delete', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).post(`/api/stacks/${STACK}/files/bulk-delete`).send({ paths: ['a.txt'] });
+    expect(res.status).toBe(401);
+  });
+
+  it('viewer receives 403', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-delete`)
+      .set('Cookie', viewerCookie)
+      .send({ paths: ['a.txt'] });
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an empty or oversized selection with 400', async () => {
+    const empty = await request(app).post(`/api/stacks/${STACK}/files/bulk-delete`).set('Cookie', adminCookie).send({ paths: [] });
+    expect(empty.status).toBe(400);
+    const tooMany = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-delete`)
+      .set('Cookie', adminCookie)
+      .send({ paths: Array.from({ length: 101 }, (_, i) => `f${i}.txt`) });
+    expect(tooMany.status).toBe(400);
+    expect(tooMany.body.code).toBe('TOO_MANY');
+  });
+
+  it('rejects a selection containing an invalid path with 400', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-delete`)
+      .set('Cookie', adminCookie)
+      .send({ paths: ['ok.txt', '../escape'] });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PATH');
+  });
+
+  it('deletes multiple files and reports per-item results', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'bd1.txt'), '1');
+    await fs.writeFile(path.join(stacksDir, STACK, 'bd2.txt'), '2');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-delete`)
+      .set('Cookie', adminCookie)
+      .send({ paths: ['bd1.txt', 'bd2.txt', 'missing.txt'] });
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toEqual(expect.arrayContaining(['bd1.txt', 'bd2.txt']));
+    expect(res.body.failed).toHaveLength(1);
+    expect(res.body.failed[0].path).toBe('missing.txt');
+    await expect(fs.access(path.join(stacksDir, STACK, 'bd1.txt'))).rejects.toThrow();
+  });
+
+  it('deletes a non-empty folder recursively', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'bdir/sub'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'bdir/sub/x.txt'), 'x');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-delete`)
+      .set('Cookie', adminCookie)
+      .send({ paths: ['bdir'] });
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toEqual(['bdir']);
+    await expect(fs.access(path.join(stacksDir, STACK, 'bdir'))).rejects.toThrow();
+  });
+
+  it('reports a protected file as a per-item failure, not a thrown request', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-delete`)
+      .set('Cookie', adminCookie)
+      .send({ paths: ['compose.yaml'] });
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toEqual([]);
+    expect(res.body.failed[0].path).toBe('compose.yaml');
+    // compose.yaml must survive.
+    expect(await fs.readFile(path.join(stacksDir, STACK, 'compose.yaml'), 'utf-8')).toContain('services');
+  });
+
+  it('normalizes a directly-submitted ancestor+descendant selection (no double-process)', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'ndir'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'ndir/child.txt'), 'c');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-delete`)
+      .set('Cookie', adminCookie)
+      .send({ paths: ['ndir', 'ndir/child.txt'] });
+    expect(res.status).toBe(200);
+    // Only the ancestor is acted on; the descendant is dropped, so no spurious failure.
+    expect(res.body.deleted).toEqual(['ndir']);
+    expect(res.body.failed).toEqual([]);
+  });
+
+  it('returns 403 for a read-only root before deleting', async () => {
+    const readonlyRoot: StackFileRoot = {
+      id: 'bind:robd', kind: 'bind', label: '/ro', hostPathOrName: path.join(stacksDir, 'ro'),
+      mounts: [{ service: 'app', containerPath: '/ro', readOnly: true }],
+      readonly: true, accessible: true, browsable: true, writable: false,
+      chmodable: false, dangerous: false, managedSourceOverlap: false,
+      warning: 'This location is read-only.', backend: 'fs',
+    };
+    const { StackFileRootsService } = await import('../services/StackFileRootsService');
+    const spy = vi.spyOn(StackFileRootsService.prototype, 'resolveRoot').mockResolvedValue(readonlyRoot);
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-delete`)
+      .query({ rootId: 'bind:robd' })
+      .set('Cookie', adminCookie)
+      .send({ paths: ['x.txt'] });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('READONLY_ROOT');
+    spy.mockRestore();
+  });
+});
+
+describe('POST /api/stacks/:stackName/files/bulk-move', () => {
+  it('moves multiple entries into a destination folder', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'bmdest'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'bm1.txt'), '1');
+    await fs.writeFile(path.join(stacksDir, STACK, 'bm2.txt'), '2');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-move`)
+      .set('Cookie', adminCookie)
+      .send({ from: ['bm1.txt', 'bm2.txt'], toDir: 'bmdest' });
+    expect(res.status).toBe(200);
+    expect(res.body.moved).toEqual(expect.arrayContaining(['bm1.txt', 'bm2.txt']));
+    expect(await fs.readFile(path.join(stacksDir, STACK, 'bmdest/bm1.txt'), 'utf-8')).toBe('1');
+    await fs.rm(path.join(stacksDir, STACK, 'bmdest'), { recursive: true, force: true });
+  });
+
+  it('reports a same-name collision at the destination as a per-item failure', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'bmd2'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'bmcol.txt'), 'src');
+    await fs.writeFile(path.join(stacksDir, STACK, 'bmd2/bmcol.txt'), 'existing');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-move`)
+      .set('Cookie', adminCookie)
+      .send({ from: ['bmcol.txt'], toDir: 'bmd2' });
+    expect(res.status).toBe(200);
+    expect(res.body.moved).toEqual([]);
+    expect(res.body.failed[0].path).toBe('bmcol.txt');
+    await fs.rm(path.join(stacksDir, STACK, 'bmd2'), { recursive: true, force: true });
+    await fs.unlink(path.join(stacksDir, STACK, 'bmcol.txt'));
+  });
+
+  it('rejects the whole request when the destination is inside a selected folder (400)', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'bmself/sub'), { recursive: true });
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/bulk-move`)
+      .set('Cookie', adminCookie)
+      .send({ from: ['bmself'], toDir: 'bmself/sub' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PATH');
+    await fs.rm(path.join(stacksDir, STACK, 'bmself'), { recursive: true, force: true });
+  });
+});
+
+describe('GET /api/stacks/:stackName/files/bulk-download', () => {
+  it('streams a .tar.gz of the selection (viewer/read access), de-duplicating nested paths', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'dl/sub'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'dl/sub/deep.txt'), 'deep');
+    await fs.writeFile(path.join(stacksDir, STACK, 'dl-top.txt'), 'top');
+    // Select the dir, a file inside it (redundant), and a top-level file.
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/bulk-download`)
+      .query({ path: ['dl', 'dl/sub/deep.txt', 'dl-top.txt'] })
+      .set('Cookie', viewerCookie) // a read-only viewer can download
+      .buffer(true)
+      .parse(binaryParser);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toContain('.tar.gz');
+    const entries = await extractTarGz(res.body as Buffer);
+    // Nested selection de-duplicated: deep.txt appears once, under its dir path.
+    expect(entries['dl/sub/deep.txt']).toBe('deep');
+    expect(entries['dl-top.txt']).toBe('top');
+    expect(Object.keys(entries)).toHaveLength(2);
+    // Tar entry names are relative POSIX paths (no leading slash, no '..').
+    for (const name of Object.keys(entries)) {
+      expect(name.startsWith('/')).toBe(false);
+      expect(name.includes('..')).toBe(false);
+    }
+    await fs.rm(path.join(stacksDir, STACK, 'dl'), { recursive: true, force: true });
+    await fs.unlink(path.join(stacksDir, STACK, 'dl-top.txt'));
+  });
+
+  it('lets a viewer download but not bulk-delete or bulk-move', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'v.txt'), 'v');
+    const dl = await request(app)
+      .get(`/api/stacks/${STACK}/files/bulk-download`)
+      .query({ path: ['v.txt'] })
+      .set('Cookie', viewerCookie)
+      .buffer(true)
+      .parse(binaryParser);
+    expect(dl.status).toBe(200);
+    const del = await request(app).post(`/api/stacks/${STACK}/files/bulk-delete`).set('Cookie', viewerCookie).send({ paths: ['v.txt'] });
+    expect(del.status).toBe(403);
+    const mv = await request(app).post(`/api/stacks/${STACK}/files/bulk-move`).set('Cookie', viewerCookie).send({ from: ['v.txt'], toDir: '' });
+    expect(mv.status).toBe(403);
+    await fs.unlink(path.join(stacksDir, STACK, 'v.txt'));
+  });
+
+  // The helper (named-volume) bulk path (rootCaseSensitive helper branch,
+  // FileRootGateway.stat/download helper branch) runs an Alpine container per
+  // file and is validated on Linux / CI, not on this workstation.
+
+  it('returns 413 when the total byte cap is exceeded', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'big.bin'), 'x');
+    const { FileRootGateway } = await import('../services/FileRootGateway');
+    const spy = vi.spyOn(FileRootGateway.prototype, 'stat').mockResolvedValue({
+      name: 'big.bin', type: 'file', size: 2 * 1024 * 1024 * 1024, mtime: 0, isProtected: false,
+    });
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/bulk-download`)
+      .query({ path: ['big.bin'] })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(413);
+    expect(res.body.code).toBe('TOO_LARGE');
+    spy.mockRestore();
+    await fs.unlink(path.join(stacksDir, STACK, 'big.bin'));
+  });
+
+  it('returns 413 (before any archive byte) when the entry cap is exceeded', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'huge'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'huge/a.txt'), 'a');
+    // A truncated directory listing means more entries than the archive cap.
+    const { FileRootGateway } = await import('../services/FileRootGateway');
+    const spy = vi.spyOn(FileRootGateway.prototype, 'listDir').mockResolvedValue({
+      entries: [{ name: 'a.txt', type: 'file', size: 1, mtime: 0, isProtected: false }],
+      total: 999999,
+      truncated: true,
+    });
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/bulk-download`)
+      .query({ path: ['huge'] })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(413);
+    expect(res.body.code).toBe('TOO_LARGE');
+    spy.mockRestore();
+    await fs.rm(path.join(stacksDir, STACK, 'huge'), { recursive: true, force: true });
+  });
+
+  it('rejects an empty selection with 400', async () => {
+    const res = await request(app).get(`/api/stacks/${STACK}/files/bulk-download`).set('Cookie', adminCookie);
+    expect(res.status).toBe(400);
   });
 });
 
