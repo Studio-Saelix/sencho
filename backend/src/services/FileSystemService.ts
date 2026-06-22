@@ -1085,16 +1085,23 @@ export class FileSystemService {
         }
         suffix.unshift(path.basename(existing));
         existing = parent;
-        // Inline js/path-injection barrier for the realpath sink below: existing
-        // is an ancestor of the already-contained target. Resolve the root itself
-        // via the untainted base so the only tainted realpath input is one the
-        // startsWith check has confirmed lives within the root.
-        if (existing !== baseResolved && !existing.startsWith(baseResolved + path.sep)) {
+        if (existing === baseResolved) {
+          // Reached the root: realpath the untainted base (never a tainted input)
+          // and reattach the not-yet-existing suffix.
+          const realBase = await fsPromises.realpath(baseResolved);
+          if (!isPathWithinBase(realBase, rootAbsDir)) {
+            throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
+          }
+          realTarget = path.join(realBase, ...suffix);
+          break;
+        }
+        // Inline js/path-injection barrier: existing is now strictly below the
+        // root, so the canonical path.resolve + startsWith form credits the sink.
+        if (!existing.startsWith(baseResolved + path.sep)) {
           throw Object.assign(new Error('Path escapes root directory'), { code: 'INVALID_PATH' });
         }
-        const probe = existing === baseResolved ? baseResolved : existing;
         try {
-          const realExisting = await fsPromises.realpath(probe);
+          const realExisting = await fsPromises.realpath(existing);
           if (!isPathWithinBase(realExisting, rootAbsDir)) {
             throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
           }
