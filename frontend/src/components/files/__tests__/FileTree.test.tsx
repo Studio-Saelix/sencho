@@ -251,6 +251,174 @@ describe('FileTree', () => {
   });
 });
 
+// ── accessibility: tree roles + keyboard navigation ────────────────────────
+
+describe('FileTree accessibility', () => {
+  it('exposes a tree with treeitem rows carrying level and selected state', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} selectedPath="README.md" />);
+
+    await screen.findByText('src');
+    expect(screen.getByRole('tree', { name: /files/i })).toBeInTheDocument();
+    const items = screen.getAllByRole('treeitem');
+    expect(items.length).toBe(2);
+    // aria-level is 1-based at the root.
+    expect(rowFor('src')).toHaveAttribute('aria-level', '1');
+    // The selected file reports aria-selected.
+    expect(rowFor('README.md')).toHaveAttribute('aria-selected', 'true');
+    expect(rowFor('src')).toHaveAttribute('aria-selected', 'false');
+  });
+
+  it('uses roving tabindex: only one row is tabbable at a time', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} selectedPath="README.md" />);
+
+    await screen.findByText('src');
+    // The selected row is the roving focus, so it holds tabIndex 0; the other -1.
+    expect(rowFor('README.md')).toHaveAttribute('tabindex', '0');
+    expect(rowFor('src')).toHaveAttribute('tabindex', '-1');
+  });
+
+  it('moves focus with ArrowDown/ArrowUp and jumps with Home/End', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+
+    const tree = screen.getByRole('tree');
+    // No prior selection: the first node is the roving target.
+    expect(rowFor('src')).toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(tree, { key: 'ArrowDown' });
+    await waitFor(() => expect(rowFor('README.md')).toHaveFocus());
+    expect(rowFor('README.md')).toHaveAttribute('tabindex', '0');
+    expect(rowFor('src')).toHaveAttribute('tabindex', '-1');
+
+    fireEvent.keyDown(tree, { key: 'ArrowUp' });
+    await waitFor(() => expect(rowFor('src')).toHaveFocus());
+
+    fireEvent.keyDown(tree, { key: 'End' });
+    await waitFor(() => expect(rowFor('README.md')).toHaveFocus());
+
+    fireEvent.keyDown(tree, { key: 'Home' });
+    await waitFor(() => expect(rowFor('src')).toHaveFocus());
+  });
+
+  it('expands a collapsed directory with ArrowRight and collapses it with ArrowLeft', async () => {
+    mockLoadDir
+      .mockReturnValueOnce(fakeOk(ROOT_ENTRIES))
+      .mockReturnValueOnce(fakeOk(SRC_ENTRIES));
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+
+    const tree = screen.getByRole('tree');
+    // src is the first (roving) node; ArrowRight expands it.
+    fireEvent.keyDown(tree, { key: 'ArrowRight' });
+    expect(await screen.findByText('index.ts')).toBeInTheDocument();
+    expect(rowFor('src')).toHaveAttribute('aria-expanded', 'true');
+
+    // ArrowLeft on the expanded directory collapses it.
+    fireEvent.keyDown(tree, { key: 'ArrowLeft' });
+    await waitFor(() => expect(screen.queryByText('index.ts')).not.toBeInTheDocument());
+    expect(rowFor('src')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('activates the focused row with Enter', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+
+    const tree = screen.getByRole('tree');
+    // Move focus to the file, then Enter selects it.
+    fireEvent.keyDown(tree, { key: 'ArrowDown' });
+    await waitFor(() => expect(rowFor('README.md')).toHaveFocus());
+    fireEvent.keyDown(rowFor('README.md'), { key: 'Enter' });
+    expect(onSelectFile).toHaveBeenCalledWith('README.md', expect.objectContaining({ name: 'README.md' }));
+  });
+
+  it('steps into the first child with ArrowRight on an already-expanded directory', async () => {
+    mockLoadDir
+      .mockReturnValueOnce(fakeOk(ROOT_ENTRIES))
+      .mockReturnValueOnce(fakeOk(SRC_ENTRIES));
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+    const tree = screen.getByRole('tree');
+
+    fireEvent.keyDown(tree, { key: 'ArrowRight' }); // expand src in place
+    await screen.findByText('index.ts');
+    expect(rowFor('src')).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.keyDown(tree, { key: 'ArrowRight' }); // step into the first child
+    await waitFor(() => expect(rowFor('index.ts')).toHaveFocus());
+    expect(rowFor('index.ts')).toHaveAttribute('tabindex', '0');
+  });
+
+  it('moves to the parent directory with ArrowLeft from a child, without collapsing it', async () => {
+    mockLoadDir
+      .mockReturnValueOnce(fakeOk(ROOT_ENTRIES))
+      .mockReturnValueOnce(fakeOk(SRC_ENTRIES));
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+    const tree = screen.getByRole('tree');
+
+    fireEvent.keyDown(tree, { key: 'ArrowRight' }); // expand src
+    await screen.findByText('index.ts');
+    fireEvent.keyDown(tree, { key: 'ArrowRight' }); // focus index.ts
+    await waitFor(() => expect(rowFor('index.ts')).toHaveFocus());
+
+    fireEvent.keyDown(tree, { key: 'ArrowLeft' }); // back up to the parent
+    await waitFor(() => expect(rowFor('src')).toHaveFocus());
+    // Moving to the parent must NOT collapse it.
+    expect(rowFor('src')).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('keeps exactly one tabbable row when the active node is filtered out', async () => {
+    mockLoadDir
+      .mockReturnValueOnce(fakeOk(ROOT_ENTRIES))
+      .mockReturnValueOnce(fakeOk(SRC_ENTRIES));
+    const user = userEvent.setup();
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+    const tree = screen.getByRole('tree');
+
+    fireEvent.keyDown(tree, { key: 'ArrowRight' }); // expand src
+    await screen.findByText('index.ts');
+    fireEvent.keyDown(tree, { key: 'ArrowRight' }); // active = src/index.ts
+    await waitFor(() => expect(rowFor('index.ts')).toHaveFocus());
+
+    // Filter to "src": the active child is removed from view, so the roving
+    // target must fall back rather than leave the tree with no tabbable row.
+    await user.type(screen.getByLabelText(/filter files/i), 'src');
+    await waitFor(() => expect(screen.queryByText('index.ts')).not.toBeInTheDocument());
+    const tabbable = screen.getAllByRole('treeitem').filter(r => r.getAttribute('tabindex') === '0');
+    expect(tabbable).toHaveLength(1);
+  });
+
+  it('announces the selected file basename in the live region', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(SRC_ENTRIES));
+    const { container } = render(<FileTree {...defaultProps()} selectedPath="src/index.ts" />);
+    await screen.findByText('index.ts');
+    const live = container.querySelector('[aria-live="polite"]');
+    expect(live).toHaveTextContent('Selected index.ts');
+  });
+
+  it('clamps focus at the ends (ArrowUp at top, ArrowDown at bottom are no-ops)', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+    const tree = screen.getByRole('tree');
+
+    // src is the first node; ArrowUp at the top stays on src.
+    fireEvent.keyDown(tree, { key: 'ArrowUp' });
+    expect(rowFor('src')).toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(tree, { key: 'End' });
+    await waitFor(() => expect(rowFor('README.md')).toHaveFocus());
+    // ArrowDown at the bottom stays on the last row.
+    fireEvent.keyDown(tree, { key: 'ArrowDown' });
+    expect(rowFor('README.md')).toHaveAttribute('tabindex', '0');
+  });
+});
+
 // ── drag-and-drop move ──────────────────────────────────────────────────────
 
 /** A minimal DataTransfer stand-in carrying our custom move payload (or an OS file drag). */
@@ -266,7 +434,7 @@ function makeDataTransfer(payload: FileEntryDragPayload | null): DataTransfer {
 }
 
 function rowFor(name: string): HTMLElement {
-  const el = screen.getByText(name).closest('[role="button"]');
+  const el = screen.getByText(name).closest('[role="treeitem"]');
   if (!el) throw new Error(`no row for ${name}`);
   return el as HTMLElement;
 }

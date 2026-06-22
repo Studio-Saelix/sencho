@@ -21,6 +21,13 @@ interface FileTreeNodeProps {
   isExpanded?: boolean;
   isLoading?: boolean;
   onClick: () => void;
+  // Accessibility / roving-tabindex wiring (the parent owns keyboard navigation).
+  /** The single roving-focusable node holds tabIndex 0; all others hold -1. */
+  isActive: boolean;
+  /** Register/unregister this row's element so the parent can move DOM focus. */
+  registerRef: (relPath: string, el: HTMLDivElement | null) => void;
+  /** Keep the parent's active node in sync when this row gains focus (click/Tab). */
+  onFocusNode: (relPath: string) => void;
   // Context menu wiring
   canEdit: boolean;
   onContextMenuRename: (relPath: string) => void;
@@ -43,6 +50,9 @@ export function FileTreeNode({
   isExpanded,
   isLoading,
   onClick,
+  isActive,
+  registerRef,
+  onFocusNode,
   canEdit,
   onContextMenuRename,
   onContextMenuMove,
@@ -113,18 +123,27 @@ export function FileTreeNode({
       onRequestPermissions={onContextMenuPermissions}
     >
       <div
-        role="button"
-        tabIndex={0}
+        ref={(el) => registerRef(relPath, el)}
+        role="treeitem"
+        aria-level={depth + 1}
+        aria-selected={isSelected}
+        aria-expanded={isDir ? isExpanded : undefined}
+        tabIndex={isActive ? 0 : -1}
         draggable={canDrag}
         onDragStart={canDrag ? handleDragStart : undefined}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={onClick}
+        onFocus={() => onFocusNode(relPath)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') onClick();
+          // Enter/Space activate the row; arrow/Home/End navigation is owned by
+          // the parent tree (it needs the flattened visible order).
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onClick();
+          }
         }}
-        aria-expanded={isDir ? isExpanded : undefined}
         className={cn(
           'flex items-center gap-1.5 py-0.5 cursor-pointer select-none rounded-sm',
           isSelected
