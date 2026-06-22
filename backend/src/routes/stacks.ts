@@ -194,8 +194,14 @@ const upload = multer({
 async function cleanupUploadTemp(req: Request): Promise<void> {
   const tmp = req.file?.path;
   if (!tmp) return;
-  await fsp.unlink(tmp).catch((err: unknown) => {
-    logFileDiag('upload temp cleanup failed', { path: tmp, errorCode: fsErrorCode(err) });
+  // Canonical js/path-injection barrier inline with the unlink sink: the spool
+  // path is multer-generated within UPLOAD_TMP_DIR (a random filename), but
+  // static analysis taints req.file.*, so confirm containment before unlinking.
+  const baseResolved = path.resolve(UPLOAD_TMP_DIR);
+  const resolved = path.resolve(tmp);
+  if (!resolved.startsWith(baseResolved + path.sep)) return;
+  await fsp.unlink(resolved).catch((err: unknown) => {
+    logFileDiag('upload temp cleanup failed', { path: resolved, errorCode: fsErrorCode(err) });
   });
 }
 
@@ -2236,12 +2242,21 @@ stacksRouter.post(
           },
         });
       }
+      // Canonical js/path-injection barrier: the spool path is multer-generated
+      // within UPLOAD_TMP_DIR (a random filename), but static analysis taints
+      // req.file.*; confirm containment so the value handed to the gateway and
+      // FileSystemService streaming sinks is credited as safe.
+      const spoolBase = path.resolve(UPLOAD_TMP_DIR);
+      const tempPath = path.resolve(req.file.path);
+      if (!tempPath.startsWith(spoolBase + path.sep)) {
+        return res.status(400).json({ error: 'Upload failed' });
+      }
       // Copy the spooled temp file into place (the spool survives; the finally
       // removes it). The atomic exclusive create for the non-overwrite case means
       // a file created by another writer after the pathKind check above is not
       // silently clobbered (a race surfaces as FILE_EXISTS -> 409, same as the
       // pre-emptive check). overwrite=true intentionally allows the clobber.
-      await gateway.writeFromTemp(root, stackName, targetRelPath, req.file.path, !overwrite);
+      await gateway.writeFromTemp(root, stackName, targetRelPath, tempPath, !overwrite);
       afterStackMutation(req, stackName);
       logFileOperation('info', 'mutate', {
         nodeId: req.nodeId,

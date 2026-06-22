@@ -1056,9 +1056,14 @@ export class FileSystemService {
    * compose. Tracked as a follow-up hardening, not a per-root regression.
    */
   private async resolveSafePathWithin(rootAbsDir: string, relPath: string): Promise<string> {
-    const target = relPath === '' ? rootAbsDir : path.resolve(rootAbsDir, relPath);
-
-    if (!isPathWithinBase(target, rootAbsDir)) {
+    // Canonical js/path-injection barrier inline with the realpath sinks below:
+    // isPathWithinBase performs the same containment check, but static analysis
+    // only credits the path.resolve + startsWith form when it sits at the sink.
+    // relPath === '' resolves to the (server-controlled) root itself and carries
+    // no user input, so it needs no containment check.
+    const baseResolved = path.resolve(rootAbsDir);
+    const target = path.resolve(baseResolved, relPath);
+    if (relPath !== '' && !target.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes root directory'), { code: 'INVALID_PATH' });
     }
 
