@@ -110,7 +110,7 @@ export function FleetMasthead({
             className={`h-2.5 w-2.5 rounded-full ${config.dotClass} ${level === 'healthy' ? '' : 'animate-[pulse_2.4s_ease-in-out_infinite]'}`}
           />
           <div className="flex flex-col gap-1">
-            <span className={`font-display italic text-3xl leading-none tracking-tight ${config.textClass}`}>
+            <span className={`font-heading text-3xl leading-none tracking-tight ${config.textClass}`}>
               {config.label}
             </span>
             <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">

@@ -99,6 +99,13 @@ describe('settings registry', () => {
         expect(SETTINGS_ITEMS.find(i => i.id === 'appearance')?.scope).toBe('browser');
         expect(SETTINGS_ITEMS.find(i => i.id === 'stacks')?.scope).toBe('browser');
     });
+
+    it('exposes the Calm/Signature appearance keywords for search', () => {
+        const appearance = SETTINGS_ITEMS.find(i => i.id === 'appearance');
+        for (const term of ['calm', 'signature', 'readability', 'heading', 'chart', 'motion', 'effects']) {
+            expect(appearance?.keywords, `keyword ${term}`).toContain(term);
+        }
+    });
 });
 
 describe('scopeLabel', () => {

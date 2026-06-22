@@ -163,7 +163,7 @@ export function StackIdentityHeader({
                     {(activeNode?.name || 'local')} <span className="text-muted-foreground/60">›</span> stacks <span className="text-muted-foreground/60">›</span> {stackName}
                 </div>
                 <div className="flex items-center gap-3 flex-wrap">
-                    <CardTitle className="font-display italic text-3xl leading-none tracking-tight">{stackName}</CardTitle>
+                    <CardTitle className="font-heading text-3xl leading-none tracking-tight">{stackName}</CardTitle>
                     {(() => {
                         const pill = getStackStatePill(safeContainers);
                         if (!pill) return null;

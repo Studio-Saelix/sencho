@@ -194,7 +194,7 @@ function ComfortableBody(props: ComfortableProps) {
                     {crumb.join(' › ')}
                 </div>
                 <div className="mt-2 flex items-center gap-2">
-                    <h3 className="font-display italic text-[22px] leading-[28px] text-stat-value">
+                    <h3 className="font-heading text-[22px] leading-[28px] text-stat-value">
                         {name}
                     </h3>
                     {isLocal && (
@@ -256,7 +256,7 @@ function CompactBody(props: BodyChrome) {
     return (
         <>
             <header className="flex items-center gap-2 px-4 py-2.5 pl-5">
-                <h3 className="font-display italic text-[18px] leading-[22px] text-stat-value mr-1">
+                <h3 className="font-heading text-[18px] leading-[22px] text-stat-value mr-1">
                     {name}
                 </h3>
                 {isLocal && (
@@ -517,7 +517,7 @@ function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onTog
 
     return (
         <div className="flex flex-col items-start gap-2 py-3">
-            <div className="font-display italic text-[18px] leading-[24px] text-stat-value">
+            <div className="font-heading text-[18px] leading-[24px] text-stat-value">
                 {headline}
             </div>
             <div className="font-mono text-[11px] leading-snug text-stat-subtitle">

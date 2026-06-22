@@ -131,7 +131,7 @@ export function FleetActionCard(props: FleetActionCardProps) {
           ))}
           <span className="text-stat-title">{lastCrumb}</span>
         </div>
-        <h3 className="mt-2 font-display italic text-[22px] leading-[28px] text-stat-value">
+        <h3 className="mt-2 font-heading text-[22px] leading-[28px] text-stat-value">
           {name}
         </h3>
         <div className={cn('mt-1.5 font-mono text-[11px] leading-none text-stat-subtitle tracking-[0.04em]')}>

@@ -11,12 +11,14 @@ export interface SegmentedControlOption<T extends string> {
 }
 
 interface SegmentedControlProps<T extends string> {
-  value: T;
+  /** Pass null to show no active segment (e.g. a custom, off-preset combination). */
+  value: T | null;
   options: SegmentedControlOption<T>[];
   onChange: (next: T) => void;
   ariaLabel?: string;
   iconOnly?: boolean;
   fullWidth?: boolean;
+  disabled?: boolean;
   className?: string;
 }
 
@@ -27,6 +29,7 @@ export function SegmentedControl<T extends string>({
   ariaLabel,
   iconOnly,
   fullWidth,
+  disabled,
   className,
 }: SegmentedControlProps<T>) {
   const buttonsRef = useRef<(HTMLButtonElement | null)[]>([]);
@@ -42,6 +45,7 @@ export function SegmentedControl<T extends string>({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>, current: number) => {
+    if (disabled) return;
     if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
       event.preventDefault();
       focusIndex(current + 1);
@@ -57,13 +61,21 @@ export function SegmentedControl<T extends string>({
     }
   };
 
+  // Roving tabindex: the active option is the keyboard entry point, but when no
+  // option is active (value is null for a custom, off-preset combination) anchor
+  // on the first option so the group stays Tab-reachable.
+  const activeIndex = options.findIndex((o) => o.value === value);
+  const rovingIndex = activeIndex === -1 ? 0 : activeIndex;
+
   return (
     <div
       role="radiogroup"
       aria-label={ariaLabel}
+      aria-disabled={disabled || undefined}
       className={cn(
         'inline-flex items-center rounded-md border border-card-border bg-card p-0.5',
         fullWidth && 'flex w-full',
+        disabled && 'opacity-50',
         className,
       )}
     >
@@ -87,8 +99,9 @@ export function SegmentedControl<T extends string>({
             aria-checked={active}
             aria-label={a11yLabel}
             title={iconOnly ? opt.label : undefined}
-            tabIndex={active ? 0 : -1}
-            onClick={() => onChange(opt.value)}
+            disabled={disabled}
+            tabIndex={disabled ? -1 : index === rovingIndex ? 0 : -1}
+            onClick={() => { if (!disabled) onChange(opt.value); }}
             onKeyDown={(e) => handleKeyDown(e, index)}
             className={cn(
               'flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50',
