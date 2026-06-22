@@ -1,4 +1,5 @@
-import { Writable } from 'stream';
+import { Writable, Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import path from 'path';
 import { createHash } from 'crypto';
 import DockerController from './DockerController';
@@ -10,7 +11,7 @@ const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 // buffered up to this size and a larger file is rejected rather than silently
 // truncated. The bound matches the upload limit so the in-memory footprint is no
 // worse than the existing multipart upload path.
-const DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
+export const DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 const EXEC_TIMEOUT_MS = 30_000;
 
 // Containment guard run inside the helper after every `cd`. Even though
@@ -27,6 +28,8 @@ const ROOT_GUARD =
 const LIST_SCRIPT = `set -e
 cd -- "$1" || exit 1
 ${ROOT_GUARD}
+lim="$2"
+n=0
 for entry in * .[!.]* ..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
   if [ -L "$entry" ]; then t=l; link=$(readlink -- "$entry" 2>/dev/null || echo "")
@@ -37,6 +40,8 @@ for entry in * .[!.]* ..?*; do
   size=$(stat -c '%s' -- "$entry" 2>/dev/null || echo 0)
   mtime=$(stat -c '%Y' -- "$entry" 2>/dev/null || echo 0)
   printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$t" "$size" "$mtime" "$entry" "$link"
+  n=$((n+1))
+  if [ -n "$lim" ] && [ "$n" -ge "$lim" ]; then break; fi
 done`;
 
 // Contain the parent before statting the leaf: cd into the leaf's directory and
@@ -103,6 +108,26 @@ fd=$(dirname -- "$from"); td=$(dirname -- "$to")
 ( cd -- "$td" 2>/dev/null && case "$(pwd -P)" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) exit 7 ;; esac ) || { echo "destination escapes volume root" >&2; exit 7; }
 { [ -e "$to" ] || [ -L "$to" ]; } && { echo "destination exists" >&2; exit 11; }
 mv -- "$from" "$to"`;
+
+// $1 = from, $2 = to. Both parents are contained and the destination must not
+// exist. cp -RP recurses without dereferencing symlinks (copying links as links,
+// matching the fs backend) and does NOT preserve ownership, since the helper runs
+// unprivileged and cannot chown; new entries are owned by the helper user, like
+// the helper write. A directory may not be copied into itself or a descendant
+// (cp would otherwise recurse into the copy it is creating).
+const COPY_SCRIPT = `set -e
+from="$1"; to="$2"
+fd=$(dirname -- "$from"); td=$(dirname -- "$to")
+sp=$( cd -- "$fd" 2>/dev/null && pwd -P ) || { echo "source escapes volume root" >&2; exit 7; }
+case "$sp" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) echo "source escapes volume root" >&2; exit 7 ;; esac
+dp=$( cd -- "$td" 2>/dev/null && pwd -P ) || { echo "destination escapes volume root" >&2; exit 7; }
+case "$dp" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) echo "destination escapes volume root" >&2; exit 7 ;; esac
+{ [ -e "$to" ] || [ -L "$to" ]; } && { echo "destination exists" >&2; exit 11; }
+src="$sp/$(basename -- "$from")"
+if [ -d "$src" ] && [ ! -L "$src" ]; then
+  case "$dp/" in "$src/"*) echo "cannot copy a folder into itself" >&2; exit 12 ;; esac
+fi
+cp -RP -- "$from" "$to"`;
 
 // $1 = relative path. Prints directory|file|none. Used for upload-overwrite checks.
 const PATHKIND_SCRIPT = `set -e
@@ -186,7 +211,7 @@ export class VolumeBrowserService {
     return new VolumeBrowserService(nodeId ?? 1);
   }
 
-  async listDir(volumeName: string, relPath: string): Promise<VolumeEntry[]> {
+  async listDir(volumeName: string, relPath: string, limit?: number): Promise<VolumeEntry[]> {
     const safe = sanitizeRelPath(relPath);
     await this.assertVolumeExists(volumeName);
     await this.ensureHelperImage();
@@ -194,10 +219,12 @@ export class VolumeBrowserService {
     // Portable across BusyBox (Alpine) and GNU coreutils. Lists each
     // direct child with a tab-separated row: type<TAB>size<TAB>mtime<TAB>
     // name<TAB>symlinkTarget. We chdir to /v/<safe> first so user input is
-    // never an argv element passed to find/stat.
-    const script = LIST_SCRIPT;
+    // never an argv element passed to find/stat. When a limit is given the
+    // script breaks after limit+1 rows, so a huge directory is never fully
+    // buffered; the caller detects truncation from the overflow row.
+    const limArg = limit !== undefined ? String(limit + 1) : '';
     const { stdout, stderr, exitCode } = await this.runHelper(volumeName, [
-      'sh', '-c', script, 'sh', `./${safe || ''}`,
+      'sh', '-c', LIST_SCRIPT, 'sh', `./${safe || ''}`, limArg,
     ]);
 
     if (exitCode !== 0) {
@@ -392,6 +419,39 @@ export class VolumeBrowserService {
     return { mtimeMs: meta.mtime * 1000, size: meta.size };
   }
 
+  /**
+   * Like writeFile but streams the content from a Readable (an upload spooled to
+   * a temp file) straight into the helper's stdin, so a large upload is never
+   * held in memory. Non-atomic in-place write (`cat > file`), matching writeFile
+   * (see writeFile for the ownership-preservation rationale); the caller owns the
+   * source stream's underlying temp file. `expectedSize` is the source byte count:
+   * `cat` cannot report a short write, so the post-write size is checked against
+   * it to catch a truncated transfer that exited cleanly.
+   */
+  async writeFileStream(volumeName: string, relPath: string, source: Readable, expectedSize: number): Promise<{ mtimeMs: number; size: number }> {
+    const safe = sanitizeRelPath(relPath);
+    if (!safe) throw new ExecError('Cannot write the volume root', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', WRITE_SCRIPT, 'sh', `./${safe}`],
+      { writable: true, stdin: source },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg) || exitCode === 8) throw new ExecError('Permission denied', 403);
+      if (exitCode === 9) throw new ExecError('Target is a directory', 400);
+      throw new ExecError(`Write failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+    const meta = await this.stat(volumeName, safe);
+    if (meta.size !== expectedSize) {
+      throw new ExecError('Upload did not fully write to the volume', 500);
+    }
+    return { mtimeMs: meta.mtime * 1000, size: meta.size };
+  }
+
   /** Create a single directory; its parent must already exist. */
   async mkdir(volumeName: string, relPath: string): Promise<void> {
     const safe = sanitizeRelPath(relPath);
@@ -450,6 +510,27 @@ export class VolumeBrowserService {
     }
   }
 
+  /** Copy a file or directory within the same volume (symlink-as-link, no chown). */
+  async copy(volumeName: string, fromRel: string, toRel: string): Promise<void> {
+    const from = sanitizeRelPath(fromRel);
+    const to = sanitizeRelPath(toRel);
+    if (!from || !to) throw new ExecError('Invalid copy path', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', COPY_SCRIPT, 'sh', `./${from}`, `./${to}`],
+      { writable: true },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
+      if (exitCode === 11 || /exists/i.test(msg)) throw new ExecError('A file or folder with that name already exists', 409);
+      if (exitCode === 12) throw new ExecError('Cannot copy a folder into itself', 400);
+      throw new ExecError(`Copy failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+  }
+
   // --- internals -----------------------------------------------------------
 
   private async assertVolumeExists(volumeName: string): Promise<void> {
@@ -493,7 +574,7 @@ export class VolumeBrowserService {
   private async runHelper(
     volumeName: string,
     cmd: string[],
-    opts: { writable?: boolean; stdin?: Buffer } = {},
+    opts: { writable?: boolean; stdin?: Buffer | Readable } = {},
   ): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
     const docker = DockerController.getInstance(this.nodeId).getDocker();
     const stdoutChunks: Buffer[] = [];
@@ -540,6 +621,7 @@ export class VolumeBrowserService {
       timer = setTimeout(() => reject(new ExecError('Helper exec timed out', 504)), EXEC_TIMEOUT_MS);
     });
 
+    let stdinError: unknown = null;
     const runPromise = (async () => {
       const stream = await container.attach({ stream: true, stdin: wantStdin, stdout: true, stderr: true, hijack: wantStdin });
       const streamEnded = new Promise<void>((resolve) => {
@@ -551,16 +633,45 @@ export class VolumeBrowserService {
       if (wantStdin && opts.stdin) {
         // Feed the file content to the container's stdin, then close it so the
         // helper's `cat > file` sees EOF and exits.
-        stream.write(opts.stdin);
-        stream.end();
+        if (Buffer.isBuffer(opts.stdin)) {
+          stream.write(opts.stdin);
+          stream.end();
+        } else {
+          // A Readable (an upload spooled to a temp file) is piped so a large
+          // upload is never held in memory. pipeline tears the stdin side down
+          // (destroys it) on a source error rather than ending it cleanly, so
+          // cat sees an abnormal close instead of a normal EOF and does not
+          // commit a truncated file as a success. Remember the error so the run
+          // is reported as failed after the container exits.
+          try {
+            await pipeline(opts.stdin, stream);
+          } catch (err) {
+            stdinError = err;
+          }
+        }
       }
       const exitInfo = await container.wait();
       // Wait for the attach stream to finish flushing demuxed output.
       await streamEnded;
+      const exitCode = typeof exitInfo?.StatusCode === 'number' ? exitInfo.StatusCode : 0;
+      // A nonzero helper exit is the authoritative failure: its exit code carries
+      // the intended 4xx mapping (target-is-a-directory, permission denied, etc.),
+      // which a stdin EPIPE from the helper closing stdin early would otherwise
+      // mask as a generic 500. Only surface the stream error when the helper
+      // itself exited cleanly (or its status was unreadable).
+      if (stdinError) {
+        if (exitCode === 0) {
+          throw new ExecError('Upload stream failed before the volume write completed', 500);
+        }
+        // The nonzero exit's mapping is the user-facing error, but the stream
+        // failure is the root cause; log it so an intermittent upload failure is
+        // debuggable rather than being silently attributed to the exit code.
+        console.error('[VolumeBrowser] helper stdin stream error masked by nonzero exit', exitCode, stdinError);
+      }
       return {
         stdout: Buffer.concat(stdoutChunks),
         stderr: Buffer.concat(stderrChunks),
-        exitCode: typeof exitInfo?.StatusCode === 'number' ? exitInfo.StatusCode : 0,
+        exitCode,
       };
     })();
 

@@ -1,8 +1,11 @@
 /**
  * Coverage for VolumeBrowserService pure helpers: path traversal sanitization,
  * volume-name validation, and binary detection. The Docker-facing exec path
- * is exercised in manual E2E only — mocking dockerode.run reliably is not
- * worth the brittleness for this PR.
+ * is exercised in manual E2E only (mocking dockerode.run reliably is not worth
+ * the brittleness here). That includes every helper that runs a script in the
+ * Alpine container: list/read/write/writeFileStream/delete/rename/copy and
+ * their exit-code-to-HTTP mappings (e.g. copy's 11 to 409, 12 to 400). Those
+ * run on Linux nodes / CI against a real named volume, not on this workstation.
  */
 import { describe, it, expect } from 'vitest';
 import {

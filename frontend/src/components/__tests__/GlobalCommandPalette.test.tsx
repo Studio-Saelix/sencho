@@ -62,6 +62,18 @@ function type(value: string) {
   fireEvent.change(screen.getByPlaceholderText('Search the app...'), { target: { value } });
 }
 
+// Focus a real text input for the duration of `run`, then always detach it.
+function withFocusedInput(run: (input: HTMLInputElement) => void) {
+  const input = document.createElement('input');
+  document.body.appendChild(input);
+  input.focus();
+  try {
+    run(input);
+  } finally {
+    document.body.removeChild(input);
+  }
+}
+
 beforeEach(() => {
   hookReturn = { hits: [], failedNodes: [], loading: false };
   nodesValue = {
@@ -207,5 +219,37 @@ describe('GlobalCommandPalette', () => {
     open();
     type('zzzz');
     expect(screen.getByText('Searching...')).toBeInTheDocument();
+  });
+
+  it('opens on Ctrl+K when no field is focused', () => {
+    renderPalette();
+    fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true });
+    expect(screen.getByPlaceholderText('Search the app...')).toBeInTheDocument();
+  });
+
+  it('ignores Ctrl+K while a text field is focused (no focus hijack)', () => {
+    renderPalette();
+    withFocusedInput(input => {
+      fireEvent.keyDown(input, { key: 'k', ctrlKey: true });
+      expect(screen.queryByPlaceholderText('Search the app...')).not.toBeInTheDocument();
+    });
+  });
+
+  it('ignores Cmd+K (metaKey) while a text field is focused', () => {
+    renderPalette();
+    withFocusedInput(input => {
+      fireEvent.keyDown(input, { key: 'k', metaKey: true });
+      expect(screen.queryByPlaceholderText('Search the app...')).not.toBeInTheDocument();
+    });
+  });
+
+  it('does not close the open palette when Ctrl+K is pressed inside it', () => {
+    // The [cmdk-root] early-return must run before the input-focus guard, so the
+    // app handler never toggles the palette closed while focus is in its own input.
+    renderPalette();
+    open();
+    const paletteInput = screen.getByPlaceholderText('Search the app...');
+    fireEvent.keyDown(paletteInput, { key: 'k', ctrlKey: true });
+    expect(screen.getByPlaceholderText('Search the app...')).toBeInTheDocument();
   });
 });

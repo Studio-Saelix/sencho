@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/toast-store';
-import { writeStackFile } from '@/lib/stackFilesApi';
+import { createEmptyStackFile, UploadConflictError } from '@/lib/stackFilesApi';
 
 function isValidFileName(name: string): boolean {
   if (!name || name === '.' || name === '..') return false;
@@ -51,15 +51,21 @@ export function NewFileDialog({
     }
     setValidationError(null);
     setCreating(true);
-    const relPath = currentDir ? `${currentDir}/${trimmed}` : trimmed;
     try {
-      await writeStackFile(stackName, relPath, '', { rootId });
+      await createEmptyStackFile(stackName, currentDir, trimmed, { rootId });
       toast.success('File created.');
       onCreated();
       onOpenChange(false);
       setName('');
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to create file.');
+      // A name already taken by a file comes back as UploadConflictError;
+      // surface it inline so the user can pick another. Other rejections
+      // (including a same-named folder) fall through to the toast below.
+      if (e instanceof UploadConflictError) {
+        setValidationError('A file with that name already exists.');
+      } else {
+        toast.error(e instanceof Error ? e.message : 'Failed to create file.');
+      }
     } finally {
       setCreating(false);
     }
