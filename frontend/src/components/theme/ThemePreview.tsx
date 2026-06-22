@@ -24,7 +24,7 @@ export function ThemePreview() {
                         <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-brand">
                             fleet · preview
                         </div>
-                        <div className="font-display text-2xl italic leading-none text-stat-value">
+                        <div className="font-heading text-2xl leading-none text-stat-value">
                             Healthy
                         </div>
                         <div className="mt-1.5 font-mono text-[11px] text-stat-subtitle">

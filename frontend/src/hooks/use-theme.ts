@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import { Moon, Zap, Sun, Monitor } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -19,6 +19,18 @@ export type AccentId =
 export type UiFont = 'Geist' | 'IBM Plex Sans' | 'Hanken Grotesk';
 export type MonoFont = 'Geist Mono' | 'IBM Plex Mono' | 'Fira Code';
 
+// Calm / Readability refresh. `visualStyle` is a macro that writes the three
+// sub-axes below; `readability` is an independent sticky master that forces the
+// calm resolution at apply time without mutating the stored sub-axes. The member
+// tuples are the single source of truth for both the union and its runtime guard
+// (mirrors the THEME_MODES/ACCENTS convention below).
+const VISUAL_STYLES = ['calm', 'signature'] as const;
+const HEADING_STYLES = ['clean', 'signature'] as const;
+const CHART_STYLES = ['muted', 'heat', 'signature'] as const;
+export type VisualStyle = (typeof VISUAL_STYLES)[number];
+export type HeadingStyle = (typeof HEADING_STYLES)[number];
+export type ChartStyle = (typeof CHART_STYLES)[number];
+
 export interface ThemeState {
     theme: ThemeMode;
     accent: AccentId;
@@ -28,6 +40,11 @@ export interface ThemeState {
     uiFont: UiFont;
     monoFont: MonoFont;
     typeScale: number;
+    visualStyle: VisualStyle;
+    headingStyle: HeadingStyle;
+    chartStyle: ChartStyle;
+    reducedEffects: boolean;
+    readability: boolean;
 }
 
 export const THEME_MODES: { id: ThemeMode; label: string; icon: LucideIcon }[] = [
@@ -81,9 +98,44 @@ export const TYPE_SIZES: { id: string; scale: number; px: number }[] = [
 
 const STORAGE_KEY = 'sencho.appearance.theme';
 const LEGACY_KEY = 'sencho-theme';
+
+// The five appearance axes the Calm/Signature refresh adds, as two presets.
+// `setVisualStyle` writes the macro + the three sub-axes (not readability);
+// migration fills missing fields on an existing stored object from SIGNATURE so
+// returning users look unchanged, while a fresh user gets CALM via DEFAULT_STATE.
+export const CALM_PRESET = {
+    visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'muted',
+    reducedEffects: true, readability: false,
+} as const;
+export const SIGNATURE_PRESET = {
+    visualStyle: 'signature', headingStyle: 'signature', chartStyle: 'signature',
+    reducedEffects: false, readability: false,
+} as const;
+
+/** Which visual-style preset the stored sub-axes currently match, or null for a
+ *  custom combination. Readability forces its own resolution, so it always reads
+ *  as null. The Appearance cards and the topbar quick-switch both derive their
+ *  highlight from this so they agree on which style is active. */
+export function activeVisualStyle(s: {
+    headingStyle: HeadingStyle;
+    chartStyle: ChartStyle;
+    reducedEffects: boolean;
+    readability: boolean;
+}): VisualStyle | null {
+    if (s.readability) return null;
+    for (const kind of VISUAL_STYLES) {
+        const p = kind === 'calm' ? CALM_PRESET : SIGNATURE_PRESET;
+        if (s.headingStyle === p.headingStyle && s.chartStyle === p.chartStyle && s.reducedEffects === p.reducedEffects) {
+            return kind;
+        }
+    }
+    return null;
+}
+
 const DEFAULT_STATE: ThemeState = {
     theme: 'dim', accent: 'cyan', borderBoost: 0, glow: 0.16, contrast: 0,
     uiFont: 'Geist', monoFont: 'Geist Mono', typeScale: 1,
+    ...CALM_PRESET,
 };
 
 const MODE_IDS = new Set<string>(THEME_MODES.map((m) => m.id));
@@ -102,6 +154,21 @@ function isUiFont(v: unknown): v is UiFont {
 }
 function isMonoFont(v: unknown): v is MonoFont {
     return typeof v === 'string' && MONO_FONT_IDS.has(v);
+}
+const VISUAL_STYLE_IDS = new Set<string>(VISUAL_STYLES);
+const HEADING_STYLE_IDS = new Set<string>(HEADING_STYLES);
+const CHART_STYLE_IDS = new Set<string>(CHART_STYLES);
+function isVisualStyle(v: unknown): v is VisualStyle {
+    return typeof v === 'string' && VISUAL_STYLE_IDS.has(v);
+}
+function isHeadingStyle(v: unknown): v is HeadingStyle {
+    return typeof v === 'string' && HEADING_STYLE_IDS.has(v);
+}
+function isChartStyle(v: unknown): v is ChartStyle {
+    return typeof v === 'string' && CHART_STYLE_IDS.has(v);
+}
+function isBool(v: unknown): v is boolean {
+    return typeof v === 'boolean';
 }
 // Numeric knobs: a persisted value must be finite and in range, otherwise fall
 // back to the default (a NaN/Infinity/out-of-range value would silently no-op
@@ -127,13 +194,23 @@ function readStored(): ThemeState {
                     uiFont: isUiFont(p.uiFont) ? p.uiFont : DEFAULT_STATE.uiFont,
                     monoFont: isMonoFont(p.monoFont) ? p.monoFont : DEFAULT_STATE.monoFont,
                     typeScale: readNumber(p.typeScale, TYPE_SCALE),
+                    // An existing stored object is a returning user: any appearance
+                    // field it predates fills from SIGNATURE so its look is unchanged.
+                    visualStyle: isVisualStyle(p.visualStyle) ? p.visualStyle : SIGNATURE_PRESET.visualStyle,
+                    headingStyle: isHeadingStyle(p.headingStyle) ? p.headingStyle : SIGNATURE_PRESET.headingStyle,
+                    chartStyle: isChartStyle(p.chartStyle) ? p.chartStyle : SIGNATURE_PRESET.chartStyle,
+                    reducedEffects: isBool(p.reducedEffects) ? p.reducedEffects : SIGNATURE_PRESET.reducedEffects,
+                    readability: isBool(p.readability) ? p.readability : SIGNATURE_PRESET.readability,
                 };
             }
         }
-        // Legacy migration: the old key held only the mode string (dark → dim).
+        // Legacy migration: the old key held only the mode string (dark → dim). A
+        // legacy key is still a returning user, so the appearance axes fill from
+        // Signature (unchanged look); only the total absence of any key is a fresh
+        // user and falls through to the Calm DEFAULT_STATE below.
         const legacy = window.localStorage.getItem(LEGACY_KEY);
-        if (legacy === 'light' || legacy === 'auto') return { ...DEFAULT_STATE, theme: legacy };
-        if (legacy === 'dark') return { ...DEFAULT_STATE, theme: 'dim' };
+        if (legacy === 'light' || legacy === 'auto') return { ...DEFAULT_STATE, ...SIGNATURE_PRESET, theme: legacy };
+        if (legacy === 'dark') return { ...DEFAULT_STATE, ...SIGNATURE_PRESET, theme: 'dim' };
     } catch {
         // ignore; localStorage may be unavailable (private mode, quota)
     }
@@ -164,9 +241,20 @@ function applyToDom(s: ThemeState, systemDark: boolean) {
     const resolved = resolveWith(s.theme, systemDark);
     root.dataset.theme = resolved;
     root.dataset.accent = s.accent;
-    root.style.setProperty('--border-boost', String(s.borderBoost));
-    root.style.setProperty('--glow', String(s.glow));
-    root.style.setProperty('--contrast', String(s.contrast));
+    // Calm/Readability: readability is a sticky master that forces the calm
+    // resolution plus a contrast lift; otherwise the stored sub-axes apply.
+    // Effective values are resolved here only, never written back to storage.
+    const rd = s.readability;
+    const headings = rd ? 'clean' : s.headingStyle;
+    const chart = rd ? 'muted' : s.chartStyle;
+    const reduced = rd || s.reducedEffects;
+    root.dataset.headings = headings;
+    root.dataset.chartStyle = chart;
+    if (reduced) root.dataset.effects = 'reduced';
+    else delete root.dataset.effects;
+    root.style.setProperty('--border-boost', String(rd ? 0.03 : s.borderBoost));
+    root.style.setProperty('--glow', String(reduced ? s.glow * 0.4 : s.glow));
+    root.style.setProperty('--contrast', String(s.contrast + (rd ? 0.18 : 0)));
     root.style.setProperty('--ui-font', `'${s.uiFont}'`);
     root.style.setProperty('--mono-font', `'${s.monoFont}'`);
     root.style.setProperty('--type-scale', String(s.typeScale));
@@ -193,7 +281,10 @@ function emit() {
 function sameState(a: ThemeState, b: ThemeState): boolean {
     return a.theme === b.theme && a.accent === b.accent
         && a.borderBoost === b.borderBoost && a.glow === b.glow && a.contrast === b.contrast
-        && a.uiFont === b.uiFont && a.monoFont === b.monoFont && a.typeScale === b.typeScale;
+        && a.uiFont === b.uiFont && a.monoFont === b.monoFont && a.typeScale === b.typeScale
+        && a.visualStyle === b.visualStyle && a.headingStyle === b.headingStyle
+        && a.chartStyle === b.chartStyle && a.reducedEffects === b.reducedEffects
+        && a.readability === b.readability;
 }
 
 function setState(patch: Partial<ThemeState>) {
@@ -261,6 +352,21 @@ export function useTheme() {
     const setUiFont = useCallback((uiFont: UiFont) => setState({ uiFont }), []);
     const setMonoFont = useCallback((monoFont: MonoFont) => setState({ monoFont }), []);
     const setTypeScale = useCallback((typeScale: number) => setState({ typeScale }), []);
+    // Macro: writes visualStyle + the three sub-axes from the preset. It does
+    // NOT touch readability, which stays a sticky master the user releases by hand.
+    const setVisualStyle = useCallback((visualStyle: VisualStyle) => {
+        const preset = visualStyle === 'calm' ? CALM_PRESET : SIGNATURE_PRESET;
+        setState({
+            visualStyle,
+            headingStyle: preset.headingStyle,
+            chartStyle: preset.chartStyle,
+            reducedEffects: preset.reducedEffects,
+        });
+    }, []);
+    const setHeadingStyle = useCallback((headingStyle: HeadingStyle) => setState({ headingStyle }), []);
+    const setChartStyle = useCallback((chartStyle: ChartStyle) => setState({ chartStyle }), []);
+    const setReducedEffects = useCallback((reducedEffects: boolean) => setState({ reducedEffects }), []);
+    const setReadability = useCallback((readability: boolean) => setState({ readability }), []);
     const resolvedTheme = resolveWith(s.theme, s.systemDark);
     return {
         theme: s.theme,
@@ -271,6 +377,11 @@ export function useTheme() {
         uiFont: s.uiFont,
         monoFont: s.monoFont,
         typeScale: s.typeScale,
+        visualStyle: s.visualStyle,
+        headingStyle: s.headingStyle,
+        chartStyle: s.chartStyle,
+        reducedEffects: s.reducedEffects,
+        readability: s.readability,
         resolvedTheme,
         isDarkMode: resolvedTheme !== 'light',
         setTheme,
@@ -281,5 +392,24 @@ export function useTheme() {
         setUiFont,
         setMonoFont,
         setTypeScale,
+        setVisualStyle,
+        setHeadingStyle,
+        setChartStyle,
+        setReducedEffects,
+        setReadability,
     } as const;
+}
+
+/** Effective chart palette + reduced flag for the security charts. A thin
+ *  useMemo wrapper over the same store snapshot (not a second external store) so
+ *  it returns a stable object reference unless a chart-relevant axis changes. */
+export function useChartStyle(): { chartStyle: ChartStyle; reduced: boolean } {
+    const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+    return useMemo(
+        () => ({
+            chartStyle: s.readability ? 'muted' : s.chartStyle,
+            reduced: s.readability || s.reducedEffects,
+        }),
+        [s.readability, s.chartStyle, s.reducedEffects],
+    );
 }

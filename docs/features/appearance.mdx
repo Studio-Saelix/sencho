@@ -1,15 +1,44 @@
 ---
 title: Appearance
-description: Personalize Sencho's look. Choose a theme and accent, fine-tune contrast, borders, and glow, swap the interface and data fonts, and set the text size. Every choice is saved to the current browser.
+description: Personalize Sencho's look. Choose a visual style, tune readability and the security charts, pick a theme and accent, swap the interface and data fonts, and set the text size. Every choice is saved to the current browser.
 ---
 
-**Settings → Appearance** is where you make Sencho look the way you want. Pick a theme and accent color, fine-tune contrast and the ambient glow, choose the interface and data fonts, and scale the text. A live preview at the top of the section reflects every change as you make it.
+**Settings → Appearance** is where you make Sencho look the way you want. Choose between the Calm and Signature visual styles, dial in readability, set how the security charts are colored, pick a theme and accent, choose the interface and data fonts, and scale the text. A live preview reflects every change as you make it.
 
-Most of these controls are also one click away from anywhere in the app: the **palette button** in the top bar, between the search and notification icons, opens a quick switcher for the theme mode, accent, and fonts.
+Several of these controls are also one click away from anywhere in the app: the **palette button** in the top bar, between the search and notification icons, opens a quick switcher for the theme mode, accent, visual style, readability, and text size.
 
 <Note>
   Appearance choices are saved to **this browser only**. They follow you across tabs on the same browser, and every device remembers its own look. Nothing here changes what other operators see.
 </Note>
+
+## Visual style
+
+The **Visual style** is the master switch for how intense the interface feels:
+
+- **Calm** (the default) keeps headings upright in the interface font, colors the security charts with a muted palette, and reduces material effects. It is the most readable setting.
+- **Signature** uses italic Instrument Serif headings and the fully saturated chart palette for a more editorial look.
+
+Picking a style sets the heading, chart, and effects controls below in one move. You are free to adjust any of them afterward to build your own combination. When **Readability mode** is on it overrides these until you turn it off.
+
+## Readability
+
+**Readability mode** is a single switch for the most legible result: upright headings, the muted chart palette, reduced effects, and a small contrast lift, all at once. While it is on, the heading and chart controls are locked to their calm values. Turn it off to set them by hand.
+
+- **Header style** chooses **Clean** (the upright interface face) or **Signature** (italic Instrument Serif). Decorative moments such as the Sencho wordmark stay in the serif either way.
+- **Contrast** is a master control that spreads the page tone, every border, and the text tiers together. Higher contrast darkens the page, brightens borders, and crisps up secondary text. Pairing high contrast with the OLED theme gives the sharpest reading on a true-black panel.
+
+## Security visualization
+
+The **Chart palette** sets the colors used on the Security page charts:
+
+- **Muted** desaturates the severity colors so critical, high, medium, and low read as a calm progression with no jarring color pairings.
+- **Heat** is a single warm ramp from a deep red through amber, with no competing hues.
+- **Signature** is the saturated severity set.
+
+## Motion & effects
+
+- **Reduced effects** flattens card bevels, the accent glow, and chart gradients for a calmer, flatter surface.
+- **Ambient glow** sets the intensity of the soft, accent-tinted glow behind the page. Slide it to zero for a completely flat background. (Reduced effects already dims it.)
 
 ## Theme
 
@@ -20,29 +49,17 @@ The **Mode** control sets the overall surface palette:
 - **Light** is the bright theme, with the same directional, opaque borders inverted for a white surface.
 - **Auto** follows your operating system, switching between Dim and Light as your OS does, and re-resolving live when the OS flips.
 
-## Accent
+The **accent** is Sencho's one data color. It drives charts, sparklines, progress bars, focus rings, active states, the masthead and sidebar rails, and the ambient page glow, so changing it recolors the whole product cohesively. Eight well-spaced hues are available: **Cyan** (the default and the signature), **Blue**, **Violet**, **Magenta**, **Orange**, **Amber**, **Lime**, and **Steel** (a deliberate near-neutral). Status colors (green for healthy, amber for warning, rose for error) stay constant regardless of accent so state always reads the same.
 
-The **accent** is Sencho's one data color. It drives charts, sparklines, progress bars, focus rings, active states, the masthead and sidebar rails, and the ambient page glow, so changing it recolors the whole product cohesively.
-
-Eight well-spaced hues are available: **Cyan** (the default and the signature), **Blue**, **Violet**, **Magenta**, **Orange**, **Amber**, **Lime**, and **Steel** (a deliberate near-neutral). Status colors (green for healthy, amber for warning, rose for error) stay constant regardless of accent so state always reads the same.
-
-## Fine-tune
-
-Three sliders shape the surfaces and atmosphere. A **Reset fine-tune** button returns all three to their defaults.
-
-- **Contrast** is a master control that spreads the page tone, every border, and the text tiers together in one move. Higher contrast darkens the page, brightens borders, and crisps up secondary text. Pairing high contrast with the OLED theme gives the sharpest reading on a true-black panel.
-- **Border brightness** lifts or softens every hairline on its own, so the separation between cards reads exactly how you like it.
-- **Ambient glow** sets the intensity of the soft, accent-tinted glow behind the page. Slide it to zero for a completely flat background.
+**Border brightness** lifts or softens every hairline on its own, so the separation between cards reads exactly how you like it. A **Reset fine-tune** button returns contrast, border brightness, and ambient glow to their defaults.
 
 ## Typography
 
-Sencho uses three type contexts. The display face for hero headings stays fixed as the signature; the other two are yours to change.
+Sencho uses three type contexts. The interface and data faces are yours to change; the heading style follows your Visual style choice.
 
 - **Interface font** sets the sans face used for body text, labels, navigation, and buttons. Choose **Geist** (default), **IBM Plex Sans**, or **Hanken Grotesk**.
 - **Data font** sets the monospace face used for the terminal, stat values, codes, and timestamps. Choose **Geist Mono** (default), **IBM Plex Mono**, or **Fira Code**.
 - **Text size** scales the entire interface from a single root multiplier. In Settings this is a continuous slider (default `1.00×`); the top-bar quick switcher offers **S / M / L / XL** presets. Both stay in sync.
-
-Hero headings and featured names always render in Instrument Serif so the editorial voice stays consistent no matter which interface font you pick.
 
 ## Display
 

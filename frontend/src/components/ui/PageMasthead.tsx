@@ -100,7 +100,7 @@ export function PageMasthead({
                         </span>
                         <span
                             className={cn(
-                                'font-display italic tracking-[-0.01em]',
+                                'font-heading tracking-[-0.01em]',
                                 size === 'hero' ? 'text-3xl leading-none' : 'text-[22px] leading-7',
                                 config.stateTextClass,
                             )}

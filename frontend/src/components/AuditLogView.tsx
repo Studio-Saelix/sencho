@@ -573,7 +573,7 @@ function StreamView({ stats, showStats, loading, groups, now, page, totalPages, 
                                 {tile.label}
                             </div>
                             <div className="flex items-end gap-2">
-                                <span className={`font-display italic text-3xl leading-none tabular-nums ${SEVERITY_TEXT[tile.severity]}`}>
+                                <span className={`font-heading text-3xl leading-none tabular-nums ${SEVERITY_TEXT[tile.severity]}`}>
                                     {tile.value === null
                                         ? '·'
                                         : idx === 2

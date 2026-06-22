@@ -114,7 +114,7 @@ export function NodeSwitcher({ onManageNodes, compact = false }: NodeSwitcherPro
                     <div className="absolute inset-y-0 left-0 w-[2px] bg-brand/60" />
                     <div className="relative flex items-center justify-between px-[var(--density-row-x)] py-[var(--density-tile-y)]">
                         <div className="flex items-baseline gap-2.5">
-                            <span className="font-display text-xl italic leading-none text-stat-value">
+                            <span className="font-heading text-xl leading-none text-stat-value">
                                 Connected
                             </span>
                             <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] tabular-nums text-brand">

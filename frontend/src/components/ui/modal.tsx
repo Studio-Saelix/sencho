@@ -93,7 +93,7 @@ function HeaderShell({
       <div className={cn(KICKER_CLASS, 'whitespace-nowrap', v.kicker)}>
         {kicker}
       </div>
-      <TitleComponent className="mt-1 font-display text-[1.75rem] italic leading-tight text-stat-value">
+      <TitleComponent className="mt-1 font-heading text-[1.75rem] leading-tight text-stat-value">
         {title}
       </TitleComponent>
       <DescriptionComponent className="sr-only">

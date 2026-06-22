@@ -267,7 +267,7 @@ function RoutingMasthead({ meshedNodes, reachableNodes, totalAliases, onShowActi
     return (
         <div className="flex items-center justify-between rounded-lg border border-card-border bg-card p-4 shadow-card-bevel">
             <div className="flex items-center gap-4">
-                <div className="font-display italic text-2xl">{stateWord}</div>
+                <div className="font-heading text-2xl">{stateWord}</div>
                 <div className="grid grid-cols-3 gap-4 text-xs">
                     <div>
                         <div className="text-[10px] leading-3 tracking-[0.18em] uppercase text-stat-subtitle font-mono">meshed</div>
