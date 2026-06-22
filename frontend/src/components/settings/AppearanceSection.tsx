@@ -74,10 +74,11 @@ const VISUAL_CARDS: VisualCardData[] = [
 const VISUAL_BAR_HEIGHTS = [16, 11, 13, 8];
 
 function VisualCard({
-    card, selected, onSelect,
+    card, selected, disabled, onSelect,
 }: {
     card: VisualCardData;
     selected: boolean;
+    disabled?: boolean;
     onSelect: () => void;
 }) {
     const { kind, name, blurb, bars } = card;
@@ -86,12 +87,14 @@ function VisualCard({
         <button
             type="button"
             onClick={onSelect}
+            disabled={disabled}
             aria-pressed={selected}
             className={cn(
                 'flex flex-col overflow-hidden rounded-lg border bg-well text-left transition-colors',
                 selected
                     ? 'border-brand/55 ring-1 ring-brand/40'
                     : 'border-card-border border-t-card-border-top hover:border-t-card-border-hover',
+                disabled && 'opacity-50',
             )}
         >
             <div className="flex h-[74px] flex-col justify-center gap-1.5 border-b border-hairline px-3.5">
@@ -155,6 +158,7 @@ export function AppearanceSection() {
                             key={c.kind}
                             card={c}
                             selected={activeVisual === c.kind}
+                            disabled={readability}
                             onSelect={() => setVisualStyle(c.kind)}
                         />
                     ))}
@@ -307,10 +311,11 @@ export function AppearanceSection() {
                             max={BORDER_BOOST.max}
                             step={BORDER_BOOST.step}
                             onValueChange={([v]) => setBorderBoost(v)}
+                            disabled={readability}
                             aria-label="Border brightness"
                         />
                         <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
-                            {fmtSigned(borderBoost)}
+                            {fmtSigned(readability ? 0.03 : borderBoost)}
                         </span>
                     </div>
                 </SettingsField>

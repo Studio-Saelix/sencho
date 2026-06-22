@@ -50,6 +50,24 @@ describe('AppearanceSection', () => {
         expect(container.querySelectorAll('[data-disabled]').length).toBeGreaterThan(0);
     });
 
+    it('readability also locks the Visual style cards and the Border brightness slider', () => {
+        const { container } = render(<AppearanceSection />);
+        const calmCard = () => screen.getByRole('button', { name: /readable default/i }) as HTMLButtonElement;
+        const sigCard = () => screen.getByRole('button', { name: /Today's look/i }) as HTMLButtonElement;
+        const borderLocked = () => !!container.querySelector('[aria-label="Border brightness"][data-disabled]');
+        expect(calmCard().disabled).toBe(false);
+        expect(borderLocked()).toBe(false);
+
+        fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
+
+        // Both cards lock (the topbar disables the same control), matching the
+        // "turn readability off to choose a style" guidance.
+        expect(calmCard().disabled).toBe(true);
+        expect(sigCard().disabled).toBe(true);
+        // Border brightness is forced to +0.03 under readability, so its slider locks.
+        expect(borderLocked()).toBe(true);
+    });
+
     it('de-selects both visual-style cards when a custom sub-axis is chosen', () => {
         render(<AppearanceSection />);
         // Baseline is Signature, so the Signature card reads selected.
