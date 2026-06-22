@@ -105,6 +105,26 @@ fd=$(dirname -- "$from"); td=$(dirname -- "$to")
 { [ -e "$to" ] || [ -L "$to" ]; } && { echo "destination exists" >&2; exit 11; }
 mv -- "$from" "$to"`;
 
+// $1 = from, $2 = to. Both parents are contained and the destination must not
+// exist. cp -RP recurses without dereferencing symlinks (copying links as links,
+// matching the fs backend) and does NOT preserve ownership, since the helper runs
+// unprivileged and cannot chown; new entries are owned by the helper user, like
+// the helper write. A directory may not be copied into itself or a descendant
+// (cp would otherwise recurse into the copy it is creating).
+const COPY_SCRIPT = `set -e
+from="$1"; to="$2"
+fd=$(dirname -- "$from"); td=$(dirname -- "$to")
+sp=$( cd -- "$fd" 2>/dev/null && pwd -P ) || { echo "source escapes volume root" >&2; exit 7; }
+case "$sp" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) echo "source escapes volume root" >&2; exit 7 ;; esac
+dp=$( cd -- "$td" 2>/dev/null && pwd -P ) || { echo "destination escapes volume root" >&2; exit 7; }
+case "$dp" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) echo "destination escapes volume root" >&2; exit 7 ;; esac
+{ [ -e "$to" ] || [ -L "$to" ]; } && { echo "destination exists" >&2; exit 11; }
+src="$sp/$(basename -- "$from")"
+if [ -d "$src" ] && [ ! -L "$src" ]; then
+  case "$dp/" in "$src/"*) echo "cannot copy a folder into itself" >&2; exit 12 ;; esac
+fi
+cp -RP -- "$from" "$to"`;
+
 // $1 = relative path. Prints directory|file|none. Used for upload-overwrite checks.
 const PATHKIND_SCRIPT = `set -e
 p="$1"
@@ -481,6 +501,27 @@ export class VolumeBrowserService {
       if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
       if (exitCode === 11 || /exists/i.test(msg)) throw new ExecError('A file or folder with that name already exists', 409);
       throw new ExecError(`Rename failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+  }
+
+  /** Copy a file or directory within the same volume (symlink-as-link, no chown). */
+  async copy(volumeName: string, fromRel: string, toRel: string): Promise<void> {
+    const from = sanitizeRelPath(fromRel);
+    const to = sanitizeRelPath(toRel);
+    if (!from || !to) throw new ExecError('Invalid copy path', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', COPY_SCRIPT, 'sh', `./${from}`, `./${to}`],
+      { writable: true },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
+      if (exitCode === 11 || /exists/i.test(msg)) throw new ExecError('A file or folder with that name already exists', 409);
+      if (exitCode === 12) throw new ExecError('Cannot copy a folder into itself', 400);
+      throw new ExecError(`Copy failed: ${msg.substring(0, 200) || 'unknown error'}`);
     }
   }
 

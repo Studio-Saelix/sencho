@@ -228,6 +228,12 @@ export class FileRootGateway {
     return this.fs().renameStackPath(stackName, fromRel, toRel, this.scopeFor(root));
   }
 
+  /** Copy a file or directory within a single root (cross-root copy is rejected at the route). */
+  async copy(root: StackFileRoot, stackName: string, fromRel: string, toRel: string): Promise<void> {
+    if (root.backend === 'helper') return this.helper().copy(root.hostPathOrName, fromRel, toRel);
+    return this.fs().copyScopedPath(stackName, fromRel, toRel, this.scopeFor(root));
+  }
+
   async getMode(root: StackFileRoot, stackName: string, relPath: string): Promise<{ mode: number; octal: string }> {
     if (root.backend === 'helper') throw unsupportedOnHelperRoot();
     return this.fs().getStackEntryMode(stackName, relPath, this.scopeFor(root));

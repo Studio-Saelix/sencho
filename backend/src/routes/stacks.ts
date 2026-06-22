@@ -2469,6 +2469,55 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
   }
 });
 
+stacksRouter.post('/:stackName/files/copy', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const { from, to } = req.body as { from?: unknown; to?: unknown };
+  if (typeof from !== 'string' || !from) {
+    return res.status(400).json({ error: '"from" must be a non-empty string' });
+  }
+  if (typeof to !== 'string' || !to) {
+    return res.status(400).json({ error: '"to" must be a non-empty string' });
+  }
+  if (!isValidRelativeStackPath(from)) {
+    return res.status(400).json({ error: 'Invalid source path', code: 'INVALID_PATH' });
+  }
+  if (!isValidRelativeStackPath(to)) {
+    return res.status(400).json({ error: 'Invalid destination path', code: 'INVALID_PATH' });
+  }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
+  const startedAt = Date.now();
+  logFileDiag('copy start', { stackName, from, to, nodeId: req.nodeId, rootKind: root.kind });
+  try {
+    await FileRootGateway.getInstance(req.nodeId).copy(root, stackName, from, to);
+    afterStackMutation(req, stackName);
+    logFileOperation('info', 'mutate', {
+      nodeId: req.nodeId,
+      op: 'copy',
+      stack: stackName,
+      path: from,
+      toPath: to,
+      rootKind: root.kind,
+      backend: root.backend,
+    });
+    logFileDiag('copy timing', { stackName, from, to, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'copy', startedAt, true);
+    return res.status(204).send();
+  } catch (err: unknown) {
+    logFileOperation('warn', 'copy failed', {
+      nodeId: req.nodeId,
+      op: 'copy',
+      stack: stackName,
+      path: from,
+      toPath: to,
+      errorCode: fsErrorCode(err),
+    });
+    recordFileOp(req.nodeId, 'copy', startedAt, false);
+    return sendFsError(res, err, 'Failed to copy');
+  }
+});
+
 stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;

@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/components/ui/toast-store';
-import { downloadStackFile, listStackDirectory, listFileRoots, renameStackPath, STACK_SOURCE_ROOT_ID } from '@/lib/stackFilesApi';
+import { downloadStackFile, listStackDirectory, listFileRoots, renameStackPath, copyStackFile, relPathParentDir, nextDuplicateName, STACK_SOURCE_ROOT_ID } from '@/lib/stackFilesApi';
 import { FileTree } from './FileTree';
 import { FileViewer } from './FileViewer';
 import { FileUploadDropzone } from './FileUploadDropzone';
@@ -100,6 +100,11 @@ export function StackFileExplorer({
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveRelPath, setMoveRelPath] = useState('');
   const [moveEntry, setMoveEntry] = useState<FileEntry | null>(null);
+
+  // ── context menu: copy to… ──
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [copyRelPath, setCopyRelPath] = useState('');
+  const [copyEntry, setCopyEntry] = useState<FileEntry | null>(null);
 
   // ── context menu: delete ──
   const [ctxDeleteOpen, setCtxDeleteOpen] = useState(false);
@@ -242,6 +247,23 @@ export function StackFileExplorer({
     }
   }, [stackName, selectedRootId, selectedPath, isViewerDirty, handleDeleted, refresh]);
 
+  // Copy handler for the "Copy to…" dialog. Copying never touches the open file,
+  // so there is no unsaved-changes guard. Returns true on success so the dialog
+  // closes; the current parent is disabled in the picker, so a same-folder copy
+  // goes through Duplicate instead.
+  const handleCopy = useCallback(async (fromRel: string, entryName: string, destDir: string): Promise<boolean> => {
+    const toRel = destDir ? `${destDir}/${entryName}` : entryName;
+    try {
+      await copyStackFile(stackName, fromRel, toRel, selectedRootId);
+      toast.success('Copied successfully.');
+      refresh();
+      return true;
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Copy failed.');
+      return false;
+    }
+  }, [stackName, selectedRootId, refresh]);
+
   // ── Context menu callbacks ──
 
   const handleContextMenuMove = useCallback((relPath: string, entry: FileEntry) => {
@@ -249,6 +271,28 @@ export function StackFileExplorer({
     setMoveEntry(entry);
     setMoveOpen(true);
   }, []);
+
+  const handleContextMenuCopy = useCallback((relPath: string, entry: FileEntry) => {
+    setCopyRelPath(relPath);
+    setCopyEntry(entry);
+    setCopyOpen(true);
+  }, []);
+
+  // Duplicate: copy the entry into its own folder under a non-colliding "copy"
+  // name, derived from the parent's current listing.
+  const handleContextMenuDuplicate = useCallback(async (relPath: string, entry: FileEntry) => {
+    const parent = relPathParentDir(relPath);
+    try {
+      const siblings = await listStackDirectory(stackName, parent, selectedRootId);
+      const newName = nextDuplicateName(entry.name, new Set(siblings.map((e) => e.name)));
+      const toRel = parent ? `${parent}/${newName}` : newName;
+      await copyStackFile(stackName, relPath, toRel, selectedRootId);
+      toast.success('Duplicated successfully.');
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Duplicate failed.');
+    }
+  }, [stackName, selectedRootId, refresh]);
 
   const handleContextMenuRename = useCallback((relPath: string) => {
     const name = relPath.split('/').pop() ?? relPath;
@@ -357,6 +401,8 @@ export function StackFileExplorer({
             canEdit={rootCanEdit}
             onContextMenuRename={handleContextMenuRename}
             onContextMenuMove={handleContextMenuMove}
+            onContextMenuDuplicate={handleContextMenuDuplicate}
+            onContextMenuCopy={handleContextMenuCopy}
             onContextMenuNewFile={handleContextMenuNewFile}
             onContextMenuNewFolder={handleContextMenuNewFolder}
             onContextMenuDelete={handleContextMenuDelete}
@@ -484,6 +530,18 @@ export function StackFileExplorer({
         entry={moveEntry}
         rootId={selectedRootId}
         onMove={handleMove}
+      />
+
+      {/* Copy to… (reuses the move picker; current parent disabled, Duplicate covers same-folder) */}
+      <MoveFileDialog
+        open={copyOpen}
+        onOpenChange={setCopyOpen}
+        stackName={stackName}
+        relPath={copyRelPath}
+        entry={copyEntry}
+        rootId={selectedRootId}
+        mode="copy"
+        onMove={handleCopy}
       />
 
       {/* Permissions */}

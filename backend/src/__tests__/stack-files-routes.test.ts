@@ -1295,6 +1295,106 @@ describe('PATCH /api/stacks/:stackName/files/rename', () => {
   });
 });
 
+// ── POST /:stackName/files/copy ──────────────────────────────────────────────
+
+describe('POST /api/stacks/:stackName/files/copy', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .send({ from: 'a.txt', to: 'b.txt' });
+    expect(res.status).toBe(401);
+  });
+
+  it('viewer receives 403', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .set('Cookie', viewerCookie)
+      .send({ from: 'a.txt', to: 'b.txt' });
+    expect(res.status).toBe(403);
+  });
+
+  it('copies a file, preserving the original', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'copy-src.txt'), 'payload');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'copy-src.txt', to: 'copy-dst.txt' });
+    expect(res.status).toBe(204);
+    expect(await fs.readFile(path.join(stacksDir, STACK, 'copy-dst.txt'), 'utf-8')).toBe('payload');
+    expect(await fs.readFile(path.join(stacksDir, STACK, 'copy-src.txt'), 'utf-8')).toBe('payload');
+    await fs.unlink(path.join(stacksDir, STACK, 'copy-src.txt'));
+    await fs.unlink(path.join(stacksDir, STACK, 'copy-dst.txt'));
+  });
+
+  it('allows duplicating a protected file under a new name', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'compose.yaml', to: 'compose.yaml.bak' });
+    expect(res.status).toBe(204);
+    await fs.unlink(path.join(stacksDir, STACK, 'compose.yaml.bak'));
+  });
+
+  it('blocks copying onto a protected root name with 409 PROTECTED_FILE', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'rogue.yaml'), 'services: {}\n');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'rogue.yaml', to: 'docker-compose.yml' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROTECTED_FILE');
+    await fs.unlink(path.join(stacksDir, STACK, 'rogue.yaml'));
+  });
+
+  it('returns 409 ALREADY_EXISTS when the destination exists', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'cexist-src.txt'), 'a');
+    await fs.writeFile(path.join(stacksDir, STACK, 'cexist-dst.txt'), 'b');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'cexist-src.txt', to: 'cexist-dst.txt' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ALREADY_EXISTS');
+    // The existing destination is untouched.
+    expect(await fs.readFile(path.join(stacksDir, STACK, 'cexist-dst.txt'), 'utf-8')).toBe('b');
+    await fs.unlink(path.join(stacksDir, STACK, 'cexist-src.txt'));
+    await fs.unlink(path.join(stacksDir, STACK, 'cexist-dst.txt'));
+  });
+
+  it('recursively copies a directory', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'cdir/nested'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'cdir/nested/deep.txt'), 'deep');
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'cdir', to: 'cdir-copy' });
+    expect(res.status).toBe(204);
+    expect(await fs.readFile(path.join(stacksDir, STACK, 'cdir-copy/nested/deep.txt'), 'utf-8')).toBe('deep');
+    await fs.rm(path.join(stacksDir, STACK, 'cdir'), { recursive: true, force: true });
+    await fs.rm(path.join(stacksDir, STACK, 'cdir-copy'), { recursive: true, force: true });
+  });
+
+  it('rejects copying a directory into its own descendant with 400', async () => {
+    await fs.mkdir(path.join(stacksDir, STACK, 'selfcopy/sub'), { recursive: true });
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .set('Cookie', adminCookie)
+      .send({ from: 'selfcopy', to: 'selfcopy/sub/selfcopy' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PATH');
+    await fs.rm(path.join(stacksDir, STACK, 'selfcopy'), { recursive: true, force: true });
+  });
+
+  it('rejects path traversal in from/to with 400', async () => {
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/files/copy`)
+      .set('Cookie', adminCookie)
+      .send({ from: '../escape.txt', to: 'x.txt' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_PATH');
+  });
+});
+
 // ── PUT /:stackName/files/permissions ────────────────────────────────────────
 
 describe('PUT /api/stacks/:stackName/files/permissions', () => {

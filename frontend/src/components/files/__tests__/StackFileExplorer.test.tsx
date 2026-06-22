@@ -16,19 +16,25 @@ import type { FileEntry } from '@/lib/stackFilesApi';
 // can drive the shared move handler directly (the DnD path passes it as onMove).
 const h = vi.hoisted(() => ({
   renameMock: vi.fn<(stack: string, from: string, to: string) => Promise<void>>(),
+  copyMock: vi.fn<(stack: string, from: string, to: string, rootId?: string) => Promise<void>>(),
+  listMock: vi.fn<(stack: string, dir: string, rootId?: string) => Promise<FileEntry[]>>(),
   onMove: null as null | ((fromRel: string, entryName: string, destDir: string) => void),
+  onCopy: null as null | ((fromRel: string, entryName: string, destDir: string) => boolean | Promise<boolean>),
   toastError: vi.fn(),
   toastSuccess: vi.fn(),
 }));
 
 vi.mock('@/lib/stackFilesApi', () => ({
   STACK_SOURCE_ROOT_ID: 'stack-source',
-  listStackDirectory: vi.fn().mockResolvedValue([]),
+  listStackDirectory: h.listMock,
   listFileRoots: vi.fn().mockResolvedValue([]),
   downloadStackFile: vi.fn(),
   readStackFile: vi.fn(),
   writeStackFile: vi.fn(),
   renameStackPath: h.renameMock,
+  copyStackFile: h.copyMock,
+  relPathParentDir: (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : ''),
+  nextDuplicateName: (n: string) => `${n} copy`,
 }));
 
 vi.mock('@/components/ui/toast-store', () => ({
@@ -43,15 +49,26 @@ vi.mock('../NewFolderDialog', () => ({ NewFolderDialog: () => null }));
 vi.mock('../NewFileDialog', () => ({ NewFileDialog: () => null }));
 vi.mock('../DeleteFileConfirm', () => ({ DeleteFileConfirm: () => null }));
 vi.mock('../RenameDialog', () => ({ RenameDialog: () => null }));
-vi.mock('../MoveFileDialog', () => ({ MoveFileDialog: () => null }));
+// Capture the copy-mode dialog's confirm callback so handleCopy can be driven
+// directly (the move-mode instance is exercised via the drag-and-drop onMove).
+vi.mock('../MoveFileDialog', () => ({
+  MoveFileDialog: ({ mode, onMove }: {
+    mode?: 'move' | 'copy';
+    onMove?: (fromRel: string, entryName: string, destDir: string) => boolean | Promise<boolean>;
+  }) => {
+    if (mode === 'copy') h.onCopy = onMove ?? null;
+    return null;
+  },
+}));
 vi.mock('../FilePermissionsDialog', () => ({ FilePermissionsDialog: () => null }));
 
 // FileTree mock: selection buttons (two siblings + one nested file) plus capture
 // of the onMove callback so move-handler behaviour can be driven directly.
 vi.mock('../FileTree', () => ({
-  FileTree: ({ onSelectFile, onMove }: {
+  FileTree: ({ onSelectFile, onMove, onContextMenuDuplicate }: {
     onSelectFile: (rel: string, entry: FileEntry) => void;
     onMove?: (fromRel: string, entryName: string, destDir: string) => void;
+    onContextMenuDuplicate?: (relPath: string, entry: FileEntry) => void;
   }) => {
     h.onMove = onMove ?? null;
     return (
@@ -64,6 +81,9 @@ vi.mock('../FileTree', () => ({
         </button>
         <button onClick={() => onSelectFile('dir/a.txt', { name: 'a.txt', type: 'file', size: 1, mtime: 0, isProtected: false })}>
           select-nested
+        </button>
+        <button onClick={() => onContextMenuDuplicate?.('configs/app.conf', { name: 'app.conf', type: 'file', size: 1, mtime: 0, isProtected: false })}>
+          ctx-duplicate
         </button>
       </div>
     );
@@ -215,5 +235,60 @@ describe('StackFileExplorer move handling', () => {
 
     await waitFor(() => expect(h.toastError).toHaveBeenCalledWith('Cannot move across a storage boundary'));
     expect(screen.getByTestId('viewer-selected').textContent).toBe('a.txt');
+  });
+});
+
+describe('StackFileExplorer copy and duplicate handling', () => {
+  beforeEach(() => {
+    h.copyMock.mockReset().mockResolvedValue(undefined);
+    h.listMock.mockReset().mockResolvedValue([]);
+    h.toastError.mockReset();
+    h.toastSuccess.mockReset();
+  });
+
+  it('duplicates into the same folder under a non-colliding "copy" name', async () => {
+    h.listMock.mockResolvedValue([
+      { name: 'app.conf', type: 'file', size: 1, mtime: 0, isProtected: false },
+    ]);
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(screen.getByText('ctx-duplicate'));
+
+    // Siblings are listed from the entry's parent dir, then copied to the derived name.
+    await waitFor(() => expect(h.listMock).toHaveBeenCalledWith('my-stack', 'configs', 'stack-source'));
+    await waitFor(() => expect(h.copyMock).toHaveBeenCalledWith('my-stack', 'configs/app.conf', 'configs/app.conf copy', 'stack-source'));
+    await waitFor(() => expect(h.toastSuccess).toHaveBeenCalledWith('Duplicated successfully.'));
+  });
+
+  it('surfaces an error toast when the sibling listing for duplicate fails', async () => {
+    h.listMock.mockRejectedValueOnce(new Error('Failed to load folders.'));
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(screen.getByText('ctx-duplicate'));
+
+    await waitFor(() => expect(h.toastError).toHaveBeenCalledWith('Failed to load folders.'));
+    expect(h.copyMock).not.toHaveBeenCalled();
+  });
+
+  it('copies via the copy-to dialog handler and reports success', async () => {
+    setup();
+    await waitFor(() => expect(h.onCopy).not.toBeNull());
+
+    const result = await h.onCopy?.('a.txt', 'a.txt', 'sub');
+    expect(result).toBe(true);
+    expect(h.copyMock).toHaveBeenCalledWith('my-stack', 'a.txt', 'sub/a.txt', 'stack-source');
+    expect(h.toastSuccess).toHaveBeenCalledWith('Copied successfully.');
+  });
+
+  it('surfaces an error toast and stays open when the copy fails', async () => {
+    h.copyMock.mockRejectedValueOnce(new Error('already exists'));
+    setup();
+    await waitFor(() => expect(h.onCopy).not.toBeNull());
+
+    const result = await h.onCopy?.('a.txt', 'a.txt', 'sub');
+    expect(result).toBe(false);
+    expect(h.toastError).toHaveBeenCalledWith('already exists');
   });
 });

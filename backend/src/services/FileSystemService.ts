@@ -101,6 +101,18 @@ function fsCaseKey(s: string): string {
   return process.platform === 'win32' || process.platform === 'darwin' ? s.toLowerCase() : s;
 }
 
+/**
+ * True when resolved absolute path `candidate` is `parent` itself or sits inside
+ * it, compared case-folded so the guard stays authoritative on a case-insensitive
+ * filesystem. Used to block moving/copying a directory into its own subtree.
+ */
+function isSameOrDescendantFsPath(parent: string, candidate: string): boolean {
+  const parentKey = fsCaseKey(parent);
+  const parentKeyWithSep = parentKey.endsWith(path.sep) ? parentKey : parentKey + path.sep;
+  const candidateKey = fsCaseKey(candidate);
+  return candidateKey === parentKey || candidateKey.startsWith(parentKeyWithSep);
+}
+
 function isProtectedRelPath(relPath: string): boolean {
   if (!relPath) return false;
   const normalized = stripTrailingSlash(relPath);
@@ -1505,17 +1517,10 @@ export class FileSystemService {
       throw Object.assign(new Error('Invalid destination name'), { code: 'INVALID_PATH' });
     }
     // Block moving a directory into itself or one of its own descendants; fs.rename
-    // would otherwise fail with an opaque EINVAL/EPERM. Compare case-folded so the
-    // guard stays authoritative when the source is supplied with non-disk casing on
-    // a case-insensitive filesystem.
+    // would otherwise fail with an opaque EINVAL/EPERM.
     const fromStat = await fsPromises.lstat(fromPath);
-    if (fromStat.isDirectory()) {
-      const fromKey = fsCaseKey(fromPath);
-      const fromKeyWithSep = fromKey.endsWith(path.sep) ? fromKey : fromKey + path.sep;
-      const toKey = fsCaseKey(toPath);
-      if (toKey === fromKey || toKey.startsWith(fromKeyWithSep)) {
-        throw Object.assign(new Error('Cannot move a folder into itself'), { code: 'INVALID_PATH' });
-      }
+    if (fromStat.isDirectory() && isSameOrDescendantFsPath(fromPath, toPath)) {
+      throw Object.assign(new Error('Cannot move a folder into itself'), { code: 'INVALID_PATH' });
     }
     // Prevent overwriting an existing path. lstat (not access) so a dangling
     // symlink already at the destination still counts as occupied.
@@ -1527,6 +1532,46 @@ export class FileSystemService {
       if (fe.code !== 'ENOENT') throw e;
     }
     await fsPromises.rename(fromPath, toPath);
+  }
+
+  /**
+   * Copies a file or directory within a single root. The source resolves through
+   * the leaf helper and the copy does not dereference symlinks, so a symlink
+   * entry is copied as a link (matching the delete/rename leaf policy) rather
+   * than followed to its target. Only the destination is protection-checked:
+   * duplicating a protected file (e.g. compose.yaml) elsewhere is allowed, but a
+   * copy cannot create a reserved name at a protected root. An existing
+   * destination is rejected (surfaced as EEXIST, which the route maps to 409).
+   */
+  async copyScopedPath(stackName: string, fromRel: string, toRel: string, scope?: FileRootScope): Promise<void> {
+    if ((scope?.protectedEnabled ?? true) && isProtectedRelPath(toRel)) throw protectedFileError(toRel);
+    const fromPath = await this.resolveScopedLeafPath(stackName, fromRel, scope);
+    const toPath = await this.resolveScopedLeafPath(stackName, toRel, scope);
+    const toName = path.basename(toPath);
+    if (!toName || toName === '.' || toName === '..') {
+      throw Object.assign(new Error('Invalid destination name'), { code: 'INVALID_PATH' });
+    }
+    // Block copying a directory into itself or one of its own descendants;
+    // fs.cp would otherwise recurse into the copy it is creating.
+    const fromStat = await fsPromises.lstat(fromPath);
+    if (fromStat.isDirectory() && isSameOrDescendantFsPath(fromPath, toPath)) {
+      throw Object.assign(new Error('Cannot copy a folder into itself'), { code: 'INVALID_PATH' });
+    }
+    try {
+      await fsPromises.cp(fromPath, toPath, {
+        recursive: fromStat.isDirectory(),
+        dereference: false,
+        errorOnExist: true,
+        force: false,
+      });
+    } catch (err: unknown) {
+      // fs.cp raises ERR_FS_CP_EEXIST when the destination already exists; remap
+      // to EEXIST so the route returns 409, matching rename's conflict handling.
+      if ((err as NodeJS.ErrnoException).code === 'ERR_FS_CP_EEXIST') {
+        throw Object.assign(new Error('A file or folder with that name already exists'), { code: 'EEXIST' });
+      }
+      throw err;
+    }
   }
 
   async getStackEntryMode(stackName: string, relPath: string, scope?: FileRootScope): Promise<{ mode: number; octal: string }> {

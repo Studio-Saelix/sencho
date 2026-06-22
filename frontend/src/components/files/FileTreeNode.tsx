@@ -25,6 +25,8 @@ interface FileTreeNodeProps {
   canEdit: boolean;
   onContextMenuRename: (relPath: string) => void;
   onContextMenuMove: (relPath: string, entry: FileEntry) => void;
+  onContextMenuDuplicate: (relPath: string, entry: FileEntry) => void;
+  onContextMenuCopy: (relPath: string, entry: FileEntry) => void;
   onContextMenuNewFile: (dirRelPath: string) => void;
   onContextMenuNewFolder: (dirRelPath: string) => void;
   onContextMenuDelete: (relPath: string, entry: FileEntry) => void;
@@ -44,6 +46,8 @@ export function FileTreeNode({
   canEdit,
   onContextMenuRename,
   onContextMenuMove,
+  onContextMenuDuplicate,
+  onContextMenuCopy,
   onContextMenuNewFile,
   onContextMenuNewFolder,
   onContextMenuDelete,
@@ -101,6 +105,8 @@ export function FileTreeNode({
       canEdit={canEdit}
       onRequestRename={onContextMenuRename}
       onRequestMove={onContextMenuMove}
+      onRequestDuplicate={onContextMenuDuplicate}
+      onRequestCopy={onContextMenuCopy}
       onRequestNewFile={onContextMenuNewFile}
       onRequestNewFolder={onContextMenuNewFolder}
       onRequestDelete={onContextMenuDelete}

@@ -60,6 +60,26 @@ export function relPathParentDir(rel: string): string {
   return rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
 }
 
+/**
+ * Pick a non-colliding "<name> copy" sibling name for Duplicate. A leading-dot
+ * file (e.g. .env) is treated as having no extension, so the suffix lands before
+ * any real extension (`app copy.conf`) but as a plain suffix for dotfiles
+ * (`.env copy`).
+ */
+export function nextDuplicateName(original: string, existing: Set<string>): string {
+  const dot = original.lastIndexOf('.');
+  const hasExt = dot > 0;
+  const base = hasExt ? original.slice(0, dot) : original;
+  const ext = hasExt ? original.slice(dot) : '';
+  let candidate = `${base} copy${ext}`;
+  let n = 2;
+  while (existing.has(candidate)) {
+    candidate = `${base} copy ${n}${ext}`;
+    n += 1;
+  }
+  return candidate;
+}
+
 /** Custom drag MIME so move drops are told apart from OS file drags (`Files`). */
 export const FILE_ENTRY_DND_MIME = 'application/x-sencho-file-entry';
 
@@ -381,6 +401,21 @@ export async function renameStackPath(
   const res = await apiFetch(
     stackFilesUrl(stackName, `/rename${rootId ? `?rootId=${encodeURIComponent(rootId)}` : ''}`),
     { method: 'PATCH', body: JSON.stringify({ from: fromRel, to: toRel }) }
+  );
+  if (!res.ok) throw new Error(await parseApiError(res));
+}
+
+export async function copyStackFile(
+  stackName: string,
+  fromRel: string,
+  toRel: string,
+  rootId?: string,
+): Promise<void> {
+  assertSafeRelPath(fromRel, 'source path');
+  assertSafeRelPath(toRel, 'destination path');
+  const res = await apiFetch(
+    stackFilesUrl(stackName, `/copy${rootId ? `?rootId=${encodeURIComponent(rootId)}` : ''}`),
+    { method: 'POST', body: JSON.stringify({ from: fromRel, to: toRel }) }
   );
   if (!res.ok) throw new Error(await parseApiError(res));
 }

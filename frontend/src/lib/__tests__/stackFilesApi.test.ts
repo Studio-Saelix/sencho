@@ -11,6 +11,7 @@ import {
   isProtectedRootRelPath,
   isSameOrDescendantPath,
   relPathParentDir,
+  nextDuplicateName,
 } from '../stackFilesApi';
 
 describe('isClientSafeRelPath', () => {
@@ -113,5 +114,24 @@ describe('relPathParentDir', () => {
 
   it('returns the directory portion for a nested entry', () => {
     expect(relPathParentDir('configs/redis/redis.conf')).toBe('configs/redis');
+  });
+});
+
+describe('nextDuplicateName', () => {
+  it('inserts " copy" before the extension', () => {
+    expect(nextDuplicateName('app.conf', new Set())).toBe('app copy.conf');
+  });
+
+  it('increments the suffix when the copy name already exists', () => {
+    expect(nextDuplicateName('app.conf', new Set(['app copy.conf']))).toBe('app copy 2.conf');
+    expect(nextDuplicateName('app.conf', new Set(['app copy.conf', 'app copy 2.conf']))).toBe('app copy 3.conf');
+  });
+
+  it('treats a leading-dot file as having no extension', () => {
+    expect(nextDuplicateName('.env', new Set())).toBe('.env copy');
+  });
+
+  it('appends to a name with no extension', () => {
+    expect(nextDuplicateName('Dockerfile', new Set())).toBe('Dockerfile copy');
   });
 });

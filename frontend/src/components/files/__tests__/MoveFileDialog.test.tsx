@@ -145,4 +145,60 @@ describe('MoveFileDialog', () => {
     // Root is the source's current parent here, so it is also a no-op.
     expect(labelButton('Stack root')).toBeDisabled();
   });
+
+  it('in copy mode shows a Copy button and keeps the current parent disabled', async () => {
+    listMock.mockResolvedValue([dir('configs'), dir('services')]);
+    const onMove = vi.fn().mockResolvedValue(true);
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <MoveFileDialog
+        open
+        onOpenChange={onOpenChange}
+        stackName="my-stack"
+        relPath="configs/app.conf"
+        entry={file('app.conf')}
+        mode="copy"
+        onMove={onMove}
+      />,
+    );
+
+    await screen.findByText('services');
+    // The confirm button is labelled Copy, and there is no Move button.
+    const copyBtn = screen.getByRole('button', { name: /^copy$/i });
+    expect(copyBtn).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /^move$/i })).toBeNull();
+    // Same destination gating as move: the current parent stays disabled, so a
+    // same-folder copy must go through Duplicate, not this picker.
+    expect(labelButton('configs')).toBeDisabled();
+
+    await user.click(labelButton('services'));
+    expect(copyBtn).toBeEnabled();
+    await user.click(copyBtn);
+    expect(onMove).toHaveBeenCalledWith('configs/app.conf', 'app.conf', 'services');
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it('in copy mode disables the stack root for a reserved name so a protected file can only land in a subfolder', async () => {
+    listMock.mockResolvedValue([dir('backups')]);
+
+    render(
+      <MoveFileDialog
+        open
+        onOpenChange={vi.fn()}
+        stackName="my-stack"
+        relPath="compose.yaml"
+        entry={file('compose.yaml')}
+        mode="copy"
+        onMove={vi.fn()}
+      />,
+    );
+
+    await screen.findByText('backups');
+    // The stack root is disabled for a reserved name; a subfolder stays valid,
+    // so copying compose.yaml is allowed but only into a subfolder.
+    expect(labelButton('Stack root')).toBeDisabled();
+    expect(labelButton('backups')).toBeEnabled();
+  });
 });

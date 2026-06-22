@@ -390,6 +390,60 @@ describe('FileSystemService stack methods', () => {
     });
   });
 
+  // ── copyScopedPath ──────────────────────────────────────────────────────
+
+  describe('copyScopedPath', () => {
+    it('copies a file and preserves the original', async () => {
+      await fs.writeFile(path.join(stackDir, 'src.txt'), 'hello');
+      const service = FileSystemService.getInstance();
+      await service.copyScopedPath(STACK, 'src.txt', 'dst.txt');
+      expect(await fs.readFile(path.join(stackDir, 'dst.txt'), 'utf-8')).toBe('hello');
+      expect(await fs.readFile(path.join(stackDir, 'src.txt'), 'utf-8')).toBe('hello');
+    });
+
+    it('recursively copies a directory tree', async () => {
+      await fs.mkdir(path.join(stackDir, 'dir/inner'), { recursive: true });
+      await fs.writeFile(path.join(stackDir, 'dir/inner/leaf.txt'), 'leaf');
+      const service = FileSystemService.getInstance();
+      await service.copyScopedPath(STACK, 'dir', 'dir-copy');
+      expect(await fs.readFile(path.join(stackDir, 'dir-copy/inner/leaf.txt'), 'utf-8')).toBe('leaf');
+    });
+
+    it('rejects an existing destination with EEXIST', async () => {
+      await fs.writeFile(path.join(stackDir, 'e-src.txt'), 'a');
+      await fs.writeFile(path.join(stackDir, 'e-dst.txt'), 'b');
+      const service = FileSystemService.getInstance();
+      await expect(service.copyScopedPath(STACK, 'e-src.txt', 'e-dst.txt')).rejects.toMatchObject({ code: 'EEXIST' });
+      expect(await fs.readFile(path.join(stackDir, 'e-dst.txt'), 'utf-8')).toBe('b');
+    });
+
+    it('rejects copying a directory into its own descendant with INVALID_PATH', async () => {
+      await fs.mkdir(path.join(stackDir, 'sc/sub'), { recursive: true });
+      const service = FileSystemService.getInstance();
+      await expect(service.copyScopedPath(STACK, 'sc', 'sc/sub/sc')).rejects.toMatchObject({ code: 'INVALID_PATH' });
+    });
+
+    it('blocks copying onto a protected root name but allows a protected source', async () => {
+      await fs.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+      const service = FileSystemService.getInstance();
+      // Source is protected, destination is not -> allowed.
+      await service.copyScopedPath(STACK, 'compose.yaml', 'compose.yaml.bak');
+      expect(await fs.readFile(path.join(stackDir, 'compose.yaml.bak'), 'utf-8')).toBe('services: {}\n');
+      // Destination is a reserved root name -> blocked.
+      await fs.writeFile(path.join(stackDir, 'plain.yaml'), 'x\n');
+      await expect(service.copyScopedPath(STACK, 'plain.yaml', 'docker-compose.yml')).rejects.toMatchObject({ code: 'PROTECTED_FILE' });
+    });
+
+    it.skipIf(isWindows)('copies a symlink as a link, not its target', async () => {
+      await fs.writeFile(path.join(stackDir, 'target.txt'), 'real');
+      await fs.symlink('target.txt', path.join(stackDir, 'link.txt'));
+      const service = FileSystemService.getInstance();
+      await service.copyScopedPath(STACK, 'link.txt', 'link-copy.txt');
+      const lst = await fs.lstat(path.join(stackDir, 'link-copy.txt'));
+      expect(lst.isSymbolicLink()).toBe(true);
+    });
+  });
+
   // ── deleteStackPath ─────────────────────────────────────────────────────
 
   describe('deleteStackPath', () => {

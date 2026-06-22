@@ -23,8 +23,12 @@ interface MoveFileDialogProps {
   entry: FileEntry | null;
   /** The selected file root; the destination tree is loaded within it. */
   rootId?: string;
-  /** Relocate `fromRel` into `destDir` (''=stack root). Resolves true only when
-   *  the entry actually moved, so the dialog stays open on a blocked/failed move. */
+  /** 'move' relocates the entry; 'copy' duplicates it into the destination. The
+   *  destination rules are identical (the current parent stays disabled in both,
+   *  so a same-folder copy goes through Duplicate, not this picker). */
+  mode?: 'move' | 'copy';
+  /** Relocate or copy `fromRel` into `destDir` (''=stack root). Resolves true only
+   *  when the action succeeded, so the dialog stays open on a blocked/failed run. */
   onMove: (fromRel: string, entryName: string, destDir: string) => boolean | Promise<boolean>;
 }
 
@@ -35,8 +39,10 @@ export function MoveFileDialog({
   relPath,
   entry,
   rootId,
+  mode = 'move',
   onMove,
 }: MoveFileDialogProps) {
+  const isCopy = mode === 'copy';
   // Loaded directory children, keyed by directory rel path ('' = stack root).
   const [dirChildren, setDirChildren] = useState<Map<string, FileEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -207,8 +213,8 @@ export function MoveFileDialog({
   return (
     <Modal open={open} onOpenChange={handleClose} size="sm">
       <ModalHeader
-        kicker={`${stackName.toUpperCase()} · MOVE`}
-        title="Move to…"
+        kicker={`${stackName.toUpperCase()} · ${isCopy ? 'COPY' : 'MOVE'}`}
+        title={isCopy ? 'Copy to…' : 'Move to…'}
         description={entry ? `Choose a destination folder for ${entry.name}.` : 'Choose a destination folder.'}
       />
       <ModalBody>
@@ -250,7 +256,7 @@ export function MoveFileDialog({
             disabled={moving || selectedDest === null || !isValidDest(selectedDest)}
           >
             {moving && <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} />}
-            Move
+            {isCopy ? 'Copy' : 'Move'}
           </Button>
         }
       />
