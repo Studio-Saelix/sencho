@@ -60,6 +60,26 @@ export function relPathParentDir(rel: string): string {
   return rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
 }
 
+/**
+ * Pick a non-colliding "<name> copy" sibling name for Duplicate. A leading-dot
+ * file (e.g. .env) is treated as having no extension, so the suffix lands before
+ * any real extension (`app copy.conf`) but as a plain suffix for dotfiles
+ * (`.env copy`).
+ */
+export function nextDuplicateName(original: string, existing: Set<string>): string {
+  const dot = original.lastIndexOf('.');
+  const hasExt = dot > 0;
+  const base = hasExt ? original.slice(0, dot) : original;
+  const ext = hasExt ? original.slice(dot) : '';
+  let candidate = `${base} copy${ext}`;
+  let n = 2;
+  while (existing.has(candidate)) {
+    candidate = `${base} copy ${n}${ext}`;
+    n += 1;
+  }
+  return candidate;
+}
+
 /** Custom drag MIME so move drops are told apart from OS file drags (`Files`). */
 export const FILE_ENTRY_DND_MIME = 'application/x-sencho-file-entry';
 
@@ -300,6 +320,24 @@ export async function uploadStackFile(
   }
 }
 
+/**
+ * Create a new empty file at `dirRelPath/fileName`. Routes through the upload
+ * endpoint with a zero-byte file and no overwrite, so the server's exclusive
+ * create path is authoritative and an existing entry is never clobbered: an
+ * existing file of that name is rejected as FILE_EXISTS (thrown as
+ * UploadConflictError), and an existing folder is rejected as DIR_EXISTS (a
+ * generic Error). Works on both the filesystem and named-volume backends.
+ */
+export async function createEmptyStackFile(
+  stackName: string,
+  dirRelPath: string,
+  fileName: string,
+  options?: { rootId?: string }
+): Promise<void> {
+  const blank = new File([new Uint8Array(0)], fileName, { type: 'text/plain' });
+  await uploadStackFile(stackName, dirRelPath, blank, { rootId: options?.rootId, overwrite: false });
+}
+
 export async function writeStackFile(
   stackName: string,
   relPath: string,
@@ -383,6 +421,76 @@ export async function renameStackPath(
     { method: 'PATCH', body: JSON.stringify({ from: fromRel, to: toRel }) }
   );
   if (!res.ok) throw new Error(await parseApiError(res));
+}
+
+export async function copyStackFile(
+  stackName: string,
+  fromRel: string,
+  toRel: string,
+  rootId?: string,
+): Promise<void> {
+  assertSafeRelPath(fromRel, 'source path');
+  assertSafeRelPath(toRel, 'destination path');
+  const res = await apiFetch(
+    stackFilesUrl(stackName, `/copy${rootId ? `?rootId=${encodeURIComponent(rootId)}` : ''}`),
+    { method: 'POST', body: JSON.stringify({ from: fromRel, to: toRel }) }
+  );
+  if (!res.ok) throw new Error(await parseApiError(res));
+}
+
+/** A failed item in a partial-success bulk operation. */
+export interface BulkFailure {
+  path: string;
+  error: string;
+}
+export interface BulkDeleteResult {
+  deleted: string[];
+  failed: BulkFailure[];
+}
+export interface BulkMoveResult {
+  moved: string[];
+  failed: BulkFailure[];
+}
+
+export async function bulkDeleteStackPaths(stackName: string, paths: string[], rootId?: string): Promise<BulkDeleteResult> {
+  const res = await apiFetch(
+    stackFilesUrl(stackName, `/bulk-delete${rootId ? `?rootId=${encodeURIComponent(rootId)}` : ''}`),
+    { method: 'POST', body: JSON.stringify({ paths }) }
+  );
+  if (!res.ok) throw new Error(await parseApiError(res));
+  return res.json() as Promise<BulkDeleteResult>;
+}
+
+export async function bulkMoveStackPaths(stackName: string, from: string[], toDir: string, rootId?: string): Promise<BulkMoveResult> {
+  const res = await apiFetch(
+    stackFilesUrl(stackName, `/bulk-move${rootId ? `?rootId=${encodeURIComponent(rootId)}` : ''}`),
+    { method: 'POST', body: JSON.stringify({ from, toDir }) }
+  );
+  if (!res.ok) throw new Error(await parseApiError(res));
+  return res.json() as Promise<BulkMoveResult>;
+}
+
+/** GET the bulk-download archive (repeated ?path= so read-only API tokens work). */
+export async function bulkDownloadStackFiles(stackName: string, paths: string[], rootId?: string): Promise<Response> {
+  const query = paths.map((p) => `path=${encodeURIComponent(p)}`).join('&');
+  const suffix = rootId ? `&rootId=${encodeURIComponent(rootId)}` : '';
+  return apiFetch(stackFilesUrl(stackName, `/bulk-download?${query}${suffix}`));
+}
+
+/**
+ * Drop any selected path whose ancestor is also selected (so a folder and a file
+ * inside it are not both acted on). A UX convenience; the backend re-normalizes
+ * authoritatively (with per-root case-awareness), so this is not the boundary.
+ */
+export function normalizeSelection(paths: string[]): string[] {
+  const set = new Set(paths);
+  return [...set].filter((p) => {
+    const segments = p.split('/');
+    for (let i = 1; i < segments.length; i++) {
+      if (set.has(segments.slice(0, i).join('/'))) return false;
+    }
+    return true;
+  });
 }
 
 export interface EntryPermissions {

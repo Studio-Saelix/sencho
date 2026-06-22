@@ -1,9 +1,10 @@
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { promises as fsPromises, createReadStream } from 'fs';
+import { promises as fsPromises, createReadStream, createWriteStream } from 'fs';
 import type { Dirent } from 'fs';
-import type { Readable } from 'stream';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { NodeRegistry } from './NodeRegistry';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { isBinaryBuffer } from '../utils/binaryDetect';
@@ -11,7 +12,10 @@ import { sanitizeForLog } from '../utils/safeLog';
 
 export interface FileEntry {
   name: string;
-  type: 'file' | 'directory' | 'symlink';
+  // 'other' covers non-regular helper-volume entries (fifo/socket/device): they
+  // are unrepresentable on the fs backend but the helper can surface them, and
+  // they must stay distinct from 'file' so the archive guard can reject them.
+  type: 'file' | 'directory' | 'symlink' | 'other';
   size: number;
   mtime: number;
   isProtected: boolean;
@@ -98,6 +102,18 @@ function stripTrailingSlash(s: string): string {
 // production) paths are case-sensitive and this returns the input unchanged.
 function fsCaseKey(s: string): string {
   return process.platform === 'win32' || process.platform === 'darwin' ? s.toLowerCase() : s;
+}
+
+/**
+ * True when resolved absolute path `candidate` is `parent` itself or sits inside
+ * it, compared case-folded so the guard stays authoritative on a case-insensitive
+ * filesystem. Used to block moving/copying a directory into its own subtree.
+ */
+function isSameOrDescendantFsPath(parent: string, candidate: string): boolean {
+  const parentKey = fsCaseKey(parent);
+  const parentKeyWithSep = parentKey.endsWith(path.sep) ? parentKey : parentKey + path.sep;
+  const candidateKey = fsCaseKey(candidate);
+  return candidateKey === parentKey || candidateKey.startsWith(parentKeyWithSep);
 }
 
 function isProtectedRelPath(relPath: string): boolean {
@@ -1043,9 +1059,14 @@ export class FileSystemService {
    * compose. Tracked as a follow-up hardening, not a per-root regression.
    */
   private async resolveSafePathWithin(rootAbsDir: string, relPath: string): Promise<string> {
-    const target = relPath === '' ? rootAbsDir : path.resolve(rootAbsDir, relPath);
-
-    if (!isPathWithinBase(target, rootAbsDir)) {
+    // Canonical js/path-injection barrier inline with the realpath sinks below:
+    // isPathWithinBase performs the same containment check, but static analysis
+    // only credits the path.resolve + startsWith form when it sits at the sink.
+    // relPath === '' resolves to the (server-controlled) root itself and carries
+    // no user input, so it needs no containment check.
+    const baseResolved = path.resolve(rootAbsDir);
+    const target = path.resolve(baseResolved, relPath);
+    if (relPath !== '' && !target.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes root directory'), { code: 'INVALID_PATH' });
     }
 
@@ -1067,6 +1088,21 @@ export class FileSystemService {
         }
         suffix.unshift(path.basename(existing));
         existing = parent;
+        if (existing === baseResolved) {
+          // Reached the root: realpath the untainted base (never a tainted input)
+          // and reattach the not-yet-existing suffix.
+          const realBase = await fsPromises.realpath(baseResolved);
+          if (!isPathWithinBase(realBase, rootAbsDir)) {
+            throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
+          }
+          realTarget = path.join(realBase, ...suffix);
+          break;
+        }
+        // Inline js/path-injection barrier: existing is now strictly below the
+        // root, so the canonical path.resolve + startsWith form credits the sink.
+        if (!existing.startsWith(baseResolved + path.sep)) {
+          throw Object.assign(new Error('Path escapes root directory'), { code: 'INVALID_PATH' });
+        }
         try {
           const realExisting = await fsPromises.realpath(existing);
           if (!isPathWithinBase(realExisting, rootAbsDir)) {
@@ -1255,7 +1291,7 @@ export class FileSystemService {
    */
   private async writeStackFileAtomic(
     safePath: string,
-    data: string | Buffer,
+    data: string | Buffer | Readable,
     opts: { exclusive?: boolean } = {},
   ): Promise<void> {
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
@@ -1265,13 +1301,28 @@ export class FileSystemService {
     const tmpPath = `${safePath}.sencho-tmp-${suffix}`;
     let stagedTmp = false;
     try {
-      const fh = await fsPromises.open(tmpPath, 'wx');
-      stagedTmp = true;
-      try {
-        await fh.writeFile(data);
-        await fh.sync();
-      } finally {
-        await fh.close();
+      if (data instanceof Readable) {
+        // Stream a temp-file source (an upload spooled to disk) into the staging
+        // file without buffering it in memory. 'wx' exclusively creates the
+        // staging file; the random suffix already guarantees a fresh name.
+        const ws = createWriteStream(tmpPath, { flags: 'wx' });
+        stagedTmp = true;
+        await pipeline(data, ws);
+        const synced = await fsPromises.open(tmpPath, 'r+');
+        try {
+          await synced.sync();
+        } finally {
+          await synced.close();
+        }
+      } else {
+        const fh = await fsPromises.open(tmpPath, 'wx');
+        stagedTmp = true;
+        try {
+          await fh.writeFile(data);
+          await fh.sync();
+        } finally {
+          await fh.close();
+        }
       }
       if (opts.exclusive) {
         // link() is atomic against EEXIST. Tmp and target are guaranteed to live
@@ -1306,14 +1357,22 @@ export class FileSystemService {
     await this.writeStackFileAtomic(safePath, content, opts);
   }
 
-  async writeStackFileBuffer(
+  /**
+   * Atomic, scoped write whose source is a temp file on disk (an upload spooled
+   * by multer's diskStorage). Streams the temp file into a staging sibling in the
+   * target's own directory, fsyncs, then links/renames into place, so a large
+   * upload is never buffered in memory and the temp file's filesystem can differ
+   * from the stack/volume filesystem (no cross-device rename). The caller owns
+   * deleting tempPath.
+   */
+  async writeScopedFileFromTemp(
     stackName: string,
     relPath: string,
-    buffer: Buffer,
+    tempPath: string,
     opts?: { exclusive?: boolean; scope?: FileRootScope },
   ): Promise<void> {
     const safePath = await this.resolveScopedPath(stackName, relPath, opts?.scope);
-    await this.writeStackFileAtomic(safePath, buffer, opts);
+    await this.writeStackFileAtomic(safePath, createReadStream(tempPath), { exclusive: opts?.exclusive });
   }
 
   /**
@@ -1481,17 +1540,10 @@ export class FileSystemService {
       throw Object.assign(new Error('Invalid destination name'), { code: 'INVALID_PATH' });
     }
     // Block moving a directory into itself or one of its own descendants; fs.rename
-    // would otherwise fail with an opaque EINVAL/EPERM. Compare case-folded so the
-    // guard stays authoritative when the source is supplied with non-disk casing on
-    // a case-insensitive filesystem.
+    // would otherwise fail with an opaque EINVAL/EPERM.
     const fromStat = await fsPromises.lstat(fromPath);
-    if (fromStat.isDirectory()) {
-      const fromKey = fsCaseKey(fromPath);
-      const fromKeyWithSep = fromKey.endsWith(path.sep) ? fromKey : fromKey + path.sep;
-      const toKey = fsCaseKey(toPath);
-      if (toKey === fromKey || toKey.startsWith(fromKeyWithSep)) {
-        throw Object.assign(new Error('Cannot move a folder into itself'), { code: 'INVALID_PATH' });
-      }
+    if (fromStat.isDirectory() && isSameOrDescendantFsPath(fromPath, toPath)) {
+      throw Object.assign(new Error('Cannot move a folder into itself'), { code: 'INVALID_PATH' });
     }
     // Prevent overwriting an existing path. lstat (not access) so a dangling
     // symlink already at the destination still counts as occupied.
@@ -1503,6 +1555,46 @@ export class FileSystemService {
       if (fe.code !== 'ENOENT') throw e;
     }
     await fsPromises.rename(fromPath, toPath);
+  }
+
+  /**
+   * Copies a file or directory within a single root. The source resolves through
+   * the leaf helper and the copy does not dereference symlinks, so a symlink
+   * entry is copied as a link (matching the delete/rename leaf policy) rather
+   * than followed to its target. Only the destination is protection-checked:
+   * duplicating a protected file (e.g. compose.yaml) elsewhere is allowed, but a
+   * copy cannot create a reserved name at a protected root. An existing
+   * destination is rejected (surfaced as EEXIST, which the route maps to 409).
+   */
+  async copyScopedPath(stackName: string, fromRel: string, toRel: string, scope?: FileRootScope): Promise<void> {
+    if ((scope?.protectedEnabled ?? true) && isProtectedRelPath(toRel)) throw protectedFileError(toRel);
+    const fromPath = await this.resolveScopedLeafPath(stackName, fromRel, scope);
+    const toPath = await this.resolveScopedLeafPath(stackName, toRel, scope);
+    const toName = path.basename(toPath);
+    if (!toName || toName === '.' || toName === '..') {
+      throw Object.assign(new Error('Invalid destination name'), { code: 'INVALID_PATH' });
+    }
+    // Block copying a directory into itself or one of its own descendants;
+    // fs.cp would otherwise recurse into the copy it is creating.
+    const fromStat = await fsPromises.lstat(fromPath);
+    if (fromStat.isDirectory() && isSameOrDescendantFsPath(fromPath, toPath)) {
+      throw Object.assign(new Error('Cannot copy a folder into itself'), { code: 'INVALID_PATH' });
+    }
+    try {
+      await fsPromises.cp(fromPath, toPath, {
+        recursive: fromStat.isDirectory(),
+        dereference: false,
+        errorOnExist: true,
+        force: false,
+      });
+    } catch (err: unknown) {
+      // fs.cp raises ERR_FS_CP_EEXIST when the destination already exists; remap
+      // to EEXIST so the route returns 409, matching rename's conflict handling.
+      if ((err as NodeJS.ErrnoException).code === 'ERR_FS_CP_EEXIST') {
+        throw Object.assign(new Error('A file or folder with that name already exists'), { code: 'EEXIST' });
+      }
+      throw err;
+    }
   }
 
   async getStackEntryMode(stackName: string, relPath: string, scope?: FileRootScope): Promise<{ mode: number; octal: string }> {
