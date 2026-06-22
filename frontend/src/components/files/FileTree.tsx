@@ -502,13 +502,13 @@ export function FileTree({
           </button>
         )}
       </div>
-      <ScrollArea type="hover" className="flex-1 min-h-0">
+      <ScrollArea type="hover" horizontal className="flex-1 min-h-0">
         <div
           data-testid="file-tree-root-dropzone"
           role="tree"
           aria-label="Files"
           aria-multiselectable
-          className={cn('py-1 min-h-full', isRootDropTarget && 'bg-accent/20')}
+          className={cn('py-1 min-h-full min-w-full w-max', isRootDropTarget && 'bg-accent/20')}
           onKeyDown={handleTreeKeyDown}
           onDragOver={handleRootDragOver}
           onDragLeave={() => setIsRootDropTarget(false)}

@@ -21,9 +21,14 @@ vi.mock('@/components/ui/toast-store', () => ({
   },
 }));
 
-// ScrollArea just renders children so the tree nodes are accessible in jsdom.
+const sa = vi.hoisted(() => ({ props: {} as Record<string, unknown> }));
+// ScrollArea just renders children so the tree nodes are accessible in jsdom;
+// capture its props so the horizontal-scroll opt-in is testable.
 vi.mock('@/components/ui/scroll-area', () => ({
-  ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  ScrollArea: ({ children, ...props }: { children: React.ReactNode } & Record<string, unknown>) => {
+    sa.props = props;
+    return <div>{children}</div>;
+  },
 }));
 
 vi.mock('@/components/ui/skeleton', () => ({
@@ -592,5 +597,45 @@ describe('FileTree drag-and-drop move', () => {
 
     expect(rowFor('README.md').draggable).toBe(true);
     expect(rowFor('compose.yaml').draggable).toBe(false);
+  });
+});
+
+// ── layout: full-row hit area + horizontal scroll for long names ────────────
+
+describe('FileTree layout', () => {
+  it('opts the tree ScrollArea into a horizontal scrollbar', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+    expect(sa.props.horizontal).toBe(true);
+  });
+
+  it('spans the tree and rows to the full pane width and stops clipping names', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} />);
+    await screen.findByText('src');
+
+    // The container and each row fill the pane while growing to content, so the
+    // right-click hit area covers the whole row at any horizontal scroll offset.
+    const tree = screen.getByRole('tree');
+    expect(tree.className).toMatch(/\bmin-w-full\b/);
+    expect(tree.className).toMatch(/\bw-max\b/);
+    expect(rowFor('src').className).toMatch(/\bmin-w-full\b/);
+    expect(rowFor('src').className).toMatch(/\bw-max\b/);
+
+    // The name renders in full (no truncation), it just does not wrap.
+    const nameSpan = screen.getByText('README.md');
+    expect(nameSpan.className).toContain('whitespace-nowrap');
+    expect(nameSpan.className).not.toContain('truncate');
+  });
+
+  it('opens the Sencho context menu when a directory row is right-clicked', async () => {
+    mockLoadDir.mockReturnValue(fakeOk(ROOT_ENTRIES));
+    render(<FileTree {...defaultProps()} canEdit />);
+    await screen.findByText('src');
+
+    fireEvent.contextMenu(rowFor('src'));
+    expect(await screen.findByText('New File')).toBeInTheDocument();
+    expect(screen.getByText('Rename')).toBeInTheDocument();
   });
 });

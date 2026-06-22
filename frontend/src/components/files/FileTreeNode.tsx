@@ -170,7 +170,7 @@ export function FileTreeNode({
           }
         }}
         className={cn(
-          'group flex items-center gap-1.5 py-0.5 cursor-pointer select-none rounded-sm',
+          'group flex items-center gap-1.5 py-0.5 cursor-pointer select-none rounded-sm min-w-full w-max',
           isSelected
             ? 'bg-accent text-accent-foreground'
             : 'hover:bg-accent/50 text-foreground',
@@ -204,7 +204,7 @@ export function FileTreeNode({
             ? <Link className="w-3.5 h-3.5 shrink-0" strokeWidth={1.5} />
             : <File className="w-3.5 h-3.5 shrink-0" strokeWidth={1.5} />
         }
-        <span className="font-mono text-sm truncate">{entry.name}</span>
+        <span className="font-mono text-sm whitespace-nowrap">{entry.name}</span>
         {entry.isProtected && (
           <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
         )}
