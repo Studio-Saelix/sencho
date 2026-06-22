@@ -20,6 +20,7 @@ export type FileExplorerOp =
   | 'delete'
   | 'mkdir'
   | 'rename'
+  | 'copy'
   | 'chmod';
 
 interface FileExplorerOpStats {
