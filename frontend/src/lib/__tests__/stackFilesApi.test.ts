@@ -161,11 +161,22 @@ describe('createEmptyStackFile', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('/upload?path=configs');
+    expect(new URL(url, 'http://x').searchParams.get('path')).toBe('configs');
     expect(url).not.toContain('overwrite=1'); // never clobbers
     const file = (init.body as FormData).get('file') as File;
     expect(file.name).toBe('app.conf');
     expect(file.size).toBe(0);
+  });
+
+  it('targets the stack root when the directory is empty', async () => {
+    const fetchMock = stubFetch(204);
+    await createEmptyStackFile('my-stack', '', 'root-file.txt');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // An empty directory means the stack root: the path query carries no segment.
+    expect(new URL(url, 'http://x').searchParams.get('path')).toBe('');
+    expect(url).not.toContain('overwrite=1');
+    expect((init.body as FormData).get('file') as File).toMatchObject({ name: 'root-file.txt', size: 0 });
   });
 
   it('throws UploadConflictError when a file of that name already exists', async () => {
