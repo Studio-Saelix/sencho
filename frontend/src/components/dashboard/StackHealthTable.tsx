@@ -134,7 +134,7 @@ export function StackHealthTable({
     <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel max-md:overflow-x-auto">
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="flex items-baseline gap-3">
-          <h2 className="font-display italic text-xl leading-none tracking-tight text-stat-value">
+          <h2 className="font-heading text-xl leading-none tracking-tight text-stat-value">
             Stack health
           </h2>
           <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-stat-subtitle">

@@ -443,7 +443,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-stat-subtitle mb-1">
                     Next 24 hours
                   </div>
-                  <div className="font-display italic text-3xl text-foreground leading-tight">
+                  <div className="font-heading text-3xl text-foreground leading-tight">
                     Next <em className="not-italic text-brand">24 hours</em>
                   </div>
                   <div className="text-xs font-mono text-stat-subtitle mt-1 tabular-nums">
