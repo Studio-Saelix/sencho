@@ -53,7 +53,7 @@ Named-volume editing is best-effort and bound by file ownership. The helper cont
 
 ## Layout
 
-The Files & Volumes tab splits into two panes. The left pane holds the Browsing selector, the upload affordance, the new-folder button, and the directory tree for the selected root. The right pane is the action bar plus the file viewer.
+The Files & Volumes tab splits into two panes. The left pane holds the Browsing selector, the upload affordance, the **New file** and **New folder** buttons, and the directory tree for the selected root. The right pane is the action bar plus the file viewer.
 
 <Frame>
   <img src="/images/stack-file-explorer/layout-panes.png" alt="Files tab two-pane layout showing the upload widget and tree on the left and the file viewer on the right" />
@@ -66,6 +66,8 @@ Folders sort before files, and entries within each group sort alphabetically.
 Click a folder to expand or collapse it. Click a file to open it in the viewer on the right. Symlinks render with a chain icon and behave like files when clicked. Deleting a symlink removes only the link entry; the file it points to is untouched.
 
 The tree is fully keyboard navigable. Tab into it and use the arrow keys to move between rows: **Up** and **Down** move row to row, **Right** expands a folder (then steps into it), **Left** collapses it (or steps out to the parent), **Home** and **End** jump to the first and last visible row, and **Enter** opens a file or toggles a folder.
+
+Each row is fully clickable across the pane, so right-clicking anywhere on a row (not just on its name) opens that entry's context menu. Long names are never truncated: the tree scrolls horizontally so you can read the full name.
 
 **Display cap.** Each directory render is capped at 1000 entries. A folder with more than 1000 children shows the first 1000 alphabetically with a footer noting how many entries the directory holds in total. The tree also has a filter input at the top of the list so you can narrow a large directory to the entries you care about without dropping to a shell.
 
@@ -116,7 +118,7 @@ Writes are atomic at the filesystem level. Sencho stages the new content into a 
 
 ## Creating files and folders
 
-The toolbar **New folder** button at the top of the tree creates a folder in the currently selected directory (the parent of the file you have open, or the stack root if nothing is open).
+The toolbar **New file** and **New folder** buttons at the top of the tree create an entry in the currently selected directory (the parent of the file you have open, or the stack root if nothing is open). Use the toolbar buttons to create an entry directly at the stack root, where there is no folder row to right-click.
 
 Right-click any folder for **New File** and **New Folder** entries that scope to the right-clicked folder. These write controls appear only when your account has stack edit permission.
 
@@ -125,6 +127,8 @@ Right-click any folder for **New File** and **New Folder** entries that scope to
 </Frame>
 
 Filenames cannot be empty, cannot contain `/` or `\`, and cannot be `.` or `..`. The Create button stays disabled until the input passes validation.
+
+Creating a file never overwrites an existing one. If a file of that name already exists in the target directory, the dialog reports inline that the name is taken; if a folder of that name exists, Sencho rejects the creation with a message. Either way the existing entry is left untouched.
 
 ## Uploading files
 
@@ -229,6 +233,8 @@ When the entry is one of the five protected names, the modal asks you to type th
 <Frame>
   <img src="/images/stack-file-explorer/context-menu-file.png" alt="Right-click menu on a file showing Rename, Permissions, and Delete entries" />
 </Frame>
+
+Right-click anywhere on a row, not only on its name, to open the menu.
 
 | Right-click target | Admin entries (with stack edit) | Viewer entries |
 |---|---|---|
