@@ -5,12 +5,15 @@
  * malicious or buggy caller cannot slip a `..` segment past the
  * client before it would otherwise be caught by the server.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   isClientSafeRelPath,
   isProtectedRootRelPath,
   isSameOrDescendantPath,
   relPathParentDir,
+  nextDuplicateName,
+  createEmptyStackFile,
+  UploadConflictError,
 } from '../stackFilesApi';
 
 describe('isClientSafeRelPath', () => {
@@ -113,5 +116,80 @@ describe('relPathParentDir', () => {
 
   it('returns the directory portion for a nested entry', () => {
     expect(relPathParentDir('configs/redis/redis.conf')).toBe('configs/redis');
+  });
+});
+
+describe('nextDuplicateName', () => {
+  it('inserts " copy" before the extension', () => {
+    expect(nextDuplicateName('app.conf', new Set())).toBe('app copy.conf');
+  });
+
+  it('increments the suffix when the copy name already exists', () => {
+    expect(nextDuplicateName('app.conf', new Set(['app copy.conf']))).toBe('app copy 2.conf');
+    expect(nextDuplicateName('app.conf', new Set(['app copy.conf', 'app copy 2.conf']))).toBe('app copy 3.conf');
+  });
+
+  it('treats a leading-dot file as having no extension', () => {
+    expect(nextDuplicateName('.env', new Set())).toBe('.env copy');
+  });
+
+  it('appends to a name with no extension', () => {
+    expect(nextDuplicateName('Dockerfile', new Set())).toBe('Dockerfile copy');
+  });
+});
+
+describe('createEmptyStackFile', () => {
+  function stubFetch(status: number, body?: object) {
+    const res = {
+      status,
+      ok: status >= 200 && status < 300,
+      headers: { get: () => null },
+      clone() { return this; },
+      json: async () => body ?? {},
+    };
+    const fetchMock = vi.fn().mockResolvedValue(res);
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  beforeEach(() => localStorage.clear());
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('posts a zero-byte file to the upload endpoint without overwrite', async () => {
+    const fetchMock = stubFetch(204);
+    await createEmptyStackFile('my-stack', 'configs', 'app.conf', { rootId: 'stack-source' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(new URL(url, 'http://x').searchParams.get('path')).toBe('configs');
+    expect(url).not.toContain('overwrite=1'); // never clobbers
+    const file = (init.body as FormData).get('file') as File;
+    expect(file.name).toBe('app.conf');
+    expect(file.size).toBe(0);
+  });
+
+  it('targets the stack root when the directory is empty', async () => {
+    const fetchMock = stubFetch(204);
+    await createEmptyStackFile('my-stack', '', 'root-file.txt');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // An empty directory means the stack root: the path query carries no segment.
+    expect(new URL(url, 'http://x').searchParams.get('path')).toBe('');
+    expect(url).not.toContain('overwrite=1');
+    expect((init.body as FormData).get('file') as File).toMatchObject({ name: 'root-file.txt', size: 0 });
+  });
+
+  it('throws UploadConflictError when a file of that name already exists', async () => {
+    stubFetch(409, { code: 'FILE_EXISTS', error: 'app.conf already exists.' });
+    await expect(createEmptyStackFile('my-stack', 'configs', 'app.conf')).rejects.toBeInstanceOf(
+      UploadConflictError,
+    );
+  });
+
+  it('throws a generic error (not UploadConflictError) when a folder of that name exists', async () => {
+    stubFetch(409, { code: 'DIR_EXISTS', error: 'A folder named app already exists in this folder.' });
+    const err = await createEmptyStackFile('my-stack', 'configs', 'app').catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(UploadConflictError);
   });
 });
