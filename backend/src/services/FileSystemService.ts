@@ -202,6 +202,7 @@ export class FileSystemService {
 
   private async getComposeFilePath(stackName: string): Promise<string> {
     const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
     const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
     for (const file of composeFiles) {
       const filePath = path.join(stackDir, file);
@@ -286,6 +287,7 @@ export class FileSystemService {
   async saveStackContent(stackName: string, content: string): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
+    await this.assertRealWithinBase(filePath);
     try {
       await fsPromises.writeFile(filePath, content, 'utf-8');
     } catch (error) {
@@ -321,6 +323,7 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
+    await this.assertRealWithinBase(safePath);
 
     if (expectedMtimeMs !== null) {
       let fh: import('fs/promises').FileHandle | null = null;
@@ -363,6 +366,7 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
+    await this.assertRealWithinBase(safePath);
 
     if (expectedMtimeMs !== null) {
       let fh: import('fs/promises').FileHandle | null = null;
@@ -391,6 +395,7 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
+    await this.assertRealWithinBase(safePath);
     try {
       const stat = await fsPromises.stat(safePath);
       return stat.mtimeMs;
@@ -412,6 +417,7 @@ export class FileSystemService {
       return false;
     }
     try {
+      await this.assertRealWithinBase(target);
       await fsPromises.access(target);
       return true;
     } catch {
@@ -421,16 +427,19 @@ export class FileSystemService {
 
   async readFile(filePath: string, encoding: BufferEncoding = 'utf-8'): Promise<string> {
     this.assertWithinBase(filePath);
+    await this.assertRealWithinBase(filePath);
     return fsPromises.readFile(filePath, encoding);
   }
 
   async writeFile(filePath: string, content: string, encoding: BufferEncoding = 'utf-8'): Promise<void> {
     this.assertWithinBase(filePath);
+    await this.assertRealWithinBase(filePath);
     return fsPromises.writeFile(filePath, content, encoding);
   }
 
   async access(filePath: string): Promise<void> {
     this.assertWithinBase(filePath);
+    await this.assertRealWithinBase(filePath);
     return fsPromises.access(filePath);
   }
 
@@ -440,6 +449,7 @@ export class FileSystemService {
     if (!isPathWithinBase(envPath, base)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
+    await this.assertRealWithinBase(envPath);
     try {
       return await fsPromises.readFile(envPath, 'utf-8');
     } catch (error) {
@@ -453,6 +463,7 @@ export class FileSystemService {
   async saveEnvContent(stackName: string, content: string): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const envPath = path.join(stackDir, '.env');
+    await this.assertRealWithinBase(envPath);
     try {
       await fsPromises.writeFile(envPath, content, 'utf-8');
     } catch (error) {
@@ -463,6 +474,7 @@ export class FileSystemService {
 
   async createStack(stackName: string): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
 
     try {
       await fsPromises.access(stackDir);
@@ -491,6 +503,7 @@ export class FileSystemService {
 
   public async deleteStack(stackName: string): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
     try {
       await fsPromises.rm(stackDir, { recursive: true, force: true });
     } catch (error: unknown) {
@@ -736,6 +749,82 @@ export class FileSystemService {
     return real;
   }
 
+  /**
+   * Reject when `targetPath` (an absolute managed stack dir, or a managed file
+   * inside it) would let an operation escape the real compose root via a
+   * symlink/junction. Complements the lexical inline barrier at each sink, which
+   * cannot see symlinks: path.resolve does not follow links.
+   *
+   * Walks up to the deepest path component that actually exists and confirms its
+   * canonical (realpath'd) location is inside the canonical compose root. The
+   * base is realpath'd too, so a legitimately symlinked compose root is not a
+   * false positive (both canonicalize through the same root link). Two escape
+   * shapes are rejected: an existing path that resolves outside the root, and a
+   * dangling symlink (a link whose target does not exist) anywhere on the path,
+   * since a write/mkdir would follow it out of tree. Components that are simply
+   * absent are safe (they get created as real entries), so they are walked past.
+   *
+   * No-op when the compose root itself does not exist yet (first-run
+   * create/migrate): nothing can exist under it, so no link can be followed.
+   *
+   * `targetPath` must be absolute; realpath of a relative path would resolve
+   * against the process cwd.
+   */
+  private async assertRealWithinBase(targetPath: string): Promise<void> {
+    // Canonical js/path-injection barrier (mirrors every other sink in this
+    // file): resolve the untrusted target against the compose root and confirm
+    // lexical containment before any filesystem probe, so static analysis
+    // credits the sanitizer for the realpath/lstat calls below. Callers already
+    // build targetPath under the base, so this never rejects a legitimate or a
+    // symlink-escaping path (both are lexically contained); the realpath walk
+    // below is what actually catches symlink/junction escapes.
+    const baseResolved = path.resolve(this.baseDir);
+    const safeTarget = path.resolve(baseResolved, targetPath);
+    if (!safeTarget.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+
+    let realBase: string;
+    try {
+      realBase = await fsPromises.realpath(this.baseDir);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      return;
+    }
+
+    const escape = () =>
+      Object.assign(new Error('Path escapes compose directory via symlink'), { code: 'SYMLINK_ESCAPE' });
+
+    let cursor = safeTarget;
+    for (;;) {
+      let realCursor: string;
+      try {
+        realCursor = await fsPromises.realpath(cursor);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+        // cursor did not resolve. A dangling symlink still lstat's (the link
+        // exists); a genuinely absent component does not. Reject the dangling
+        // link; walk up past an absent component to the nearest real ancestor.
+        let danglingLink = false;
+        try {
+          await fsPromises.lstat(cursor);
+          danglingLink = true;
+        } catch (le) {
+          if ((le as NodeJS.ErrnoException).code !== 'ENOENT') throw le;
+        }
+        if (danglingLink) throw escape();
+        const parent = path.dirname(cursor);
+        if (parent === cursor) throw escape();
+        cursor = parent;
+        continue;
+      }
+      if (realCursor !== realBase && !realCursor.startsWith(realBase + path.sep)) {
+        throw escape();
+      }
+      return;
+    }
+  }
+
   async migrateFlatToDirectory(): Promise<void> {
     try {
       try {
@@ -753,6 +842,15 @@ export class FileSystemService {
 
         const stackName = item.name.replace(/\.(yml|yaml)$/, '');
         const stackDir = path.join(this.baseDir, stackName);
+        try {
+          await this.assertRealWithinBase(stackDir);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'SYMLINK_ESCAPE') throw e;
+          // A symlinked entry escaping the compose root is hostile/anomalous;
+          // skip just it so the remaining flat stacks still migrate.
+          console.warn(`[FileSystemService] Skipping migration of ${stackName}: stack path escapes the compose directory`);
+          continue;
+        }
 
         try {
           await fsPromises.access(stackDir);
@@ -798,6 +896,7 @@ export class FileSystemService {
     const debug = isDebugEnabled();
     const t0 = Date.now();
     const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
     // Canonical js/path-injection barrier (mirrors restoreStackFiles): resolve the
     // backup path against the backup root and confirm containment inline, so the
     // mkdir/copy/write sinks below operate on a validated path. stackName is
@@ -866,6 +965,7 @@ export class FileSystemService {
     const debug = isDebugEnabled();
     const t0 = Date.now();
     const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
     // Canonical js/path-injection barrier at the backup read sink: resolve the
     // backup dir against its root and confirm containment inline, mirroring
     // backupStackFiles. stackName is already validated by resolveStackDir above;
@@ -936,6 +1036,7 @@ export class FileSystemService {
    */
   async snapshotStackFiles(stackName: string): Promise<() => Promise<void>> {
     const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
     // Canonical js/path-injection barrier inline with the read/write sinks, the
     // same pattern restoreStackFiles uses: resolve against the base and confirm
     // containment so static analysis credits the barrier.
