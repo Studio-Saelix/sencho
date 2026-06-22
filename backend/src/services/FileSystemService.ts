@@ -755,6 +755,19 @@ export class FileSystemService {
    * against the process cwd.
    */
   private async assertRealWithinBase(targetPath: string): Promise<void> {
+    // Canonical js/path-injection barrier (mirrors every other sink in this
+    // file): resolve the untrusted target against the compose root and confirm
+    // lexical containment before any filesystem probe, so static analysis
+    // credits the sanitizer for the realpath/lstat calls below. Callers already
+    // build targetPath under the base, so this never rejects a legitimate or a
+    // symlink-escaping path (both are lexically contained); the realpath walk
+    // below is what actually catches symlink/junction escapes.
+    const baseResolved = path.resolve(this.baseDir);
+    const safeTarget = path.resolve(baseResolved, targetPath);
+    if (!safeTarget.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+
     let realBase: string;
     try {
       realBase = await fsPromises.realpath(this.baseDir);
@@ -766,7 +779,7 @@ export class FileSystemService {
     const escape = () =>
       Object.assign(new Error('Path escapes compose directory via symlink'), { code: 'SYMLINK_ESCAPE' });
 
-    let cursor = path.resolve(targetPath);
+    let cursor = safeTarget;
     for (;;) {
       let realCursor: string;
       try {
