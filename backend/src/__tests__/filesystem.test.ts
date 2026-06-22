@@ -27,6 +27,12 @@ vi.mock('fs', () => ({
     rename: vi.fn(),
     copyFile: vi.fn(),
     unlink: vi.fn(),
+    // deleteStack now realpath-checks the stack dir against the compose root
+    // before rm. Resolve to the absolute path (no symlink) so the containment
+    // guard passes and these tests still exercise the rm error translation;
+    // the guard's symlink-escape behaviour is covered in
+    // filesystem-symlink-escape.test.ts.
+    realpath: vi.fn((p: string) => Promise.resolve(path.resolve(p))),
   },
 }));
 
