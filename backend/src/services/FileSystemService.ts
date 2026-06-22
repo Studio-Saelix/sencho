@@ -12,7 +12,10 @@ import { sanitizeForLog } from '../utils/safeLog';
 
 export interface FileEntry {
   name: string;
-  type: 'file' | 'directory' | 'symlink';
+  // 'other' covers non-regular helper-volume entries (fifo/socket/device): they
+  // are unrepresentable on the fs backend but the helper can surface them, and
+  // they must stay distinct from 'file' so the archive guard can reject them.
+  type: 'file' | 'directory' | 'symlink' | 'other';
   size: number;
   mtime: number;
   isProtected: boolean;

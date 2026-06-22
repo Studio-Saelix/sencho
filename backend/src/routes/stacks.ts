@@ -2613,6 +2613,7 @@ async function enumerateArchiveFiles(
   const visit = async (relPath: string): Promise<void> => {
     const st = await gateway.stat(root, stackName, relPath);
     if (st.type !== 'directory') {
+      gateway.assertArchivable(root, relPath, st);
       addFile(relPath, st.size);
       return;
     }
@@ -2625,7 +2626,10 @@ async function enumerateArchiveFiles(
     for (const entry of entries) {
       const childRel = `${relPath}/${entry.name}`;
       if (entry.type === 'directory') await visit(childRel);
-      else addFile(childRel, entry.size);
+      else {
+        gateway.assertArchivable(root, childRel, entry);
+        addFile(childRel, entry.size);
+      }
     }
   };
   for (const p of selection) await visit(p);
@@ -2723,8 +2727,12 @@ stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Re
     files = await enumerateArchiveFiles(gateway, root, stackName, normalized);
   } catch (err: unknown) {
     recordFileOp(req.nodeId, 'download', startedAt, false);
-    if ((err as { code?: string }).code === 'ARCHIVE_TOO_LARGE') {
+    const code = (err as { code?: string }).code;
+    if (code === 'ARCHIVE_TOO_LARGE') {
       return res.status(413).json({ error: (err as Error).message, code: 'TOO_LARGE' });
+    }
+    if (code === 'ARCHIVE_UNSUPPORTED') {
+      return res.status(400).json({ error: (err as Error).message, code: 'UNSUPPORTED' });
     }
     return sendFsError(res, err, 'Failed to prepare download');
   }

@@ -1641,6 +1641,24 @@ describe('GET /api/stacks/:stackName/files/bulk-download', () => {
     await fs.unlink(path.join(stacksDir, STACK, 'big.bin'));
   });
 
+  it('returns 400 UNSUPPORTED when an entry is not archivable (e.g. a helper symlink/non-regular file)', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, 'odd.bin'), 'x');
+    // assertArchivable only rejects on helper roots; force the rejection so the
+    // route's mapping (which fires for any backend) is covered without a volume.
+    const { FileRootGateway } = await import('../services/FileRootGateway');
+    const spy = vi.spyOn(FileRootGateway.prototype, 'assertArchivable').mockImplementation(() => {
+      throw Object.assign(new Error('"odd.bin" cannot be downloaded from this volume'), { code: 'ARCHIVE_UNSUPPORTED' });
+    });
+    const res = await request(app)
+      .get(`/api/stacks/${STACK}/files/bulk-download`)
+      .query({ path: ['odd.bin'] })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('UNSUPPORTED');
+    spy.mockRestore();
+    await fs.unlink(path.join(stacksDir, STACK, 'odd.bin'));
+  });
+
   it('returns 413 (before any archive byte) when the entry cap is exceeded', async () => {
     await fs.mkdir(path.join(stacksDir, STACK, 'huge'), { recursive: true });
     await fs.writeFile(path.join(stacksDir, STACK, 'huge/a.txt'), 'a');

@@ -11,7 +11,7 @@ const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 // buffered up to this size and a larger file is rejected rather than silently
 // truncated. The bound matches the upload limit so the in-memory footprint is no
 // worse than the existing multipart upload path.
-const DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
+export const DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 const EXEC_TIMEOUT_MS = 30_000;
 
 // Containment guard run inside the helper after every `cd`. Even though
@@ -28,6 +28,8 @@ const ROOT_GUARD =
 const LIST_SCRIPT = `set -e
 cd -- "$1" || exit 1
 ${ROOT_GUARD}
+lim="$2"
+n=0
 for entry in * .[!.]* ..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
   if [ -L "$entry" ]; then t=l; link=$(readlink -- "$entry" 2>/dev/null || echo "")
@@ -38,6 +40,8 @@ for entry in * .[!.]* ..?*; do
   size=$(stat -c '%s' -- "$entry" 2>/dev/null || echo 0)
   mtime=$(stat -c '%Y' -- "$entry" 2>/dev/null || echo 0)
   printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$t" "$size" "$mtime" "$entry" "$link"
+  n=$((n+1))
+  if [ -n "$lim" ] && [ "$n" -ge "$lim" ]; then break; fi
 done`;
 
 // Contain the parent before statting the leaf: cd into the leaf's directory and
@@ -207,7 +211,7 @@ export class VolumeBrowserService {
     return new VolumeBrowserService(nodeId ?? 1);
   }
 
-  async listDir(volumeName: string, relPath: string): Promise<VolumeEntry[]> {
+  async listDir(volumeName: string, relPath: string, limit?: number): Promise<VolumeEntry[]> {
     const safe = sanitizeRelPath(relPath);
     await this.assertVolumeExists(volumeName);
     await this.ensureHelperImage();
@@ -215,10 +219,12 @@ export class VolumeBrowserService {
     // Portable across BusyBox (Alpine) and GNU coreutils. Lists each
     // direct child with a tab-separated row: type<TAB>size<TAB>mtime<TAB>
     // name<TAB>symlinkTarget. We chdir to /v/<safe> first so user input is
-    // never an argv element passed to find/stat.
-    const script = LIST_SCRIPT;
+    // never an argv element passed to find/stat. When a limit is given the
+    // script breaks after limit+1 rows, so a huge directory is never fully
+    // buffered; the caller detects truncation from the overflow row.
+    const limArg = limit !== undefined ? String(limit + 1) : '';
     const { stdout, stderr, exitCode } = await this.runHelper(volumeName, [
-      'sh', '-c', script, 'sh', `./${safe || ''}`,
+      'sh', '-c', LIST_SCRIPT, 'sh', `./${safe || ''}`, limArg,
     ]);
 
     if (exitCode !== 0) {
@@ -647,13 +653,25 @@ export class VolumeBrowserService {
       const exitInfo = await container.wait();
       // Wait for the attach stream to finish flushing demuxed output.
       await streamEnded;
+      const exitCode = typeof exitInfo?.StatusCode === 'number' ? exitInfo.StatusCode : 0;
+      // A nonzero helper exit is the authoritative failure: its exit code carries
+      // the intended 4xx mapping (target-is-a-directory, permission denied, etc.),
+      // which a stdin EPIPE from the helper closing stdin early would otherwise
+      // mask as a generic 500. Only surface the stream error when the helper
+      // itself exited cleanly (or its status was unreadable).
       if (stdinError) {
-        throw new ExecError('Upload stream failed before the volume write completed', 500);
+        if (exitCode === 0) {
+          throw new ExecError('Upload stream failed before the volume write completed', 500);
+        }
+        // The nonzero exit's mapping is the user-facing error, but the stream
+        // failure is the root cause; log it so an intermittent upload failure is
+        // debuggable rather than being silently attributed to the exit code.
+        console.error('[VolumeBrowser] helper stdin stream error masked by nonzero exit', exitCode, stdinError);
       }
       return {
         stdout: Buffer.concat(stdoutChunks),
         stderr: Buffer.concat(stderrChunks),
-        exitCode: typeof exitInfo?.StatusCode === 'number' ? exitInfo.StatusCode : 0,
+        exitCode,
       };
     })();
 

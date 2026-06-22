@@ -370,7 +370,11 @@ export function StackFileExplorer({
     try {
       const res = await bulkDownloadStackFiles(stackName, selection, selectedRootId);
       if (!res.ok) {
-        toast.error(res.status === 413 ? 'The selection is too large to download.' : 'Download failed.');
+        // Prefer the server's specific reason (e.g. a volume file that is a
+        // symlink or exceeds the per-file limit); fall back per status.
+        let msg = res.status === 413 ? 'The selection is too large to download.' : 'Download failed.';
+        try { const body = await res.json(); if (body?.error) msg = body.error as string; } catch { /* keep the default */ }
+        toast.error(msg);
         return;
       }
       downloadBlob(`${stackName}-files.tar.gz`, await res.blob());

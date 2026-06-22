@@ -393,7 +393,19 @@ describe('StackFileExplorer bulk selection', () => {
     await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
   });
 
-  it('shows a too-large message when the bulk download is rejected with 413', async () => {
+  it('surfaces the server message when the bulk download is rejected (e.g. a volume symlink)', async () => {
+    h.bulkDownloadMock.mockResolvedValue({
+      ok: false, status: 400, json: async () => ({ error: '"x" cannot be downloaded from this volume' }),
+    } as unknown as Response);
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByText('bulk-select-two'));
+    await user.click(screen.getByRole('button', { name: 'Download selection' }));
+    await waitFor(() => expect(h.toastError).toHaveBeenCalledWith('"x" cannot be downloaded from this volume'));
+  });
+
+  it('falls back to a too-large message when a 413 body cannot be parsed', async () => {
+    // No json() on the response: the parse fails and the per-status default shows.
     h.bulkDownloadMock.mockResolvedValue({ ok: false, status: 413 } as unknown as Response);
     const user = userEvent.setup();
     setup();
