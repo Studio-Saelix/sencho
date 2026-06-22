@@ -320,6 +320,24 @@ export async function uploadStackFile(
   }
 }
 
+/**
+ * Create a new empty file at `dirRelPath/fileName`. Routes through the upload
+ * endpoint with a zero-byte file and no overwrite, so the server's exclusive
+ * create path is authoritative and an existing entry is never clobbered: an
+ * existing file of that name is rejected as FILE_EXISTS (thrown as
+ * UploadConflictError), and an existing folder is rejected as DIR_EXISTS (a
+ * generic Error). Works on both the filesystem and named-volume backends.
+ */
+export async function createEmptyStackFile(
+  stackName: string,
+  dirRelPath: string,
+  fileName: string,
+  options?: { rootId?: string }
+): Promise<void> {
+  const blank = new File([new Uint8Array(0)], fileName, { type: 'text/plain' });
+  await uploadStackFile(stackName, dirRelPath, blank, { rootId: options?.rootId, overwrite: false });
+}
+
 export async function writeStackFile(
   stackName: string,
   relPath: string,

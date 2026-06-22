@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   onCopy: null as null | ((fromRel: string, entryName: string, destDir: string) => boolean | Promise<boolean>),
   onConfirmDestination: null as null | ((destDir: string) => boolean | Promise<boolean>),
   onSelectionChange: null as null | ((next: Set<string>) => void),
+  newFileProps: null as null | { open: boolean; currentDir: string; rootId?: string },
   toastError: vi.fn(),
   toastSuccess: vi.fn(),
 }));
@@ -67,7 +68,13 @@ vi.mock('../FileUploadDropzone', () => ({
 }));
 
 vi.mock('../NewFolderDialog', () => ({ NewFolderDialog: () => null }));
-vi.mock('../NewFileDialog', () => ({ NewFileDialog: () => null }));
+// Capture the dialog props so the toolbar button's open/dir/root wiring is testable.
+vi.mock('../NewFileDialog', () => ({
+  NewFileDialog: (props: { open: boolean; currentDir: string; rootId?: string }) => {
+    h.newFileProps = { open: props.open, currentDir: props.currentDir, rootId: props.rootId };
+    return null;
+  },
+}));
 vi.mock('../DeleteFileConfirm', () => ({ DeleteFileConfirm: () => null }));
 vi.mock('../RenameDialog', () => ({ RenameDialog: () => null }));
 // Capture the copy-mode dialog's confirm callback so handleCopy can be driven
@@ -421,5 +428,29 @@ describe('StackFileExplorer bulk selection', () => {
     expect(screen.getByText('2 selected')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Clear selection' }));
     expect(screen.queryByText('2 selected')).not.toBeInTheDocument();
+  });
+});
+
+describe('StackFileExplorer new file affordance', () => {
+  beforeEach(() => { h.newFileProps = null; });
+
+  it('opens the New file dialog at the stack root from the toolbar button', async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole('button', { name: 'New file' }));
+    expect(h.newFileProps).toMatchObject({ open: true, currentDir: '', rootId: 'stack-source' });
+  });
+
+  it('targets the current directory once a nested file is selected', async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByText('select-nested')); // dir/a.txt -> currentDir 'dir'
+    await user.click(screen.getByRole('button', { name: 'New file' }));
+    expect(h.newFileProps).toMatchObject({ open: true, currentDir: 'dir' });
+  });
+
+  it('hides the New file button on a non-editable root', () => {
+    render(<StackFileExplorer stackName="my-stack" canEdit={false} isDarkMode={false} />);
+    expect(screen.queryByRole('button', { name: 'New file' })).not.toBeInTheDocument();
   });
 });

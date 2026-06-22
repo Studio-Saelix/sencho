@@ -5,13 +5,15 @@
  * malicious or buggy caller cannot slip a `..` segment past the
  * client before it would otherwise be caught by the server.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   isClientSafeRelPath,
   isProtectedRootRelPath,
   isSameOrDescendantPath,
   relPathParentDir,
   nextDuplicateName,
+  createEmptyStackFile,
+  UploadConflictError,
 } from '../stackFilesApi';
 
 describe('isClientSafeRelPath', () => {
@@ -133,5 +135,50 @@ describe('nextDuplicateName', () => {
 
   it('appends to a name with no extension', () => {
     expect(nextDuplicateName('Dockerfile', new Set())).toBe('Dockerfile copy');
+  });
+});
+
+describe('createEmptyStackFile', () => {
+  function stubFetch(status: number, body?: object) {
+    const res = {
+      status,
+      ok: status >= 200 && status < 300,
+      headers: { get: () => null },
+      clone() { return this; },
+      json: async () => body ?? {},
+    };
+    const fetchMock = vi.fn().mockResolvedValue(res);
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  beforeEach(() => localStorage.clear());
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('posts a zero-byte file to the upload endpoint without overwrite', async () => {
+    const fetchMock = stubFetch(204);
+    await createEmptyStackFile('my-stack', 'configs', 'app.conf', { rootId: 'stack-source' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/upload?path=configs');
+    expect(url).not.toContain('overwrite=1'); // never clobbers
+    const file = (init.body as FormData).get('file') as File;
+    expect(file.name).toBe('app.conf');
+    expect(file.size).toBe(0);
+  });
+
+  it('throws UploadConflictError when a file of that name already exists', async () => {
+    stubFetch(409, { code: 'FILE_EXISTS', error: 'app.conf already exists.' });
+    await expect(createEmptyStackFile('my-stack', 'configs', 'app.conf')).rejects.toBeInstanceOf(
+      UploadConflictError,
+    );
+  });
+
+  it('throws a generic error (not UploadConflictError) when a folder of that name exists', async () => {
+    stubFetch(409, { code: 'DIR_EXISTS', error: 'A folder named app already exists in this folder.' });
+    const err = await createEmptyStackFile('my-stack', 'configs', 'app').catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(UploadConflictError);
   });
 });

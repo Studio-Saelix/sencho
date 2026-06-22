@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Trash2, FolderPlus, FolderInput, Download, Loader2, AlertTriangle, X } from 'lucide-react';
+import { Trash2, FilePlus, FolderPlus, FolderInput, Download, Loader2, AlertTriangle, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -484,7 +484,23 @@ export function StackFileExplorer({
               variant="ghost"
               size="icon"
               className="h-6 w-6 shrink-0"
+              title="New file"
+              aria-label="New file"
+              onClick={() => {
+                setNewFileDir(currentDir);
+                setNewFileOpen(true);
+              }}
+            >
+              <FilePlus className="w-3.5 h-3.5" strokeWidth={1.5} />
+            </Button>
+          )}
+          {rootCanEdit && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0"
               title="New folder"
+              aria-label="New folder"
               onClick={() => {
                 setNewFolderDir(currentDir);
                 setNewFolderOpen(true);
