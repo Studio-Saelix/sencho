@@ -60,6 +60,9 @@ Preflight runs against the **active node**, so selecting a remote node checks th
   <Accordion title="A port conflict is flagged for a port my own stack uses">
     Preflight ignores ports already held by the stack you are checking, so redeploying a running stack does not flag its own bindings. A conflict means a *different* stack, or an unmanaged container, holds that host port on this node.
   </Accordion>
+  <Accordion title="The report says node-state checks were skipped">
+    The node-state checks (external networks and volumes, host-port conflicts, and `container_name` collisions) read the node's live Docker state. When the Docker daemon on the target node is unreachable, Sencho cannot read that state, so those checks are skipped and the report shows an info notice rather than guessing. The model checks still run. Confirm the daemon is reachable on the node, then run preflight again for full coverage.
+  </Accordion>
   <Accordion title="The Doctor tab is not there on a remote node">
     The tab appears when the active node reports that it supports Compose Doctor. A node running an older version of Sencho does not advertise it, so the tab is hidden for that node until it is updated.
   </Accordion>
