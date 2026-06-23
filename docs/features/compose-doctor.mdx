@@ -7,7 +7,7 @@ The **Doctor** tab in the right-hand **Anatomy** panel answers one question befo
 
 The check is advisory. It never blocks a deploy and never changes a stack; it tells you what it found so you can decide. It runs on demand: press **run preflight** and Sencho renders the model, runs the checks, and stores the result so the tab still shows it the next time you open the stack.
 
-Compose Doctor never shows a secret value. It reads the structure of the effective model, service names, images, ports, volumes, and the *names* of environment variables, but never their values, so nothing sensitive appears in the report, the stored run, or the logs.
+Compose Doctor reads the structure of the effective model, service names, images, ports, volumes, and the *names* of environment variables, never their values, so a secret injected through `environment:` or `env_file:` never appears in the report, the stored run, or the logs. One caveat: a secret interpolated into a structural field, such as a port, an image tag, or a volume path built from a `${VAR}`, is resolved before the model is read, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into these fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
 ## Severity
 
