@@ -304,6 +304,9 @@ describe('FileSystemService backup location', () => {
   // truncated or corrupted backup is rejected with a clear error instead of being
   // copied back silently. These reuse the outer mkdtemp/DATA_DIR harness.
   describe('backup integrity checksum', () => {
+    // Independent oracle for the manifest hashes. Production hashes the raw file
+    // Buffer; for the UTF-8 text fixtures used here that yields the same digest as
+    // hashing Buffer.from(s, 'utf-8').
     const sha = (s: string) => createHash('sha256').update(Buffer.from(s, 'utf-8')).digest('hex');
 
     it('writes a .checksums manifest with the SHA-256 of each backed-up file', async () => {
@@ -448,10 +451,15 @@ describe('FileSystemService backup location', () => {
       await fsPromises.writeFile(path.join(backupDir, '.env'), 'TOKEN=go', 'utf-8');
 
       await fsPromises.writeFile(path.join(stackDir, '.env'), 'TOKEN=current\n', 'utf-8');
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: current\n', 'utf-8');
 
       await expect(service.restoreStackFiles(stackName)).rejects.toThrow(/integrity|corrupt/i);
 
+      // The abort must touch nothing: the live .env keeps its current contents, and
+      // the valid-but-unrestored compose.yaml is left as-is rather than reverted to
+      // the backup, proving the .env mismatch halts before any file is copied back.
       expect(await fsPromises.readFile(path.join(stackDir, '.env'), 'utf-8')).toBe('TOKEN=current\n');
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: current\n');
     });
 
     it('restores faithfully when a manifest entry is not a string (degrades to unverified)', async () => {
