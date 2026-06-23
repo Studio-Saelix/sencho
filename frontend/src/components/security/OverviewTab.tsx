@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
+import { SCANNER_DETECTIONS_NOTE } from './securityMasthead';
 import type { SecurityOverview, ScanSummary, SecurityRiskTrendPoint } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
 import {
@@ -124,8 +125,14 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
         )
       )}
 
-      {/* The masthead hides its stat cluster on a phone; restate it here. */}
-      {isMobile && <SecuritySevStrip overview={overview} />}
+      {/* The masthead hides its stat cluster on a phone; restate it here, framed
+          as scanner detections rather than posture. */}
+      {isMobile && (
+        <div className="space-y-2">
+          <SecuritySevStrip overview={overview} />
+          <p className="font-mono text-[10px] leading-snug text-stat-subtitle">{SCANNER_DETECTIONS_NOTE}</p>
+        </div>
+      )}
 
       {/* Charts lead the dashboard. */}
       <div className="grid gap-4 lg:grid-cols-3">

@@ -28,6 +28,10 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: true }),
 }));
 
+vi.mock('@/context/LicenseContext', () => ({
+  useLicense: () => ({ isPaid: false }),
+}));
+
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SuppressionsPanel } from '../SuppressionsPanel';
