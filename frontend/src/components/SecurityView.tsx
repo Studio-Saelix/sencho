@@ -5,7 +5,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
-import { deriveMasthead } from './security/securityMasthead';
+import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -334,7 +334,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         tone={tone}
         pulsing={pulsing}
         size="hero"
-        className="rounded-lg mb-4"
+        className="rounded-lg mb-2"
         subtitle={subtitle}
         metadata={overview ? [
           { label: 'CRITICAL', value: String(overview.critical), tone: overview.critical > 0 ? 'error' : 'value' },
@@ -342,6 +342,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           { label: 'LAST SCAN', value: overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never', tone: 'subtitle' },
         ] : undefined}
       />
+      <p className="mb-4 max-w-3xl font-mono text-[11px] leading-snug text-stat-subtitle">
+        {SCANNER_DETECTIONS_NOTE}
+      </p>
 
       <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
         <TabsList className="mb-4">
