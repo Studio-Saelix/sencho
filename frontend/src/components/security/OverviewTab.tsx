@@ -6,13 +6,13 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
 import { SCANNER_DETECTIONS_NOTE } from './securityMasthead';
-import type { SecurityOverview, ScanSummary, SecurityRiskTrendPoint } from '@/types/security';
+import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
 import {
-  SeverityDonutChart,
   RiskTrendChart,
-  TopExposedImagesChart,
-  FindingsByTypeChart,
+  ActionPostureChart,
+  TopExploitRiskList,
+  CvssEpssQuadrantChart,
 } from './SecurityCharts';
 import { ScanNodeLauncher } from './ScanNodeLauncher';
 
@@ -20,8 +20,9 @@ interface OverviewTabProps {
   overview: SecurityOverview | null;
   /** 'unsupported' = node has no overview endpoint (benign); 'failed' = a real error. */
   loadError: 'unsupported' | 'failed' | null;
-  summaries: Record<string, ScanSummary>;
   trend: SecurityRiskTrendPoint[];
+  /** Actionable Critical/High findings with KEV/EPSS for the exploit-intel charts. */
+  exploitIntel: ExploitIntelFinding[];
   onNavigate: (tab: SecurityTab) => void;
   onInspect: (scanId: number) => void;
   /** Admin on a node with a ready scanner; enables the node-scan launcher. */
@@ -57,7 +58,7 @@ function ChartCard({ title, className, children }: { title: string; className?: 
   );
 }
 
-export function OverviewTab({ overview, loadError, summaries, trend, onNavigate, onInspect, canScan, onScanComplete, isPaid }: OverviewTabProps) {
+export function OverviewTab({ overview, loadError, trend, exploitIntel, onNavigate, onInspect, canScan, onScanComplete, isPaid }: OverviewTabProps) {
   const isMobile = useIsMobile();
 
   if (loadError === 'unsupported') {
@@ -92,8 +93,6 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
       </div>
     );
   }
-
-  const summaryList = Object.values(summaries);
 
   const tiles: SignalTile[] = [
     { kicker: 'Scanned images', value: String(overview.scannedImages) },
@@ -134,22 +133,23 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
         </div>
       )}
 
-      {/* Charts lead the dashboard. */}
+      {/* Charts lead the dashboard: the trend gives severity context, the rest
+          answer "what should I act on first?" from posture + exploit intel. */}
       <div className="grid gap-4 lg:grid-cols-3">
         <ChartCard title="Risk trend · 30 days · critical + high" className="lg:col-span-2">
           <RiskTrendChart trend={trend} />
         </ChartCard>
-        <ChartCard title="Severity distribution">
-          <SeverityDonutChart summaries={summaryList} />
+        <ChartCard title="Action posture">
+          <ActionPostureChart overview={overview} />
         </ChartCard>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <ChartCard title="Top exposed images">
-          <TopExposedImagesChart summaries={summaryList} onInspect={onInspect} />
+        <ChartCard title="Top exploit-risk findings">
+          <TopExploitRiskList items={exploitIntel} onInspect={onInspect} />
         </ChartCard>
-        <ChartCard title="Findings by type">
-          <FindingsByTypeChart summaries={summaryList} />
+        <ChartCard title="Severity × exploitability">
+          <CvssEpssQuadrantChart items={exploitIntel} />
         </ChartCard>
       </div>
 

@@ -17,7 +17,7 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import type { SecurityTab } from '@/lib/events';
-import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, FleetRole } from '@/types/security';
+import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
@@ -75,6 +75,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const [summariesLoading, setSummariesLoading] = useState(true);
   const [summariesError, setSummariesError] = useState(false);
   const [trend, setTrend] = useState<SecurityRiskTrendPoint[]>([]);
+  const [exploitIntel, setExploitIntel] = useState<ExploitIntelFinding[]>([]);
   const [isReplica, setIsReplica] = useState(false);
   // Bumped after a node-wide scan completes to refetch the active node's posture.
   const [reloadToken, setReloadToken] = useState(0);
@@ -113,6 +114,12 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       const trendPromise: Promise<SecurityRiskTrendPoint[]> = apiFetch('/security/overview/trend')
         .then((r) => (r.ok ? r.json() : []))
         .then((t) => (Array.isArray(t) ? t : []))
+        .catch(() => []);
+      // Exploit-intel powers two overview charts; isolate it like the trend so a
+      // failure (or an older node without the endpoint) degrades to empty panels.
+      const exploitIntelPromise: Promise<ExploitIntelFinding[]> = apiFetch('/security/overview/exploit-intel')
+        .then((r) => (r.ok ? r.json() : { items: [] }))
+        .then((b) => (b && Array.isArray(b.items) ? b.items : []))
         .catch(() => []);
       try {
         const [overviewRes, summariesRes] = await Promise.all([
@@ -154,8 +161,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       } finally {
         if (!cancelled) setSummariesLoading(false);
       }
-      const trend = await trendPromise;
-      if (!cancelled) setTrend(trend);
+      const [trendData, intelData] = await Promise.all([trendPromise, exploitIntelPromise]);
+      if (!cancelled) {
+        setTrend(trendData);
+        setExploitIntel(intelData);
+      }
     })();
     return () => { cancelled = true; };
   }, [activeNode?.id, reloadToken]);
@@ -214,8 +224,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           <OverviewTab
             overview={overview}
             loadError={overviewLoadError}
-            summaries={summaries}
             trend={trend}
+            exploitIntel={exploitIntel}
             onNavigate={onTabChange}
             onInspect={onInspect}
             canScan={canScan}
