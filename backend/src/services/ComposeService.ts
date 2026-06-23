@@ -117,10 +117,29 @@ export class ComposeService {
     }
     if (overridePath) {
       if (filePrefix.length === 0) {
-        // Single-file stack: passing any -f disables auto-discovery, so name the
-        // base file explicitly before layering the override on top of it.
-        const baseFilename = await FileSystemService.getInstance(this.nodeId).getComposeFilename(stackName);
+        // Single-file stack: passing any -f disables compose's auto-discovery, so name
+        // the base file explicitly, then re-add the user's implicit override (if any) so
+        // it is not silently dropped, before layering the mesh override on top.
+        const fsSvc = FileSystemService.getInstance(this.nodeId);
+        const baseFilename = await fsSvc.getComposeFilename(stackName);
         args.push('-f', baseFilename);
+        let userOverride: string | null = null;
+        try {
+          userOverride = await fsSvc.getOverrideFilename(stackName);
+        } catch (err) {
+          // Containment-guard rejections (bad stack name / symlink escape) are hard errors:
+          // abort the deploy rather than degrade. The "no override" case returns null rather
+          // than throwing, so any other throw is transient I/O: drop the override and proceed
+          // (logging the consequence) instead of failing the deploy.
+          const code = (err as { code?: string }).code;
+          if (code === 'INVALID_STACK_NAME' || code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
+            throw err;
+          }
+          console.warn('[ComposeService] could not resolve user compose override; deploying without it:', sanitizeForLog((err as Error).message));
+        }
+        if (userOverride) {
+          args.push('-f', userOverride);
+        }
       }
       args.push('-f', overridePath);
     }

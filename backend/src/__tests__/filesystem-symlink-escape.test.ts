@@ -125,6 +125,12 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: symlinked stack di
     await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
   });
 
+  it('getOverrideFilename rejects instead of resolving an out-of-tree override', async () => {
+    await fs.writeFile(path.join(externalTarget, 'compose.override.yml'), 'services: {}\n', 'utf-8');
+    const svc = FileSystemService.getInstance();
+    await expect(svc.getOverrideFilename(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+  });
+
   it('generic readFile/writeFile/access through the symlinked stack dir reject', async () => {
     const svc = FileSystemService.getInstance();
     const envAbs = path.join(composeDir, STACK, '.env');

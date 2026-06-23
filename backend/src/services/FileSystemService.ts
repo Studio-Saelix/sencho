@@ -60,6 +60,16 @@ const PROTECTED_STACK_FILES = new Set([
 // list FileSystemService uses elsewhere; named here for the import scan.
 const IMPORT_COMPOSE_FILENAMES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'] as const;
 const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(IMPORT_COMPOSE_FILENAMES);
+// Override filenames docker compose can auto-discover, listed in priority order (first
+// match wins, not paired to the chosen base file's family). We resolve the first that
+// exists, mirroring compose's default override resolution, to re-add it when an explicit
+// -f list (mesh injection) would otherwise suppress that discovery.
+const COMPOSE_OVERRIDE_FILENAMES = [
+  'compose.override.yaml',
+  'compose.override.yml',
+  'docker-compose.override.yaml',
+  'docker-compose.override.yml',
+] as const;
 // Skip reading compose files larger than this into the import preview.
 const IMPORT_MAX_PREVIEW_BYTES = 1_048_576; // 1 MiB
 
@@ -219,6 +229,34 @@ export class FileSystemService {
 
   async getComposeFilename(stackName: string): Promise<string> {
     return path.basename(await this.getComposeFilePath(stackName));
+  }
+
+  /**
+   * The stack's hand-authored compose override filename (bare basename, e.g.
+   * `compose.override.yml`), or `null` when none exists. Mirrors how docker compose
+   * itself resolves the default override: the first existing variant in priority order.
+   * Callers building an explicit `-f` list (which suppresses compose's built-in override
+   * discovery) use this to re-add the implicit override. Applies the same stack-name and
+   * symlink-containment guards as `getComposeFilePath`.
+   */
+  async getOverrideFilename(stackName: string): Promise<string | null> {
+    const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
+    // Canonical js/path-injection barrier inline with the access sink (same pattern as
+    // envExists): stackName is already validated by resolveStackDir and assertRealWithinBase
+    // above, but static analysis only credits the containment check when it sits at the sink.
+    const baseResolved = path.resolve(this.baseDir);
+    for (const file of COMPOSE_OVERRIDE_FILENAMES) {
+      const target = path.resolve(stackDir, file);
+      if (!target.startsWith(baseResolved + path.sep)) continue;
+      try {
+        await fsPromises.access(target);
+        return file;
+      } catch {
+        // continue
+      }
+    }
+    return null;
   }
 
   async getStacks(): Promise<string[]> {
