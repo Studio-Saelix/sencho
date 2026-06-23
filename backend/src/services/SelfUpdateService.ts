@@ -88,6 +88,46 @@ interface ComposeContext {
   hostBindMounts: HostMount[];
 }
 
+/**
+ * Build the `docker run` argv for the self-update helper container. Pure and
+ * exported so the mount construction is unit-testable alongside the compose
+ * command it carries.
+ *
+ * workingDir, dataDirHost, and the host bind-mount sources are operator-set
+ * paths (compose labels / container mounts). They are placed as discrete argv
+ * elements and handed to execFile, which spawns docker with no shell, so a path
+ * carrying shell metacharacters stays inert data and never reaches a shell.
+ */
+export function buildSelfUpdateRunArgs(
+  ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'dataDirHost' | 'hostBindMounts'>,
+  composeCmd: string,
+): string[] {
+  const { workingDir, imageName, dataDirHost, hostBindMounts } = ctx;
+  const mountArgs: string[] = [
+    '-v', '/var/run/docker.sock:/var/run/docker.sock',
+    '-v', `${workingDir}:${workingDir}:ro`,
+  ];
+  if (dataDirHost) {
+    mountArgs.push('-v', `${dataDirHost}:/app/data:rw`);
+  }
+  const alreadyMounted = new Set([
+    '/var/run/docker.sock', workingDir, ...(dataDirHost ? [dataDirHost] : []),
+  ]);
+  for (const { source } of hostBindMounts) {
+    if (alreadyMounted.has(source) || source.startsWith(workingDir + '/')) continue;
+    mountArgs.push('-v', `${source}:${source}:ro`);
+  }
+  return [
+    'run', '--rm',
+    '--user', 'root',
+    '--entrypoint', 'sh',
+    ...mountArgs,
+    '-w', workingDir,
+    imageName,
+    '-c', composeCmd,
+  ];
+}
+
 class SelfUpdateService {
   private static instance: SelfUpdateService;
   private canSelfUpdate = false;
@@ -244,31 +284,7 @@ class SelfUpdateService {
     const pruneOnUpdate =
       DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
     const composeCmd = buildSelfUpdateComposeCmd(fFlags, serviceName, stderrTmp, UPDATE_ERROR_FILE, pruneOnUpdate);
-
-    const mountArgs: string[] = [
-      '-v', '/var/run/docker.sock:/var/run/docker.sock',
-      '-v', `${workingDir}:${workingDir}:ro`,
-    ];
-    if (dataDirHost) {
-      mountArgs.push('-v', `${dataDirHost}:/app/data:rw`);
-    }
-    const alreadyMounted = new Set([
-      '/var/run/docker.sock', workingDir, ...(dataDirHost ? [dataDirHost] : []),
-    ]);
-    for (const { source } of hostBindMounts) {
-      if (alreadyMounted.has(source) || source.startsWith(workingDir + '/')) continue;
-      mountArgs.push('-v', `${source}:${source}:ro`);
-    }
-
-    const args = [
-      'run', '--rm',
-      '--user', 'root',
-      '--entrypoint', 'sh',
-      ...mountArgs,
-      '-w', workingDir,
-      imageName,
-      '-c', composeCmd,
-    ];
+    const args = buildSelfUpdateRunArgs({ workingDir, imageName, dataDirHost, hostBindMounts }, composeCmd);
 
     // Callback may never fire on success (we die mid-call during recreate);
     // that is fine because the restart itself is the success signal.
