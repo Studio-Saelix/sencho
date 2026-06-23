@@ -979,10 +979,19 @@ export class FileSystemService {
     // the backup and finds it no longer matches. Managed files (compose, .env) are
     // small; revisit this read-into-memory if a large file is ever added to
     // PROTECTED_STACK_FILES.
+    // Canonical js/path-injection barrier inline with each source read sink:
+    // resolve against the compose base and confirm containment, mirroring
+    // snapshotStackFiles. stackDir is already validated by resolveStackDir, but
+    // re-establishing containment at the readFile sink itself lets static analysis
+    // credit the barrier, which it does not through the helper.
+    const baseResolved = path.resolve(this.baseDir);
     const checksums: Record<string, string> = {};
     const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
     for (const file of composeFiles) {
-      const src = path.join(stackDir, file);
+      const src = path.resolve(baseResolved, path.join(stackDir, file));
+      if (!src.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
       try {
         const buf = await fsPromises.readFile(src);
         await fsPromises.writeFile(path.join(backupDir, file), buf);
@@ -995,8 +1004,11 @@ export class FileSystemService {
       }
     }
 
-    // Copy .env if it exists
-    const envSrc = path.join(stackDir, '.env');
+    // Copy .env if it exists (same inline containment barrier as above).
+    const envSrc = path.resolve(baseResolved, path.join(stackDir, '.env'));
+    if (!envSrc.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
     try {
       const buf = await fsPromises.readFile(envSrc);
       await fsPromises.writeFile(path.join(backupDir, '.env'), buf);
