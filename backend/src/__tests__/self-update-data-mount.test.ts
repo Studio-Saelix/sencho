@@ -6,7 +6,7 @@
  * recovery will be unavailable" at boot.
  */
 import { describe, expect, it } from 'vitest';
-import { buildSelfUpdateComposeCmd, findDataDirHost, shQuote } from '../services/SelfUpdateService';
+import { buildSelfUpdateComposeCmd, buildSelfUpdateRunArgs, findDataDirHost, shQuote } from '../services/SelfUpdateService';
 
 describe('findDataDirHost', () => {
   it('returns the host path for a bind mount at /app/data', () => {
@@ -97,5 +97,156 @@ describe('buildSelfUpdateComposeCmd', () => {
     // The recreate line stays intact: its redirection and the real exit-code
     // capture follow the quoted args, so the injected `ec=0` never runs as shell.
     expect(cmd).toContain(`2>${stderrTmp}; ec=$?;`);
+  });
+});
+
+describe('buildSelfUpdateRunArgs', () => {
+  // Sentinel for the compose command so we can assert it stays a single,
+  // isolated argv element rather than being fused with any operator path.
+  const COMPOSE = 'COMPOSE_CMD';
+
+  it('emits the exact docker run argv (locks flag/mount/-w/image/-c ordering)', () => {
+    // `docker run [OPTIONS] IMAGE [COMMAND]`: a misplaced flag after the image
+    // becomes a container arg and the recreate fails silently, so lock the
+    // whole array, not just containment.
+    const args = buildSelfUpdateRunArgs(
+      {
+        workingDir: '/opt/sencho',
+        imageName: 'sencho:latest',
+        dataDirHost: '/opt/sencho/data',
+        hostBindMounts: [{ source: '/etc/extra', destination: '/etc/extra' }],
+      },
+      COMPOSE,
+    );
+    expect(args).toEqual([
+      'run', '--rm',
+      '--user', 'root',
+      '--entrypoint', 'sh',
+      '-v', '/var/run/docker.sock:/var/run/docker.sock',
+      '-v', '/opt/sencho:/opt/sencho:ro',
+      '-v', '/opt/sencho/data:/app/data:rw',
+      '-v', '/etc/extra:/etc/extra:ro',
+      '-w', '/opt/sencho',
+      'sencho:latest',
+      '-c', COMPOSE,
+    ]);
+  });
+
+  it('keeps workingDir a discrete -w value and the compose command isolated behind -c', () => {
+    const args = buildSelfUpdateRunArgs(
+      { workingDir: '/opt/sencho', imageName: 'sencho:latest', dataDirHost: null, hostBindMounts: [] },
+      COMPOSE,
+    );
+    expect(args[args.indexOf('-w') + 1]).toBe('/opt/sencho');
+    expect(args).toContain('/opt/sencho:/opt/sencho:ro');
+    // The compose command is the final element, never concatenated with a path.
+    expect(args[args.length - 2]).toBe('-c');
+    expect(args[args.length - 1]).toBe(COMPOSE);
+  });
+
+  it('passes operator paths with shell metacharacters as inert argv data (no shell sees them)', () => {
+    // execFile spawns docker without a shell, so these survive verbatim as their
+    // own argv elements and are never interpreted.
+    const args = buildSelfUpdateRunArgs(
+      {
+        workingDir: '/srv/$(touch pwned)',
+        imageName: 'sencho:latest',
+        dataDirHost: null,
+        hostBindMounts: [{ source: '/srv/a;rm -rf b', destination: '/x' }],
+      },
+      COMPOSE,
+    );
+    expect(args).toContain('/srv/$(touch pwned):/srv/$(touch pwned):ro');
+    expect(args).toContain('/srv/a;rm -rf b:/srv/a;rm -rf b:ro');
+    expect(args[args.indexOf('-w') + 1]).toBe('/srv/$(touch pwned)');
+  });
+
+  it('mounts only the base volumes when there are no extra host bind mounts', () => {
+    const withData = buildSelfUpdateRunArgs(
+      { workingDir: '/opt/sencho', imageName: 'img', dataDirHost: '/opt/sencho/data', hostBindMounts: [] },
+      COMPOSE,
+    );
+    // docker.sock + workingDir + data dir.
+    expect(withData.filter(a => a === '-v')).toHaveLength(3);
+
+    const withoutData = buildSelfUpdateRunArgs(
+      { workingDir: '/opt/sencho', imageName: 'img', dataDirHost: null, hostBindMounts: [] },
+      COMPOSE,
+    );
+    // docker.sock + workingDir only; the data-dir mount is omitted.
+    expect(withoutData.filter(a => a === '-v')).toHaveLength(2);
+    expect(withoutData.some(a => a.endsWith(':/app/data:rw'))).toBe(false);
+  });
+
+  it('does not forward a source that is already mounted', () => {
+    const args = buildSelfUpdateRunArgs(
+      {
+        workingDir: '/opt/sencho',
+        imageName: 'img',
+        dataDirHost: null,
+        hostBindMounts: [{ source: '/var/run/docker.sock', destination: '/var/run/docker.sock' }],
+      },
+      COMPOSE,
+    );
+    expect(args.filter(a => a === '/var/run/docker.sock:/var/run/docker.sock')).toHaveLength(1);
+  });
+
+  it('skips sources nested under workingDir but keeps look-alike siblings', () => {
+    const args = buildSelfUpdateRunArgs(
+      {
+        workingDir: '/srv/app',
+        imageName: 'img',
+        dataDirHost: null,
+        hostBindMounts: [
+          { source: '/srv/app/sub', destination: '/x' },          // nested under workingDir
+          { source: '/srv/app-backup/config', destination: '/y' }, // shares the prefix, not nested
+        ],
+      },
+      COMPOSE,
+    );
+    // The nested path is already covered by the workingDir mount.
+    expect(args).not.toContain('/srv/app/sub:/srv/app/sub:ro');
+    // The sibling only shares the string prefix; the `+ '/'` guard keeps it.
+    expect(args).toContain('/srv/app-backup/config:/srv/app-backup/config:ro');
+  });
+
+  it('mounts an inspected workingDir or dataDirHost bind exactly once', () => {
+    // In production info.Mounts also lists the compose working dir and the
+    // /app/data bind, so both arrive again in hostBindMounts. The base mounts
+    // already cover them, so they must not be forwarded a second time.
+    const args = buildSelfUpdateRunArgs(
+      {
+        workingDir: '/opt/sencho',
+        imageName: 'img',
+        dataDirHost: '/opt/sencho/data',
+        hostBindMounts: [
+          { source: '/opt/sencho', destination: '/opt/sencho' },       // == workingDir
+          { source: '/opt/sencho/data', destination: '/app/data' },    // == dataDirHost
+        ],
+      },
+      COMPOSE,
+    );
+    // workingDir keeps its single base :ro mount; never re-forwarded.
+    expect(args.filter(a => a === '/opt/sencho:/opt/sencho:ro')).toHaveLength(1);
+    // data dir stays mounted once as :rw at /app/data, never re-added read-only.
+    expect(args.filter(a => a === '/opt/sencho/data:/app/data:rw')).toHaveLength(1);
+    expect(args).not.toContain('/opt/sencho/data:/opt/sencho/data:ro');
+  });
+
+  it('forwards multiple eligible bind mounts in input order', () => {
+    const args = buildSelfUpdateRunArgs(
+      {
+        workingDir: '/opt/sencho',
+        imageName: 'img',
+        dataDirHost: null,
+        hostBindMounts: [
+          { source: '/etc/first', destination: '/etc/first' },
+          { source: '/etc/second', destination: '/etc/second' },
+        ],
+      },
+      COMPOSE,
+    );
+    expect(args.indexOf('/etc/first:/etc/first:ro'))
+      .toBeLessThan(args.indexOf('/etc/second:/etc/second:ro'));
   });
 });
