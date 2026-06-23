@@ -13,6 +13,7 @@ import { validateImageRef } from '../utils/image-ref';
 import { applySuppressions, isTriageStatus, isTriageJustification } from '../utils/suppression-filter';
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
+import { generateOpenVex } from '../services/OpenVexExporter';
 import { deriveSecurityPosture, type SecurityPostureFacts, type SecurityPostureState } from '../services/securityPosture';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
@@ -929,6 +930,24 @@ securityRouter.get(
     }
   },
 );
+
+// Export the instance's CVE triage decisions as an OpenVEX document. Authoring
+// fleet VEX is a governance feature, so it is Admiral (paid) + admin, mirroring
+// the SARIF export gate.
+securityRouter.get('/vex/export', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  if (!requirePaid(req, res)) return;
+  try {
+    const suppressions = DatabaseService.getInstance().getCveSuppressions();
+    const doc = generateOpenVex(suppressions, req.user?.username || 'sencho', new Date().toISOString());
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="sencho-fleet.openvex.json"');
+    res.send(JSON.stringify(doc));
+  } catch (error) {
+    console.error('[Security] OpenVEX export failed:', error);
+    res.status(500).json({ error: (error as Error).message || 'Failed to generate OpenVEX' });
+  }
+});
 
 securityRouter.get('/policies', authMiddleware, (req: Request, res: Response): void => {
   if (!requirePaid(req, res)) return;

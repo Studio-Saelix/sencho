@@ -365,3 +365,33 @@ describe('GET /api/security/scans/:scanId/vulnerabilities', () => {
     expect(item).toMatchObject({ kev: true, epss_score: 0.42, epss_percentile: 0.95 });
   });
 });
+
+describe('GET /api/security/vex/export (Admiral)', () => {
+  beforeEach(() => {
+    resetSecurity();
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+  });
+  afterAll(() => {
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+  });
+
+  it('is gated to Admiral: 403 for Community', async () => {
+    const res = await request(app).get('/api/security/vex/export').set('Cookie', adminCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it('exports an OpenVEX document from triage decisions for Admiral', async () => {
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-2222', pkg_name: null, image_pattern: 'nginx*', reason: 'not present in build',
+      created_by: 'admin', created_at: Date.now(), expires_at: null, replicated_from_control: 0,
+      status: 'not_affected', justification: 'component_not_present',
+    });
+    const res = await request(app).get('/api/security/vex/export').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['@context']).toContain('openvex');
+    const stmt = (res.body.statements as Array<{ vulnerability: { name: string }; status: string; justification?: string; products: string[] }>)
+      .find((s) => s.vulnerability.name === 'CVE-2024-2222');
+    expect(stmt).toMatchObject({ status: 'not_affected', justification: 'component_not_present', products: ['nginx*'] });
+  });
+});
