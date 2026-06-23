@@ -83,8 +83,12 @@ function seedScan(o: {
 
 function resetSecurity(): void {
   const raw = (db() as unknown as { db: { prepare: (s: string) => { run: () => void } } }).db;
+  raw.prepare('DELETE FROM vulnerability_details').run();
   raw.prepare('DELETE FROM vulnerability_scans').run();
   raw.prepare('DELETE FROM scan_policies').run();
+  raw.prepare('DELETE FROM cve_suppressions').run();
+  raw.prepare('DELETE FROM misconfig_acknowledgements').run();
+  raw.prepare('DELETE FROM cve_intel').run();
 }
 
 describe('GET /api/security/overview', () => {
@@ -191,6 +195,27 @@ describe('GET /api/security/overview', () => {
       posture: 'Action needed',
       posturePartial: false,
     });
+  });
+
+  it('escalates an unfixable known-exploited (KEV) finding to Action needed', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'kev:1', image_digest: 'sha256:kev', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-9999', pkg_name: 'libkev', installed_version: '1', fixed_version: null,
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    // No fix available, but the CVE is known-exploited: KEV overrides "no fix".
+    db().replaceKev([{ cve_id: 'CVE-2024-9999', date_added: '2024-01-01' }], now);
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ knownExploited: 1, fixableCriticalHigh: 0, posture: 'Action needed' });
   });
 
   it('reads Secure when a scan completed with nothing actionable or severe', async () => {

@@ -730,6 +730,14 @@ export interface MisconfigAcknowledgement {
     replicated_from_control: number;
 }
 
+/** Read-time exploit intelligence joined to a CVE id (CveIntelService cache). */
+export interface CveIntel {
+    kev: boolean;
+    kevDate: string | null;
+    epssScore: number | null;
+    epssPercentile: number | null;
+}
+
 export interface ScanSummary {
     image_ref: string;
     highest_severity: VulnSeverity | null;
@@ -1180,6 +1188,20 @@ export class DatabaseService {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_misconfig_ack_unique
         ON misconfig_acknowledgements(rule_id, COALESCE(stack_pattern, ''));
 
+      -- Time-varying exploit intelligence (CISA KEV + FIRST EPSS), refreshed by
+      -- CveIntelService and joined to findings at read time by CVE id. Never
+      -- frozen onto vulnerability_details, so a CVE entering KEV later lights up
+      -- on scans already stored.
+      CREATE TABLE IF NOT EXISTS cve_intel (
+        cve_id TEXT PRIMARY KEY,
+        kev INTEGER NOT NULL DEFAULT 0,
+        kev_date TEXT,
+        epss_score REAL,
+        epss_percentile REAL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cve_intel_kev ON cve_intel(kev);
+
       CREATE TABLE IF NOT EXISTS stack_labels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         node_id INTEGER NOT NULL DEFAULT 0,
@@ -1513,6 +1535,10 @@ export class DatabaseService {
         stmt.run('trivy_last_notified_version', '');
         stmt.run('deploy_block_honor_suppressions', '0');
         stmt.run('pre_deploy_scan_advisory', '0');
+        // Outbound CVE exploit-intel (KEV + EPSS) fetch. On by default (a safe
+        // convenience that degrades gracefully offline); operators on air-gapped
+        // or firewalled hosts can turn it off.
+        stmt.run('cve_intel_enabled', '1');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
         stmt.run('reclaim_hero', '1');
@@ -4737,6 +4763,91 @@ export class DatabaseService {
             .all(nodeId, nodeId, limit + 1) as Array<{ rule_id: string; stack_context: string | null }>;
         const truncated = rows.length > limit;
         return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
+     * Distinct CVE ids present in stored findings, for the intel service to fetch
+     * EPSS only for what exists (EPSS covers CVEs, not GHSA, so filter to CVE-*).
+     */
+    public getDistinctVulnerabilityCveIds(limit = 20000): string[] {
+        const rows = this.db
+            .prepare(
+                `SELECT DISTINCT vulnerability_id FROM vulnerability_details
+                 WHERE vulnerability_id LIKE 'CVE-%' LIMIT ?`,
+            )
+            .all(limit) as Array<{ vulnerability_id: string }>;
+        return rows.map((r) => r.vulnerability_id);
+    }
+
+    /**
+     * Replace the KEV membership set. Clears kev on every row first, then marks
+     * the supplied CVEs, so a CVE removed from CISA's feed stops being flagged.
+     * Preserves EPSS columns (ON CONFLICT only touches the kev fields).
+     */
+    public replaceKev(entries: Array<{ cve_id: string; date_added: string | null }>, now: number): void {
+        const clear = this.db.prepare('UPDATE cve_intel SET kev = 0');
+        const upsert = this.db.prepare(
+            `INSERT INTO cve_intel (cve_id, kev, kev_date, updated_at)
+             VALUES (?, 1, ?, ?)
+             ON CONFLICT(cve_id) DO UPDATE SET kev = 1, kev_date = excluded.kev_date, updated_at = excluded.updated_at`,
+        );
+        const txn = this.db.transaction((rows: typeof entries) => {
+            clear.run();
+            for (const e of rows) upsert.run(e.cve_id, e.date_added, now);
+        });
+        txn(entries);
+    }
+
+    /** Upsert EPSS scores. Preserves kev columns (ON CONFLICT touches only EPSS). */
+    public upsertEpss(entries: Array<{ cve_id: string; epss_score: number; epss_percentile: number }>, now: number): void {
+        if (entries.length === 0) return;
+        const upsert = this.db.prepare(
+            `INSERT INTO cve_intel (cve_id, epss_score, epss_percentile, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(cve_id) DO UPDATE SET epss_score = excluded.epss_score,
+               epss_percentile = excluded.epss_percentile, updated_at = excluded.updated_at`,
+        );
+        const txn = this.db.transaction((rows: typeof entries) => {
+            for (const e of rows) upsert.run(e.cve_id, e.epss_score, e.epss_percentile, now);
+        });
+        txn(entries);
+    }
+
+    /**
+     * Read-time intel join. Returns a map keyed by CVE id for the supplied ids
+     * only (chunked to stay under SQLite's bound-parameter ceiling). Absent ids
+     * simply have no entry.
+     */
+    public getCveIntel(cveIds: string[]): Map<string, CveIntel> {
+        const out = new Map<string, CveIntel>();
+        if (cveIds.length === 0) return out;
+        const unique = [...new Set(cveIds)];
+        const CHUNK = 900;
+        for (let i = 0; i < unique.length; i += CHUNK) {
+            const chunk = unique.slice(i, i + CHUNK);
+            const placeholders = chunk.map(() => '?').join(', ');
+            const rows = this.db
+                .prepare(
+                    `SELECT cve_id, kev, kev_date, epss_score, epss_percentile
+                     FROM cve_intel WHERE cve_id IN (${placeholders})`,
+                )
+                .all(...chunk) as Array<{
+                    cve_id: string;
+                    kev: number;
+                    kev_date: string | null;
+                    epss_score: number | null;
+                    epss_percentile: number | null;
+                }>;
+            for (const r of rows) {
+                out.set(r.cve_id, {
+                    kev: r.kev === 1,
+                    kevDate: r.kev_date,
+                    epssScore: r.epss_score,
+                    epssPercentile: r.epss_percentile,
+                });
+            }
+        }
+        return out;
     }
 
     /**

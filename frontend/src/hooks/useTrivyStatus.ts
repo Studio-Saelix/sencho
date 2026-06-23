@@ -9,6 +9,7 @@ const INITIAL_STATUS: TrivyStatus = {
   autoUpdate: false,
   honorSuppressionsOnDeploy: false,
   preDeployScanAdvisory: false,
+  cveIntelEnabled: true,
   busy: false,
 };
 
@@ -35,6 +36,7 @@ export function useTrivyStatus(): UseTrivyStatusResult {
         autoUpdate: !!d.autoUpdate,
         honorSuppressionsOnDeploy: !!d.honorSuppressionsOnDeploy,
         preDeployScanAdvisory: !!d.preDeployScanAdvisory,
+        cveIntelEnabled: d.cveIntelEnabled !== false,
         busy: !!d.busy,
       });
     } catch (err) {

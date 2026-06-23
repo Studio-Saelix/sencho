@@ -172,6 +172,7 @@ securityRouter.get('/trivy-status', authMiddleware, (_req: Request, res: Respons
     autoUpdate: settings.trivy_auto_update === '1',
     honorSuppressionsOnDeploy: settings.deploy_block_honor_suppressions === '1',
     preDeployScanAdvisory: settings.pre_deploy_scan_advisory === '1',
+    cveIntelEnabled: settings.cve_intel_enabled !== '0',
     busy: installer.isBusy(),
   });
 });
@@ -259,6 +260,22 @@ securityRouter.put('/trivy-auto-update', authMiddleware, (req: Request, res: Res
   } catch (err) {
     const msg = getErrorMessage(err, 'Failed to update setting');
     console.error('[Security] Trivy auto-update toggle failed:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// Outbound CVE exploit-intel (KEV + EPSS) fetch toggle. Per-instance: the
+// background CveIntelService on each node reads its own local setting, so this
+// configures whichever node is active. Default on; off suits air-gapped hosts.
+securityRouter.put('/cve-intel-enabled', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const enabled = req.body?.enabled === true;
+  try {
+    DatabaseService.getInstance().updateGlobalSetting('cve_intel_enabled', enabled ? '1' : '0');
+    res.json({ cveIntelEnabled: enabled });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to update setting');
+    console.error('[Security] CVE intel toggle failed:', msg);
     res.status(500).json({ error: msg });
   }
 });
@@ -678,6 +695,8 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     // unchanged. The pass is capped; `posturePartial` flags a truncated node.
     const cveSuppressions = db.getCveSuppressions();
     const critHigh = db.getLatestCritHighVulnFindingsForNode(req.nodeId);
+    // Exploit intel is joined at read time by CVE id (never frozen onto the row).
+    const intel = db.getCveIntel(critHigh.items.map((f) => f.vulnerability_id));
     const critHighByImage = new Map<string, Array<{ vulnerability_id: string; pkg_name: string; fixed_version: string | null }>>();
     for (const f of critHigh.items) {
       const group = critHighByImage.get(f.image_ref);
@@ -686,10 +705,12 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     }
     let fixableCriticalHigh = 0;
     let accepted = 0;
+    let knownExploited = 0;
     for (const [imageRef, group] of critHighByImage) {
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
-        if (e.suppressed) accepted += 1;
-        else if (e.fixed_version) fixableCriticalHigh += 1;
+        if (e.suppressed) { accepted += 1; continue; }
+        if (e.fixed_version) fixableCriticalHigh += 1;
+        if (intel.get(e.vulnerability_id)?.kev) knownExploited += 1;
       }
     }
 
@@ -708,9 +729,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       }
     }
 
-    // Time-varying intel and exposure are joined in later phases; until then
-    // they are honestly zero rather than guessed.
-    const knownExploited = 0;
+    // Compose exposure is joined in a later phase; until then it is honestly zero.
     const publiclyExposed = 0;
 
     const postureFacts: SecurityPostureFacts = {

@@ -18,6 +18,8 @@ export interface TrivyStatus {
   autoUpdate: boolean;
   honorSuppressionsOnDeploy: boolean;
   preDeployScanAdvisory: boolean;
+  /** Outbound CVE exploit-intel (KEV + EPSS) fetch is enabled for this node. */
+  cveIntelEnabled: boolean;
   busy: boolean;
 }
 
