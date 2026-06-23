@@ -317,3 +317,30 @@ describe('GET /api/security/policy-packs', () => {
     expect(paid.body).toEqual(community.body);
   });
 });
+
+describe('GET /api/security/scans/:scanId/vulnerabilities', () => {
+  beforeEach(() => resetSecurity());
+
+  it('attaches read-time exploit intel (KEV/EPSS) to each finding', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'vex:1', image_digest: 'sha256:vex', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-7777', pkg_name: 'p', installed_version: '1', fixed_version: null,
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().replaceKev([{ cve_id: 'CVE-2024-7777', date_added: '2024-02-02' }], now);
+    db().upsertEpss([{ cve_id: 'CVE-2024-7777', epss_score: 0.42, epss_percentile: 0.95 }], now);
+
+    const res = await request(app).get(`/api/security/scans/${scanId}/vulnerabilities`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const item = (res.body.items as Array<{ vulnerability_id: string; kev: boolean; epss_score: number }>)
+      .find((i) => i.vulnerability_id === 'CVE-2024-7777');
+    expect(item).toMatchObject({ kev: true, epss_score: 0.42, epss_percentile: 0.95 });
+  });
+});

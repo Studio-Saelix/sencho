@@ -134,6 +134,11 @@ export interface VulnerabilityDetail {
   purl?: string | null;
   pkg_path?: string | null;
   layer_digest?: string | null;
+  // Read-time exploit intel join (KEV / EPSS), attached by the vulnerabilities
+  // endpoint. Optional: absent until the intel cache has populated.
+  kev?: boolean;
+  epss_score?: number | null;
+  epss_percentile?: number | null;
   suppressed?: boolean;
   suppression_id?: number;
   suppression_reason?: string;

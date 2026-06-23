@@ -584,7 +584,19 @@ securityRouter.get(
     const result = db.getVulnerabilityDetails(scanId, { severity, limit, offset });
     const suppressions = db.getCveSuppressions();
     const enriched = applySuppressions(result.items, scan.image_ref, suppressions);
-    res.json({ ...result, items: enriched });
+    // Join time-varying exploit intel at read time (KEV/EPSS), keyed by CVE id;
+    // never frozen onto the row, so a CVE entering KEV later surfaces on this scan.
+    const intel = db.getCveIntel(enriched.map((v) => v.vulnerability_id));
+    const withIntel = enriched.map((v) => {
+      const i = intel.get(v.vulnerability_id);
+      return {
+        ...v,
+        kev: i?.kev ?? false,
+        epss_score: i?.epssScore ?? null,
+        epss_percentile: i?.epssPercentile ?? null,
+      };
+    });
+    res.json({ ...result, items: withIntel });
   },
 );
 
