@@ -638,6 +638,17 @@ export interface VulnerabilityDetail {
     title: string | null;
     description: string | null;
     primary_url: string | null;
+    // Scan-intrinsic enrichment captured from Trivy. Optional because older rows
+    // (pre-enrichment) and callers that don't enrich omit them; the insert binds
+    // null. `status` is the posture-relevant one (fixed / will_not_fix / ...).
+    status?: string | null;
+    cvss_score?: number | null;
+    cvss_vector?: string | null;
+    cvss_source?: string | null;
+    vendor_severity?: VulnSeverity | null;
+    purl?: string | null;
+    pkg_path?: string | null;
+    layer_digest?: string | null;
 }
 
 export interface SecretFinding {
@@ -1435,6 +1446,18 @@ export class DatabaseService {
         maybeAddCol('fleet_snapshots', 'skipped_stacks', "TEXT NOT NULL DEFAULT '[]'");
         // Captured Stack Dossier metadata (opt-in documentation snapshots)
         maybeAddCol('fleet_snapshots', 'documentation', "TEXT NOT NULL DEFAULT ''");
+
+        // Scan finding enrichment: scan-intrinsic fields Trivy returns that the
+        // triage/action posture surfaces (status, CVSS, vendor severity, purl,
+        // package path, layer). Nullable; older rows simply have no enrichment.
+        maybeAddCol('vulnerability_details', 'status', 'TEXT');
+        maybeAddCol('vulnerability_details', 'cvss_score', 'REAL');
+        maybeAddCol('vulnerability_details', 'cvss_vector', 'TEXT');
+        maybeAddCol('vulnerability_details', 'cvss_source', 'TEXT');
+        maybeAddCol('vulnerability_details', 'vendor_severity', 'TEXT');
+        maybeAddCol('vulnerability_details', 'purl', 'TEXT');
+        maybeAddCol('vulnerability_details', 'pkg_path', 'TEXT');
+        maybeAddCol('vulnerability_details', 'layer_digest', 'TEXT');
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -4401,8 +4424,10 @@ export class DatabaseService {
         const stmt = this.db.prepare(
             `INSERT INTO vulnerability_details (
                 scan_id, vulnerability_id, pkg_name, installed_version,
-                fixed_version, severity, title, description, primary_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                fixed_version, severity, title, description, primary_url,
+                status, cvss_score, cvss_vector, cvss_source, vendor_severity,
+                purl, pkg_path, layer_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         const txn = this.db.transaction((rows: typeof details) => {
             for (const d of rows) {
@@ -4416,6 +4441,14 @@ export class DatabaseService {
                     d.title,
                     d.description,
                     d.primary_url,
+                    d.status ?? null,
+                    d.cvss_score ?? null,
+                    d.cvss_vector ?? null,
+                    d.cvss_source ?? null,
+                    d.vendor_severity ?? null,
+                    d.purl ?? null,
+                    d.pkg_path ?? null,
+                    d.layer_digest ?? null,
                 );
             }
         });

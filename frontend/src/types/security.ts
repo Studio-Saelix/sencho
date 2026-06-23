@@ -122,6 +122,16 @@ export interface VulnerabilityDetail {
   title: string | null;
   description: string | null;
   primary_url: string | null;
+  // Scan-intrinsic enrichment (nullable; absent on older scans). Drives the
+  // CVSS chip and evidence tags. `status`: fixed / will_not_fix / end_of_life.
+  status?: string | null;
+  cvss_score?: number | null;
+  cvss_vector?: string | null;
+  cvss_source?: string | null;
+  vendor_severity?: VulnSeverity | null;
+  purl?: string | null;
+  pkg_path?: string | null;
+  layer_digest?: string | null;
   suppressed?: boolean;
   suppression_id?: number;
   suppression_reason?: string;

@@ -204,3 +204,55 @@ describe('pruneScanHistoryPerImage', () => {
     expect(afterChildren.cnt).toBe(0);
   });
 });
+
+describe('vulnerability_details enrichment round-trips', () => {
+  it('persists and reads back status, CVSS, vendor severity, purl, path, and layer', () => {
+    const db = DatabaseService.getInstance();
+    const scanId = seedScan({ image_ref: 'enriched:1' });
+    db.insertVulnerabilityDetails(scanId, [
+      {
+        vulnerability_id: 'CVE-2024-1234',
+        pkg_name: 'libssl',
+        installed_version: '1.0.0',
+        fixed_version: '1.0.1',
+        severity: 'CRITICAL',
+        title: 'enriched finding',
+        description: null,
+        primary_url: null,
+        status: 'will_not_fix',
+        cvss_score: 9.8,
+        cvss_vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H',
+        cvss_source: 'nvd',
+        vendor_severity: 'HIGH',
+        purl: 'pkg:deb/debian/libssl@1.0.0',
+        pkg_path: 'usr/lib/libssl.so',
+        layer_digest: 'sha256:cafe',
+      },
+      // A finding that omits enrichment stores nulls, not undefined (no crash).
+      {
+        vulnerability_id: 'CVE-2024-5678',
+        pkg_name: 'libbare',
+        installed_version: '2',
+        fixed_version: null,
+        severity: 'HIGH',
+        title: null,
+        description: null,
+        primary_url: null,
+      },
+    ]);
+    const { items } = db.getVulnerabilityDetails(scanId);
+    const enriched = items.find((i) => i.vulnerability_id === 'CVE-2024-1234');
+    expect(enriched).toMatchObject({
+      status: 'will_not_fix',
+      cvss_score: 9.8,
+      cvss_source: 'nvd',
+      vendor_severity: 'HIGH',
+      purl: 'pkg:deb/debian/libssl@1.0.0',
+      pkg_path: 'usr/lib/libssl.so',
+      layer_digest: 'sha256:cafe',
+    });
+    const bare = items.find((i) => i.vulnerability_id === 'CVE-2024-5678');
+    expect(bare?.status ?? null).toBeNull();
+    expect(bare?.cvss_score ?? null).toBeNull();
+  });
+});
