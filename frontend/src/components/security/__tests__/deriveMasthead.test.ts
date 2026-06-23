@@ -67,3 +67,16 @@ it('reads Monitoring/warn when criticals/highs exist but nothing is actionable',
 it('reads Secure/live when a scan completed and nothing is actionable or severe', () => {
   expect(deriveMasthead(overview({}), false)).toEqual({ state: 'Secure', tone: 'live' });
 });
+
+it('prefers the backend posture over the local bootstrap when present', () => {
+  // Bootstrap from these facts would read Action needed (fixable > 0); the
+  // authoritative backend verdict wins.
+  expect(deriveMasthead(overview({ fixable: 5, posture: 'Monitoring' }), false)).toEqual({
+    state: 'Monitoring',
+    tone: 'warn',
+  });
+});
+
+it('falls back to the local bootstrap when the node reports no posture', () => {
+  expect(deriveMasthead(overview({ fixable: 1 }), false)).toEqual({ state: 'Action needed', tone: 'error' });
+});

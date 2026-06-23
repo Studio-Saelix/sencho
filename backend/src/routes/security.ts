@@ -13,6 +13,7 @@ import { validateImageRef } from '../utils/image-ref';
 import { applySuppressions } from '../utils/suppression-filter';
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
+import { deriveSecurityPosture, type SecurityPostureFacts, type SecurityPostureState } from '../services/securityPosture';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -137,6 +138,25 @@ interface SecurityOverviewResponse {
   lastSuccessfulScanAt: number | null;
   scanner: { available: boolean; version: string | null; source: 'managed' | 'host' | 'none'; autoUpdate: boolean };
   deployEnforcement: { honorSuppressionsOnDeploy: boolean; eligibleBlockPolicies: number };
+  // Posture facts. Counts are facts; the verb (`posture`) is derived in one
+  // place (`deriveSecurityPosture`). `critical`/`high` above stay for back-compat
+  // and are relabeled "scanner detections" in the UI; `rawCritical`/`rawHigh`
+  // are their posture-named aliases. `knownExploited` and `publiclyExposed` come
+  // online with the CVE-intel and Compose-exposure phases (0 until then).
+  rawCritical: number;
+  rawHigh: number;
+  fixableCriticalHigh: number;
+  knownExploited: number;
+  publiclyExposed: number;
+  dangerousCompose: number;
+  needsReview: number;
+  accepted: number;
+  notAffected: number;
+  /** Total actionable items, for the "N actions" affordance. */
+  actionable: number;
+  posture: SecurityPostureState;
+  /** True when the bounded posture pass hit its row cap on this node. */
+  posturePartial: boolean;
 }
 
 export const securityRouter = Router();
@@ -652,6 +672,61 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       }
     }
 
+    // Posture facts that depend on suppressions/acks (which change without a
+    // rescan) are computed at read time over a bounded set of Critical/High
+    // findings, grouped per image so the existing read-time filters apply
+    // unchanged. The pass is capped; `posturePartial` flags a truncated node.
+    const cveSuppressions = db.getCveSuppressions();
+    const critHigh = db.getLatestCritHighVulnFindingsForNode(req.nodeId);
+    const critHighByImage = new Map<string, Array<{ vulnerability_id: string; pkg_name: string; fixed_version: string | null }>>();
+    for (const f of critHigh.items) {
+      const group = critHighByImage.get(f.image_ref);
+      if (group) group.push(f);
+      else critHighByImage.set(f.image_ref, [f]);
+    }
+    let fixableCriticalHigh = 0;
+    let accepted = 0;
+    for (const [imageRef, group] of critHighByImage) {
+      for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
+        if (e.suppressed) accepted += 1;
+        else if (e.fixed_version) fixableCriticalHigh += 1;
+      }
+    }
+
+    const acks = db.getMisconfigAcknowledgements();
+    const highMisconfigs = db.getLatestHighMisconfigFindingsForNode(req.nodeId);
+    const misconfigByStack = new Map<string | null, Array<{ rule_id: string }>>();
+    for (const f of highMisconfigs.items) {
+      const group = misconfigByStack.get(f.stack_context);
+      if (group) group.push(f);
+      else misconfigByStack.set(f.stack_context, [f]);
+    }
+    let dangerousCompose = 0;
+    for (const [stackContext, group] of misconfigByStack) {
+      for (const e of applyMisconfigAcknowledgements(group, stackContext, acks)) {
+        if (!e.acknowledged) dangerousCompose += 1;
+      }
+    }
+
+    // Time-varying intel and exposure are joined in later phases; until then
+    // they are honestly zero rather than guessed.
+    const knownExploited = 0;
+    const publiclyExposed = 0;
+
+    const postureFacts: SecurityPostureFacts = {
+      scannerAvailable: svc.isTrivyAvailable(),
+      hasCompletedScan: lastSuccessfulScanAt !== null,
+      fixableCriticalHigh,
+      secrets,
+      dangerousCompose,
+      knownExploited,
+      publiclyExposed,
+      rawCritical: critical,
+      rawHigh: high,
+    };
+    const posture = deriveSecurityPosture(postureFacts);
+    const actionable = fixableCriticalHigh + secrets + dangerousCompose + knownExploited + publiclyExposed;
+
     const overview: SecurityOverviewResponse = {
       scannedImages,
       critical,
@@ -676,6 +751,18 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
           FleetSyncService.getSelfIdentity(),
         ),
       },
+      rawCritical: critical,
+      rawHigh: high,
+      fixableCriticalHigh,
+      knownExploited,
+      publiclyExposed,
+      dangerousCompose,
+      needsReview: 0,
+      accepted,
+      notAffected: 0,
+      actionable,
+      posture,
+      posturePartial: critHigh.truncated || highMisconfigs.truncated,
     };
     res.json(overview);
   } catch (error) {

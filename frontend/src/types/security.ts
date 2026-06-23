@@ -194,6 +194,10 @@ export interface ScanCompareResult {
   row_limit?: number;
 }
 
+/** The Security page's action posture (the masthead verdict). Mirrors the
+ *  backend `SecurityPostureState`. */
+export type SecurityPostureState = 'Action needed' | 'Monitoring' | 'Secure' | 'Unknown';
+
 /** Node-scoped security posture rollup for the Security page Overview. */
 export interface SecurityOverview {
   scannedImages: number;
@@ -216,6 +220,23 @@ export interface SecurityOverview {
     /** Approximate count of enabled block-on-deploy policies eligible for this node. */
     eligibleBlockPolicies: number;
   };
+  // Posture facts. Optional because an older remote node (reached through the
+  // proxy) may not report them; the masthead falls back to a local derivation.
+  // Counts are facts; `posture` is the authoritative derived verb.
+  rawCritical?: number;
+  rawHigh?: number;
+  fixableCriticalHigh?: number;
+  knownExploited?: number;
+  publiclyExposed?: number;
+  dangerousCompose?: number;
+  needsReview?: number;
+  accepted?: number;
+  notAffected?: number;
+  /** Total actionable items, for the "N actions" affordance. */
+  actionable?: number;
+  posture?: SecurityPostureState;
+  /** True when the bounded posture pass hit its row cap on this node. */
+  posturePartial?: boolean;
 }
 
 /** Which detail tab the scan sheet opens on. Matches VulnerabilityScanSheet's tabs. */

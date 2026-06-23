@@ -1,7 +1,7 @@
 import type { MastheadTone } from '@/components/ui/PageMasthead';
-import type { SecurityOverview } from '@/types/security';
+import type { SecurityOverview, SecurityPostureState } from '@/types/security';
 
-export type SecurityPosture = 'Action needed' | 'Monitoring' | 'Secure' | 'Unknown';
+export type SecurityPosture = SecurityPostureState;
 
 const POSTURE_TONE: Record<SecurityPosture, MastheadTone> = {
   'Action needed': 'error',
@@ -21,21 +21,24 @@ export const SCANNER_DETECTIONS_NOTE =
  * decide the headline. "Secure" means nothing is actionable right now, never a
  * claim that no vulnerabilities exist.
  *
- * Phase-1 bootstrap: "actionable" is approximated from the overview facts that
- * already exist (fixable findings, secrets, misconfigs). Unknown covers a
- * missing scanner or a node that has never completed a scan. A later phase moves
- * this bucketing to the backend and prefers an authoritative `posture`.
+ * The backend computes the authoritative `posture` (one bucketing function), so
+ * this prefers `overview.posture` when present. The local bootstrap below is the
+ * fallback for an older remote node reached through the proxy that does not
+ * report posture: "actionable" is approximated from the overview facts that
+ * already exist (fixable findings, secrets, misconfigs); Unknown covers a
+ * missing scanner or a node that has never completed a scan.
  */
 export function deriveMasthead(
   overview: SecurityOverview | null,
   error: boolean,
 ): { state: SecurityPosture; tone: MastheadTone } {
-  const posture = derivePosture(overview, error);
+  const posture = resolvePosture(overview, error);
   return { state: posture, tone: POSTURE_TONE[posture] };
 }
 
-function derivePosture(overview: SecurityOverview | null, error: boolean): SecurityPosture {
+function resolvePosture(overview: SecurityOverview | null, error: boolean): SecurityPosture {
   if (error || !overview) return 'Unknown';
+  if (overview.posture && overview.posture in POSTURE_TONE) return overview.posture;
   if (!overview.scanner.available || overview.lastSuccessfulScanAt === null) return 'Unknown';
   if (overview.fixable > 0 || overview.secrets > 0 || overview.misconfigs > 0) return 'Action needed';
   if (overview.critical > 0 || overview.high > 0) return 'Monitoring';

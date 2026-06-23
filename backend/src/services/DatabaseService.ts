@@ -4637,6 +4637,76 @@ export class DatabaseService {
     }
 
     /**
+     * Critical/High vulnerability findings from the latest completed scan per
+     * image on a node, for read-time posture math (suppression-aware fixable and
+     * accepted counts). Selects only the identity columns posture needs and is
+     * capped: `truncated` is set when the cap is hit so the caller can mark the
+     * posture partial rather than silently undercount. Phase 2 intentionally
+     * omits `status` (added by the findings-enrichment phase) so this runs
+     * standalone against a not-yet-migrated `vulnerability_details`.
+     */
+    public getLatestCritHighVulnFindingsForNode(
+        nodeId: number,
+        limit = 5000,
+    ): {
+        items: Array<{ image_ref: string; vulnerability_id: string; pkg_name: string; fixed_version: string | null }>;
+        truncated: boolean;
+    } {
+        const rows = this.db
+            .prepare(
+                `SELECT vs.image_ref, vd.vulnerability_id, vd.pkg_name, vd.fixed_version
+                 FROM vulnerability_details vd
+                 INNER JOIN vulnerability_scans vs ON vs.id = vd.scan_id
+                 INNER JOIN (
+                   SELECT image_ref, MAX(scanned_at) AS max_scanned
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed'
+                   GROUP BY image_ref
+                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
+                 WHERE vs.node_id = ? AND vs.status = 'completed'
+                   AND vd.severity IN ('CRITICAL', 'HIGH')
+                 LIMIT ?`,
+            )
+            .all(nodeId, nodeId, limit + 1) as Array<{
+                image_ref: string;
+                vulnerability_id: string;
+                pkg_name: string;
+                fixed_version: string | null;
+            }>;
+        const truncated = rows.length > limit;
+        return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
+     * High-severity misconfiguration findings from the latest completed scan per
+     * image on a node, for the acknowledgement-aware `dangerousCompose` posture
+     * fact. Same bounded shape as `getLatestCritHighVulnFindingsForNode`.
+     */
+    public getLatestHighMisconfigFindingsForNode(
+        nodeId: number,
+        limit = 5000,
+    ): { items: Array<{ rule_id: string; stack_context: string | null }>; truncated: boolean } {
+        const rows = this.db
+            .prepare(
+                `SELECT mf.rule_id, vs.stack_context
+                 FROM misconfig_findings mf
+                 INNER JOIN vulnerability_scans vs ON vs.id = mf.scan_id
+                 INNER JOIN (
+                   SELECT image_ref, MAX(scanned_at) AS max_scanned
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed'
+                   GROUP BY image_ref
+                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
+                 WHERE vs.node_id = ? AND vs.status = 'completed'
+                   AND mf.severity IN ('CRITICAL', 'HIGH')
+                 LIMIT ?`,
+            )
+            .all(nodeId, nodeId, limit + 1) as Array<{ rule_id: string; stack_context: string | null }>;
+        const truncated = rows.length > limit;
+        return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
      * Uncapped count of scans in a given status for a node. Unlike
      * `getVulnerabilityScans`, this never applies the per-image history cap, so
      * the Security overview reports the true number of (for example) failed

@@ -128,6 +128,84 @@ describe('GET /api/security/overview', () => {
     });
   });
 
+  it('derives suppression- and ack-aware posture facts from detail rows', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1,
+      image_ref: 'app:1',
+      image_digest: `sha256:app-${Math.random().toString(16).slice(2)}`,
+      scanned_at: now,
+      total_vulnerabilities: 3,
+      critical_count: 2,
+      high_count: 1,
+      medium_count: 0,
+      low_count: 0,
+      unknown_count: 0,
+      fixable_count: 2,
+      secret_count: 0,
+      misconfig_count: 2,
+      scanners_used: 'vuln',
+      highest_severity: 'CRITICAL',
+      os_info: null,
+      trivy_version: null,
+      scan_duration_ms: null,
+      triggered_by: 'manual',
+      status: 'completed',
+      error: null,
+      stack_context: null,
+    });
+    const detail = (vulnerability_id: string, severity: 'CRITICAL' | 'HIGH', fixed_version: string | null) => ({
+      vulnerability_id, pkg_name: `pkg-${vulnerability_id}`, installed_version: '1', fixed_version,
+      severity, title: null, description: null, primary_url: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      detail('CVE-2024-0001', 'CRITICAL', '2'),   // fixable, counts
+      detail('CVE-2024-0002', 'HIGH', null),       // unfixable, does not count
+      detail('CVE-2024-0003', 'CRITICAL', '9'),    // fixable but suppressed -> accepted, not fixable
+    ]);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-0003', pkg_name: null, image_pattern: null, reason: 'accepted risk',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0,
+    });
+    db().insertMisconfigFindings(scanId, [
+      { rule_id: 'DS001', check_id: null, severity: 'HIGH', title: null, message: null, resolution: null, target: 'app', primary_url: null },
+      { rule_id: 'DS002', check_id: null, severity: 'CRITICAL', title: null, message: null, resolution: null, target: 'app', primary_url: null },
+    ]);
+    db().createMisconfigAcknowledgement({
+      rule_id: 'DS001', stack_pattern: null, reason: 'acknowledged',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0,
+    });
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      rawCritical: 2,
+      rawHigh: 1,
+      fixableCriticalHigh: 1,   // 0001 only (0003 suppressed, 0002 unfixable)
+      accepted: 1,              // 0003 suppressed
+      dangerousCompose: 1,      // DS002 (DS001 acknowledged)
+      knownExploited: 0,
+      publiclyExposed: 0,
+      needsReview: 0,
+      notAffected: 0,
+      posture: 'Action needed',
+      posturePartial: false,
+    });
+  });
+
+  it('reads Secure when a scan completed with nothing actionable or severe', async () => {
+    db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'clean:1', image_digest: 'sha256:clean', scanned_at: Date.now(),
+      total_vulnerabilities: 0, critical_count: 0, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: null, os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.posture).toBe('Secure');
+  });
+
   it('is reachable by a Community viewer (read-only, auth-only)', async () => {
     const res = await request(app).get('/api/security/overview').set('Cookie', viewerCookie);
     expect(res.status).toBe(200);
