@@ -10,7 +10,7 @@ import { isValidStackName } from '../utils/validation';
 import { FleetSyncService } from '../services/FleetSyncService';
 import { LicenseService } from '../services/LicenseService';
 import { validateImageRef } from '../utils/image-ref';
-import { applySuppressions } from '../utils/suppression-filter';
+import { applySuppressions, isTriageStatus, isTriageJustification } from '../utils/suppression-filter';
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
 import { deriveSecurityPosture, type SecurityPostureFacts, type SecurityPostureState } from '../services/securityPosture';
@@ -717,10 +717,19 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     }
     let fixableCriticalHigh = 0;
     let accepted = 0;
+    let notAffected = 0;
+    let needsReview = 0;
     let knownExploited = 0;
     for (const [imageRef, group] of critHighByImage) {
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
-        if (e.suppressed) { accepted += 1; continue; }
+        if (e.triage_status === 'needs_review') needsReview += 1;
+        if (e.suppressed) {
+          // A dismissing decision: not_affected is its own fact, the rest are "accepted".
+          if (e.triage_status === 'not_affected') notAffected += 1;
+          else accepted += 1;
+          continue;
+        }
+        // Not dismissed (no decision, needs_review, or affected): still actionable.
         if (e.fixed_version) fixableCriticalHigh += 1;
         if (intel.get(e.vulnerability_id)?.kev) knownExploited += 1;
       }
@@ -788,9 +797,9 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       knownExploited,
       publiclyExposed,
       dangerousCompose,
-      needsReview: 0,
+      needsReview,
       accepted,
-      notAffected: 0,
+      notAffected,
       actionable,
       posture,
       posturePartial: critHigh.truncated || highMisconfigs.truncated,
@@ -1061,6 +1070,15 @@ securityRouter.post('/suppressions', authMiddleware, (req: Request, res: Respons
   if (expiresAt !== null && !Number.isFinite(expiresAt)) {
     res.status(400).json({ error: 'expires_at must be a timestamp or null' }); return;
   }
+  // Triage decision: default 'accepted' (a plain suppress = accepted risk).
+  const status = body.status === undefined ? 'accepted' : body.status;
+  if (!isTriageStatus(status)) {
+    res.status(400).json({ error: 'invalid triage status' }); return;
+  }
+  const justification = body.justification == null || body.justification === '' ? null : body.justification;
+  if (justification !== null && !isTriageJustification(justification)) {
+    res.status(400).json({ error: 'invalid triage justification' }); return;
+  }
   try {
     const suppression = DatabaseService.getInstance().createCveSuppression({
       cve_id: cveId,
@@ -1071,6 +1089,8 @@ securityRouter.post('/suppressions', authMiddleware, (req: Request, res: Respons
       created_at: Date.now(),
       expires_at: expiresAt,
       replicated_from_control: 0,
+      status,
+      justification,
     });
     FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
     res.status(201).json(suppression);
@@ -1094,12 +1114,23 @@ securityRouter.put('/suppressions/:id', authMiddleware, (req: Request, res: Resp
     res.status(400).json({ error: 'Invalid suppression id' }); return;
   }
   const body = req.body ?? {};
-  const updates: Partial<{ reason: string; image_pattern: string | null; expires_at: number | null }> = {};
+  const updates: Partial<{ reason: string; image_pattern: string | null; expires_at: number | null; status: string; justification: string | null }> = {};
   if (body.reason !== undefined) {
     const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
     if (!reason) { res.status(400).json({ error: 'reason is required' }); return; }
     if (reason.length > 2000) { res.status(400).json({ error: 'reason is too long' }); return; }
     updates.reason = reason;
+  }
+  if (body.status !== undefined) {
+    if (!isTriageStatus(body.status)) { res.status(400).json({ error: 'invalid triage status' }); return; }
+    updates.status = body.status;
+  }
+  if (body.justification !== undefined) {
+    const justification = body.justification == null || body.justification === '' ? null : body.justification;
+    if (justification !== null && !isTriageJustification(justification)) {
+      res.status(400).json({ error: 'invalid triage justification' }); return;
+    }
+    updates.justification = justification;
   }
   if (body.image_pattern !== undefined) {
     const pattern = body.image_pattern == null || body.image_pattern === '' ? null : String(body.image_pattern).trim();

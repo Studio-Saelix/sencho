@@ -197,6 +197,27 @@ describe('GET /api/security/overview', () => {
     });
   });
 
+  it('separates not_affected and needs_review triage facts in the overview', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'triage:1', image_digest: 'sha256:triage', scanned_at: now,
+      total_vulnerabilities: 2, critical_count: 2, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-0010', pkg_name: 'a', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+      { vulnerability_id: 'CVE-2024-0011', pkg_name: 'b', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    db().createCveSuppression({ cve_id: 'CVE-2024-0010', pkg_name: null, image_pattern: null, reason: 'not affected', created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'not_affected' });
+    db().createCveSuppression({ cve_id: 'CVE-2024-0011', pkg_name: null, image_pattern: null, reason: 'reviewing', created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'needs_review' });
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ notAffected: 1, needsReview: 1, accepted: 0, fixableCriticalHigh: 0, posture: 'Monitoring' });
+  });
+
   it('escalates an unfixable known-exploited (KEV) finding to Action needed', async () => {
     const now = Date.now();
     const scanId = db().createVulnerabilityScan({

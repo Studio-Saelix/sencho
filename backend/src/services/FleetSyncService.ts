@@ -577,6 +577,9 @@ export class FleetSyncService {
                 created_by: s.created_by,
                 created_at: s.created_at,
                 expires_at: s.expires_at,
+                // Replicate the triage decision so a replica's posture matches control.
+                status: s.status,
+                justification: s.justification,
             }));
         } else if (resource === 'misconfig_acknowledgements') {
             rows = db.getLocalMisconfigAcknowledgements().map((a) => ({

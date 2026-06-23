@@ -144,6 +144,10 @@ export interface VulnerabilityDetail {
   suppression_reason?: string;
 }
 
+/** Triage decision states (mirrors the backend TriageStatus). */
+export type TriageStatus =
+  | 'needs_review' | 'affected' | 'not_affected' | 'accepted' | 'fixed' | 'false_positive' | 'ignored';
+
 export interface CveSuppression {
   id: number;
   cve_id: string;
@@ -155,6 +159,8 @@ export interface CveSuppression {
   expires_at: number | null;
   replicated_from_control: number;
   active: boolean;
+  status?: TriageStatus;
+  justification?: string | null;
 }
 
 export interface ScanSummary {

@@ -712,6 +712,11 @@ export interface CveSuppression {
     created_at: number;
     expires_at: number | null;
     replicated_from_control: number;
+    // Triage decision layered on the suppression. Optional on inputs (callers may
+    // omit them; the insert defaults `status` to 'accepted', the back-compat value
+    // for pre-triage rows). `justification` is an optional OpenVEX reason code.
+    status?: string;
+    justification?: string | null;
 }
 
 /**
@@ -1480,6 +1485,11 @@ export class DatabaseService {
         maybeAddCol('vulnerability_details', 'purl', 'TEXT');
         maybeAddCol('vulnerability_details', 'pkg_path', 'TEXT');
         maybeAddCol('vulnerability_details', 'layer_digest', 'TEXT');
+
+        // Triage decisions layered on CVE suppressions (status + optional OpenVEX
+        // justification). Existing rows default to 'accepted' (the prior behavior).
+        maybeAddCol('cve_suppressions', 'status', "TEXT NOT NULL DEFAULT 'accepted'");
+        maybeAddCol('cve_suppressions', 'justification', 'TEXT');
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -5320,8 +5330,8 @@ export class DatabaseService {
         const result = this.db
             .prepare(
                 `INSERT INTO cve_suppressions
-                    (cve_id, pkg_name, image_pattern, reason, created_by, created_at, expires_at, replicated_from_control)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    (cve_id, pkg_name, image_pattern, reason, created_by, created_at, expires_at, replicated_from_control, status, justification)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
                 suppression.cve_id,
@@ -5332,17 +5342,24 @@ export class DatabaseService {
                 suppression.created_at,
                 suppression.expires_at,
                 suppression.replicated_from_control ?? 0,
+                suppression.status ?? 'accepted',
+                suppression.justification ?? null,
             );
-        return { ...suppression, id: result.lastInsertRowid as number };
+        return {
+            ...suppression,
+            status: suppression.status ?? 'accepted',
+            justification: suppression.justification ?? null,
+            id: result.lastInsertRowid as number,
+        };
     }
 
     public updateCveSuppression(
         id: number,
-        updates: Partial<Pick<CveSuppression, 'reason' | 'image_pattern' | 'expires_at'>>,
+        updates: Partial<Pick<CveSuppression, 'reason' | 'image_pattern' | 'expires_at' | 'status' | 'justification'>>,
     ): CveSuppression | null {
         const existing = this.getCveSuppression(id);
         if (!existing) return null;
-        const ALLOWED = new Set(['reason', 'image_pattern', 'expires_at']);
+        const ALLOWED = new Set(['reason', 'image_pattern', 'expires_at', 'status', 'justification']);
         const fields: string[] = [];
         const values: unknown[] = [];
         for (const [key, value] of Object.entries(updates)) {
@@ -5370,8 +5387,8 @@ export class DatabaseService {
         const deleteStmt = this.db.prepare('DELETE FROM cve_suppressions WHERE replicated_from_control = 1');
         const insertStmt = this.db.prepare(
             `INSERT INTO cve_suppressions
-                (cve_id, pkg_name, image_pattern, reason, created_by, created_at, expires_at, replicated_from_control)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+                (cve_id, pkg_name, image_pattern, reason, created_by, created_at, expires_at, replicated_from_control, status, justification)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         );
         const txn = this.db.transaction((items: Array<Omit<CveSuppression, 'id'>>) => {
             deleteStmt.run();
@@ -5384,6 +5401,9 @@ export class DatabaseService {
                     s.created_by,
                     s.created_at,
                     s.expires_at,
+                    // Back-compat: a control on an older version omits these in its push.
+                    s.status ?? 'accepted',
+                    s.justification ?? null,
                 );
             }
         });

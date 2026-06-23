@@ -256,3 +256,33 @@ describe('vulnerability_details enrichment round-trips', () => {
     expect(bare?.cvss_score ?? null).toBeNull();
   });
 });
+
+describe('cve_suppressions triage replication', () => {
+  function clearSuppressions(): void {
+    (DatabaseService.getInstance() as unknown as { db: { prepare: (s: string) => { run: () => void } } })
+      .db.prepare('DELETE FROM cve_suppressions').run();
+  }
+
+  it('round-trips a non-default triage status through replication', () => {
+    const db = DatabaseService.getInstance();
+    clearSuppressions();
+    db.replaceReplicatedCveSuppressions([{
+      cve_id: 'CVE-2024-3001', pkg_name: null, image_pattern: null, reason: 'vendor confirmed safe',
+      created_by: 'control-admin', created_at: 1000, expires_at: null, replicated_from_control: 1,
+      status: 'not_affected', justification: 'vulnerable_code_not_in_execute_path',
+    }]);
+    const row = db.getCveSuppressions().find((s) => s.cve_id === 'CVE-2024-3001');
+    expect(row).toMatchObject({ status: 'not_affected', justification: 'vulnerable_code_not_in_execute_path', replicated_from_control: 1 });
+  });
+
+  it('defaults replicated rows that omit status to accepted (upgrade path)', () => {
+    const db = DatabaseService.getInstance();
+    clearSuppressions();
+    db.replaceReplicatedCveSuppressions([{
+      cve_id: 'CVE-2024-3002', pkg_name: null, image_pattern: null, reason: 'legacy push',
+      created_by: 'control-admin', created_at: 1000, expires_at: null, replicated_from_control: 1,
+    }]);
+    const row = db.getCveSuppressions().find((s) => s.cve_id === 'CVE-2024-3002');
+    expect(row?.status).toBe('accepted');
+  });
+});
