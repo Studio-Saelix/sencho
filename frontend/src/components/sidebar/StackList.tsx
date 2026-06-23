@@ -32,6 +32,7 @@ export interface StackListProps {
   searchQuery: string;
   stackLabelMap: Record<string, Label[]>;
   stackStatuses: Record<string, StackRowStatus | undefined>;
+  stackCounts: Record<string, { running: number; total: number } | undefined>;
   stackUpdates: Record<string, boolean>;
   gitSourcePendingMap: Record<string, boolean>;
   pinnedFiles: string[];
@@ -117,7 +118,7 @@ interface StackListBulkProps {
 
 export function StackList(props: StackListProps & StackListBulkProps) {
   const {
-    files, isLoading, selectedFile, searchQuery, stackLabelMap, stackStatuses,
+    files, isLoading, selectedFile, searchQuery, stackLabelMap, stackStatuses, stackCounts,
     stackUpdates, gitSourcePendingMap, pinnedFiles, isCollapsed, toggleCollapse,
     isBusy, getDisplayName, onSelectFile, buildMenuCtx,
     bulkMode, selectedFiles, onToggleSelect,
@@ -176,6 +177,8 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                     file={file}
                     displayName={getDisplayName(file)}
                     status={stackStatuses[file] ?? 'unknown'}
+                    running={stackCounts[file]?.running}
+                    total={stackCounts[file]?.total}
                     isBusy={isBusy(file)}
                     isActive={selectedFile === file}
                     labels={stackLabelMap[file] ?? []}
