@@ -1166,9 +1166,11 @@ stacksRouter.get('/:stackName/storage', async (req: Request, res: Response) => {
 // Effective Stack Anatomy: structural facts (services, ports, volumes, networks,
 // restart) from the fully-merged effective model, so a multi-file Git source's
 // dossier and doc-drift reflect every override file, not just the root compose.
-// Read-only and advisory; auto-proxies to the active node. Secret-safe: the
-// response carries only structural fields; resolved env, label, and command
-// values in the rendered model are never extracted into the payload.
+// Read-only and advisory; auto-proxies to the active node. The response carries
+// only structural fields; resolved env, label, and command values are never
+// extracted. A secret interpolated INTO a structural field still resolves into
+// the payload, but is already readable at the same stack:read scope via the
+// stack's files (see docs/features/environment-guardrails).
 stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
