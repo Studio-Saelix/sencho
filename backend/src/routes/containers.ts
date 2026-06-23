@@ -2,11 +2,14 @@ import { Router, type Request, type Response } from 'express';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import { requireAdmin } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 
 export const containersRouter = Router();
 
 containersRouter.get('/', async (req: Request, res: Response) => {
+  // Baseline node-level read gate: the listing is node-wide, not per-stack scoped.
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const dockerController = DockerController.getInstance(req.nodeId);
     const containers = await dockerController.getRunningContainers();
@@ -17,6 +20,7 @@ containersRouter.get('/', async (req: Request, res: Response) => {
 });
 
 containersRouter.get('/:id/logs', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const id = req.params.id as string;
     const dockerController = DockerController.getInstance(req.nodeId);
