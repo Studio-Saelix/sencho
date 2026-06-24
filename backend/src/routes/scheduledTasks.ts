@@ -70,16 +70,27 @@ function validateStackTarget(targetType: TargetType, targetId: unknown, nodeId: 
   return null;
 }
 
-function validateScanNode(nodeId: unknown): string | null {
-  if (nodeId == null) return 'Scan action requires node_id.';
+/**
+ * Shared guard for actions that must run on an existing local node (scan, prune).
+ * `labelSingular` names the action ("Scan", "Prune"); `labelPlural` names the
+ * scheduled operation in prose ("Scheduled vulnerability scans", "Scheduled prunes").
+ */
+function validateLocalNode(nodeId: unknown, labelSingular: string, labelPlural: string): string | null {
+  if (nodeId == null) return `${labelSingular} action requires node_id.`;
   const parsedNodeId = Number(nodeId);
-  if (!Number.isFinite(parsedNodeId)) return 'Scan action requires a valid node_id.';
+  if (!Number.isFinite(parsedNodeId)) return `${labelSingular} action requires a valid node_id.`;
   const node = DatabaseService.getInstance().getNode(parsedNodeId);
-  if (!node) return 'Scheduled vulnerability scans require an existing local node.';
-  if (node?.type === 'remote') {
-    return 'Scheduled vulnerability scans currently require a local node.';
-  }
+  if (!node) return `${labelPlural} require an existing local node.`;
+  if (node.type === 'remote') return `${labelPlural} currently require a local node.`;
   return null;
+}
+
+function validateScanNode(nodeId: unknown): string | null {
+  return validateLocalNode(nodeId, 'Scan', 'Scheduled vulnerability scans');
+}
+
+function validatePruneNode(nodeId: unknown): string | null {
+  return validateLocalNode(nodeId, 'Prune', 'Scheduled prunes');
 }
 
 /** Shared validation for prune_targets, target_services, prune_label_filter. Returns an error string or null. */
@@ -176,6 +187,10 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       const nodeErr = validateScanNode(node_id);
       if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     }
+    if (action === 'prune') {
+      const nodeErr = validatePruneNode(node_id);
+      if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
+    }
     if (action === 'update' && target_type === 'fleet' && !node_id) {
       res.status(400).json({ error: ERR_FLEET_NODE_REQUIRED }); return;
     }
@@ -267,6 +282,10 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
 
     if (finalAction === 'scan') {
       const nodeErr = validateScanNode(finalNodeId);
+      if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
+    }
+    if (finalAction === 'prune') {
+      const nodeErr = validatePruneNode(finalNodeId);
       if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     }
     if (finalAction === 'update' && finalTargetType === 'fleet') {

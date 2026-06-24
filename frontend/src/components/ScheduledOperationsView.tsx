@@ -149,7 +149,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       const res = await apiFetch('/nodes', { localOnly: true });
       if (res.ok) {
         const data = await res.json();
-        setNodes(data.map((n: { id: number; name: string }) => ({ id: n.id, name: n.name })));
+        setNodes(data.map((n: { id: number; name: string; type: 'local' | 'remote' }) => ({ id: n.id, name: n.name, type: n.type })));
       }
     } catch {
       // Non-critical
@@ -182,7 +182,12 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     let cancelled = false;
     const fetchServices = async () => {
       try {
-        const res = await apiFetch(`/stacks/${encodeURIComponent(formTargetId)}/services`);
+        // Load services from the selected node so remote-node restart schedules
+        // discover the right services instead of the hub's.
+        const endpoint = `/stacks/${encodeURIComponent(formTargetId)}/services`;
+        const res = formNodeId
+          ? await fetchForNode(endpoint, parseInt(formNodeId, 10))
+          : await apiFetch(endpoint);
         if (res.ok && !cancelled) {
           setAvailableServices(await res.json());
         }
@@ -192,7 +197,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     };
     fetchServices();
     return () => { cancelled = true; };
-  }, [formAction, formTargetId]);
+  }, [formAction, formTargetId, formNodeId]);
 
   // Re-fetch stacks when node changes
   useEffect(() => {
@@ -258,7 +263,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       body.target_id = formTargetId;
       body.node_id = formNodeId ? parseInt(formNodeId, 10) : null;
     }
-    if (formAction === 'scan' || formAction === UPDATE_FLEET_ACTION) {
+    if (formAction === 'scan' || formAction === 'prune' || formAction === UPDATE_FLEET_ACTION) {
       body.node_id = formNodeId ? parseInt(formNodeId, 10) : null;
     }
     if (formAction === 'prune' && formPruneTargets.length > 0) {
@@ -365,12 +370,17 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const targetType = ACTION_OPTIONS.find(a => a.value === formAction)?.targetType;
   const cronDescription = getCronDescription(formCron);
   const nodeOptions = useMemo(() => nodes.map(n => ({ value: String(n.id), label: n.name })), [nodes]);
+  // Scan and prune run on the hub-local Docker daemon only; remote nodes are excluded from their pickers.
+  const localNodeOptions = useMemo(
+    () => nodes.filter(n => n.type === 'local').map(n => ({ value: String(n.id), label: n.name })),
+    [nodes],
+  );
   const isSaveDisabled =
     saving || !formName || !formCron
     || (targetType === 'stack' && (!formTargetId || !formNodeId))
     || (formAction === 'scan' && !formNodeId)
     || (formAction === UPDATE_FLEET_ACTION && !formNodeId)
-    || (formAction === 'prune' && formPruneTargets.length === 0);
+    || (formAction === 'prune' && (!formNodeId || formPruneTargets.length === 0));
 
   const windowEnd = now + TIMELINE_WINDOW_MS;
   const timelinePills = filteredTasks
@@ -740,21 +750,41 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               </div>
             )}
 
+            {formAction === 'snapshot' && (
+              <div className="space-y-2">
+                <Label>Scope</Label>
+                <div className="flex h-9 w-full items-center rounded-md border border-glass-border bg-input px-3 text-sm text-muted-foreground">
+                  Entire fleet
+                </div>
+                <p className="text-xs text-muted-foreground">Captures every node's compose and .env files. No node or stack to choose.</p>
+              </div>
+            )}
+
             {formAction === 'scan' && (
               <div className="space-y-2">
                 <Label>Node</Label>
                 <Combobox
-                  options={nodeOptions}
+                  options={localNodeOptions}
                   value={formNodeId}
                   onValueChange={setFormNodeId}
                   placeholder="Select node..."
                 />
-                <p className="text-xs text-muted-foreground">Every image on the selected node will be scanned.</p>
+                <p className="text-xs text-muted-foreground">Every image on the selected node will be scanned. Scans run on local nodes only.</p>
               </div>
             )}
 
             {formAction === 'prune' && (
               <>
+                <div className="space-y-2">
+                  <Label>Node</Label>
+                  <Combobox
+                    options={localNodeOptions}
+                    value={formNodeId}
+                    onValueChange={setFormNodeId}
+                    placeholder="Select node..."
+                  />
+                  <p className="text-xs text-muted-foreground">Resources are pruned on the selected node. Prunes run on local nodes only.</p>
+                </div>
                 <div className="space-y-2">
                   <Label>Prune Targets</Label>
                   <div className="grid grid-cols-2 gap-2">

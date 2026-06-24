@@ -62,8 +62,8 @@ The All tasks toggle swaps the lane track for a sortable table.
 | **Auto-update Stack** | A specific stack on a specific node | Checks each image in the stack for a newer tag and recreates the stack if any image has an update. See [Auto-Update Policies](/features/auto-update-policies) for the companion review board. |
 | **Auto-update All Stacks** | A specific node | Runs the auto-update check across every stack on the node. Pair with **Auto-update Stack** rows when you want different cadences for specific stacks. |
 | **Fleet Snapshot** | The whole fleet | Creates a versioned, fleet-wide snapshot of every node's compose files and `.env` files. See [Fleet Backups](/features/fleet-backups). |
-| **System Prune** | The selected node | Prunes containers, images, networks, and volumes (any subset), optionally filtered by a Docker label. |
-| **Vulnerability Scan** | A specific node | Runs Trivy against every image on the node and persists the results. Requires Trivy to be installed on the target node ([Installing Trivy](/operations/trivy-setup)). |
+| **System Prune** | A local node | Prunes containers, images, networks, and volumes (any subset), optionally filtered by a Docker label. Runs on local nodes only. |
+| **Vulnerability Scan** | A local node | Runs Trivy against every image on the node and persists the results. Requires Trivy to be installed on the target node ([Installing Trivy](/operations/trivy-setup)). Runs on local nodes only. |
 | **Backup Stack Files** | A specific stack on a specific node | Copies the stack's compose file and `.env` to `<DATA_DIR>/backups/<stack>/`. One slot per stack; each run overwrites the previous backup. For a versioned archive use a Fleet Snapshot instead. |
 | **Stop Stack** | A specific stack on a specific node | Runs `docker compose stop`. Containers are stopped but preserved. Use for off-hours power saving when you want a fast restart later. |
 | **Take Stack Down** | A specific stack on a specific node | Runs `docker compose down`. Containers are removed. Use to fully release resources when the stack is not needed for an extended period. |
@@ -87,10 +87,11 @@ Common fields:
 
 Conditional fields per action:
 
-- **Stack actions** (Restart Stack, Auto-update Stack, Backup Stack Files, Stop / Take Down / Start Stack) add a **Node** combobox and a **Stack** combobox. Restart Stack additionally renders a **Services** checkbox grid sourced from the stack's compose services, so you can scope the restart to a subset instead of restarting the entire stack.
+- **Stack actions** (Restart Stack, Auto-update Stack, Backup Stack Files, Stop / Take Down / Start Stack) add a **Node** combobox and a **Stack** combobox. Restart Stack additionally renders a **Services** checkbox grid sourced from the stack's compose services on the selected node, so you can scope the restart to a subset instead of restarting the entire stack.
 - **Auto-update All Stacks** adds a **Node** combobox with the helper text "Every stack on the selected node will be checked and updated when new images are available."
-- **Vulnerability Scan** adds a **Node** combobox with the helper text "Every image on the selected node will be scanned."
-- **System Prune** adds a **Prune Targets** group (Containers, Images, Networks, Volumes; all selected by default) and a **Label Filter** input for scoping the prune to resources matching a Docker label.
+- **Vulnerability Scan** adds a **Node** combobox listing local nodes only, with the helper text "Every image on the selected node will be scanned. Scans run on local nodes only."
+- **System Prune** adds a **Node** combobox listing local nodes only, then a **Prune Targets** group (Containers, Images, Networks, Volumes; all selected by default) and a **Label Filter** input for scoping the prune to resources matching a Docker label.
+- **Fleet Snapshot** shows a read-only **Scope: Entire fleet** summary instead of a Node or Stack picker, because it captures every node.
 
 <Frame>
   <img src="/images/scheduled-operations/create-restart.png" alt="The New scheduled task modal configured for a Restart Stack task. Name reads 'Nightly staging restart'. Action is Restart Stack. Node is Local. Stack is 'audit-mesh-prod'. A Services group with helper text '(leave empty for all)' shows two unchecked checkboxes labelled 'echo' and 'prober'. Cron Expression is '0 3 * * *' with the preview 'At 03:00 AM'. The Enabled toggle reads ON. The Delete after successful run checkbox is unchecked. Cancel and Create buttons sit at the bottom right." />
