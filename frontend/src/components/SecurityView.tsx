@@ -5,7 +5,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
-import { deriveMasthead } from './security/securityMasthead';
+import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -17,7 +17,7 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import type { SecurityTab } from '@/lib/events';
-import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, FleetRole } from '@/types/security';
+import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
@@ -75,6 +75,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const [summariesLoading, setSummariesLoading] = useState(true);
   const [summariesError, setSummariesError] = useState(false);
   const [trend, setTrend] = useState<SecurityRiskTrendPoint[]>([]);
+  const [exploitIntel, setExploitIntel] = useState<ExploitIntelFinding[]>([]);
   const [isReplica, setIsReplica] = useState(false);
   // Bumped after a node-wide scan completes to refetch the active node's posture.
   const [reloadToken, setReloadToken] = useState(0);
@@ -113,6 +114,12 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       const trendPromise: Promise<SecurityRiskTrendPoint[]> = apiFetch('/security/overview/trend')
         .then((r) => (r.ok ? r.json() : []))
         .then((t) => (Array.isArray(t) ? t : []))
+        .catch(() => []);
+      // Exploit-intel powers two overview charts; isolate it like the trend so a
+      // failure (or an older node without the endpoint) degrades to empty panels.
+      const exploitIntelPromise: Promise<ExploitIntelFinding[]> = apiFetch('/security/overview/exploit-intel')
+        .then((r) => (r.ok ? r.json() : { items: [] }))
+        .then((b) => (b && Array.isArray(b.items) ? b.items : []))
         .catch(() => []);
       try {
         const [overviewRes, summariesRes] = await Promise.all([
@@ -154,8 +161,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       } finally {
         if (!cancelled) setSummariesLoading(false);
       }
-      const trend = await trendPromise;
-      if (!cancelled) setTrend(trend);
+      const [trendData, intelData] = await Promise.all([trendPromise, exploitIntelPromise]);
+      if (!cancelled) {
+        setTrend(trendData);
+        setExploitIntel(intelData);
+      }
     })();
     return () => { cancelled = true; };
   }, [activeNode?.id, reloadToken]);
@@ -202,9 +212,22 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     { value: 'scanner', label: 'Scanner setup' },
   ];
 
-  const subtitle = overview
-    ? `${overview.scannedImages} ${overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner ${overview.scanner.available ? 'ready' : 'not installed'}`
-    : undefined;
+  // The scanner-detections disclaimer rides as an info affordance next to the
+  // scanned-images count rather than a standing caption below the masthead.
+  const subtitle = overview ? (
+    <span className="inline-flex items-center gap-1.5">
+      <span>
+        {overview.scannedImages} {overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner {overview.scanner.available ? 'ready' : 'not installed'}
+      </span>
+      <span
+        className="inline-flex shrink-0 cursor-help text-stat-subtitle/70 hover:text-stat-subtitle"
+        title={SCANNER_DETECTIONS_NOTE}
+        aria-label={SCANNER_DETECTIONS_NOTE}
+      >
+        <Info className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
+      </span>
+    </span>
+  ) : undefined;
 
   // The tab panels are identical on desktop and mobile; only the masthead and
   // the tab strip differ, so the panels are shared between both layouts.
@@ -214,8 +237,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           <OverviewTab
             overview={overview}
             loadError={overviewLoadError}
-            summaries={summaries}
             trend={trend}
+            exploitIntel={exploitIntel}
             onNavigate={onTabChange}
             onInspect={onInspect}
             canScan={canScan}
@@ -329,7 +352,6 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   return (
     <div className="h-full overflow-auto p-6">
       <PageMasthead
-        kicker="SECURITY"
         state={state}
         tone={tone}
         pulsing={pulsing}

@@ -11,6 +11,7 @@ import { SchedulerService } from '../services/SchedulerService';
 import { MfaService } from '../services/MfaService';
 import { MeshService } from '../services/MeshService';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { CveIntelService } from '../services/CveIntelService';
 import { PilotMetrics } from '../services/PilotMetrics';
 
 /**
@@ -51,6 +52,9 @@ export function installShutdownHandlers(server: Server): void {
       });
       try { BlueprintReconciler.getInstance().stop(); } catch (e) {
         console.warn('[Shutdown] BlueprintReconciler cleanup failed:', (e as Error).message);
+      }
+      try { CveIntelService.getInstance().stop(); } catch (e) {
+        console.warn('[Shutdown] CveIntelService cleanup failed:', (e as Error).message);
       }
       try { PilotMetrics.flush(); } catch (e) {
         console.warn('[Shutdown] PilotMetrics flush failed:', (e as Error).message);

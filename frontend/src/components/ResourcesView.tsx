@@ -38,6 +38,7 @@ import { ReclaimHero } from './resources/ReclaimHero';
 import { FootprintTreemap } from './resources/FootprintTreemap';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
+import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { NetworkDetailSheet, type NetworkInspectData } from './resources/NetworkDetailSheet';
 
 const NetworkTopologyView = lazy(() => import('./NetworkTopologyView'));
@@ -1021,7 +1022,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                             className="animate-in fade-in-0 duration-200 hover:bg-muted/30 transition-colors"
                                             style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}
                                         >
-                                            <TableCell className="font-mono text-xs max-w-[200px] truncate">{vol.Name}</TableCell>
+                                            <TableCell className="font-mono text-xs max-w-[200px]"><VolumeNameLabel name={vol.Name} showChip /></TableCell>
                                             <TableCell><Badge variant="outline" className="text-[10px] h-5">{vol.Driver}</Badge></TableCell>
                                             <TableCell className="hidden md:table-cell text-xs text-muted-foreground truncate max-w-[300px]">{vol.Mountpoint}</TableCell>
                                             <TableCell>

@@ -10,7 +10,8 @@ export interface MastheadMetadataItem {
 }
 
 export interface PageMastheadProps {
-    kicker: string;
+    /** Small uppercase label above the state word. Omit to show only the state. */
+    kicker?: string;
     state: string;
     tone: MastheadTone;
     pulsing?: boolean;
@@ -95,9 +96,11 @@ export function PageMasthead({
                         )}
                     />
                     <div className="flex min-w-0 flex-col gap-1">
-                        <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
-                            {kicker}
-                        </span>
+                        {kicker ? (
+                            <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
+                                {kicker}
+                            </span>
+                        ) : null}
                         <span
                             className={cn(
                                 'font-heading tracking-[-0.01em]',
