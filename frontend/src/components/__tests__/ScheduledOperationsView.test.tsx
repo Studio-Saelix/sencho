@@ -16,6 +16,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { SCHEDULED_ACTIONS } from '@/lib/scheduledActions';
 import ScheduledOperationsView from '../ScheduledOperationsView';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
@@ -136,6 +137,122 @@ describe('ScheduledOperationsView', () => {
         prune_targets: ['containers', 'images', 'networks', 'volumes'],
       });
       expect(postCall![1].localOnly).toBe(true);
+    });
+  });
+
+  it('renders the five registry category lanes in the timeline view', async () => {
+    render(<ScheduledOperationsView />);
+    // Timeline is the default view; the lane track always renders.
+    for (const lane of ['Lifecycle', 'Updates', 'Security', 'Maintenance', 'Backups']) {
+      expect(await screen.findByText(lane)).toBeInTheDocument();
+    }
+  });
+
+  it('offers every registry action in the create picker', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+
+    for (const action of SCHEDULED_ACTIONS) {
+      expect(await screen.findByRole('button', { name: action.label })).toBeInTheDocument();
+    }
+  });
+
+  it('shows the correct conditional fields per action', async () => {
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+
+    // The Combobox toggles selection, so each step selects an action that
+    // differs from the current one (the modal opens on the first action,
+    // Restart Stack).
+    const selectAction = async (label: string) => {
+      await userEvent.click(screen.getAllByRole('combobox')[0]);
+      await userEvent.click(await screen.findByRole('button', { name: label }));
+    };
+
+    // Default stack action (Restart Stack): Node + Stack, no Prune Targets.
+    expect(await screen.findByText('Stack')).toBeInTheDocument();
+    expect(screen.getByText('Node')).toBeInTheDocument();
+    expect(screen.queryByText('Prune Targets')).not.toBeInTheDocument();
+
+    // Node-only action: Node shown, Stack hidden.
+    await selectAction('Auto-update All Stacks');
+    expect(screen.getByText('Node')).toBeInTheDocument();
+    expect(screen.queryByText('Stack')).not.toBeInTheDocument();
+
+    // Fleet snapshot: no Node, no Stack.
+    await selectAction('Fleet Snapshot');
+    expect(screen.queryByText('Node')).not.toBeInTheDocument();
+    expect(screen.queryByText('Stack')).not.toBeInTheDocument();
+
+    // Prune: Prune Targets shown, no Node.
+    await selectAction('System Prune');
+    expect(screen.getByText('Prune Targets')).toBeInTheDocument();
+    expect(screen.queryByText('Node')).not.toBeInTheDocument();
+  });
+
+  it('emits node_id and target_id for a stack update save', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'stack-update');
+
+    // Switch from the default restart to the stack update action.
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Auto-update Stack' }));
+
+    // Node selector, then the stack selector that loads once a node is chosen.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      const postCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(postCall![1].body);
+      expect(body).toMatchObject({
+        name: 'stack-update',
+        target_type: 'stack',
+        action: 'update',
+        target_id: 'web',
+        node_id: 1,
+      });
+    });
+  });
+
+  it('maps the update-fleet alias to action=update, target_type=fleet on save', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'fleet-update');
+
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Auto-update All Stacks' }));
+
+    // Node selector is the second combobox once the node-only field renders.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      const postCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(postCall![1].body);
+      expect(body).toMatchObject({
+        name: 'fleet-update',
+        target_type: 'fleet',
+        action: 'update',
+        node_id: 1,
+      });
     });
   });
 });
