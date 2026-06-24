@@ -620,13 +620,28 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                       <div className="text-xs text-muted-foreground font-mono">{task.cron_expression}</div>
                     </TableCell>
                     <TableCell>
-                      {task.last_status === 'success' ? (
-                        <Badge className="bg-success-muted text-success border-success/20">Success</Badge>
-                      ) : task.last_status === 'failure' ? (
-                        <Badge variant="destructive">Failed</Badge>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">Never run</span>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {task.last_status === 'success' ? (
+                          <Badge className="bg-success-muted text-success border-success/20">Success</Badge>
+                        ) : task.last_status === 'failure' ? (
+                          <Badge variant="destructive">Failed</Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Never run</span>
+                        )}
+                        {task.delete_after_run === 1 && (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] text-muted-foreground"
+                            title={
+                              task.last_status === 'failure'
+                                ? 'One-shot task kept after a failed run so you can retry or debug. Deletes itself after a successful run.'
+                                : 'One-shot task. Deletes itself after a successful run.'
+                            }
+                          >
+                            One-shot
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatTimestamp(task.next_run_at)}
