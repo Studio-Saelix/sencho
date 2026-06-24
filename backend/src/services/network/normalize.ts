@@ -23,6 +23,13 @@ export function isLoopback(ip: string): boolean {
   return ip === '127.0.0.1' || ip === '::1' || ip === '[::1]';
 }
 
+/** True for `network_mode: host`, which publishes every container port directly
+ *  on the host regardless of any declared `ports:` (so it is always exposed
+ *  beyond loopback). Other modes (none, bridge, service:, container:) are not. */
+export function isHostNetwork(mode: string | undefined): boolean {
+  return mode === 'host';
+}
+
 /** Resolved runtime name of a top-level network/volume: a `name:` override wins,
  *  otherwise compose prefixes the project (`<project>_<key>`). An external
  *  resource is never project-prefixed: it references a pre-existing network/volume

@@ -26,6 +26,8 @@ Each service lists its published ports with the interface they bind to:
 - **loopback** marks a port bound only to `127.0.0.1`, reachable only from the host itself.
 - A specific address is shown as-is.
 
+A service running with `network_mode: host` is treated as **host-exposed**: it publishes every container port directly on the host, so it counts as exposed regardless of whether it declares any `ports:`. The exposure summary reflects that even when the port list is empty.
+
 The tab also surfaces each service's network membership and aliases, `network_mode` (`host`, `none`, `service:`, and `container:` modes are called out), and `extra_hosts` entries.
 
 ## Exposure intent
