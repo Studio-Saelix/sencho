@@ -102,17 +102,19 @@ describe('ActionPostureChart', () => {
 });
 
 describe('TopExploitRiskList', () => {
-    it('ranks KEV first, then EPSS, then CVSS, and opens the scan on click', () => {
+    it('ranks KEV > high EPSS > unknown EPSS > low EPSS (assume automatable), and opens the scan', () => {
         const items = [
             finding({ vulnerability_id: 'CVE-LOW', cvss_score: 5, epss_score: 0.01, scan_id: 10 }),
             finding({ vulnerability_id: 'CVE-KEV', cvss_score: 6, kev: true, scan_id: 11 }),
             finding({ vulnerability_id: 'CVE-EPSS', cvss_score: 5, epss_score: 0.8, scan_id: 12 }),
+            finding({ vulnerability_id: 'CVE-UNK', cvss_score: 5, epss_score: null, scan_id: 13 }),
         ];
         const onInspect = vi.fn();
         const { container } = render(<TopExploitRiskList items={items} onInspect={onInspect} />);
         const buttons = [...container.querySelectorAll('button')];
         const order = buttons.map((b) => b.querySelector('.font-mono')?.textContent);
-        expect(order).toEqual(['CVE-KEV', 'CVE-EPSS', 'CVE-LOW']);
+        // Unknown-exploitability (CVE-UNK) outranks the evidenced-low one (CVE-LOW).
+        expect(order).toEqual(['CVE-KEV', 'CVE-EPSS', 'CVE-UNK', 'CVE-LOW']);
         fireEvent.click(buttons[0]);
         expect(onInspect).toHaveBeenCalledWith(11);
     });
@@ -143,7 +145,7 @@ describe('CvssEpssQuadrantChart', () => {
         const scatters = [...container.querySelectorAll('[data-rc="Scatter"]')];
         const plotted = scatters.flatMap((s) => JSON.parse(s.getAttribute('data-chartdata') ?? '[]') as { cve: string }[]);
         expect(plotted.map((p) => p.cve).sort()).toEqual(['CVE-1', 'CVE-2']);
-        expect(container.textContent).toContain('not shown');
+        expect(container.textContent).toContain('unrated');
     });
 
     it('shows an empty state when no finding has both scores', () => {

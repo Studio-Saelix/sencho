@@ -123,9 +123,25 @@ export function ActionPostureChart({ overview }: { overview: SecurityOverview })
   );
 }
 
-// Rank: known-exploited first, then by EPSS (desc, nulls last), then CVSS.
+// EPSS at or above this is treated as an elevated exploitation likelihood.
+const HIGH_EPSS = 0.1;
+
+// Rank by exploitation risk under the "assume it's automatable" principle
+// (CISA BOD 26-04): absence of EPSS evidence is NOT treated as low risk. Tiers:
+// known-exploited (KEV) > known-elevated EPSS > unknown EPSS > known-low EPSS.
+// A finding we have no exploitability evidence for outranks one we have
+// evidence is unlikely. CVSS is only a within-tier tiebreaker.
+function exploitTier(f: ExploitIntelFinding): number {
+  if (f.kev) return 0;
+  if (f.epss_score === null) return 2; // unknown: assume potentially automatable
+  if (f.epss_score >= HIGH_EPSS) return 1;
+  return 3; // evidence of low likelihood
+}
+
 function exploitRank(a: ExploitIntelFinding, b: ExploitIntelFinding): number {
-  if (a.kev !== b.kev) return a.kev ? -1 : 1;
+  const ta = exploitTier(a);
+  const tb = exploitTier(b);
+  if (ta !== tb) return ta - tb;
   const ae = a.epss_score ?? -1;
   const be = b.epss_score ?? -1;
   if (ae !== be) return be - ae;
@@ -173,6 +189,14 @@ export function TopExploitRiskList({
               )}
               {f.epss_score !== null && (
                 <span className="font-mono text-[10px] tabular-nums text-warning">{Math.round(f.epss_score * 100)}%</span>
+              )}
+              {!f.kev && f.epss_score === null && (
+                <span
+                  className="font-mono text-[10px] tabular-nums text-stat-subtitle/70"
+                  title="Exploitability unrated; treated as potentially automatable"
+                >
+                  EPSS n/a
+                </span>
               )}
               {f.cvss_score !== null && (
                 <span className="font-mono text-[10px] tabular-nums text-stat-subtitle">CVSS {f.cvss_score}</span>
@@ -252,7 +276,7 @@ export function CvssEpssQuadrantChart({ items }: { items: ExploitIntelFinding[] 
       </ChartContainer>
       {missing > 0 && (
         <p className="pt-2 text-[10px] leading-snug text-stat-subtitle">
-          {missing} finding{missing === 1 ? '' : 's'} not shown (no CVSS or EPSS yet).
+          {missing} finding{missing === 1 ? '' : 's'} unrated (missing CVSS or EPSS), not lower risk.
         </p>
       )}
     </div>
