@@ -9,6 +9,9 @@ import type { FileEntry } from '@/lib/stackFilesApi';
 import { listVolumeDirectory, readVolumeFile } from '@/lib/volumeApi';
 import type { VolumeFileResult } from '@/lib/volumeApi';
 import { formatBytes } from '@/lib/utils';
+import { isAnonymousVolumeName, shortVolumeLabel } from '@/lib/volumeName';
+import { VolumeNameLabel } from './VolumeNameLabel';
+import { AnonymousNameBand } from './AnonymousNameBand';
 
 interface VolumeBrowserSheetProps {
   volumeName: string | null;
@@ -72,8 +75,8 @@ export function VolumeBrowserSheet({ volumeName, onClose }: VolumeBrowserSheetPr
     <SystemSheet
       open={!!volumeName}
       onOpenChange={handleClose}
-      crumb={['Resources', 'Volumes', volumeName ?? '—']}
-      name={volumeName ?? 'Volume'}
+      crumb={['Resources', 'Volumes', volumeName ? shortVolumeLabel(volumeName) : '-']}
+      name={volumeName ? <VolumeNameLabel name={volumeName} /> : 'Volume'}
       meta={meta}
       primaryAction={{
         label: 'Refresh tree',
@@ -85,37 +88,40 @@ export function VolumeBrowserSheet({ volumeName, onClose }: VolumeBrowserSheetPr
       noScroll
     >
       {volumeName && (
-        <div className="grid grid-cols-[260px_1fr] gap-3 px-6 py-5 flex-1 min-h-0">
-          <div className="rounded-md border border-card-border bg-card overflow-hidden">
-            <FileTree
-              key={`${volumeName}:${refreshKey}`}
-              sourceKey={volumeName}
-              loadDir={loadDir}
-              refreshKey={refreshKey}
-              selectedPath={selectedPath}
-              onSelectFile={handleSelectFile}
-            />
-          </div>
+        <>
+          {isAnonymousVolumeName(volumeName) && <AnonymousNameBand name={volumeName} />}
+          <div className="grid grid-cols-[260px_1fr] gap-3 px-6 py-5 flex-1 min-h-0">
+            <div className="rounded-md border border-card-border bg-card overflow-hidden">
+              <FileTree
+                key={`${volumeName}:${refreshKey}`}
+                sourceKey={volumeName}
+                loadDir={loadDir}
+                refreshKey={refreshKey}
+                selectedPath={selectedPath}
+                onSelectFile={handleSelectFile}
+              />
+            </div>
 
-          <div className="rounded-md border border-card-border bg-card overflow-hidden flex flex-col">
-            {!selectedPath && (
-              <div className="flex-1 flex items-center justify-center p-6 text-xs text-muted-foreground italic">
-                Select a file to preview.
-              </div>
-            )}
-            {selectedPath && fileLoading && (
-              <div className="p-3 space-y-2">
-                <Skeleton className="h-4 w-1/3" />
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-3/4" />
-              </div>
-            )}
-            {selectedPath && !fileLoading && fileResult && (
-              <FileResultPanel path={selectedPath} result={fileResult} />
-            )}
+            <div className="rounded-md border border-card-border bg-card overflow-hidden flex flex-col">
+              {!selectedPath && (
+                <div className="flex-1 flex items-center justify-center p-6 text-xs text-muted-foreground italic">
+                  Select a file to preview.
+                </div>
+              )}
+              {selectedPath && fileLoading && (
+                <div className="p-3 space-y-2">
+                  <Skeleton className="h-4 w-1/3" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-3/4" />
+                </div>
+              )}
+              {selectedPath && !fileLoading && fileResult && (
+                <FileResultPanel path={selectedPath} result={fileResult} />
+              )}
+            </div>
           </div>
-        </div>
+        </>
       )}
     </SystemSheet>
   );
