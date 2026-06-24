@@ -7,7 +7,7 @@ The **Networking** tab in the right-hand **Anatomy** panel answers a Compose-fir
 
 The view is read-only with respect to the stack: it never changes a deployment. The one thing you can edit here is the stack's *exposure intent*, which is stored separately so Sencho can flag mismatches over time.
 
-Compose Networking never shows a secret value. It reads the structure of the model, network names, service-to-network membership, published ports, and the *names* of environment variables and labels, but never their values, so nothing sensitive appears in the view or the logs.
+Compose Networking reads the structure of the model, network names, service-to-network membership, published ports, and the *names* of environment variables and labels, never their values, so a secret injected through `environment:` or `env_file:` never appears in the view or the logs. One caveat: a structural field built by interpolating a secret, such as a network name, a published port, or an `extra_hosts` entry assembled from a `${VAR}`, is resolved before the tab reads it, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into these fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
 ## Networks
 

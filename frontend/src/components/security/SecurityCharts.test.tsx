@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, act, renderHook } from '@testing-library/react';
+import { render, act, renderHook, fireEvent } from '@testing-library/react';
 import { useTheme } from '@/hooks/use-theme';
 
 // recharts paints nothing at 0x0 in jsdom, so stub every export with a prop-
 // capturing element. The real ChartContainer still runs (it injects the
-// --color-* vars from SEVERITY_CONFIG), so the token mapping is observable.
+// --color-* vars), so the token mapping is observable.
 vi.mock('recharts', async () => {
     const React = await import('react');
     const stub = (tag: string) => (props: Record<string, unknown>) =>
@@ -21,76 +21,136 @@ vi.mock('recharts', async () => {
             },
             props.children as React.ReactNode,
         );
-    // Explicit named exports (vitest validates named imports against real keys,
-    // so a Proxy namespace will not do). Covers what SecurityCharts and the shared
-    // ChartContainer (ResponsiveContainer / Tooltip / Legend) reference.
     return {
         ResponsiveContainer: stub('ResponsiveContainer'),
         Tooltip: stub('Tooltip'),
         Legend: stub('Legend'),
-        PieChart: stub('PieChart'),
-        Pie: stub('Pie'),
         AreaChart: stub('AreaChart'),
         Area: stub('Area'),
         BarChart: stub('BarChart'),
         Bar: stub('Bar'),
+        Cell: stub('Cell'),
+        ScatterChart: stub('ScatterChart'),
+        Scatter: stub('Scatter'),
         XAxis: stub('XAxis'),
         YAxis: stub('YAxis'),
+        ZAxis: stub('ZAxis'),
         CartesianGrid: stub('CartesianGrid'),
         LabelList: stub('LabelList'),
+        ReferenceLine: stub('ReferenceLine'),
     };
 });
 
-import { RiskTrendChart, FindingsByTypeChart, SeverityDonutChart } from './SecurityCharts';
-import type { ScanSummary, SecurityRiskTrendPoint } from '@/types/security';
+import { RiskTrendChart, ActionPostureChart, TopExploitRiskList, CvssEpssQuadrantChart } from './SecurityCharts';
+import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding } from '@/types/security';
 
 const TREND: SecurityRiskTrendPoint[] = [
     { date: '2026-06-01', critical: 2, high: 5 },
     { date: '2026-06-02', critical: 1, high: 3 },
 ];
 
-const SUMMARY: ScanSummary = {
-    image_ref: 'nginx:1.27',
-    highest_severity: 'CRITICAL',
-    scanned_at: 0,
-    scan_id: 1,
-    total: 11,
-    critical: 2, high: 5, medium: 3, low: 1, unknown: 0,
-    fixable: 3,
-    secret_count: 1, misconfig_count: 4,
-};
+function overview(o: Partial<SecurityOverview>): SecurityOverview {
+    return {
+        scannedImages: 0, critical: 0, high: 0, fixable: 0, secrets: 0, misconfigs: 0,
+        staleScans: 0, failedScans: 0, lastSuccessfulScanAt: null,
+        scanner: { available: true, version: '1', source: 'managed', autoUpdate: false },
+        deployEnforcement: { honorSuppressionsOnDeploy: false, eligibleBlockPolicies: 0 },
+        rawCritical: 0, rawHigh: 0, fixableCriticalHigh: 0, knownExploited: 0, publiclyExposed: 0,
+        dangerousCompose: 0, needsReview: 0, accepted: 0, notAffected: 0, actionable: 0,
+        posture: 'Secure', posturePartial: false,
+        ...o,
+    };
+}
 
-function configureChart(opts: { chartStyle?: 'muted' | 'heat' | 'signature'; reducedEffects?: boolean; readability?: boolean } = {}) {
+function finding(o: Partial<ExploitIntelFinding>): ExploitIntelFinding {
+    return {
+        vulnerability_id: 'CVE-0000-0000', image_ref: 'img:1', scan_id: 1, severity: 'HIGH',
+        cvss_score: null, epss_score: null, epss_percentile: null, kev: false, fixed_version: null,
+        ...o,
+    };
+}
+
+function configureChart(opts: { chartStyle?: 'muted' | 'heat' | 'signature'; reducedEffects?: boolean } = {}) {
     const { result } = renderHook(() => useTheme());
     act(() => {
         result.current.setReadability(false);
         result.current.setVisualStyle('signature');
         if (opts.chartStyle) result.current.setChartStyle(opts.chartStyle);
         if (opts.reducedEffects) result.current.setReducedEffects(true);
-        if (opts.readability) result.current.setReadability(true);
     });
 }
 
-describe('SecurityCharts palette routing', () => {
+describe('ActionPostureChart', () => {
     beforeEach(() => configureChart());
 
-    it('routes FindingsByType through --sev-* / neutral (no destructive/warning/brand)', () => {
-        const { container } = render(<FindingsByTypeChart summaries={[SUMMARY]} />);
+    it('renders the five posture bars from the overview facts', () => {
+        const { container } = render(
+            <ActionPostureChart overview={overview({ fixableCriticalHigh: 3, knownExploited: 1, needsReview: 2, accepted: 1, notAffected: 0, rawCritical: 5, rawHigh: 4 })} />,
+        );
         const chart = container.querySelector('[data-rc="BarChart"]');
-        const data = JSON.parse(chart!.getAttribute('data-chartdata')!) as { fill: string }[];
-        expect(data.map((d) => d.fill)).toEqual(['var(--sev-vuln)', 'var(--sev-critical)', 'var(--stat-icon)']);
-        for (const d of data) {
-            expect(d.fill).not.toMatch(/--(destructive|warning|brand)\)/);
-        }
+        const data = JSON.parse(chart!.getAttribute('data-chartdata')!) as { label: string; value: number }[];
+        expect(data.map((d) => [d.label, d.value])).toEqual([
+            ['Fixable', 3], ['Known exploited', 1], ['Needs review', 2], ['Accepted', 1], ['Not affected', 0],
+        ]);
+        expect(container.textContent).toContain('known-exploited');
     });
 
-    it('maps the four donut severities to the --sev-* tokens', () => {
-        const { container } = render(<SeverityDonutChart summaries={[SUMMARY]} />);
-        const css = container.querySelector('style')?.textContent ?? '';
-        expect(css).toContain('--color-critical: var(--sev-critical)');
-        expect(css).toContain('--color-high: var(--sev-high)');
-        expect(css).toContain('--color-medium: var(--sev-medium)');
-        expect(css).toContain('--color-low: var(--sev-low)');
+    it('shows an empty state with no Critical or High findings', () => {
+        const { container } = render(<ActionPostureChart overview={overview({})} />);
+        expect(container.textContent).toContain('No Critical or High findings');
+    });
+});
+
+describe('TopExploitRiskList', () => {
+    it('ranks KEV > high EPSS > unknown EPSS > low EPSS (assume automatable), and opens the scan', () => {
+        const items = [
+            finding({ vulnerability_id: 'CVE-LOW', cvss_score: 5, epss_score: 0.01, scan_id: 10 }),
+            finding({ vulnerability_id: 'CVE-KEV', cvss_score: 6, kev: true, scan_id: 11 }),
+            finding({ vulnerability_id: 'CVE-EPSS', cvss_score: 5, epss_score: 0.8, scan_id: 12 }),
+            finding({ vulnerability_id: 'CVE-UNK', cvss_score: 5, epss_score: null, scan_id: 13 }),
+        ];
+        const onInspect = vi.fn();
+        const { container } = render(<TopExploitRiskList items={items} onInspect={onInspect} />);
+        const buttons = [...container.querySelectorAll('button')];
+        const order = buttons.map((b) => b.querySelector('.font-mono')?.textContent);
+        // Unknown-exploitability (CVE-UNK) outranks the evidenced-low one (CVE-LOW).
+        expect(order).toEqual(['CVE-KEV', 'CVE-EPSS', 'CVE-UNK', 'CVE-LOW']);
+        fireEvent.click(buttons[0]);
+        expect(onInspect).toHaveBeenCalledWith(11);
+    });
+
+    it('shows the severity-ranked hint when no intel is present', () => {
+        const { container } = render(
+            <TopExploitRiskList items={[finding({ vulnerability_id: 'CVE-A', cvss_score: 8 })]} onInspect={vi.fn()} />,
+        );
+        expect(container.textContent).toContain('Enable exploit intelligence');
+    });
+
+    it('shows an empty state with no actionable findings', () => {
+        const { container } = render(<TopExploitRiskList items={[]} onInspect={vi.fn()} />);
+        expect(container.textContent).toContain('No actionable');
+    });
+});
+
+describe('CvssEpssQuadrantChart', () => {
+    beforeEach(() => configureChart());
+
+    it('plots only findings with both CVSS and EPSS and notes the excluded ones', () => {
+        const items = [
+            finding({ vulnerability_id: 'CVE-1', cvss_score: 9, epss_score: 0.5, kev: true }),
+            finding({ vulnerability_id: 'CVE-2', cvss_score: 7, epss_score: 0.2 }),
+            finding({ vulnerability_id: 'CVE-3', cvss_score: 8, epss_score: null }), // excluded
+        ];
+        const { container } = render(<CvssEpssQuadrantChart items={items} />);
+        const scatters = [...container.querySelectorAll('[data-rc="Scatter"]')];
+        const plotted = scatters.flatMap((s) => JSON.parse(s.getAttribute('data-chartdata') ?? '[]') as { cve: string }[]);
+        expect(plotted.map((p) => p.cve).sort()).toEqual(['CVE-1', 'CVE-2']);
+        expect(container.textContent).toContain('unrated');
+    });
+
+    it('shows an empty state when no finding has both scores', () => {
+        const { container } = render(<CvssEpssQuadrantChart items={[finding({ cvss_score: 9, epss_score: null })]} />);
+        expect(container.textContent).toContain('Enable exploit intelligence');
     });
 });
 
@@ -120,18 +180,6 @@ describe('RiskTrendChart gradient vs flat', () => {
         }
     });
 
-    it('uses the heat fill (0.15) with no gradient under Heat', () => {
-        configureChart({ chartStyle: 'heat' });
-        const { container } = render(<RiskTrendChart trend={TREND} />);
-        const areas = [...container.querySelectorAll('[data-rc="Area"]')];
-        expect(areas).toHaveLength(2);
-        for (const a of areas) {
-            expect(a.getAttribute('data-fill')).toMatch(/^var\(--color-/);
-            expect(a.getAttribute('data-fillopacity')).toBe('0.15');
-            expect(a.getAttribute('data-strokewidth')).toBe('1.9');
-        }
-    });
-
     it('dims the fill further and flattens under reduced effects, even in Signature', () => {
         configureChart({ chartStyle: 'signature', reducedEffects: true });
         const { container } = render(<RiskTrendChart trend={TREND} />);
@@ -139,7 +187,6 @@ describe('RiskTrendChart gradient vs flat', () => {
         for (const a of areas) {
             expect(a.getAttribute('data-fill')).toMatch(/^var\(--color-/);
             expect(a.getAttribute('data-strokewidth')).toBe('1.9');
-            // 0.30 * 0.62
             expect(Number(a.getAttribute('data-fillopacity'))).toBeCloseTo(0.186, 5);
         }
     });

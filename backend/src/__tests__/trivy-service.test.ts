@@ -196,6 +196,66 @@ describe('TrivyService', () => {
       expect(parsedEmpty.vulnerabilities).toEqual([]);
     });
 
+    it('captures scan-intrinsic enrichment (status, CVSS, vendor severity, purl, path, layer)', () => {
+      // Shape mirrors Trivy's documented image-scan JSON for a single finding.
+      const raw = JSON.stringify({
+        Results: [
+          {
+            Target: 'app',
+            Vulnerabilities: [
+              {
+                VulnerabilityID: 'CVE-2024-9143',
+                PkgName: 'libcrypto3',
+                PkgPath: 'usr/lib/libcrypto.so.3',
+                PkgIdentifier: { PURL: 'pkg:apk/alpine/libcrypto3@3.3.2-r0' },
+                InstalledVersion: '3.3.2-r0',
+                FixedVersion: '3.3.2-r1',
+                Status: 'fixed',
+                Severity: 'LOW',
+                Layer: { DiffID: 'sha256:deadbeef' },
+                VendorSeverity: { amazon: 3, redhat: 1, ubuntu: 1 },
+                CVSS: {
+                  nvd: { V3Vector: 'CVSS:3.1/AV:N', V3Score: 9.8 },
+                  redhat: { V3Vector: 'CVSS:3.1/AV:L', V3Score: 3.7 },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      const v = parseTrivyOutput(raw).vulnerabilities[0];
+      expect(v.status).toBe('fixed');
+      expect(v.cvssScore).toBe(9.8); // prefers nvd over redhat
+      expect(v.cvssVector).toBe('CVSS:3.1/AV:N');
+      expect(v.cvssSource).toBe('nvd');
+      expect(v.vendorSeverity).toBe('HIGH'); // max vendor rating (amazon=3)
+      expect(v.purl).toBe('pkg:apk/alpine/libcrypto3@3.3.2-r0');
+      expect(v.pkgPath).toBe('usr/lib/libcrypto.so.3');
+      expect(v.layerDigest).toBe('sha256:deadbeef');
+    });
+
+    it('falls back to a non-nvd CVSS source and nulls absent enrichment', () => {
+      const onlyRedhat = JSON.stringify({
+        Results: [{ Vulnerabilities: [{ VulnerabilityID: 'CVE-R', PkgName: 'p', Severity: 'HIGH', CVSS: { redhat: { V3Vector: 'X', V3Score: 7.5 } } }] }],
+      });
+      const a = parseTrivyOutput(onlyRedhat).vulnerabilities[0];
+      expect(a.cvssSource).toBe('redhat');
+      expect(a.cvssScore).toBe(7.5);
+
+      const bare = JSON.stringify({
+        Results: [{ Vulnerabilities: [{ VulnerabilityID: 'CVE-N', PkgName: 'p', Severity: 'HIGH' }] }],
+      });
+      const b = parseTrivyOutput(bare).vulnerabilities[0];
+      expect(b.status).toBeNull();
+      expect(b.cvssScore).toBeNull();
+      expect(b.cvssVector).toBeNull();
+      expect(b.cvssSource).toBeNull();
+      expect(b.vendorSeverity).toBeNull();
+      expect(b.purl).toBeNull();
+      expect(b.pkgPath).toBeNull();
+      expect(b.layerDigest).toBeNull();
+    });
+
     it('throws a helpful error on malformed JSON', () => {
       expect(() => parseTrivyOutput('{not-json')).toThrow(/Malformed/i);
     });

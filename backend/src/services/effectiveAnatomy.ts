@@ -7,10 +7,16 @@
  * facts. Rendering the merged model and extracting the same anatomy shape keeps
  * those signals honest.
  *
- * Secret-safe by construction: the extractor reads only structural fields
- * (service keys, ports, volumes, restart, network keys). It never reads
- * `environment`, `command`, `entrypoint`, `labels`, `secrets`, or `configs`, so a
- * resolved secret VALUE in the rendered model can never reach this payload.
+ * Reads only structural fields (service keys, ports, volumes, restart, network
+ * keys); it never reads `environment`, `command`, `entrypoint`, `labels`,
+ * `secrets`, or `configs`, so a secret INJECTED through those fields can never
+ * reach this payload. The exception is a secret interpolated INTO a structural
+ * field (a bind path, network name, or published port built from a `${VAR}`):
+ * `docker compose config` resolves it before this parse, leaving no provenance
+ * to distinguish it, so the resolved value is returned. That value is already
+ * readable at the same `stack:read` scope via the stack's files, so this is a
+ * documented caveat (see docs/features/environment-guardrails), not a new
+ * exposure.
  */
 import { ComposeService } from './ComposeService';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
