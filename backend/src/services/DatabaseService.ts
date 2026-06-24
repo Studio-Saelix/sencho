@@ -4776,6 +4776,57 @@ export class DatabaseService {
     }
 
     /**
+     * Critical/High findings from the latest completed scan per image, with the
+     * severity + CVSS the overview's exploit-intel charts need. Same bounded
+     * shape as getLatestCritHighVulnFindingsForNode (single latest-per-image
+     * JOIN, capped, `truncated` flagged). Intel (KEV/EPSS) and suppression
+     * filtering are applied by the caller at read time.
+     */
+    public getLatestCritHighFindingsWithCvssForNode(
+        nodeId: number,
+        limit = 2000,
+    ): {
+        items: Array<{
+            image_ref: string;
+            scan_id: number;
+            vulnerability_id: string;
+            pkg_name: string;
+            severity: VulnSeverity;
+            cvss_score: number | null;
+            fixed_version: string | null;
+        }>;
+        truncated: boolean;
+    } {
+        const rows = this.db
+            .prepare(
+                `SELECT vs.image_ref, vs.id AS scan_id, vd.vulnerability_id, vd.pkg_name,
+                        vd.severity, vd.cvss_score, vd.fixed_version
+                 FROM vulnerability_details vd
+                 INNER JOIN vulnerability_scans vs ON vs.id = vd.scan_id
+                 INNER JOIN (
+                   SELECT image_ref, MAX(scanned_at) AS max_scanned
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed'
+                   GROUP BY image_ref
+                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
+                 WHERE vs.node_id = ? AND vs.status = 'completed'
+                   AND vd.severity IN ('CRITICAL', 'HIGH')
+                 LIMIT ?`,
+            )
+            .all(nodeId, nodeId, limit + 1) as Array<{
+                image_ref: string;
+                scan_id: number;
+                vulnerability_id: string;
+                pkg_name: string;
+                severity: VulnSeverity;
+                cvss_score: number | null;
+                fixed_version: string | null;
+            }>;
+        const truncated = rows.length > limit;
+        return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
      * Distinct CVE ids present in stored findings, for the intel service to fetch
      * EPSS only for what exists (EPSS covers CVEs, not GHSA, so filter to CVE-*).
      */

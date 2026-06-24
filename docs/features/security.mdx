@@ -27,9 +27,14 @@ posture itself: a vulnerable component being present is not the same as a reacha
 The masthead carries a standing note to that effect, and posture weighs fix availability, exploit
 intelligence, and triage decisions rather than raw severity alone.
 
-Below it, a signal rail summarizes the supporting numbers: scanned images, fixable findings, secrets,
-Compose misconfigurations, stale scans, and failed scans. A status strip shows scanner health
-(installed source and version, auto-update) and the active node's deploy enforcement posture.
+Below it, the charts lead with prioritization rather than raw severity: a **risk trend** for context,
+an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a
+**top exploit-risk** list ranking actionable findings by known-exploited status then EPSS, and a
+**severity-by-exploitability** quadrant that separates high-severity-but-unlikely findings from the
+ones to act on first. The exploit-risk charts populate once exploit intelligence is enabled and images
+are scanned. A signal rail summarizes the supporting numbers (scanned images, fixable findings,
+secrets, Compose misconfigurations, stale scans, failed scans), and a status strip shows scanner health
+and the active node's deploy enforcement posture.
 
 If a node does not report an overview (for example an older remote node), the page falls back to a
 clear "overview unavailable" state and the other tabs keep working.

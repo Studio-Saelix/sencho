@@ -828,6 +828,61 @@ securityRouter.get('/overview/trend', authMiddleware, (req: Request, res: Respon
   }
 });
 
+// One actionable Critical/High finding for the overview exploit-intel charts.
+interface ExploitIntelFinding {
+  vulnerability_id: string;
+  image_ref: string;
+  scan_id: number;
+  severity: VulnSeverity;
+  cvss_score: number | null;
+  epss_score: number | null;
+  epss_percentile: number | null;
+  kev: boolean;
+  fixed_version: string | null;
+}
+
+// Node-scoped, auth-only (Community). Returns the latest-scan Critical/High
+// findings that are still actionable (dismissed triage decisions filtered out),
+// enriched at read time with KEV/EPSS intel. Powers the Top exploit-risk list
+// and the CVSS-by-EPSS quadrant on the Security overview. Bounded; `truncated`
+// flags a capped node.
+securityRouter.get('/overview/exploit-intel', authMiddleware, (req: Request, res: Response): void => {
+  try {
+    const db = DatabaseService.getInstance();
+    const found = db.getLatestCritHighFindingsWithCvssForNode(req.nodeId);
+    const suppressions = db.getCveSuppressions();
+    const intel = db.getCveIntel(found.items.map((f) => f.vulnerability_id));
+    const byImage = new Map<string, typeof found.items>();
+    for (const f of found.items) {
+      const group = byImage.get(f.image_ref);
+      if (group) group.push(f);
+      else byImage.set(f.image_ref, [f]);
+    }
+    const items: ExploitIntelFinding[] = [];
+    for (const [imageRef, group] of byImage) {
+      for (const e of applySuppressions(group, imageRef, suppressions)) {
+        if (e.suppressed) continue; // decided findings are not part of the act-first view
+        const i = intel.get(e.vulnerability_id);
+        items.push({
+          vulnerability_id: e.vulnerability_id,
+          image_ref: imageRef,
+          scan_id: e.scan_id,
+          severity: e.severity,
+          cvss_score: e.cvss_score,
+          epss_score: i?.epssScore ?? null,
+          epss_percentile: i?.epssPercentile ?? null,
+          kev: i?.kev ?? false,
+          fixed_version: e.fixed_version,
+        });
+      }
+    }
+    res.json({ items, truncated: found.truncated });
+  } catch (error) {
+    console.error('[Security] Failed to build exploit-intel overview:', error);
+    res.status(500).json({ error: 'Failed to build exploit-intel overview' });
+  }
+});
+
 // Static, read-only policy-pack catalog. Auth-only (Community), no DB, no
 // enforcement. The frontend fetches this with localOnly so the global catalog
 // is available regardless of which node is active.
