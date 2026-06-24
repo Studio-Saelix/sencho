@@ -1,8 +1,11 @@
+import { useMemo, useState } from 'react';
 import {
   AreaChart, Area, BarChart, Bar, Cell, ScatterChart, Scatter,
-  XAxis, YAxis, ZAxis, CartesianGrid, LabelList, ReferenceLine, Tooltip,
+  XAxis, YAxis, ZAxis, CartesianGrid, Label, LabelList, ReferenceLine, Tooltip,
 } from 'recharts';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
+import { Button } from '@/components/ui/button';
 import { useChartStyle, type ChartStyle } from '@/hooks/use-theme';
 import { cn } from '@/lib/utils';
 import type { SecurityRiskTrendPoint, SecurityOverview, ExploitIntelFinding } from '@/types/security';
@@ -152,7 +155,16 @@ function shortImage(ref: string): string {
   return ref.length > 30 ? `…${ref.slice(-29)}` : ref;
 }
 
-/** Ranked list of the highest exploit-risk actionable findings; row opens the scan. */
+const EXPLOIT_PAGE_SIZE = 8;
+
+// Header and body rows share this template so columns stay aligned. `max-md:min-w`
+// keeps the table from crushing its columns below md, where the card scrolls
+// horizontally instead; desktop is untouched by the `max-md:` prefix.
+const EXPLOIT_GRID = 'grid-cols-[10px_minmax(0,1.4fr)_minmax(0,1fr)_56px_52px] max-md:min-w-[480px]';
+
+/** Ranked, paginated table of the highest exploit-risk actionable findings; a row opens the scan.
+ *  Renders its own card chrome (header + pagination + column headers) so the Overview reads as a
+ *  table, mirroring the dashboard Stack-health table. */
 export function TopExploitRiskList({
   items,
   onInspect,
@@ -160,55 +172,94 @@ export function TopExploitRiskList({
   items: ExploitIntelFinding[];
   onInspect: (scanId: number) => void;
 }) {
-  if (items.length === 0) return <EmptyChart label="No actionable Critical or High findings" height={220} />;
-  const ranked = [...items].sort(exploitRank).slice(0, 8);
+  const [page, setPage] = useState(0);
+  const ranked = useMemo(() => [...items].sort(exploitRank), [items]);
   const anyIntel = items.some((i) => i.epss_score !== null || i.kev);
 
+  const totalPages = Math.max(1, Math.ceil(ranked.length / EXPLOIT_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const pageItems = ranked.slice(safePage * EXPLOIT_PAGE_SIZE, (safePage + 1) * EXPLOIT_PAGE_SIZE);
+  const needsPagination = ranked.length > EXPLOIT_PAGE_SIZE;
+
   return (
-    <div className="flex flex-col">
-      <div className="min-h-[220px]">
-        {ranked.map((f) => (
-          <button
-            key={`${f.scan_id}:${f.vulnerability_id}`}
-            type="button"
-            onClick={() => onInspect(f.scan_id)}
-            className="flex w-full items-center gap-2 border-b border-hairline py-2 text-left last:border-b-0 hover:bg-glass-highlight"
-          >
-            <span
-              className="h-[7px] w-[7px] shrink-0 rounded-full"
-              style={{ background: f.severity === 'CRITICAL' ? 'var(--sev-critical)' : 'var(--sev-high)' }}
-              aria-hidden
-            />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate font-mono text-xs text-stat-value">{f.vulnerability_id}</span>
-              <span className="block truncate font-mono text-[10px] text-stat-icon">{shortImage(f.image_ref)}</span>
-            </span>
-            <span className="flex shrink-0 items-center gap-1.5">
-              {f.kev && (
-                <span className="rounded border border-destructive/40 bg-destructive/10 px-1 py-px text-[9px] font-mono uppercase text-destructive">KEV</span>
-              )}
-              {f.epss_score !== null && (
-                <span className="font-mono text-[10px] tabular-nums text-warning">{Math.round(f.epss_score * 100)}%</span>
-              )}
-              {!f.kev && f.epss_score === null && (
-                <span
-                  className="font-mono text-[10px] tabular-nums text-stat-subtitle/70"
-                  title="Exploitability unrated; treated as potentially automatable"
-                >
-                  EPSS n/a
-                </span>
-              )}
-              {f.cvss_score !== null && (
-                <span className="font-mono text-[10px] tabular-nums text-stat-subtitle">CVSS {f.cvss_score}</span>
-              )}
-            </span>
-          </button>
-        ))}
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel max-md:overflow-x-auto">
+      <div className="flex items-center justify-between gap-4 px-4 py-3">
+        <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">Top exploit-risk findings</h3>
+        {needsPagination && (
+          <div className="flex items-center gap-1.5">
+            <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage === 0} onClick={() => setPage(safePage - 1)} aria-label="Previous page">
+              <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </Button>
+            <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">{safePage + 1} / {totalPages}</span>
+            <Button variant="ghost" size="icon" className="h-6 w-6" disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)} aria-label="Next page">
+              <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </Button>
+          </div>
+        )}
       </div>
-      {!anyIntel && (
-        <p className="pt-2 text-[10px] leading-snug text-stat-subtitle">
-          Ranked by severity. Enable exploit intelligence and re-scan to rank by known-exploited and EPSS.
-        </p>
+
+      {ranked.length === 0 ? (
+        <div className="flex min-h-[220px] items-center justify-center border-t border-border/60 px-4 text-center text-xs text-stat-subtitle">
+          No actionable Critical or High findings
+        </div>
+      ) : (
+        <>
+          <div className={`grid ${EXPLOIT_GRID} items-center gap-2 border-t border-border/60 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle`}>
+            <span />
+            <span>CVE</span>
+            <span>Image</span>
+            <span className="text-right">EPSS</span>
+            <span className="text-right">CVSS</span>
+          </div>
+          <ul className="divide-y divide-border/40">
+            {pageItems.map((f, i) => (
+              // Key by absolute rank position: the same CVE can recur across
+              // packages/images with an identical scan_id + vulnerability_id, so
+              // those fields are not unique. Position in the sorted list is.
+              <li
+                key={safePage * EXPLOIT_PAGE_SIZE + i}
+                role="button"
+                tabIndex={0}
+                onClick={() => onInspect(f.scan_id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onInspect(f.scan_id);
+                  }
+                }}
+                className={`grid ${EXPLOIT_GRID} cursor-pointer items-center gap-2 px-4 py-2 transition-colors hover:bg-glass-highlight`}
+              >
+                <span
+                  className="h-[7px] w-[7px] shrink-0 justify-self-center rounded-full"
+                  style={{ background: f.severity === 'CRITICAL' ? 'var(--sev-critical)' : 'var(--sev-high)' }}
+                  aria-hidden
+                />
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate font-mono text-xs text-stat-value">{f.vulnerability_id}</span>
+                  {f.kev && (
+                    <span className="shrink-0 rounded border border-destructive/40 bg-destructive/10 px-1 py-px text-[9px] font-mono uppercase text-destructive">KEV</span>
+                  )}
+                </span>
+                <span className="truncate font-mono text-[11px] text-stat-icon">{shortImage(f.image_ref)}</span>
+                <span className="text-right font-mono text-[11px] tabular-nums">
+                  {f.epss_score !== null ? (
+                    <span className="text-warning">{Math.round(f.epss_score * 100)}%</span>
+                  ) : (
+                    <span className="text-stat-subtitle/70" title="Exploitability unrated; treated as potentially automatable">n/a</span>
+                  )}
+                </span>
+                <span className="text-right font-mono text-[11px] tabular-nums text-stat-subtitle">
+                  {f.cvss_score !== null ? f.cvss_score : '-'}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {!anyIntel && (
+            <p className="border-t border-border/40 px-4 py-2 text-[10px] leading-snug text-stat-subtitle">
+              Ranked by severity. Enable exploit intelligence and re-scan to rank by known-exploited and EPSS.
+            </p>
+          )}
+        </>
       )}
     </div>
   );
@@ -254,18 +305,26 @@ export function CvssEpssQuadrantChart({ items }: { items: ExploitIntelFinding[] 
   const otherPoints = plotted.filter((p) => !p.kev);
 
   return (
+    // Fixed height, not flex-fill: a flex/grid-stretched ResponsiveContainer
+    // re-measures a content-driven height and grows on every render. The parent
+    // grid (OverviewTab) uses items-start so this card does not stretch to a
+    // taller neighbour, which is what previously left dead space under the chart.
     <div>
-      <ChartContainer config={QUADRANT_CONFIG} className="h-[220px] w-full">
-        <ScatterChart margin={{ left: 0, right: 12, top: 8, bottom: 8 }}>
+      <ChartContainer config={QUADRANT_CONFIG} className="h-[260px] w-full">
+        <ScatterChart margin={{ left: 12, right: 12, top: 8, bottom: 24 }}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis
             type="number" dataKey="epssPct" name="EPSS" unit="%" domain={[0, 100]}
             tickLine={false} axisLine={false} fontSize={10}
-          />
+          >
+            <Label value="Exploitability (EPSS %)" position="insideBottom" offset={-14} fontSize={10} className="fill-stat-subtitle" />
+          </XAxis>
           <YAxis
             type="number" dataKey="cvss" name="CVSS" domain={[0, 10]}
-            tickLine={false} axisLine={false} fontSize={10} width={28}
-          />
+            tickLine={false} axisLine={false} fontSize={10} width={40}
+          >
+            <Label value="Severity (CVSS)" angle={-90} position="insideLeft" offset={8} fontSize={10} className="fill-stat-subtitle" style={{ textAnchor: 'middle' }} />
+          </YAxis>
           <ZAxis range={[40, 40]} />
           <ReferenceLine x={10} stroke="var(--border)" strokeDasharray="4 4" />
           <ReferenceLine y={7} stroke="var(--border)" strokeDasharray="4 4" />
