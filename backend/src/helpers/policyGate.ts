@@ -1,13 +1,36 @@
 import type { Request, Response } from 'express';
-import { enforcePolicyPreDeploy, type PolicyEnforcementOptions } from '../services/PolicyEnforcement';
+import { enforcePolicyPreDeploy, type PolicyEnforcementOptions, type PolicyViolation } from '../services/PolicyEnforcement';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
+import type { ScanPolicy } from '../services/DatabaseService';
 import { NotificationService } from '../services/NotificationService';
 import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
 import { LicenseService } from '../services/LicenseService';
 import { effectiveTier } from '../middleware/tierGates';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
+import { describeReason } from '../utils/policy-risk';
+
+type BlockableAction = 'deploy' | 'update' | 'rollback';
+
+/**
+ * One-line block message naming the risk inputs that matched, shared by the
+ * thrown-error and 409-response paths so they never drift. Falls back to a
+ * generic phrase when no reason was recorded (e.g. an image that could not be
+ * scanned).
+ */
+export function describePolicyBlock(
+  policy: ScanPolicy | undefined,
+  violations: PolicyViolation[],
+  action: BlockableAction = 'deploy',
+): string {
+  const reasons = new Set<string>();
+  for (const v of violations) {
+    for (const r of v.reasons) reasons.add(describeReason(r));
+  }
+  const reasonText = reasons.size > 0 ? [...reasons].join(' + ') : 'scan policy conditions';
+  return `Policy "${policy?.name ?? 'policy'}" blocked ${action}: ${violations.length} image(s) matched ${reasonText}`;
+}
 
 // Bypass requires `?ignorePolicy=true` AND `req.user.role === 'admin'`. The
 // `stack:deploy` permission alone is not sufficient because the `deployer`
@@ -47,7 +70,7 @@ export async function assertPolicyGateAllows(
 ): Promise<void> {
   const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
   if (!gate.ok) {
-    throw new Error(`Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`);
+    throw new Error(describePolicyBlock(gate.policy, gate.violations));
   }
 }
 
@@ -64,11 +87,14 @@ export async function runPolicyGate(
   const gate = await enforcePolicyPreDeploy(stackName, nodeId, buildPolicyGateOptions(req));
   if (!gate.ok) {
     res.status(409).json({
-      error: `Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`,
+      error: describePolicyBlock(gate.policy, gate.violations),
       policy: gate.policy && {
         id: gate.policy.id,
         name: gate.policy.name,
         maxSeverity: gate.policy.max_severity,
+        blockOnSeverity: gate.policy.block_on_severity,
+        blockOnKev: gate.policy.block_on_kev,
+        blockOnFixable: gate.policy.block_on_fixable,
       },
       violations: gate.violations,
     });

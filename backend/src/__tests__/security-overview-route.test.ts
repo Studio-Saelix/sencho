@@ -108,9 +108,9 @@ describe('GET /api/security/overview', () => {
     seedScan({ node_id: 2, image_ref: 'other:1', scanned_at: now, critical: 99 });
 
     // One fleet-wide and one this-node block policy count; an other-node one does not.
-    db().createScanPolicy({ name: 'fw', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
-    db().createScanPolicy({ name: 'n1', node_id: 1, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
-    db().createScanPolicy({ name: 'n2', node_id: 2, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'fw', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'n1', node_id: 1, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'n2', node_id: 2, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
 
     const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
     expect(res.status).toBe(200);

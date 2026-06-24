@@ -21,6 +21,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
 import { validateStackPatternForRedos } from './fleet';
 import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
+import { isNoOpBlockingPolicy } from '../utils/policy-risk';
 import { DEFAULT_POLICY_PACKS } from '../services/policy-packs';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
@@ -963,7 +964,7 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
   if (!requireAdmin(req, res)) return;
   if (!requirePaid(req, res)) return;
   if (blockIfReplica(res, 'security policies')) return;
-  const { name, node_id, stack_pattern, max_severity, block_on_deploy, enabled } = req.body ?? {};
+  const { name, node_id, stack_pattern, max_severity, block_on_deploy, enabled, block_on_severity, block_on_kev, block_on_fixable } = req.body ?? {};
   if (!name || typeof name !== 'string' || !name.trim()) {
     res.status(400).json({ error: 'Policy name is required' }); return;
   }
@@ -977,6 +978,16 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
       res.status(400).json({ error: patternError }); return;
     }
   }
+  // Risk-first defaults when a field is omitted (KEV + fixable on, severity off),
+  // so an API-created policy matches the UI default rather than the severity-only
+  // migration default that exists only to preserve older rows.
+  const blockOnDeploy = block_on_deploy ? 1 : 0;
+  const blockOnSeverity = block_on_severity === undefined ? 0 : (block_on_severity ? 1 : 0);
+  const blockOnKev = block_on_kev === undefined ? 1 : (block_on_kev ? 1 : 0);
+  const blockOnFixable = block_on_fixable === undefined ? 1 : (block_on_fixable ? 1 : 0);
+  if (isNoOpBlockingPolicy(blockOnDeploy, blockOnSeverity, blockOnKev, blockOnFixable)) {
+    res.status(400).json({ error: 'A blocking policy must enable at least one of: severity threshold, KEV, or fixable.' }); return;
+  }
   try {
     const resolvedNodeId = node_id != null ? Number(node_id) : null;
     const policy = DatabaseService.getInstance().createScanPolicy({
@@ -985,8 +996,11 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
       node_identity: FleetSyncService.resolveIdentityForNodeId(resolvedNodeId),
       stack_pattern: normalizedPattern,
       max_severity,
-      block_on_deploy: block_on_deploy ? 1 : 0,
+      block_on_deploy: blockOnDeploy,
       enabled: enabled === false ? 0 : 1,
+      block_on_severity: blockOnSeverity,
+      block_on_kev: blockOnKev,
+      block_on_fixable: blockOnFixable,
       replicated_from_control: 0,
     });
     FleetSyncService.getInstance().pushResourceAsync('scan_policies');
@@ -1031,7 +1045,24 @@ securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response
   }
   if (body.block_on_deploy !== undefined) updates.block_on_deploy = body.block_on_deploy ? 1 : 0;
   if (body.enabled !== undefined) updates.enabled = body.enabled ? 1 : 0;
-  const policy = DatabaseService.getInstance().updateScanPolicy(id, updates);
+  if (body.block_on_severity !== undefined) updates.block_on_severity = body.block_on_severity ? 1 : 0;
+  if (body.block_on_kev !== undefined) updates.block_on_kev = body.block_on_kev ? 1 : 0;
+  if (body.block_on_fixable !== undefined) updates.block_on_fixable = body.block_on_fixable ? 1 : 0;
+  const db = DatabaseService.getInstance();
+  const existing = db.getScanPolicy(id);
+  if (!existing) {
+    res.status(404).json({ error: 'Policy not found' }); return;
+  }
+  // Validate the post-update state: a policy that ends up blocking must still
+  // have at least one active input. Merge the patch over the existing row.
+  const mergedBlockOnDeploy = (updates.block_on_deploy as number | undefined) ?? existing.block_on_deploy;
+  const mergedSeverity = (updates.block_on_severity as number | undefined) ?? existing.block_on_severity;
+  const mergedKev = (updates.block_on_kev as number | undefined) ?? existing.block_on_kev;
+  const mergedFixable = (updates.block_on_fixable as number | undefined) ?? existing.block_on_fixable;
+  if (isNoOpBlockingPolicy(mergedBlockOnDeploy, mergedSeverity, mergedKev, mergedFixable)) {
+    res.status(400).json({ error: 'A blocking policy must enable at least one of: severity threshold, KEV, or fixable.' }); return;
+  }
+  const policy = db.updateScanPolicy(id, updates);
   if (!policy) {
     res.status(404).json({ error: 'Policy not found' }); return;
   }

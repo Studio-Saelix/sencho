@@ -420,6 +420,33 @@ describe('POST /api/fleet/sync/:resource stack_pattern ReDoS guard', () => {
   });
 });
 
+describe('POST /api/fleet/sync/scan_policies risk-input validation', () => {
+  const pushRows = (row: Record<string, unknown>) =>
+    request(app)
+      .post('/api/fleet/sync/scan_policies')
+      .set('Authorization', nodeProxyAuthHeader)
+      .send({ rows: [{ name: 'p', node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', enabled: 1, ...row }] });
+
+  it('rejects a non-0/1 risk-input value', async () => {
+    const res = await pushRows({ block_on_deploy: 1, block_on_kev: 2 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/block_on_kev must be 0 or 1/);
+  });
+
+  it('rejects a blocking policy with every input off', async () => {
+    const res = await pushRows({ block_on_deploy: 1, block_on_severity: 0, block_on_kev: 0, block_on_fixable: 0 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/at least one/i);
+  });
+
+  it('passes validation for a legacy row that omits the risk-input fields', async () => {
+    // A field-less blocking row defaults to severity-only and must not be
+    // rejected by the new cross-field guard (the back-compat contract).
+    const res = await pushRows({ block_on_deploy: 1 });
+    expect(res.body.error ?? '').not.toMatch(/at least one|must be 0 or 1/i);
+  });
+});
+
 describe('POST /api/fleet/role/demote', () => {
   it('returns 401 without auth', async () => {
     const res = await request(app).post('/api/fleet/role/demote').send({ confirm: true });
