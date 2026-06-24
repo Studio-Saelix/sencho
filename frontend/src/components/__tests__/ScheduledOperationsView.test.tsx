@@ -138,4 +138,29 @@ describe('ScheduledOperationsView', () => {
       expect(postCall![1].localOnly).toBe(true);
     });
   });
+
+  it('disables Create when the cron expression has a seconds field', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'cleanup');
+
+    // Use System Prune so the form needs no stack target/node, isolating the cron check.
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+
+    const createButton = screen.getByRole('button', { name: 'Create' });
+    expect(createButton).toBeEnabled();
+
+    const cronInput = screen.getByPlaceholderText('0 3 * * *');
+    await userEvent.clear(cronInput);
+    await userEvent.type(cronInput, '30 0 3 * * *');
+
+    expect(screen.getByText(/seconds field is not supported/i)).toBeInTheDocument();
+    expect(createButton).toBeDisabled();
+
+    await userEvent.clear(cronInput);
+    await userEvent.type(cronInput, '0 4 * * *');
+    expect(createButton).toBeEnabled();
+  });
 });

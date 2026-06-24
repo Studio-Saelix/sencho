@@ -116,6 +116,29 @@ function validateOptionalFields(
   return null;
 }
 
+/**
+ * Validate a cron expression for Scheduled Operations. The scheduler ticks once
+ * per minute, so an expression with a leading seconds field (6 or more fields)
+ * is rejected: its sub-minute precision could never be honored. Cron nicknames
+ * such as `@daily` (a single token) are left untouched. Returns an error message
+ * or null.
+ */
+function validateCronExpression(cron: unknown): string | null {
+  if (typeof cron !== 'string' || !cron.trim()) {
+    return 'Cron expression is required.';
+  }
+  if (cron.trim().split(/\s+/).length >= 6) {
+    return 'Cron expression must use 5 fields (minute hour day month weekday). The seconds field is not supported.';
+  }
+  try {
+    CronExpressionParser.parse(cron);
+  } catch (e) {
+    console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron), sanitizeForLog(getErrorMessage(e, 'unknown')));
+    return 'Invalid cron expression.';
+  }
+  return null;
+}
+
 export const scheduledTasksRouter = Router();
 
 scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
@@ -185,10 +208,8 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     const optionalErr = validateOptionalFields(action, target_type, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
 
-    try { CronExpressionParser.parse(cron_expression); } catch (e) {
-      console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron_expression), sanitizeForLog(getErrorMessage(e, 'unknown')));
-      res.status(400).json({ error: 'Invalid cron expression.' }); return;
-    }
+    const cronErr = validateCronExpression(cron_expression);
+    if (cronErr) { res.status(400).json({ error: cronErr }); return; }
 
     const scheduler = SchedulerService.getInstance();
     const now = Date.now();
@@ -282,10 +303,8 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
 
     if (cron_expression) {
-      try { CronExpressionParser.parse(cron_expression); } catch (e) {
-        console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron_expression), sanitizeForLog(getErrorMessage(e, 'unknown')));
-        res.status(400).json({ error: 'Invalid cron expression.' }); return;
-      }
+      const cronErr = validateCronExpression(cron_expression);
+      if (cronErr) { res.status(400).json({ error: cronErr }); return; }
     }
 
     const updates: Record<string, unknown> = { updated_at: Date.now() };

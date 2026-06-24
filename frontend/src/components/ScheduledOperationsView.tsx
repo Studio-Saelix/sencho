@@ -14,7 +14,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { Combobox } from '@/components/ui/combobox';
 import type { ScheduledTask, TaskRun, NodeOption } from '@/types/scheduling';
-import { getCronDescription, formatTimestamp } from '@/lib/scheduling';
+import { getCronDescription, getCronFieldError, formatTimestamp } from '@/lib/scheduling';
 
 const UPDATE_FLEET_ACTION = 'update-fleet' as const;
 
@@ -364,9 +364,10 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
 
   const targetType = ACTION_OPTIONS.find(a => a.value === formAction)?.targetType;
   const cronDescription = getCronDescription(formCron);
+  const cronFieldError = getCronFieldError(formCron);
   const nodeOptions = useMemo(() => nodes.map(n => ({ value: String(n.id), label: n.name })), [nodes]);
   const isSaveDisabled =
-    saving || !formName || !formCron
+    saving || !formName || !formCron || !!cronFieldError
     || (targetType === 'stack' && (!formTargetId || !formNodeId))
     || (formAction === 'scan' && !formNodeId)
     || (formAction === UPDATE_FLEET_ACTION && !formNodeId)
@@ -794,7 +795,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 onChange={e => setFormCron(e.target.value)}
                 className="font-mono"
               />
-              <p className="text-xs text-muted-foreground">{cronDescription}</p>
+              {cronFieldError
+                ? <p className="text-xs text-destructive">{cronFieldError}</p>
+                : <p className="text-xs text-muted-foreground">{cronDescription}</p>}
             </div>
 
             <div className="flex items-center gap-2">

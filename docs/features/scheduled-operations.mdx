@@ -157,6 +157,8 @@ Sencho uses standard 5-field cron expressions:
 * * * * *
 ```
 
+Schedules run on a one-minute granularity, so a six-field expression with a leading seconds field is not accepted: enter exactly five fields, or the create and edit forms reject it.
+
 Common examples:
 
 | Expression | Meaning |
