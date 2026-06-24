@@ -212,9 +212,22 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     { value: 'scanner', label: 'Scanner setup' },
   ];
 
-  const subtitle = overview
-    ? `${overview.scannedImages} ${overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner ${overview.scanner.available ? 'ready' : 'not installed'}`
-    : undefined;
+  // The scanner-detections disclaimer rides as an info affordance next to the
+  // scanned-images count rather than a standing caption below the masthead.
+  const subtitle = overview ? (
+    <span className="inline-flex items-center gap-1.5">
+      <span>
+        {overview.scannedImages} {overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner {overview.scanner.available ? 'ready' : 'not installed'}
+      </span>
+      <span
+        className="inline-flex shrink-0 cursor-help text-stat-subtitle/70 hover:text-stat-subtitle"
+        title={SCANNER_DETECTIONS_NOTE}
+        aria-label={SCANNER_DETECTIONS_NOTE}
+      >
+        <Info className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
+      </span>
+    </span>
+  ) : undefined;
 
   // The tab panels are identical on desktop and mobile; only the masthead and
   // the tab strip differ, so the panels are shared between both layouts.
@@ -343,7 +356,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         tone={tone}
         pulsing={pulsing}
         size="hero"
-        className="rounded-lg mb-2"
+        className="rounded-lg mb-4"
         subtitle={subtitle}
         metadata={overview ? [
           { label: 'CRITICAL', value: String(overview.critical), tone: overview.critical > 0 ? 'error' : 'value' },
@@ -351,9 +364,6 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           { label: 'LAST SCAN', value: overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never', tone: 'subtitle' },
         ] : undefined}
       />
-      <p className="mb-4 max-w-3xl font-mono text-[11px] leading-snug text-stat-subtitle">
-        {SCANNER_DETECTIONS_NOTE}
-      </p>
 
       <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
         <TabsList className="mb-4">

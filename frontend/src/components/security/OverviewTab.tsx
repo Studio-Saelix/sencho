@@ -5,7 +5,6 @@ import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
-import { SCANNER_DETECTIONS_NOTE } from './securityMasthead';
 import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
 import {
@@ -124,14 +123,9 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, onNaviga
         )
       )}
 
-      {/* The masthead hides its stat cluster on a phone; restate it here, framed
-          as scanner detections rather than posture. */}
-      {isMobile && (
-        <div className="space-y-2">
-          <SecuritySevStrip overview={overview} />
-          <p className="font-mono text-[10px] leading-snug text-stat-subtitle">{SCANNER_DETECTIONS_NOTE}</p>
-        </div>
-      )}
+      {/* The masthead hides its stat cluster on a phone; restate it here. The
+          scanner-detections note lives in the masthead's info affordance. */}
+      {isMobile && <SecuritySevStrip overview={overview} />}
 
       {/* Charts lead the dashboard: the trend gives severity context, the rest
           answer "what should I act on first?" from posture + exploit intel. */}
