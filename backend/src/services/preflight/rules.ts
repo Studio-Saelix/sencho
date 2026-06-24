@@ -105,7 +105,7 @@ const envFileMissing: PreflightRule = {
 const portConflictNode: PreflightRule = {
   id: 'port-conflict-node',
   run(ctx) {
-    if (!ctx.model) return [];
+    if (!ctx.model || !ctx.nodeStateAvailable) return [];
     const byPort = new Map<number, NodePortBinding[]>();
     for (const b of ctx.nodePorts) {
       const list = byPort.get(b.publishedPort);
@@ -388,10 +388,31 @@ const deploySwarmOnly: PreflightRule = {
   },
 };
 
+const nodeStateUnavailable: PreflightRule = {
+  id: 'node-state-unavailable',
+  run(ctx) {
+    // Emit only when the model rendered but the node's Docker snapshot could not be
+    // read: an unrenderable model already raises its own render-failed blocker, so a
+    // second advisory there would be noise. The rules that read node state suppress
+    // themselves in this state; this finding tells the operator why, so a clean pass
+    // during an outage is not mistaken for full coverage. (The info-only
+    // new-network / new-volume notices are gated too, but left out of the message
+    // below: they preview a deploy action rather than flag a problem.)
+    if (!ctx.model || ctx.nodeStateAvailable) return [];
+    return [{
+      ruleId: 'node-state-unavailable',
+      severity: 'info',
+      title: 'Node-state checks skipped',
+      message: 'The node\'s Docker state could not be read, so the external-resource, host-port, and container_name checks did not run. This result is partial.',
+      remediation: 'Confirm the Docker daemon is reachable on this node, then re-run preflight.',
+    }];
+  },
+};
+
 const externalNetworkMissing: PreflightRule = {
   id: 'external-network-missing',
   run(ctx) {
-    if (!ctx.model) return [];
+    if (!ctx.model || !ctx.nodeStateAvailable) return [];
     const findings: PreflightFinding[] = [];
     for (const [key, net] of Object.entries(ctx.model.networks)) {
       if (!net.external || ctx.existingNetworkNames.has(net.name)) continue;
@@ -411,7 +432,7 @@ const externalNetworkMissing: PreflightRule = {
 const externalVolumeMissing: PreflightRule = {
   id: 'external-volume-missing',
   run(ctx) {
-    if (!ctx.model) return [];
+    if (!ctx.model || !ctx.nodeStateAvailable) return [];
     const findings: PreflightFinding[] = [];
     for (const [key, vol] of Object.entries(ctx.model.volumes)) {
       if (!vol.external || ctx.existingVolumeNames.has(vol.name)) continue;
@@ -431,7 +452,7 @@ const externalVolumeMissing: PreflightRule = {
 const newNetwork: PreflightRule = {
   id: 'new-network',
   run(ctx) {
-    if (!ctx.model) return [];
+    if (!ctx.model || !ctx.nodeStateAvailable) return [];
     const findings: PreflightFinding[] = [];
     for (const [key, net] of Object.entries(ctx.model.networks)) {
       if (net.external || key === 'default') continue;
@@ -452,7 +473,7 @@ const newNetwork: PreflightRule = {
 const newVolume: PreflightRule = {
   id: 'new-volume',
   run(ctx) {
-    if (!ctx.model) return [];
+    if (!ctx.model || !ctx.nodeStateAvailable) return [];
     const findings: PreflightFinding[] = [];
     for (const [key, vol] of Object.entries(ctx.model.volumes)) {
       if (vol.external) continue;
@@ -521,7 +542,7 @@ const containerNameInternalDup: PreflightRule = {
 const containerNameCollision: PreflightRule = {
   id: 'container-name-collision',
   run(ctx) {
-    if (!ctx.model) return [];
+    if (!ctx.model || !ctx.nodeStateAvailable) return [];
     const findings: PreflightFinding[] = [];
     for (const s of ctx.model.services) {
       if (!s.containerName) continue;
@@ -723,6 +744,7 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   noRestartPolicy,
   noHealthcheck,
   deploySwarmOnly,
+  nodeStateUnavailable,
   externalNetworkMissing,
   externalVolumeMissing,
   newNetwork,

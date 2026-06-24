@@ -12,12 +12,29 @@ The page is organized into tabs.
 
 ## Overview
 
-The overview opens with a status masthead that reads your worst active severity at a glance,
-**Secure**, **At risk**, or **Critical**, alongside the critical and high counts and the time of the
-last successful scan. Below it, a signal rail summarizes the supporting numbers: scanned images,
-fixable findings, secrets, Compose misconfigurations, stale scans, and failed scans. A status strip
-shows scanner health (installed source and version, auto-update) and the active node's deploy
-enforcement posture.
+The overview opens with a status masthead that reads your **action posture** at a glance, the answer
+to "what can and should I do right now?":
+
+- **Action needed**: something concrete to act on, such as a fixable Critical or High finding, a
+  detected secret, a dangerous Compose setting, or a known-exploited (CISA KEV) CVE.
+- **Monitoring**: Critical or High findings exist, but none are currently actionable (no fix
+  available, or already triaged).
+- **Secure**: nothing actionable right now. This is never a claim that no vulnerabilities exist.
+- **Unknown**: the scanner is not installed, or no scan has completed yet.
+
+Raw Critical and High counts stay visible next to the posture as **scanner detections**, not as the
+posture itself: a vulnerable component being present is not the same as a reachable, exploitable risk.
+The masthead carries a standing note to that effect, and posture weighs fix availability, exploit
+intelligence, and triage decisions rather than raw severity alone.
+
+Below it, the charts lead with prioritization rather than raw severity: a **risk trend** for context,
+an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a
+**top exploit-risk** list ranking actionable findings by known-exploited status then EPSS, and a
+**severity-by-exploitability** quadrant that separates high-severity-but-unlikely findings from the
+ones to act on first. The exploit-risk charts populate once exploit intelligence is enabled and images
+are scanned. A signal rail summarizes the supporting numbers (scanned images, fixable findings,
+secrets, Compose misconfigurations, stale scans, failed scans), and a status strip shows scanner health
+and the active node's deploy enforcement posture.
 
 If a node does not report an overview (for example an older remote node), the page falls back to a
 clear "overview unavailable" state and the other tabs keep working.
@@ -25,8 +42,10 @@ clear "overview unavailable" state and the other tabs keep working.
 ## Images
 
 Image findings list every scanned image on the active node with its highest severity. Selecting an
-image opens the full scan report, where you can review vulnerabilities, suppress a CVE, and export an
-SBOM.
+image opens the full scan report, where you can review vulnerabilities, triage a CVE, and export an
+SBOM. Each finding carries evidence tags so you can tell scary from exploitable at a glance:
+known-exploited (KEV), EPSS exploitation probability, the CVSS score, and vendor "will not fix"
+status, alongside whether a fix is available.
 
 ## Compose risks
 
@@ -54,6 +73,11 @@ CVE suppressions and misconfiguration acknowledgements are managed here, the sam
 in Settings. These are governed by the local instance, so this tab is shown when you are on the local
 node; switch to the local node to manage them.
 
+Suppressing a CVE records a **triage decision**: accepted risk, not affected, false positive, fixed,
+ignored, or needs review, with an optional OpenVEX justification. Decided findings stop driving the
+action posture; a "needs review" decision stays counted but keeps the finding actionable. Admiral
+instances can export the fleet's triage decisions as an OpenVEX document for use with other tooling.
+
 ## History
 
 The History tab opens the scan history sheet, listing completed scans grouped by image with search and
@@ -65,6 +89,10 @@ history** button in the [Resources Hub](/features/resources) is a shortcut to th
 Scanner setup manages the Trivy binary for the active node: install the managed binary, update it when
 a new release is available, and toggle automatic updates. Trivy is installed independently on each
 node. See [Installing Trivy](/operations/trivy-setup) for the full setup options.
+
+It also toggles **exploit intelligence**: a daily background fetch of the CISA KEV catalog and FIRST
+EPSS scores that powers the known-exploited and EPSS evidence tags. It degrades gracefully when
+offline and can be turned off for air-gapped or firewalled hosts.
 
 ## What stays where
 
