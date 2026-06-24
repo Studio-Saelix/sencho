@@ -339,7 +339,6 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   return (
     <div className="h-full overflow-auto p-6">
       <PageMasthead
-        kicker="SECURITY"
         state={state}
         tone={tone}
         pulsing={pulsing}
