@@ -79,6 +79,37 @@ describe('ScheduledOperationsView', () => {
     expect(await screen.findByText('nightly-prune')).toBeInTheDocument();
   });
 
+  it('marks a one-shot task with a chip and leaves recurring tasks unmarked', async () => {
+    tasksFixture = [
+      makeTask({ id: 1, name: 'recurring-task' }),
+      makeTask({ id: 2, name: 'one-shot-task', delete_after_run: 1 }),
+    ];
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+    await screen.findByText('recurring-task');
+
+    // A single One-shot chip, scoped to the one-shot row.
+    const chips = screen.getAllByText('One-shot');
+    expect(chips).toHaveLength(1);
+    // A pending one-shot carries the plain lifecycle tooltip, not the failure copy.
+    expect(chips[0]).toHaveAttribute('title', expect.stringContaining('Deletes itself after a successful run'));
+    expect(chips[0]).toHaveAttribute('title', expect.not.stringContaining('kept after a failed run'));
+    const oneShotRow = screen.getByText('one-shot-task').closest('tr');
+    expect(oneShotRow).toContainElement(chips[0]);
+    const recurringRow = screen.getByText('recurring-task').closest('tr');
+    expect(recurringRow?.textContent).not.toContain('One-shot');
+  });
+
+  it('explains a failed one-shot was kept to debug', async () => {
+    tasksFixture = [makeTask({ id: 1, name: 'failed-one-shot', delete_after_run: 1, last_status: 'failure' })];
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+    const chip = await screen.findByText('One-shot');
+    expect(chip).toHaveAttribute('title', expect.stringContaining('kept after a failed run'));
+  });
+
   it('opens the create modal from a prefill and consumes it once', async () => {
     const onPrefillConsumed = vi.fn();
     render(
