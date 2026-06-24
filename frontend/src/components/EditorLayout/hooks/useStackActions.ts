@@ -261,7 +261,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.envContent !== editorState.originalEnvContent;
 
   const getStackMenuVisibility = (file: string) => {
-    const status = stackListState.stackStatuses[file];
+    // A partial stack has running containers, so it shows the running-stack
+    // lifecycle actions (stop/restart/update) rather than deploy.
+    const raw = stackListState.stackStatuses[file];
+    const status = raw === 'partial' ? 'running' : raw;
     return {
       showDeploy: status !== 'running',
       showStop: status === 'running',

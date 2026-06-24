@@ -36,8 +36,12 @@ export function useSidebarContextMenu({
   const buildMenuCtx = useCallback((file: string): StackMenuCtx => {
     const sName = file.replace(/\.(yml|yaml)$/, '');
     const mainPort = stackListState.stackPorts[file];
+    // A partial stack has running containers, so it gets the running-stack
+    // lifecycle affordances; the menu's status union stays three-state.
+    const rawStatus = stackListState.stackStatuses[file] ?? 'unknown';
+    const stackStatus = rawStatus === 'partial' ? 'running' : rawStatus;
     return {
-      stackStatus: (stackListState.stackStatuses[file] ?? 'unknown') as 'running' | 'exited' | 'unknown',
+      stackStatus,
       // Only offer "Open App" when a browser-reachable URL can actually be built
       // (a remote node with no API host, e.g. a pilot agent, yields none).
       canOpenApp: mainPort !== undefined && buildServiceUrl({ node: activeNode, publicPort: mainPort }) !== null,

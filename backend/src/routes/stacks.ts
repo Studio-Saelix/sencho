@@ -13,7 +13,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
 import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
-import DockerController from '../services/DockerController';
+import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { MeshService } from '../services/MeshService';
 import { CacheService } from '../services/CacheService';
@@ -240,7 +240,7 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
         const stackNames = stacks.map((s: string) => s.replace(/\.(yml|yaml)$/, ''));
         const dockerController = DockerController.getInstance(req.nodeId);
         const bulkInfo = await dockerController.getBulkStackStatuses(stackNames);
-        const data: Record<string, { status: 'running' | 'exited' | 'unknown'; mainPort?: number; runningSince?: number }> = {};
+        const data: Record<string, BulkStackInfo> = {};
         for (const stack of stacks) {
           const name = stack.replace(/\.(yml|yaml)$/, '');
           data[stack] = bulkInfo[name] ?? { status: 'unknown' };
