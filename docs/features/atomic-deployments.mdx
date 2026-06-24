@@ -14,7 +14,7 @@ The same backup also powers the **Rollback** action in the stack editor, so you 
 3. **Health probe.** Sencho waits 3 seconds, then lists every container with the `com.docker.compose.project=<stack>` label and checks each one for a non-zero exit code. Any container that has exited with a non-zero status counts as a crash.
 4. **Auto-rollback on failure.** When a crash is detected, Sencho streams `=== Deployment failed - restoring previous compose and env files ===`, restores the backed-up files, and re-runs `docker compose up -d` with the restored configuration. On success it streams `=== Restored previous compose and env files ===`. Restoring the files reverts the compose and `.env` configuration; an image referenced by a moving tag (such as `latest`) is not reverted, because the local tag still resolves to the newly pulled digest. The original deploy error is preserved and reported as the deploy result, so a failed-then-rolled-back deploy still registers as a failure in the deploy progress modal.
 
-If the rollback itself fails (for example, the re-deploy step cannot pull a previously available image, or the file restore is blocked by filesystem permissions), Sencho streams `=== Rollback failed - manual intervention may be required ===`. The backup files remain at `<DATA_DIR>/backups/<stack>/` so you can copy them back manually.
+If the rollback itself fails (for example, the re-deploy step cannot pull a previously available image, or the file restore is blocked by filesystem permissions), Sencho streams `=== Rollback failed - manual intervention may be required ===`. The backup files remain at `<DATA_DIR>/backups/<nodeId>/<stack>/` so you can copy them back manually.
 
 ## Which operations are protected
 
@@ -39,11 +39,13 @@ The menu entry is hidden when no backup exists for the stack, for example on a f
 
 ## Where backups are stored
 
-Backups live under `<DATA_DIR>/backups/<stack>/`, in the same writable volume Sencho uses for its database and other persisted state. They are intentionally kept outside the user's compose folder, so the operation works even when a container has chowned its bind-mounted stack directory to root.
+Backups live under `<DATA_DIR>/backups/<nodeId>/<stack>/`, in the same writable volume Sencho uses for its database and other persisted state. They are intentionally kept outside the user's compose folder, so the operation works even when a container has chowned its bind-mounted stack directory to root.
 
-Each backup is a flat copy of the compose file Sencho found, plus `.env` if it exists, plus a `.timestamp` marker that records when the backup was taken. There is one backup slot per stack: every protected deploy or update overwrites the previous backup, so the **Rollback** menu always reverts to the configuration that was on disk immediately before the most recent run.
+Each backup is a flat copy of the compose file Sencho found, plus `.env` if it exists, plus two markers: a `.timestamp` recording when the backup was taken and a `.checksums` integrity manifest holding a SHA-256 for each backed-up file. There is one backup slot per stack: every protected deploy or update overwrites the previous backup, so the **Rollback** menu always reverts to the configuration that was on disk immediately before the most recent run.
 
 A restore is a faithful revert, not an overlay. Sencho replaces the compose file and `.env` with the backed-up copies and removes any compose variant or `.env` that was added after the backup was taken, so the stack returns to exactly the file set it had before the run. For example, if a deploy switched the stack from `compose.yaml` to `docker-compose.yml` or introduced a new `.env`, a rollback undoes both. Files Sencho does not manage are left untouched.
+
+Before a restore overwrites anything, Sencho re-hashes each backed-up file and compares it against the `.checksums` manifest. If a file no longer matches (for example, a backup truncated by an out-of-disk write), Sencho aborts the restore with a clear error and leaves the stack exactly as it was, rather than copying the corrupt content back over a working configuration.
 
 ## Troubleshooting
 
@@ -57,12 +59,17 @@ A restore is a faithful revert, not an overlay. Sencho replaces the compose file
     The health probe is a 3-second window after `docker compose up -d` returns. Crashes that happen after that window are out of scope for atomic rollback by design, because Sencho cannot tell whether a late exit is a real failure or a normal restart. The [health gate](/features/health-gated-updates) covers exactly this period: it observes the stack for a configurable window after the update, records a verdict on the stack timeline, and offers a manual rollback when containers do not stay healthy. For ongoing health beyond that, use **Auto-Heal Policies** to restart unhealthy containers automatically and **Alert Rules** to page you when a container exits unexpectedly.
   </Accordion>
   <Accordion title="The deploy progress modal showed 'Rollback failed - manual intervention may be required'">
-    This message means the auto-rollback attempted to restore the backup and re-deploy, but the restore step or the re-deploy itself errored out. The backup files are still at `<DATA_DIR>/backups/<stack>/`. To recover:
+    This message means the auto-rollback attempted to restore the backup and re-deploy, but the restore step or the re-deploy itself errored out. The backup files are still at `<DATA_DIR>/backups/<nodeId>/<stack>/`. To recover:
 
-    1. Copy `compose.yaml` (or the variant Sencho backed up) and `.env` from `<DATA_DIR>/backups/<stack>/` back into the stack directory.
+    1. Copy `compose.yaml` (or the variant Sencho backed up) and `.env` from `<DATA_DIR>/backups/<nodeId>/<stack>/` back into the stack directory.
     2. Open the stack in the editor and click **Deploy** to re-run with the restored configuration.
 
     The most common causes are filesystem permissions on the stack directory and a missing image in a private registry that the original deploy could not pull.
+  </Accordion>
+  <Accordion title="Rollback failed with a 'backup is corrupt (integrity check failed)' error">
+    The backup slot holds a file whose contents no longer match the checksum recorded when the backup was taken, usually because the disk filled up or the write was interrupted while the backup was being written. Sencho refuses to copy that file back, so your live stack is left untouched rather than overwritten with corrupt content.
+
+    Edit the compose file or `.env` directly in the editor to the configuration you want, then click **Deploy**. The next protected deploy writes a fresh, verified backup, and **Rollback** works again from that point.
   </Accordion>
   <Accordion title="Rollback ran but the stack still has the broken configuration">
     Sencho keeps a single backup per stack. If you ran two atomic deploys back to back, the second deploy overwrote the first backup with the broken configuration before it failed. **Rollback** then restores that broken configuration, because as far as Sencho is concerned it is the most recent known state.
