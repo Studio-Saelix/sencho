@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'path';
 import os from 'os';
 import { promises as fsPromises } from 'fs';
+import { createHash } from 'crypto';
 
 // Mutable state the mocked NodeRegistry reads. Each test rewrites these
 // before instantiating FileSystemService.
@@ -296,5 +297,190 @@ describe('FileSystemService backup location', () => {
 
     const kept = await fsPromises.readFile(path.join(stackDir, 'notes.txt'), 'utf-8');
     expect(kept).toBe('keep me\n');
+  });
+
+  // Integrity guard: a backup carries a .checksums manifest, and a restore
+  // verifies each backed-up file against it before touching the live stack, so a
+  // truncated or corrupted backup is rejected with a clear error instead of being
+  // copied back silently. These reuse the outer mkdtemp/DATA_DIR harness.
+  describe('backup integrity checksum', () => {
+    // Independent oracle for the manifest hashes. Production hashes the raw file
+    // Buffer; for the UTF-8 text fixtures used here that yields the same digest as
+    // hashing Buffer.from(s, 'utf-8').
+    const sha = (s: string) => createHash('sha256').update(Buffer.from(s, 'utf-8')).digest('hex');
+
+    it('writes a .checksums manifest with the SHA-256 of each backed-up file', async () => {
+      const stackName = 'sums';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      const composeBody = 'services:\n  web: {}\n';
+      const envBody = 'FOO=bar\n';
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), composeBody, 'utf-8');
+      await fsPromises.writeFile(path.join(stackDir, '.env'), envBody, 'utf-8');
+
+      await FileSystemService.getInstance().backupStackFiles(stackName);
+
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      const manifest = JSON.parse(await fsPromises.readFile(path.join(backupDir, '.checksums'), 'utf-8'));
+      expect(manifest['compose.yaml']).toBe(sha(composeBody));
+      expect(manifest['.env']).toBe(sha(envBody));
+    });
+
+    it('aborts the restore and leaves the live file unchanged when a backed-up file is corrupt', async () => {
+      const stackName = 'corrupt';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: good\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      await service.backupStackFiles(stackName);
+
+      // Corrupt the backed-up copy on disk (truncation or bit-rot after a clean backup).
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      await fsPromises.writeFile(path.join(backupDir, 'compose.yaml'), 'name: go', 'utf-8');
+
+      // The live file is the post-deploy state a rollback would revert.
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: current\n', 'utf-8');
+
+      await expect(service.restoreStackFiles(stackName)).rejects.toThrow(/integrity|corrupt/i);
+
+      // The live file must be untouched, not overwritten with the corrupt bytes.
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: current\n');
+      // The manifest marker must never leak into the stack directory.
+      await expect(fsPromises.access(path.join(stackDir, '.checksums'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('verifies before removing orphans, so a corrupt backup mutates nothing', async () => {
+      const stackName = 'atomic';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: good\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      await service.backupStackFiles(stackName); // backup has compose.yaml, no .env
+
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      await fsPromises.writeFile(path.join(backupDir, 'compose.yaml'), 'trunc', 'utf-8');
+
+      // A post-backup deploy added a .env: a faithful restore would remove it as an
+      // orphan. The integrity check must run first, so the corrupt backup leaves both
+      // the orphan and the live compose exactly as they are.
+      await fsPromises.writeFile(path.join(stackDir, '.env'), 'SECRET=x\n', 'utf-8');
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: current\n', 'utf-8');
+
+      await expect(service.restoreStackFiles(stackName)).rejects.toThrow(/integrity|corrupt/i);
+
+      expect(await fsPromises.readFile(path.join(stackDir, '.env'), 'utf-8')).toBe('SECRET=x\n');
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: current\n');
+    });
+
+    it('restores faithfully when no .checksums manifest exists (pre-feature backup)', async () => {
+      const stackName = 'legacy';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: original\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      await service.backupStackFiles(stackName);
+
+      // A backup taken before the integrity feature existed has no manifest.
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      await fsPromises.rm(path.join(backupDir, '.checksums'));
+
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: mutated\n', 'utf-8');
+      await service.restoreStackFiles(stackName);
+
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: original\n');
+    });
+
+    it('restores faithfully when the manifest is unparseable (degrades to no verification)', async () => {
+      const stackName = 'garbled';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: original\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+
+      // Both garbage JSON and an empty file are unparseable; neither proves the
+      // data files are bad, so a needed rollback must still proceed.
+      for (const garbage of ['not json', '']) {
+        await service.backupStackFiles(stackName);
+        await fsPromises.writeFile(path.join(backupDir, '.checksums'), garbage, 'utf-8');
+        await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: mutated\n', 'utf-8');
+        await service.restoreStackFiles(stackName);
+        expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: original\n');
+      }
+    });
+
+    it('copies a backup file that has no checksum entry without verifying it', async () => {
+      const stackName = 'partial';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: original\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      await service.backupStackFiles(stackName); // manifest records compose.yaml only
+
+      // A managed file present in the backup slot but absent from the manifest
+      // (e.g. its read failed during backup, so it was never recorded). It must
+      // still be restored: the check is never stricter than what was recorded.
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      await fsPromises.writeFile(path.join(backupDir, '.env'), 'TOKEN=restored\n', 'utf-8');
+
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: mutated\n', 'utf-8');
+      await service.restoreStackFiles(stackName);
+
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: original\n');
+      expect(await fsPromises.readFile(path.join(stackDir, '.env'), 'utf-8')).toBe('TOKEN=restored\n');
+    });
+
+    it('aborts the restore when the backed-up .env is corrupt, leaving the live .env intact', async () => {
+      const stackName = 'envcorrupt';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: good\n', 'utf-8');
+      await fsPromises.writeFile(path.join(stackDir, '.env'), 'TOKEN=good\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      await service.backupStackFiles(stackName); // manifest covers compose.yaml and .env
+
+      // Corrupt only the backed-up .env; compose.yaml stays valid. The .env's own
+      // manifest entry must be checked, so the restore aborts on it.
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      await fsPromises.writeFile(path.join(backupDir, '.env'), 'TOKEN=go', 'utf-8');
+
+      await fsPromises.writeFile(path.join(stackDir, '.env'), 'TOKEN=current\n', 'utf-8');
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: current\n', 'utf-8');
+
+      await expect(service.restoreStackFiles(stackName)).rejects.toThrow(/integrity|corrupt/i);
+
+      // The abort must touch nothing: the live .env keeps its current contents, and
+      // the valid-but-unrestored compose.yaml is left as-is rather than reverted to
+      // the backup, proving the .env mismatch halts before any file is copied back.
+      expect(await fsPromises.readFile(path.join(stackDir, '.env'), 'utf-8')).toBe('TOKEN=current\n');
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: current\n');
+    });
+
+    it('restores faithfully when a manifest entry is not a string (degrades to unverified)', async () => {
+      const stackName = 'nonstring';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: original\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      await service.backupStackFiles(stackName);
+
+      // A parseable manifest whose value is not a hex string (tampered or
+      // wrong-typed) must not block a rollback whose data files are intact: a
+      // manifest problem is not proof the backup is corrupt.
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      await fsPromises.writeFile(path.join(backupDir, '.checksums'), JSON.stringify({ 'compose.yaml': 123 }), 'utf-8');
+
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: mutated\n', 'utf-8');
+      await service.restoreStackFiles(stackName);
+
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: original\n');
+    });
   });
 });

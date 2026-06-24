@@ -100,6 +100,9 @@ export interface PreflightContext {
   existingNetworkNames: Set<string>;
   existingVolumeNames: Set<string>;
   existingContainers: { name: string; stack: string | null }[];
+  /** Whether the node's Docker snapshot was collected; gates node-state checks so
+   *  an unavailable snapshot cannot be mistaken for an empty node. */
+  nodeStateAvailable: boolean;
   bindChecks: BindCheck[];
   /** Stack-level exposure classification, or null when unset. */
   stackIntent: ExposureIntent | null;

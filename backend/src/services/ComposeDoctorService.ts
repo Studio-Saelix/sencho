@@ -175,7 +175,7 @@ export class ComposeDoctorService {
         || 'Sencho could not run docker compose on this node.';
     }
 
-    const { nodePorts, existingNetworkNames, existingVolumeNames, existingContainers } = await this.nodeState(nodeId, fsSvc, stackName);
+    const { nodePorts, existingNetworkNames, existingVolumeNames, existingContainers, nodeStateAvailable } = await this.nodeState(nodeId, fsSvc, stackName);
     const bindChecks = model ? await this.resolveBindChecks(model, baseDir) : [];
     const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls } = this.exposureState(nodeId, stackName);
 
@@ -207,6 +207,7 @@ export class ComposeDoctorService {
       existingNetworkNames,
       existingVolumeNames,
       existingContainers,
+      nodeStateAvailable,
       bindChecks,
       stackIntent,
       serviceIntents,
@@ -254,6 +255,7 @@ export class ComposeDoctorService {
     existingNetworkNames: Set<string>;
     existingVolumeNames: Set<string>;
     existingContainers: { name: string; stack: string | null }[];
+    nodeStateAvailable: boolean;
   }> {
     try {
       const knownStacks = await fsSvc.getStacks();
@@ -265,11 +267,12 @@ export class ComposeDoctorService {
         existingNetworkNames: new Set(snapshot.networks.map(n => n.name)),
         existingVolumeNames: new Set(snapshot.volumes.map(v => v.name)),
         existingContainers: snapshot.containers.map(c => ({ name: c.name, stack: c.stack })),
+        nodeStateAvailable: true,
       };
     } catch (error) {
       console.warn('[ComposeDoctor] Node snapshot unavailable for %s; node-state checks skipped:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
-      return { nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(), existingContainers: [] };
+      return { nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(), existingContainers: [], nodeStateAvailable: false };
     }
   }
 
