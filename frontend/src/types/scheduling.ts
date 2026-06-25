@@ -35,4 +35,5 @@ export interface TaskRun {
 export interface NodeOption {
   id: number;
   name: string;
+  type: 'local' | 'remote';
 }

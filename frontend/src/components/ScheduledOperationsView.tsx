@@ -127,7 +127,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       const res = await apiFetch('/nodes', { localOnly: true });
       if (res.ok) {
         const data = await res.json();
-        setNodes(data.map((n: { id: number; name: string }) => ({ id: n.id, name: n.name })));
+        setNodes(data.map((n: { id: number; name: string; type: 'local' | 'remote' }) => ({ id: n.id, name: n.name, type: n.type })));
       }
     } catch {
       // Non-critical
@@ -160,7 +160,12 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     let cancelled = false;
     const fetchServices = async () => {
       try {
-        const res = await apiFetch(`/stacks/${encodeURIComponent(formTargetId)}/services`);
+        // Load services from the selected node so remote-node restart schedules
+        // discover the right services instead of the hub's.
+        const endpoint = `/stacks/${encodeURIComponent(formTargetId)}/services`;
+        const res = formNodeId
+          ? await fetchForNode(endpoint, parseInt(formNodeId, 10))
+          : await apiFetch(endpoint);
         if (res.ok && !cancelled) {
           setAvailableServices(await res.json());
         }
@@ -170,7 +175,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     };
     fetchServices();
     return () => { cancelled = true; };
-  }, [formAction, formTargetId]);
+  }, [formAction, formTargetId, formNodeId]);
 
   // Re-fetch stacks when node changes
   useEffect(() => {
@@ -221,7 +226,10 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
 
   const handleSave = async () => {
     const actionDef = getActionById(formAction);
-    if (!actionDef) return;
+    if (!actionDef) {
+      toast.error('This scheduled action is no longer supported.');
+      return;
+    }
 
     const body: Record<string, unknown> = {
       name: formName,
@@ -230,23 +238,12 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       cron_expression: formCron,
       enabled: formEnabled,
       delete_after_run: formDeleteAfterRun,
+      target_id: actionDef.requiresStack ? formTargetId : null,
+      node_id: actionDef.requiresNode && formNodeId ? parseInt(formNodeId, 10) : null,
+      prune_targets: formAction === 'prune' && formPruneTargets.length > 0 ? formPruneTargets : null,
+      target_services: actionDef.supportsServiceSelection && formTargetServices.length > 0 ? formTargetServices : null,
+      prune_label_filter: formAction === 'prune' && formPruneLabelFilter.trim() ? formPruneLabelFilter.trim() : null,
     };
-
-    if (actionDef.requiresStack) {
-      body.target_id = formTargetId;
-    }
-    if (actionDef.requiresNode) {
-      body.node_id = formNodeId ? parseInt(formNodeId, 10) : null;
-    }
-    if (formAction === 'prune' && formPruneTargets.length > 0) {
-      body.prune_targets = formPruneTargets;
-    }
-    if (formAction === 'restart' && formTargetServices.length > 0) {
-      body.target_services = formTargetServices;
-    }
-    if (formAction === 'prune' && formPruneLabelFilter.trim()) {
-      body.prune_label_filter = formPruneLabelFilter.trim();
-    }
 
     setSaving(true);
     try {
@@ -342,8 +339,14 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const currentAction = getActionById(formAction);
   const cronDescription = getCronDescription(formCron);
   const nodeOptions = useMemo(() => nodes.map(n => ({ value: String(n.id), label: n.name })), [nodes]);
+  // Scan and prune run on the hub-local Docker daemon only; remote nodes are excluded from their pickers.
+  const localNodeOptions = useMemo(
+    () => nodes.filter(n => n.type === 'local').map(n => ({ value: String(n.id), label: n.name })),
+    [nodes],
+  );
+  const currentNodeOptions = currentAction?.nodeScope === 'local' ? localNodeOptions : nodeOptions;
   const isSaveDisabled =
-    saving || !formName || !formCron
+    saving || !currentAction || !formName || !formCron
     || (!!currentAction?.requiresStack && (!formTargetId || !formNodeId))
     || (!!currentAction?.requiresNode && !currentAction.requiresStack && !formNodeId)
     || (formAction === 'prune' && formPruneTargets.length === 0);
@@ -715,11 +718,21 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               </>
             )}
 
+            {formAction === 'snapshot' && (
+              <div className="space-y-2">
+                <Label>Scope</Label>
+                <div className="flex h-9 w-full items-center rounded-md border border-glass-border bg-input px-3 text-sm text-muted-foreground">
+                  Entire fleet
+                </div>
+                <p className="text-xs text-muted-foreground">Captures every node's compose and .env files. No node or stack to choose.</p>
+              </div>
+            )}
+
             {currentAction?.requiresNode && !currentAction.requiresStack && (
               <div className="space-y-2">
                 <Label>Node</Label>
                 <Combobox
-                  options={nodeOptions}
+                  options={currentNodeOptions}
                   value={formNodeId}
                   onValueChange={setFormNodeId}
                   placeholder="Select node..."

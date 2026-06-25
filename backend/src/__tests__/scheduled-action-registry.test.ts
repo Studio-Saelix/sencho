@@ -8,6 +8,7 @@ import {
   VALID_ACTIONS,
   BACKEND_SCHEDULED_ACTIONS,
   INVALID_ACTION_MESSAGE,
+  getScheduledActionDefinition,
   validateActionTarget,
   type BackendScheduledAction,
   type TargetType,
@@ -34,6 +35,13 @@ describe('scheduledActionRegistry', () => {
     expect(INVALID_ACTION_MESSAGE).toBe(
       'Invalid action. Must be restart, snapshot, prune, update, scan, auto_backup, auto_stop, auto_down, or auto_start.',
     );
+  });
+
+  it('marks node-scoped and local-only actions in backend metadata', () => {
+    expect(getScheduledActionDefinition('scan')).toMatchObject({ requiresNode: true, nodeScope: 'local' });
+    expect(getScheduledActionDefinition('prune')).toMatchObject({ requiresNode: true, nodeScope: 'local' });
+    expect(getScheduledActionDefinition('update')).toMatchObject({ requiresNode: true });
+    expect(getScheduledActionDefinition('snapshot')).toMatchObject({ requiresNode: false });
   });
 
   describe('validateActionTarget', () => {

@@ -38,6 +38,11 @@ describe('scheduledActions registry', () => {
     }
   });
 
+  it('marks scan and prune as local-node actions', () => {
+    expect(getActionById('scan')).toMatchObject({ requiresNode: true, nodeScope: 'local' });
+    expect(getActionById('prune')).toMatchObject({ requiresNode: true, nodeScope: 'local' });
+  });
+
   it('getActionById resolves a known id and returns undefined otherwise', () => {
     expect(getActionById('restart')?.label).toBe('Restart Stack');
     expect(getActionById('nope')).toBeUndefined();

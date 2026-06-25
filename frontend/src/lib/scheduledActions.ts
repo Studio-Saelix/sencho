@@ -37,6 +37,7 @@ export interface ScheduledActionDefinition {
   requiresNode: boolean;
   requiresStack: boolean;
   supportsServiceSelection: boolean;
+  nodeScope?: 'local';
   helperText?: string;
 }
 
@@ -46,8 +47,8 @@ export const SCHEDULED_ACTIONS: ScheduledActionDefinition[] = [
   { id: 'update', backendAction: 'update', label: 'Auto-update Stack', shortLabel: 'update', category: 'updates', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
   { id: 'update-fleet', backendAction: 'update', label: 'Auto-update All Stacks', shortLabel: 'update', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, helperText: 'Every stack on the selected node will be checked and updated when new images are available.' },
   { id: 'snapshot', backendAction: 'snapshot', label: 'Fleet Snapshot', shortLabel: 'snapshot', category: 'backups', targetType: 'fleet', tone: 'warning', requiresNode: false, requiresStack: false, supportsServiceSelection: false },
-  { id: 'prune', backendAction: 'prune', label: 'System Prune', shortLabel: 'prune', category: 'maintenance', targetType: 'system', tone: 'warning', requiresNode: false, requiresStack: false, supportsServiceSelection: false },
-  { id: 'scan', backendAction: 'scan', label: 'Vulnerability Scan', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, helperText: 'Every image on the selected node will be scanned.' },
+  { id: 'prune', backendAction: 'prune', label: 'System Prune', shortLabel: 'prune', category: 'maintenance', targetType: 'system', tone: 'warning', requiresNode: true, requiresStack: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Resources are pruned on the selected node. Prunes run on local nodes only.' },
+  { id: 'scan', backendAction: 'scan', label: 'Vulnerability Scan', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Every image on the selected node will be scanned. Scans run on local nodes only.' },
   { id: 'auto_backup', backendAction: 'auto_backup', label: 'Backup Stack Files', shortLabel: 'backup', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
   { id: 'auto_stop', backendAction: 'auto_stop', label: 'Stop Stack (keep containers)', shortLabel: 'stop', category: 'lifecycle', targetType: 'stack', tone: 'warning', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
   { id: 'auto_down', backendAction: 'auto_down', label: 'Take Stack Down (remove containers)', shortLabel: 'down', category: 'lifecycle', targetType: 'stack', tone: 'destructive', requiresNode: true, requiresStack: true, supportsServiceSelection: false },

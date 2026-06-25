@@ -662,6 +662,9 @@ export class SchedulerService {
         if (task.node_id == null && isDebugEnabled()) {
             console.log(`[SchedulerService:debug] Prune task ${task.id}: no node_id specified, using default node ${nodeId}`);
         }
+        if (this.isRemoteNode(nodeId)) {
+            throw new Error('Scheduled prunes currently require a local node.');
+        }
         const docker = DockerController.getInstance(nodeId);
         const allTargets = ['containers', 'images', 'networks', 'volumes'] as const;
         type PruneTarget = typeof allTargets[number];

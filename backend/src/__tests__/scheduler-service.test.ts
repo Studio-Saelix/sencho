@@ -594,6 +594,32 @@ describe('SchedulerService - executePrune', () => {
 
     expect(mockPruneSystem).toHaveBeenCalledWith('containers', 'env=staging');
   });
+
+  it('fails scheduled prune tasks that target remote nodes before pruning', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 73,
+      name: 'remote-prune',
+      action: 'prune',
+      cron_expression: '0 3 * * *',
+      enabled: true,
+      node_id: 2,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(73);
+
+    expect(mockPruneSystem).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringMatching(/local node/i),
+      }),
+    );
+  });
 });
 
 // ── executeUpdate ──────────────────────────────────────────────────────

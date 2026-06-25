@@ -986,22 +986,39 @@ export class FileSystemService {
     // credit the barrier, which it does not through the helper.
     const baseResolved = path.resolve(this.baseDir);
     const checksums: Record<string, string> = {};
+    const writeManagedBackupFile = async (file: string, src: string): Promise<void> => {
+      let buf: Buffer;
+      try {
+        buf = await fsPromises.readFile(src);
+      } catch (e: unknown) {
+        const code = (e as NodeJS.ErrnoException)?.code;
+        if (code !== 'ENOENT') {
+          console.warn(`[FileSystemService] Could not read ${file} for backup:`, (e as Error).message);
+        }
+        return;
+      }
+
+      const dest = path.join(backupDir, file);
+      try {
+        await fsPromises.writeFile(dest, buf);
+      } catch (e: unknown) {
+        try {
+          await fsPromises.unlink(dest);
+        } catch {
+          // Best-effort cleanup only. The write failure below is the actionable error.
+        }
+        throw new Error(`Could not write backup ${file}: ${(e as Error).message}`, { cause: e });
+      }
+      checksums[file] = sha256HexBuffer(buf);
+    };
+
     const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
     for (const file of composeFiles) {
       const src = path.resolve(baseResolved, path.join(stackDir, file));
       if (!src.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
       }
-      try {
-        const buf = await fsPromises.readFile(src);
-        await fsPromises.writeFile(path.join(backupDir, file), buf);
-        checksums[file] = sha256HexBuffer(buf);
-      } catch (e: unknown) {
-        const code = (e as NodeJS.ErrnoException)?.code;
-        if (code !== 'ENOENT') {
-          console.warn(`[FileSystemService] Could not back up ${file}:`, (e as Error).message);
-        }
-      }
+      await writeManagedBackupFile(file, src);
     }
 
     // Copy .env if it exists (same inline containment barrier as above).
@@ -1009,16 +1026,7 @@ export class FileSystemService {
     if (!envSrc.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    try {
-      const buf = await fsPromises.readFile(envSrc);
-      await fsPromises.writeFile(path.join(backupDir, '.env'), buf);
-      checksums['.env'] = sha256HexBuffer(buf);
-    } catch (e: unknown) {
-      const code = (e as NodeJS.ErrnoException)?.code;
-      if (code !== 'ENOENT') {
-        console.warn('[FileSystemService] Could not back up .env:', (e as Error).message);
-      }
-    }
+    await writeManagedBackupFile('.env', envSrc);
 
     // Write the integrity manifest before the timestamp marker, so a crash
     // between the two leaves the checksums present (a backup that restore can
