@@ -101,6 +101,9 @@ function seedPolicy(overrides: Partial<Omit<ScanPolicy, 'id' | 'created_at' | 'u
     max_severity: overrides.max_severity ?? 'CRITICAL',
     block_on_deploy: overrides.block_on_deploy ?? 1,
     enabled: overrides.enabled ?? 1,
+    block_on_severity: overrides.block_on_severity ?? 1,
+    block_on_kev: overrides.block_on_kev ?? 0,
+    block_on_fixable: overrides.block_on_fixable ?? 0,
     replicated_from_control: overrides.replicated_from_control ?? 0,
   });
 }

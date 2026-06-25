@@ -10,22 +10,35 @@
  */
 import { ComposeService } from './ComposeService';
 import { DatabaseService } from './DatabaseService';
-import type { ScanPolicy, VulnSeverity, VulnerabilityScan } from './DatabaseService';
+import type { ScanPolicy, VulnSeverity, VulnerabilityScan, VulnerabilityDetail } from './DatabaseService';
 import { FleetSyncService } from './FleetSyncService';
 import { NotificationService } from './NotificationService';
 import { sanitizeForLog } from '../utils/safeLog';
 import TrivyService from './TrivyService';
-import { isSeverityAtLeast, severityRank } from '../utils/severity';
+import { isSeverityAtLeast } from '../utils/severity';
 import { applySuppressions } from '../utils/suppression-filter';
 import { validateImageRef } from '../utils/image-ref';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
+import {
+    evaluatePolicyRisk,
+    describePolicyInputs,
+    policyInputs,
+    type PolicyBlockReason,
+    type PolicyRiskInputs,
+} from '../utils/policy-risk';
 
 export interface PolicyViolation {
     imageRef: string;
     severity: VulnSeverity;
     criticalCount: number;
     highCount: number;
+    /** Non-suppressed CVEs in the CISA known-exploited (KEV) set on this image. */
+    kevCount: number;
+    /** Non-suppressed Critical/High findings with a fix available on this image. */
+    fixableCount: number;
+    /** Which policy inputs matched (empty when the image could not be scanned). */
+    reasons: PolicyBlockReason[];
     scanId: number;
 }
 
@@ -78,13 +91,19 @@ export function _resetTrivyMissingNotificationStateForTests(): void {
 
 type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count' | 'total_vulnerabilities'>;
 
-interface ImageSeverityEvaluation {
+interface ImageRiskEvaluation {
+    /** Policy inputs that matched for this image. */
+    reasons: PolicyBlockReason[];
     /** Highest non-suppressed severity; UNKNOWN means no severity remains. */
     severity: VulnSeverity;
     criticalCount: number;
     highCount: number;
+    kevCount: number;
+    fixableCount: number;
     /** CVE IDs suppressed for this image; only populated when honoring suppressions. */
     suppressedCves: string[];
+    /** True when the same inputs would have matched if suppressions were ignored. */
+    rawWouldBlock: boolean;
 }
 
 interface SuppressionPass {
@@ -93,69 +112,122 @@ interface SuppressionPass {
 }
 
 /**
- * Resolve an image's effective severity for a policy decision. With
- * honorSuppressions off this returns the stored scan's raw severity and counts
- * (the historical behavior). With it on, the scan's findings are filtered
- * through the active CVE suppressions for that image and severity + counts are
- * re-derived from what remains, so an accepted CVE no longer drives a block.
+ * Aggregate-only evaluation. Two roles: the cheap fast path for a severity-only
+ * policy that does not need detail rows (`failClosed=false`), and the fallback
+ * when the detail rows cannot be trusted. Severity stays verifiable from the
+ * stored aggregate counts, so it always gates. KEV/fixability cannot be read
+ * from aggregates: when `failClosed` is set the active KEV/fixable inputs block
+ * anyway, because their absence cannot be proven without the details.
  */
-function evaluateImageSeverity(
+function aggregateFallback(
+    inputs: PolicyRiskInputs,
+    rawSeverity: VulnSeverity,
     scan: PreflightScan,
-    imageRef: string,
-    honorSuppressions: boolean,
-): ImageSeverityEvaluation {
-    const raw: ImageSeverityEvaluation = {
-        severity: scan.highest_severity ?? 'UNKNOWN',
+    failClosed: boolean,
+): ImageRiskEvaluation {
+    const reasons: PolicyBlockReason[] = [];
+    if (inputs.blockOnSeverity && isSeverityAtLeast(rawSeverity, inputs.maxSeverity)) reasons.push('severity');
+    if (failClosed && inputs.blockOnKev) reasons.push('kev');
+    if (failClosed && inputs.blockOnFixable) reasons.push('fixable');
+    return {
+        reasons,
+        severity: rawSeverity,
         criticalCount: scan.critical_count,
         highCount: scan.high_count,
+        kevCount: 0,
+        fixableCount: 0,
         suppressedCves: [],
+        rawWouldBlock: reasons.length > 0,
     };
-    if (!honorSuppressions) return raw;
+}
+
+/**
+ * Resolve which of a policy's risk inputs (severity, KEV, fixability) an image
+ * matches. A severity-only policy that is not honoring suppressions keeps the
+ * cheap aggregate path (historical behavior). Any KEV/fixable input, or honoring
+ * suppressions, requires the per-finding detail rows: KEV/fixability cannot be
+ * read from the aggregate counts, so the details are loaded regardless of the
+ * honor flag. KEV/fixable are evaluated over the non-suppressed set only.
+ */
+function evaluateImageRisk(
+    scan: PreflightScan,
+    imageRef: string,
+    policy: ScanPolicy,
+    honorSuppressions: boolean,
+): ImageRiskEvaluation {
+    const inputs = policyInputs(policy);
+    const rawSeverity = scan.highest_severity ?? 'UNKNOWN';
+    const needsDetails = inputs.blockOnKev || inputs.blockOnFixable || honorSuppressions;
+    if (!needsDetails) {
+        return aggregateFallback(inputs, rawSeverity, scan, false);
+    }
 
     const db = DatabaseService.getInstance();
-    let findings;
+    let findings: VulnerabilityDetail[];
     let suppressions;
     try {
         findings = db.getAllVulnerabilityDetails(scan.id);
         suppressions = db.getCveSuppressions();
     } catch (err) {
-        // A suppression-read failure must never drop severity. Fall back to the
-        // raw scan, which still gates: an accepted CVE stays blocking rather
-        // than slipping a deploy through on a transient DB error.
-        console.error('[Policy] Suppression re-derivation failed for %s; gating on raw scan severity:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(err, 'db read failed')));
-        return raw;
+        // Detail read failed: severity still gates from the aggregate, but
+        // KEV/fixability are unknowable. Fail closed on them, consistent with the
+        // truncated-details path below: a policy that explicitly opted into a
+        // KEV/fixable gate must not silently degrade to "allow" on a transient
+        // read error. The admin bypass path stays available.
+        console.error('[Policy] Detail read failed for %s; gating severity on aggregate, failing closed on KEV/fixable:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(err, 'db read failed')));
+        return aggregateFallback(inputs, rawSeverity, scan, true);
     }
-    // The stored detail rows must reproduce the scan's full finding set before a
-    // recompute can be trusted. A cache-hit preflight scan keeps the complete
-    // aggregate counts but copies only the first N detail rows, so recomputing
-    // from a truncated set could drop an unsuppressed blocking CVE below the
-    // threshold. When the counts disagree (including an empty detail table for a
-    // non-empty scan), gate on the raw scan severity, which never drops severity.
+
+    // The stored detail rows must reproduce the scan's full finding set before
+    // KEV/fixability can be trusted. A cache-hit preflight scan keeps the
+    // complete aggregate counts but copies only the first N detail rows. When the
+    // counts disagree, gate severity on the raw aggregate and fail closed on any
+    // KEV/fixable input: absence of a known-exploited or fixable finding cannot be
+    // proven from a truncated set, so the unverifiable finding is treated as risky.
     if (findings.length !== scan.total_vulnerabilities) {
         if (scan.total_vulnerabilities > 0) {
             console.warn(
-                '[Policy] Scan %d detail rows (%d) do not match its total (%d); gating on raw scan severity',
+                '[Policy] Scan %d detail rows (%d) do not match its total (%d); gating severity on raw scan, failing closed on KEV/fixable',
                 scan.id, findings.length, scan.total_vulnerabilities,
             );
         }
-        return raw;
+        return aggregateFallback(inputs, rawSeverity, scan, true);
     }
 
-    const enriched = applySuppressions(findings, imageRef, suppressions);
-    let severity: VulnSeverity = 'UNKNOWN';
-    let criticalCount = 0;
-    let highCount = 0;
+    // KEV membership is the same for the full set and the non-suppressed subset,
+    // so resolve intel once over every CVE and reuse it for both the effective
+    // decision and the suppression-pass check below.
+    const intel = inputs.blockOnKev ? db.getCveIntel(findings.map((f) => f.vulnerability_id)) : null;
+    const isKev = (cveId: string): boolean => intel?.get(cveId)?.kev === true;
+
     const suppressedCves = new Set<string>();
-    for (const f of enriched) {
-        if (f.suppressed) {
-            suppressedCves.add(f.vulnerability_id);
-            continue;
+    let evalSet: VulnerabilityDetail[];
+    if (honorSuppressions) {
+        evalSet = [];
+        for (const f of applySuppressions(findings, imageRef, suppressions)) {
+            if (f.suppressed) { suppressedCves.add(f.vulnerability_id); continue; }
+            evalSet.push(f);
         }
-        if (severityRank(f.severity) > severityRank(severity)) severity = f.severity;
-        if (f.severity === 'CRITICAL') criticalCount++;
-        else if (f.severity === 'HIGH') highCount++;
+    } else {
+        evalSet = findings;
     }
-    return { severity, criticalCount, highCount, suppressedCves: [...suppressedCves] };
+
+    const outcome = evaluatePolicyRisk(evalSet, isKev, inputs);
+    // When honoring suppressions, "would have blocked on the raw set" detects a
+    // pass that only succeeded because an accepted CVE was filtered out.
+    const rawWouldBlock = honorSuppressions
+        ? evaluatePolicyRisk(findings, isKev, inputs).reasons.length > 0
+        : outcome.reasons.length > 0;
+    return {
+        reasons: outcome.reasons,
+        severity: outcome.highestSeverity,
+        criticalCount: outcome.criticalCount,
+        highCount: outcome.highCount,
+        kevCount: outcome.kevCount,
+        fixableCount: outcome.fixableCount,
+        suppressedCves: [...suppressedCves],
+        rawWouldBlock,
+    };
 }
 
 /**
@@ -186,8 +258,8 @@ function recordSuppressionPassAudit(
         console.error('[Policy] Failed to record suppression-pass audit entry:', err);
     }
     console.warn(
-        '[Policy] Deploy for "%s" allowed by suppressions: %d image(s) would have met %s (policy "%s")',
-        sanitizeForLog(stackName), passes.length, policy.max_severity, sanitizeForLog(policy.name),
+        '[Policy] Deploy for "%s" allowed by suppressions: %d image(s) would have matched %s (policy "%s")',
+        sanitizeForLog(stackName), passes.length, describePolicyInputs(policyInputs(policy)), sanitizeForLog(policy.name),
     );
 }
 
@@ -228,6 +300,9 @@ export async function enforcePolicyPreDeploy(
                 severity: 'UNKNOWN',
                 criticalCount: 0,
                 highCount: 0,
+                kevCount: 0,
+                fixableCount: 0,
+                reasons: [],
                 scanId: 0,
             }],
         };
@@ -262,8 +337,8 @@ export async function enforcePolicyForImageRefs(
     const debug = isDebugEnabled();
     if (debug) {
         console.log(
-            '[Policy:debug] Evaluating "%s" against policy "%s" (max=%s, images=%d, honorSuppressions=%s)',
-            sanitizeForLog(stackName), sanitizeForLog(policy.name), policy.max_severity, imageRefs.length, honorSuppressions,
+            '[Policy:debug] Evaluating "%s" against policy "%s" (inputs=%s, images=%d, honorSuppressions=%s)',
+            sanitizeForLog(stackName), sanitizeForLog(policy.name), describePolicyInputs(policyInputs(policy)), imageRefs.length, honorSuppressions,
         );
     }
 
@@ -277,6 +352,9 @@ export async function enforcePolicyForImageRefs(
                     severity: 'UNKNOWN',
                     criticalCount: 0,
                     highCount: 0,
+                    kevCount: 0,
+                    fixableCount: 0,
+                    reasons: [],
                     scanId: 0,
                 });
             }
@@ -284,26 +362,28 @@ export async function enforcePolicyForImageRefs(
         }
         try {
             const scan = await svc.scanImagePreflight(imageRef, nodeId, stackName);
-            const evaluated = evaluateImageSeverity(scan, imageRef, honorSuppressions);
-            const rawSeverity = scan.highest_severity ?? 'UNKNOWN';
+            const evaluated = evaluateImageRisk(scan, imageRef, policy, honorSuppressions);
             if (debug) {
                 console.log(
-                    '[Policy:debug] %s scanned: effective=%s raw=%s vs max=%s',
-                    sanitizeForLog(imageRef), evaluated.severity, rawSeverity, policy.max_severity,
+                    '[Policy:debug] %s scanned: severity=%s kev=%d fixable=%d matched=[%s]',
+                    sanitizeForLog(imageRef), evaluated.severity, evaluated.kevCount, evaluated.fixableCount, evaluated.reasons.join(','),
                 );
             }
-            if (isSeverityAtLeast(evaluated.severity, policy.max_severity)) {
+            if (evaluated.reasons.length > 0) {
                 violations.push({
                     imageRef,
                     severity: evaluated.severity,
                     criticalCount: evaluated.criticalCount,
                     highCount: evaluated.highCount,
+                    kevCount: evaluated.kevCount,
+                    fixableCount: evaluated.fixableCount,
+                    reasons: evaluated.reasons,
                     scanId: scan.id,
                 });
             } else if (
                 honorSuppressions &&
                 evaluated.suppressedCves.length > 0 &&
-                isSeverityAtLeast(rawSeverity, policy.max_severity)
+                evaluated.rawWouldBlock
             ) {
                 suppressionPasses.push({ imageRef, cves: evaluated.suppressedCves });
             }
@@ -315,6 +395,9 @@ export async function enforcePolicyForImageRefs(
                 severity: 'UNKNOWN',
                 criticalCount: 0,
                 highCount: 0,
+                kevCount: 0,
+                fixableCount: 0,
+                reasons: [],
                 scanId: 0,
             });
         }
@@ -352,8 +435,8 @@ export async function enforcePolicyForImageRefs(
     }
 
     console.warn(
-        '[Policy] Blocked deploy for "%s": %d image(s) exceed %s (policy "%s")',
-        sanitizeForLog(stackName), violations.length, policy.max_severity, sanitizeForLog(policy.name),
+        '[Policy] Blocked deploy for "%s": %d image(s) matched %s (policy "%s")',
+        sanitizeForLog(stackName), violations.length, describePolicyInputs(policyInputs(policy)), sanitizeForLog(policy.name),
     );
     return { ok: false, bypassed: false, policy, violations };
 }

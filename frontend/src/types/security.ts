@@ -188,6 +188,12 @@ export interface ScanPolicy {
   max_severity: VulnSeverity;
   block_on_deploy: number;
   enabled: number;
+  /** Block when an image's highest non-suppressed severity meets max_severity. */
+  block_on_severity: number;
+  /** Block when any non-suppressed CVE is in the CISA known-exploited (KEV) set. */
+  block_on_kev: number;
+  /** Block when any non-suppressed Critical/High finding has a fix available. */
+  block_on_fixable: number;
   replicated_from_control: number;
   created_at: number;
   updated_at: number;

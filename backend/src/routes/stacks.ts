@@ -42,7 +42,7 @@ import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
@@ -391,7 +391,7 @@ async function runStackBulkOp(
         return {
           stackName,
           ok: false,
-          error: `Policy "${gate.policy?.name}" blocked update`,
+          error: describePolicyBlock(gate.policy, gate.violations, 'update'),
           code: 'policy_blocked',
         };
       }
@@ -849,7 +849,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         buildPolicyGateOptions(req),
       );
       if (!gate.ok) {
-        deployError = `Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`;
+        deployError = describePolicyBlock(gate.policy, gate.violations);
       } else {
         try {
           await ComposeService.getInstance(req.nodeId).deployStack(stack_name);

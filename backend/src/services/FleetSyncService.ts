@@ -565,6 +565,9 @@ export class FleetSyncService {
                 max_severity: p.max_severity,
                 block_on_deploy: p.block_on_deploy,
                 enabled: p.enabled,
+                block_on_severity: p.block_on_severity,
+                block_on_kev: p.block_on_kev,
+                block_on_fixable: p.block_on_fixable,
                 created_at: p.created_at,
                 updated_at: p.updated_at,
             }));
