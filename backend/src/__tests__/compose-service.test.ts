@@ -87,6 +87,7 @@ vi.mock('../services/DatabaseService', () => ({
       getRegistries: mockGetRegistries,
       getGlobalSettings: mockGetGlobalSettings,
       getGitSource: () => undefined,
+      getStackProjectEnvFiles: () => [],
     }),
   },
 }));
