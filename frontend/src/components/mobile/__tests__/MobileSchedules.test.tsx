@@ -64,4 +64,35 @@ describe('MobileSchedules', () => {
     // renders with the destructive class only if the tone is wired through.
     expect(container.querySelector('.bg-destructive')).toBeTruthy();
   });
+
+  describe('update + fleet target', () => {
+    it('renders node-scoped copy, not fleet-ambiguous text', async () => {
+      mockedFetch.mockResolvedValue(jsonResponse([
+        makeTask({ id: 1, action: 'update', target_type: 'fleet', target_id: null, node_id: 2 }),
+      ]));
+
+      render(<MobileSchedules headerActions={null} />);
+
+      const row = await screen.findByText('update node');
+      expect(row).toBeInTheDocument();
+
+      // The row must not contain the forbidden ambiguous copy.
+      expect(screen.queryByText('update fleet')).not.toBeInTheDocument();
+      expect(screen.queryByText('update all')).not.toBeInTheDocument();
+
+      // The target label for update+fleet renders 'stacks', not 'fleet'.
+      expect(screen.getByText('stacks')).toBeInTheDocument();
+    });
+  });
+
+  it('renders fleet target label for a snapshot task', async () => {
+    mockedFetch.mockResolvedValue(jsonResponse([
+      makeTask({ id: 1, action: 'snapshot', target_type: 'fleet', target_id: null, node_id: null }),
+    ]));
+
+    render(<MobileSchedules headerActions={null} />);
+
+    // Snapshot IS fleet-wide; 'fleet' in the target label is correct.
+    expect(await screen.findByText('fleet')).toBeInTheDocument();
+  });
 });

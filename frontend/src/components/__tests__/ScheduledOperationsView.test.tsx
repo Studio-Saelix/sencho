@@ -454,4 +454,44 @@ describe('ScheduledOperationsView', () => {
       });
     });
   });
+
+  describe('risk badge and helper text', () => {
+    it('shows Interruptive badge and helper for the default action Restart Stack', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+
+      expect(screen.getByText('Interruptive')).toBeInTheDocument();
+      expect(screen.getByText(
+        'Restarts containers in place. Running services are stopped and started again on the same configuration.',
+      )).toBeInTheDocument();
+    });
+
+    it('shows Safe badge and helper for Create Fleet Snapshot', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+
+      // Switch action to Create Fleet Snapshot (a non-node, non-stack action).
+      await userEvent.click(screen.getAllByRole('combobox')[0]);
+      await userEvent.click(await screen.findByRole('button', { name: 'Create Fleet Snapshot' }));
+
+      expect(screen.getByText('Safe')).toBeInTheDocument();
+      expect(screen.getByText(
+        'Creates a versioned snapshot of compose and env files across the fleet.',
+      )).toBeInTheDocument();
+    });
+
+    it('shows Destructive badge and helper for Prune Node Resources', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+
+      // Switch action to Prune Node Resources.
+      await userEvent.click(screen.getAllByRole('combobox')[0]);
+      await userEvent.click(await screen.findByRole('button', { name: 'Prune Node Resources' }));
+
+      expect(screen.getByText('Destructive')).toBeInTheDocument();
+      expect(screen.getByText(
+        'Removes unused Docker resources on the selected node. Be careful when pruning volumes.',
+      )).toBeInTheDocument();
+    });
+  });
 });

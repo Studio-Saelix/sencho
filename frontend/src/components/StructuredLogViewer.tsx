@@ -80,6 +80,13 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
   useEffect(() => { followingRef.current = following; }, [following]);
 
   useEffect(() => {
+    // Reset state accumulated from the previous stack before connecting.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRows([]);
+    rowIdRef.current = 0;
+    setFollowing(true);
+    followingRef.current = true;
+
     const cleanStackName = stackName.replace(/\.(yml|yaml)$/, '');
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const activeNodeId = localStorage.getItem('sencho-active-node') || '';

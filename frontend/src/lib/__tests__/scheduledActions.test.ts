@@ -10,8 +10,13 @@ import {
   DEFAULT_SCHEDULED_ACTION_ID,
   getActionById,
   resolveTaskAction,
+  RISK_LABEL,
+  RISK_TONE,
+  RISK_BADGE_CLASSES,
+  RISK_DOT_CLASSES,
   type BackendAction,
   type ScheduledActionCategory,
+  type ScheduledActionRiskLevel,
 } from '../scheduledActions';
 
 const BACKEND_ACTIONS: BackendAction[] = [
@@ -92,5 +97,80 @@ describe('scheduledActions registry', () => {
     expect(fleetUpdate).toBeDefined();
     expect(fleetUpdate!.backendAction).toBe('update');
     expect(fleetUpdate!.targetType).toBe('fleet');
+  });
+
+  describe('helperText', () => {
+    const expected: Record<string, string> = {
+      'auto_backup': 'Backs up compose and env files only. This does not back up application volumes.',
+      'auto_start': 'Creates containers if they do not exist, or starts existing stopped containers.',
+      'restart': 'Restarts containers in place. Running services are stopped and started again on the same configuration.',
+      'auto_stop': 'Stops containers but keeps them in place for a faster start later.',
+      'auto_down': 'Runs compose down. Containers are removed, but compose files remain on disk.',
+      'update': "Checks this stack's images and recreates the stack only when newer images are available.",
+      'update-fleet': 'Checks every stack on the selected node and updates stacks with newer images.',
+      'scan': 'Runs Trivy against images on the selected local node and records the findings.',
+      'prune': 'Removes unused Docker resources on the selected node. Be careful when pruning volumes.',
+      'snapshot': 'Creates a versioned snapshot of compose and env files across the fleet.',
+    };
+
+    for (const [id, text] of Object.entries(expected)) {
+      it(`${id} helper text matches the specified wording`, () => {
+        expect(getActionById(id)?.helperText).toBe(text);
+      });
+    }
+  });
+
+  describe('riskLevel', () => {
+    const expected: Record<string, ScheduledActionRiskLevel> = {
+      'auto_backup': 'safe',
+      'auto_start': 'runtime-change',
+      'restart': 'interruptive',
+      'auto_stop': 'interruptive',
+      'auto_down': 'removes-containers',
+      'update': 'runtime-change',
+      'update-fleet': 'runtime-change',
+      'scan': 'read-only',
+      'prune': 'destructive',
+      'snapshot': 'safe',
+    };
+
+    for (const [id, level] of Object.entries(expected)) {
+      it(`${id} risk level is ${level}`, () => {
+        expect(getActionById(id)?.riskLevel).toBe(level);
+      });
+    }
+
+    it('every action has a RISK_LABEL entry', () => {
+      for (const def of SCHEDULED_ACTIONS) {
+        expect(RISK_LABEL[def.riskLevel]).toBeTruthy();
+      }
+    });
+  });
+
+  describe('risk metadata maps', () => {
+    it('RISK_TONE maps every action risk level', () => {
+      for (const def of SCHEDULED_ACTIONS) {
+        expect(RISK_TONE[def.riskLevel]).toBeTruthy();
+      }
+    });
+
+    it('RISK_BADGE_CLASSES maps every action risk level', () => {
+      for (const def of SCHEDULED_ACTIONS) {
+        expect(RISK_BADGE_CLASSES[def.riskLevel]).toBeTruthy();
+      }
+    });
+
+    it('RISK_DOT_CLASSES maps every action risk level', () => {
+      for (const def of SCHEDULED_ACTIONS) {
+        expect(RISK_DOT_CLASSES[def.riskLevel]).toBeTruthy();
+      }
+    });
+  });
+
+  it('resolveTaskAction for update+fleet returns correct metadata', () => {
+    const def = resolveTaskAction({ action: 'update', target_type: 'fleet' });
+    expect(def?.id).toBe('update-fleet');
+    expect(def?.riskLevel).toBe('runtime-change');
+    expect(def?.helperText).toBe('Checks every stack on the selected node and updates stacks with newer images.');
   });
 });
