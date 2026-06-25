@@ -2,19 +2,19 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Loader2 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import type { ScheduledTask } from '@/types/scheduling';
-import { getActionById } from '@/lib/scheduledActions';
+import { resolveTaskAction } from '@/lib/scheduledActions';
 import { Masthead, SectionHead, StateDot, type Tone } from './mobile-ui';
 
 interface MobileSchedulesProps {
   headerActions: ReactNode;
 }
 
-function actionTone(action: ScheduledTask['action']): Tone {
-  return getActionById(action)?.tone ?? 'brand';
+function actionTone(task: ScheduledTask): Tone {
+  return resolveTaskAction(task)?.tone ?? 'brand';
 }
 
-function actionShortLabel(action: ScheduledTask['action']): string {
-  return getActionById(action)?.shortLabel ?? action;
+function actionShortLabel(task: ScheduledTask): string {
+  return resolveTaskAction(task)?.shortLabel ?? task.action;
 }
 
 function hhmm(ts: number): string {
@@ -44,7 +44,10 @@ function dayLabel(ts: number, now: number): string {
 
 function targetLabel(task: ScheduledTask): string {
   if (task.target_type === 'stack') return (task.target_id ?? task.name).replace(/\.(ya?ml)$/, '');
-  if (task.target_type === 'fleet') return 'fleet';
+  if (task.target_type === 'fleet') {
+    if (task.action === 'update') return 'stacks';
+    return 'fleet';
+  }
   return task.target_type;
 }
 
@@ -113,7 +116,7 @@ export function MobileSchedules({ headerActions }: MobileSchedulesProps) {
         state={next ? hhmm(next.runAt) : '--:--'}
         stateTone="brand"
         live={false}
-        meta={next ? `${relative(next.runAt, now)} · ${actionShortLabel(next.task.action)} ${targetLabel(next.task)}` : 'nothing scheduled'}
+        meta={next ? `${relative(next.runAt, now)} · ${actionShortLabel(next.task)} ${targetLabel(next.task)}` : 'nothing scheduled'}
         right={headerActions}
       />
 
@@ -130,7 +133,7 @@ export function MobileSchedules({ headerActions }: MobileSchedulesProps) {
           upcoming.map((run, i) => {
             const prevDay = i > 0 ? dayLabel(upcoming[i - 1].runAt, now) : null;
             const day = dayLabel(run.runAt, now);
-            const tone = actionTone(run.task.action);
+            const tone = actionTone(run.task);
             return (
               <div key={`${run.task.id}-${run.runAt}`}>
                 {day !== prevDay ? <SectionHead>{day}</SectionHead> : null}
@@ -138,7 +141,7 @@ export function MobileSchedules({ headerActions }: MobileSchedulesProps) {
                   <span className="w-[46px] shrink-0 font-mono tabular-nums text-[13px] text-stat-value">{hhmm(run.runAt)}</span>
                   <StateDot tone={tone} size={7} glow />
                   <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-stat-subtitle">
-                    <span className="text-stat-value">{actionShortLabel(run.task.action)}</span>{` ${targetLabel(run.task)}`}
+                    <span className="text-stat-value">{actionShortLabel(run.task)}</span>{` ${targetLabel(run.task)}`}
                   </span>
                   <span className="shrink-0 font-mono text-[11px] text-stat-icon">{relative(run.runAt, now)}</span>
                 </div>

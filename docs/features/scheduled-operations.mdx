@@ -80,7 +80,7 @@ Click **New Schedule** in the header. The form opens in a centered modal. The Ac
 Common fields:
 
 - **Name.** A descriptive label.
-- **Action.** Pick the operation. The form below changes based on your selection.
+- **Action.** Pick the operation. Once selected, the form shows a risk badge and a one-line helper text below the picker so you can see the blast radius at a glance. The six risk levels are Safe (informational, no risk), Read-only (observation only), Interruptive (temporarily disrupts running state), Runtime change (changes running state, not destructive), Removes containers (tears down containers), and Destructive (irreversibly deletes resources).
 - **Cron Expression.** A standard 5-field cron. A human-readable preview appears below the input as you type (`At 03:00 AM`, `At 04:00 AM, only on Sunday`, and so on). See [Cron expression reference](#cron-expression-reference).
 - **Enabled.** Toggle the task on or off without deleting it.
 - **Delete after successful run.** When enabled, the task removes itself from the schedule after its first successful execution. Failures keep the task so you can inspect the error and retry. See [Delete after successful run](#delete-after-successful-run).
@@ -88,8 +88,8 @@ Common fields:
 Conditional fields per action:
 
 - **Stack actions** (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Auto-update Stack, Stop Stack, Take Stack Down) add a **Node** combobox and a **Stack** combobox. Restart Stack additionally renders a **Services** checkbox grid sourced from the stack's compose services on the selected node, so you can scope the restart to a subset instead of restarting the entire stack.
-- **Auto-update All Stacks on Node** adds a **Node** combobox with the helper text "Every stack on the selected node will be checked and updated when new images are available."
-- **Scan Node Images** adds a **Node** combobox listing local nodes only, with the helper text "Every image on the selected node will be scanned. Scans run on local nodes only."
+- **Auto-update All Stacks on Node** adds a **Node** combobox. The helper text "Checks every stack on the selected node and updates stacks with newer images" appears above, next to the Runtime change badge.
+- **Scan Node Images** adds a **Node** combobox listing local nodes only. The helper text "Runs Trivy against images on the selected local node and records the findings" and Read-only badge appear above.
 - **Prune Node Resources** adds a **Node** combobox listing local nodes only, then a **Prune Targets** group (Containers, Images, Networks, Volumes; all selected by default) and a **Label Filter** input for scoping the prune to resources matching a Docker label.
 - **Create Fleet Snapshot** shows a read-only **Scope: Entire fleet** summary instead of a Node or Stack picker, because it captures every node.
 

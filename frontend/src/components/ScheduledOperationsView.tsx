@@ -15,12 +15,16 @@ import { apiFetch, fetchForNode } from '@/lib/api';
 import { Combobox } from '@/components/ui/combobox';
 import type { ScheduledTask, TaskRun, NodeOption } from '@/types/scheduling';
 import { getCronDescription, getCronFieldError, formatTimestamp } from '@/lib/scheduling';
+import { cn } from '@/lib/utils';
 import {
   SCHEDULED_ACTIONS,
   SCHEDULED_ACTION_CATEGORIES,
   getActionById,
   resolveTaskAction,
   DEFAULT_SCHEDULED_ACTION_ID,
+  RISK_BADGE_CLASSES,
+  RISK_DOT_CLASSES,
+  RISK_LABEL,
 } from '@/lib/scheduledActions';
 
 const DEFAULT_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'];
@@ -685,6 +689,18 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 onValueChange={(val) => { setFormAction(val); setFormTargetId(''); setFormNodeId(''); setFormTargetServices([]); setFormPruneLabelFilter(''); }}
                 placeholder="Select action..."
               />
+              {currentAction && (
+                <div className="flex items-start gap-2">
+                  <span className={cn(
+                    'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium shrink-0 mt-0.5',
+                    RISK_BADGE_CLASSES[currentAction.riskLevel],
+                  )}>
+                    <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', RISK_DOT_CLASSES[currentAction.riskLevel])} />
+                    {RISK_LABEL[currentAction.riskLevel]}
+                  </span>
+                  <p className="text-xs text-muted-foreground">{currentAction.helperText}</p>
+                </div>
+              )}
             </div>
 
             {currentAction?.requiresStack && (
@@ -750,9 +766,6 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   onValueChange={setFormNodeId}
                   placeholder="Select node..."
                 />
-                {currentAction.helperText && (
-                  <p className="text-xs text-muted-foreground">{currentAction.helperText}</p>
-                )}
               </div>
             )}
 
