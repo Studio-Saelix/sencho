@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
   SCHEDULED_ACTIONS,
   SCHEDULED_ACTION_CATEGORIES,
+  DEFAULT_SCHEDULED_ACTION_ID,
   getActionById,
   resolveTaskAction,
   type BackendAction,
@@ -68,5 +69,28 @@ describe('scheduledActions registry', () => {
     it('returns undefined for an unknown action', () => {
       expect(resolveTaskAction({ action: 'bogus' as BackendAction, target_type: 'system' })).toBeUndefined();
     });
+  });
+
+  it('exports DEFAULT_SCHEDULED_ACTION_ID as restart', () => {
+    expect(DEFAULT_SCHEDULED_ACTION_ID).toBe('restart');
+  });
+
+  it('orders actions by category group', () => {
+    const ids = SCHEDULED_ACTIONS.map(a => a.id);
+    // Verify the exact order: lifecycle first, then updates, security, maintenance, backups.
+    expect(ids).toEqual([
+      'auto_backup', 'auto_start', 'restart', 'auto_stop', 'auto_down',
+      'update', 'update-fleet',
+      'scan',
+      'prune',
+      'snapshot',
+    ]);
+  });
+
+  it('preserves the update-fleet alias after resorting', () => {
+    const fleetUpdate = SCHEDULED_ACTIONS.find(a => a.id === 'update-fleet');
+    expect(fleetUpdate).toBeDefined();
+    expect(fleetUpdate!.backendAction).toBe('update');
+    expect(fleetUpdate!.targetType).toBe('fleet');
   });
 });

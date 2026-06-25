@@ -26,7 +26,7 @@ Open the **Schedules** tab from the top navigation bar. The page opens on the Ti
 The Timeline plots every firing of every enabled task across a rolling 24-hour window starting from the current minute.
 
 - **Masthead.** A `NEXT 24 HOURS` kicker, an italic display heading, the window's start and end timestamps in a monospace range, and a right-anchored **Next** pill that reads out the time and task name of the next firing and a relative countdown.
-- **Five lanes.** Lifecycle (label blue), Updates (success green), Security (label purple), Maintenance (warning amber), and Backups (brand cyan). The Lifecycle lane holds stack restarts plus the four stack-lifecycle actions (Backup Stack Files, Stop Stack, Take Stack Down, Start Stack); Updates holds per-node and fleet image updates; Security holds vulnerability scans; Maintenance holds system prunes; Backups holds fleet snapshots.
+- **Five lanes.** Lifecycle (label blue), Updates (success green), Security (label purple), Maintenance (warning amber), and Backups (brand cyan). The Lifecycle lane holds the five stack-lifecycle actions (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down); Updates holds per-node and fleet image updates; Security holds vulnerability scans; Maintenance holds node resource prunes; Backups holds fleet snapshots.
 - **Pills.** One pill per firing within the window, positioned proportionally to the firing's time. Each pill shows the firing time and the task name. Pills are color-matched to their lane. Click a pill to open the run history sheet for that task.
 - **Now rail.** A glowing vertical rail at the current minute, anchored to the left of the track at page open and drifting right as time passes (the page recomputes positions periodically).
 - **Axis.** Six monospace time ticks run along the bottom, evenly spaced through the window.
@@ -40,13 +40,13 @@ Toggle to **All tasks** from the masthead to see every schedule in a table regar
 The All tasks toggle swaps the lane track for a sortable table.
 
 <Frame>
-  <img src="/images/scheduled-operations/all-tasks.png" alt="All tasks table view of Scheduled Operations. Columns are Name, Action, Target, Schedule, Status, Next Run, Enabled, Actions. Two rows are visible: 'Vul Scan' with a Vulnerability Scan badge, target 'system', schedule 'At 03:00 AM / 0 3 * * *', Success status, next run '5/15/2026, 3:00:00 AM', ON toggle, and an action group of Run now / Execution history / Edit / Delete (Delete in destructive red). 'Nightly Snapshot' with a Fleet Snapshot badge, target 'fleet', schedule 'At 04:00 AM / 0 4 * * *', Success, next run '5/15/2026, 4:00:00 AM', ON, same action group." />
+  <img src="/images/scheduled-operations/all-tasks.png" alt="All tasks table view of Scheduled Operations. Columns are Name, Action, Target, Schedule, Status, Next Run, Enabled, Actions. Two rows are visible: 'Vul Scan' with a Scan Node Images badge, target 'system', schedule 'At 03:00 AM / 0 3 * * *', Success status, next run '5/15/2026, 3:00:00 AM', ON toggle, and an action group of Run now / Execution history / Edit / Delete (Delete in destructive red). 'Nightly Snapshot' with a Create Fleet Snapshot badge, target 'fleet', schedule 'At 04:00 AM / 0 4 * * *', Success, next run '5/15/2026, 4:00:00 AM', ON, same action group." />
 </Frame>
 
 | Column | What it shows |
 |---|---|
 | **Name** | The task name. |
-| **Action** | A badge labelling the operation (e.g. Restart Stack, Vulnerability Scan, Fleet Snapshot). |
+| **Action** | A badge labelling the operation (e.g. Restart Stack, Scan Node Images, Create Fleet Snapshot). |
 | **Target** | The stack the task targets (with a service list in parentheses when restart is scoped to specific services), or the target type for non-stack actions (`system`, `fleet`). |
 | **Schedule** | A human-readable description of the cron with the raw expression on a second line. |
 | **Status** | The last run result: **Success** (green), **Failed** (red), or `Never run` if the task has not fired yet. |
@@ -60,21 +60,21 @@ The All tasks toggle swaps the lane track for a sortable table.
 |---|---|---|
 | **Restart Stack** | A specific stack (optionally specific services) on a specific node | Restarts all or selected containers in the stack. |
 | **Auto-update Stack** | A specific stack on a specific node | Checks each image in the stack for a newer tag and recreates the stack if any image has an update. See [Auto-Update Policies](/features/auto-update-policies) for the companion review board. |
-| **Auto-update All Stacks** | A specific node | Runs the auto-update check across every stack on the node. Pair with **Auto-update Stack** rows when you want different cadences for specific stacks. |
-| **Fleet Snapshot** | The whole fleet | Creates a versioned, fleet-wide snapshot of every node's compose files and `.env` files. See [Fleet Backups](/features/fleet-backups). |
-| **System Prune** | A local node | Prunes containers, images, networks, and volumes (any subset), optionally filtered by a Docker label. Runs on local nodes only. |
-| **Vulnerability Scan** | A local node | Runs Trivy against every image on the node and persists the results. Requires Trivy to be installed on the target node ([Installing Trivy](/operations/trivy-setup)). Runs on local nodes only. |
-| **Backup Stack Files** | A specific stack on a specific node | Copies the stack's compose file and `.env` to `<DATA_DIR>/backups/<stack>/`. One slot per stack; each run overwrites the previous backup. For a versioned archive use a Fleet Snapshot instead. |
+| **Auto-update All Stacks on Node** | A specific node | Runs the auto-update check across every stack on the node. Pair with **Auto-update Stack** rows when you want different cadences for specific stacks. |
+| **Create Fleet Snapshot** | The whole fleet | Creates a versioned, fleet-wide snapshot of every node's compose files and `.env` files. See [Fleet Backups](/features/fleet-backups). |
+| **Prune Node Resources** | A local node | Prunes containers, images, networks, and volumes (any subset), optionally filtered by a Docker label. Runs on local nodes only. |
+| **Scan Node Images** | A local node | Runs Trivy against every image on the node and persists the results. Requires Trivy to be installed on the target node ([Installing Trivy](/operations/trivy-setup)). Runs on local nodes only. |
+| **Backup Stack Compose Files** | A specific stack on a specific node | Copies the stack's compose file and `.env` to `<DATA_DIR>/backups/<stack>/`. One slot per stack; each run overwrites the previous backup. For a versioned archive use a Create Fleet Snapshot instead. |
 | **Stop Stack** | A specific stack on a specific node | Runs `docker compose stop`. Containers are stopped but preserved. Use for off-hours power saving when you want a fast restart later. |
 | **Take Stack Down** | A specific stack on a specific node | Runs `docker compose down`. Containers are removed. Use to fully release resources when the stack is not needed for an extended period. |
-| **Start Stack** | A specific stack on a specific node | Runs `docker compose up -d`. Works for both stopped and removed containers: if they exist they are started, if not they are created from the compose file. |
+| **Start / Bring Up Stack** | A specific stack on a specific node | Runs `docker compose up -d`. Works for both stopped and removed containers: if they exist they are started, if not they are created from the compose file. |
 
 ## Creating a scheduled task
 
-Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation.
+Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Lifecycle, Updates, Security, Maintenance, and Backups.
 
 <Frame>
-  <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown lists Restart Stack, Auto-update Stack, Auto-update All Stacks, Fleet Snapshot, System Prune, and Vulnerability Scan as the first six entries. Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />
+  <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown groups actions under category headers: Lifecycle (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down), Updates (Auto-update Stack, Auto-update All Stacks on Node), Security (Scan Node Images), Maintenance (Prune Node Resources), and Backups (Create Fleet Snapshot). Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />
 </Frame>
 
 Common fields:
@@ -87,11 +87,11 @@ Common fields:
 
 Conditional fields per action:
 
-- **Stack actions** (Restart Stack, Auto-update Stack, Backup Stack Files, Stop / Take Down / Start Stack) add a **Node** combobox and a **Stack** combobox. Restart Stack additionally renders a **Services** checkbox grid sourced from the stack's compose services on the selected node, so you can scope the restart to a subset instead of restarting the entire stack.
-- **Auto-update All Stacks** adds a **Node** combobox with the helper text "Every stack on the selected node will be checked and updated when new images are available."
-- **Vulnerability Scan** adds a **Node** combobox listing local nodes only, with the helper text "Every image on the selected node will be scanned. Scans run on local nodes only."
-- **System Prune** adds a **Node** combobox listing local nodes only, then a **Prune Targets** group (Containers, Images, Networks, Volumes; all selected by default) and a **Label Filter** input for scoping the prune to resources matching a Docker label.
-- **Fleet Snapshot** shows a read-only **Scope: Entire fleet** summary instead of a Node or Stack picker, because it captures every node.
+- **Stack actions** (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Auto-update Stack, Stop Stack, Take Stack Down) add a **Node** combobox and a **Stack** combobox. Restart Stack additionally renders a **Services** checkbox grid sourced from the stack's compose services on the selected node, so you can scope the restart to a subset instead of restarting the entire stack.
+- **Auto-update All Stacks on Node** adds a **Node** combobox with the helper text "Every stack on the selected node will be checked and updated when new images are available."
+- **Scan Node Images** adds a **Node** combobox listing local nodes only, with the helper text "Every image on the selected node will be scanned. Scans run on local nodes only."
+- **Prune Node Resources** adds a **Node** combobox listing local nodes only, then a **Prune Targets** group (Containers, Images, Networks, Volumes; all selected by default) and a **Label Filter** input for scoping the prune to resources matching a Docker label.
+- **Create Fleet Snapshot** shows a read-only **Scope: Entire fleet** summary instead of a Node or Stack picker, because it captures every node.
 
 <Frame>
   <img src="/images/scheduled-operations/create-restart.png" alt="The New scheduled task modal configured for a Restart Stack task. Name reads 'Nightly staging restart'. Action is Restart Stack. Node is Local. Stack is 'audit-mesh-prod'. A Services group with helper text '(leave empty for all)' shows two unchecked checkboxes labelled 'echo' and 'prober'. Cron Expression is '0 3 * * *' with the preview 'At 03:00 AM'. The Enabled toggle reads ON. The Delete after successful run checkbox is unchecked. Cancel and Create buttons sit at the bottom right." />
@@ -105,32 +105,32 @@ When creating a Restart Stack task and a stack is selected, Sencho reads the com
 
 ### Scheduled vulnerability scans
 
-A Vulnerability Scan task runs Trivy against every image on the selected node and persists the findings. Trivy must be installed on that node ([Installing Trivy](/operations/trivy-setup)). Manual and scheduled scans share the same digest-based 24-hour cache, so unchanged images that were scanned recently are reused instead of rescanned on every run, which keeps execution time low.
+A Scan Node Images task runs Trivy against every image on the selected node and persists the findings. Trivy must be installed on that node ([Installing Trivy](/operations/trivy-setup)). Manual and scheduled scans share the same digest-based 24-hour cache, so unchanged images that were scanned recently are reused instead of rescanned on every run, which keeps execution time low.
 
 When a scheduled scan finishes, Sencho dispatches a completion notification. The severity reflects the outcome (info on a clean run, warning when findings are present); the category is `scan_finding`. The full message format and how it surfaces in the bell is documented in [Alerts & Notifications · Vulnerability scanning](/features/alerts-notifications#vulnerability-scanning).
 
 <Frame>
-  <img src="/images/scheduled-operations/create-scan.png" alt="The New scheduled task modal configured for a Vulnerability Scan. Name reads 'Nightly vulnerability scan'. Action is Vulnerability Scan. Node is Local with helper text explaining every image on the selected node will be scanned and scans run on local nodes only. Cron Expression is '0 3 * * *' with the preview 'At 03:00 AM'. The Enabled toggle reads ON. Cancel and Create buttons sit at the bottom right." />
+  <img src="/images/scheduled-operations/create-scan.png" alt="The New scheduled task modal configured for a Scan Node Images. Name reads 'Nightly vulnerability scan'. Action is Scan Node Images. Node is Local with helper text explaining every image on the selected node will be scanned and scans run on local nodes only. Cron Expression is '0 3 * * *' with the preview 'At 03:00 AM'. The Enabled toggle reads ON. Cancel and Create buttons sit at the bottom right." />
 </Frame>
 
 ### Prune label filter
 
-When creating a System Prune task, the **Label Filter (optional)** input scopes the prune to resources matching a specific Docker label. Use `key=value` format (for example, `com.docker.compose.project=staging`). Leave the field empty to prune every unused resource of the selected types.
+When creating a Prune Node Resources task, the **Label Filter (optional)** input scopes the prune to resources matching a specific Docker label. Use `key=value` format (for example, `com.docker.compose.project=staging`). Leave the field empty to prune every unused resource of the selected types.
 
 <Frame>
-  <img src="/images/scheduled-operations/create-prune.png" alt="The New scheduled task modal configured for a System Prune. Name reads 'Weekly cleanup'. Action is System Prune. Node is Local. The Prune Targets group shows four checked boxes: Containers, Images, Networks, Volumes. The Label Filter (optional) input reads 'com.docker.compose.project=staging' with the helper text 'Only prune resources matching this Docker label.' Cron Expression is '0 4 * * 0' with the preview 'At 04:00 AM, only on Sunday'. The Enabled toggle reads ON. The Delete after successful run checkbox is unchecked. Cancel and Create buttons sit at the bottom right." />
+  <img src="/images/scheduled-operations/create-prune.png" alt="The New scheduled task modal configured for a Prune Node Resources. Name reads 'Weekly cleanup'. Action is Prune Node Resources. Node is Local. The Prune Targets group shows four checked boxes: Containers, Images, Networks, Volumes. The Label Filter (optional) input reads 'com.docker.compose.project=staging' with the helper text 'Only prune resources matching this Docker label.' Cron Expression is '0 4 * * 0' with the preview 'At 04:00 AM, only on Sunday'. The Enabled toggle reads ON. The Delete after successful run checkbox is unchecked. Cancel and Create buttons sit at the bottom right." />
 </Frame>
 
 ### Stack lifecycle scheduling
 
-Stop Stack, Take Stack Down, Start Stack, and Backup Stack Files let you schedule lifecycle events for individual stacks on a per-node basis. A common pattern for development or staging stacks is:
+Backup Stack Compose Files, Start / Bring Up Stack, Stop Stack, and Take Stack Down let you schedule lifecycle events for individual stacks on a per-node basis. A common pattern for development or staging stacks is:
 
 - A **Stop Stack** or **Take Stack Down** task at the end of the working day (for example, `0 19 * * 1-5`, 7 PM on weekdays).
-- A **Start Stack** task at the start of the working day (for example, `0 8 * * 1-5`, 8 AM on weekdays).
+- A **Start / Bring Up Stack** task at the start of the working day (for example, `0 8 * * 1-5`, 8 AM on weekdays).
 
 **Stop vs Take Down.** Use Stop Stack when you want containers ready to resume quickly: Docker keeps the container filesystem in place and the matching Start Stack simply restarts the existing containers. Use Take Stack Down to fully release resources; Start Stack then recreates the containers from the compose file on the next run.
 
-**Backup Stack Files** keeps a single slot per stack under `<DATA_DIR>/backups/<stack>/`. Each run overwrites the previous backup. For a versioned, point-in-time archive across all nodes, use a [Fleet Snapshot](/features/fleet-backups) task instead.
+**Backup Stack Compose Files** keeps a single slot per stack under `<DATA_DIR>/backups/<stack>/`. Each run overwrites the previous backup. For a versioned, point-in-time archive across all nodes, use a [Create Fleet Snapshot](/features/fleet-backups) task instead.
 
 Pick any node in your fleet from the schedule's **Node** combobox: the four lifecycle actions run against the node you select, whether it is the hub or a connected remote. The schedule itself is stored on the hub, so you manage every node's lifecycle tasks from one place.
 
@@ -196,7 +196,7 @@ When a scheduled task fails, Sencho dispatches an `error`-level notification in 
 
 When a task that previously failed succeeds again, Sencho dispatches an `info`-level recovery notification in the same category to confirm the issue is resolved. Tasks that succeed on every run do not produce per-run notifications: the recovery-only approach keeps the channel quiet during steady-state operation.
 
-Vulnerability Scan tasks are an exception: they always dispatch a completion notification, even on a clean run, because the message body carries severity counts you may want to react to. The severity is `info` on a clean run and `warning` when findings are present; the category is `scan_finding`, not `system`. The full message format and routing behavior is documented in [Alerts & Notifications · Vulnerability scanning](/features/alerts-notifications#vulnerability-scanning).
+Scan Node Images tasks are an exception: they always dispatch a completion notification, even on a clean run, because the message body carries severity counts you may want to react to. The severity is `info` on a clean run and `warning` when findings are present; the category is `scan_finding`, not `system`. The full message format and routing behavior is documented in [Alerts & Notifications · Vulnerability scanning](/features/alerts-notifications#vulnerability-scanning).
 
 Configure delivery channels in **Settings · Notifications · Channels**.
 
@@ -232,7 +232,7 @@ A background Scheduler Service evaluates due tasks every 60 seconds. When a task
 4. On failure, an `error`-level notification goes out through the configured channels. On recovery from a previously failing state, an `info`-level recovery notification is dispatched.
 5. The next run time is recalculated from the cron expression.
 
-Schedules are stored on the hub. Stack-targeted actions execute against the selected node, so lifecycle and per-stack update schedules can target either the hub or a connected remote node. System Prune and Vulnerability Scan run on local nodes only. Fleet Snapshot captures every node from the hub schedule.
+Schedules are stored on the hub. Stack-targeted actions execute against the selected node, so lifecycle and per-stack update schedules can target either the hub or a connected remote node. Prune Node Resources and Scan Node Images run on local nodes only. Create Fleet Snapshot captures every node from the hub schedule.
 
 If a task is still running from a previous firing, the scheduler skips the new firing to prevent overlap.
 
@@ -250,14 +250,14 @@ If Sencho restarts while a task is mid-execution, the orphaned run record is mar
   <Accordion title="A scheduled scan completed but no notification arrived">
     Scan notifications share the same delivery path as every other Sencho notification. Check, in order: 1) at least one channel is enabled in **Settings · Notifications · Channels** and its **Test** button succeeds; 2) if the stack the scan is associated with has notification routes defined, at least one matching route is enabled (the routing layer takes priority over the global channels); 3) open the notification bell, where every notification is recorded regardless of channel configuration, and look for a delivery-error entry; 4) on a remote node, channels must be configured on that node itself because channel settings are per-node.
   </Accordion>
-  <Accordion title="A Vulnerability Scan fails with 'Trivy binary is not available'">
+  <Accordion title="A Scan Node Images fails with 'Trivy binary is not available'">
     Trivy must be installed on the node that runs the scan, not just on the gateway. Follow [Installing Trivy](/operations/trivy-setup) on the target node, then click **Run now** on the schedule to confirm the scan succeeds before waiting for the next cron tick.
   </Accordion>
-  <Accordion title="A Start Stack run fails with a compose file error">
-    Start Stack runs `docker compose up -d` against the stack's compose directory. If the stack folder has been removed or its compose file is missing, the run fails. Re-create or restore the stack from the [Editor](/features/editor), then click **Run now** on the schedule to confirm it succeeds before the next cron tick.
+  <Accordion title="A Start / Bring Up Stack run fails with a compose file error">
+    Start / Bring Up Stack runs `docker compose up -d` against the stack's compose directory. If the stack folder has been removed or its compose file is missing, the run fails. Re-create or restore the stack from the [Editor](/features/editor), then click **Run now** on the schedule to confirm it succeeds before the next cron tick.
   </Accordion>
-  <Accordion title="A Backup Stack Files run overwrote the previous backup">
-    Backup Stack Files keeps a single slot per stack under `<DATA_DIR>/backups/<stack>/`. Each run overwrites the previous backup. This is by design: for a versioned archive of compose files across the fleet, use a [Fleet Snapshot](/features/fleet-backups) task, which retains every snapshot under the snapshots directory.
+  <Accordion title="A Backup Stack Compose Files run overwrote the previous backup">
+    Backup Stack Compose Files keeps a single slot per stack under `<DATA_DIR>/backups/<stack>/`. Each run overwrites the previous backup. This is by design: for a versioned archive of compose files across the fleet, use a [Create Fleet Snapshot](/features/fleet-backups) task, which retains every snapshot under the snapshots directory.
   </Accordion>
   <Accordion title="A one-shot task disappeared from the list">
     A task with **Delete after successful run** enabled removes itself automatically after the first successful execution, along with its run history. This is expected behavior. If you need a record of the run before deletion, click **Download CSV** in the run history sheet before the next successful run.
