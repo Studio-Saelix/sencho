@@ -524,7 +524,7 @@ export function EditorView(props: EditorViewProps) {
                                             <Suspense fallback={<div className="w-full h-full" aria-busy="true" />}>
                                                 <Editor
                                                     height="100%"
-                                                    language={activeTab === 'compose' ? 'yaml' : 'plaintext'}
+                                                    language={activeTab === 'compose' ? 'yaml' : 'ini'}
                                                     theme={isDarkMode ? 'vs-dark' : 'vs'}
                                                     value={activeTab === 'compose' ? safeContent : safeEnvContent}
                                                     onMount={(editor) => { monacoEditorRef.current = editor; }}
