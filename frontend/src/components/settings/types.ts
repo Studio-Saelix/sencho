@@ -54,6 +54,7 @@ export type SectionId =
     | 'registries'
     | 'labels'
     | 'host-alerts'
+    | 'container-alerts'
     | 'docker-storage'
     | 'image-updates'
     | 'fleet-mesh'
