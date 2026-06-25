@@ -13,7 +13,7 @@ export class LogFormatter {
     private static readonly TIMESTAMP_REGEX = /^(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\s*)/;
 
     // Matches docker-compose style prefix like "container-name  | " or "db-1 | "
-    private static readonly PREFIX_REGEX = /^([a-zA-Z0-9_-]+)(?:\s+\|\s+)/;
+    private static readonly PREFIX_REGEX = /^([a-zA-Z0-9_.-]+)(?:\s+\|\s+)/;
 
     // Level regexes (case insensitive for matching, but we check raw string for precise targeting if needed)
     private static readonly ERROR_REGEX = /\b(ERROR|ERR|Exception|Fatal)\b/i;
@@ -26,26 +26,34 @@ export class LogFormatter {
         let processedLine = line;
         let formatAccumulator = '';
 
-        // 1. Process Timestamp
-        const tsMatch = processedLine.match(LogFormatter.TIMESTAMP_REGEX);
-        if (tsMatch) {
-            const ts = tsMatch[1];
-            formatAccumulator += `${LogFormatter.GRAY}${ts}${LogFormatter.RESET}`;
-            processedLine = processedLine.slice(ts.length);
+        // 1. Process prefix and timestamp tokens in arrival order.
+        // Each regex is anchored at ^ and strips its match from the
+        // remainder, so looping until neither matches naturally handles
+        // both "redis | 2024-...Z message" and "2024-...Z redis | message".
+        let changed = true;
+        while (changed) {
+            changed = false;
+
+            const prefixMatch = processedLine.match(LogFormatter.PREFIX_REGEX);
+            if (prefixMatch) {
+                const pfxMatchStr = prefixMatch[0]; // e.g. "redis | "
+                const name = prefixMatch[1];
+                const restOfPrefix = pfxMatchStr.slice(name.length); // e.g. " | "
+                formatAccumulator += `${LogFormatter.CYAN}${name}${LogFormatter.WHITE}${LogFormatter.RESET}${restOfPrefix}`;
+                processedLine = processedLine.slice(pfxMatchStr.length);
+                changed = true;
+            }
+
+            const tsMatch = processedLine.match(LogFormatter.TIMESTAMP_REGEX);
+            if (tsMatch) {
+                const ts = tsMatch[1];
+                formatAccumulator += `${LogFormatter.GRAY}${ts}${LogFormatter.RESET}`;
+                processedLine = processedLine.slice(ts.length);
+                changed = true;
+            }
         }
 
-        // 2. Process Prefix
-        const prefixMatch = processedLine.match(LogFormatter.PREFIX_REGEX);
-        if (prefixMatch) {
-            const pfxMatchStr = prefixMatch[0]; // e.g. "container-name | "
-            const name = prefixMatch[1];
-            const restOfPrefix = pfxMatchStr.slice(name.length); // e.g. " | "
-
-            formatAccumulator += `${LogFormatter.CYAN}${name}${LogFormatter.WHITE}${LogFormatter.RESET}${restOfPrefix}`;
-            processedLine = processedLine.slice(pfxMatchStr.length);
-        }
-
-        // 3. Process Levels & JSON
+        // 2. Process Levels & JSON
         const trimmedLine = processedLine.trim();
 
         // Fast JSON Check (Starts with { and ends with })

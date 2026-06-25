@@ -14,6 +14,8 @@ interface LogRow {
   ts: string | null;
   level: LogLevel;
   message: string;
+  /** Normalized service name extracted from the log prefix, or null for synthetic / old-format rows. */
+  containerName: string | null;
   /** True when this row was synthesized by the client (e.g. reconnect sentinel). */
   synthetic?: boolean;
 }
@@ -24,6 +26,7 @@ const BUFFER_CAP = 10_000;
 const TIMESTAMP_REGEX = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+(.*)$/;
 // eslint-disable-next-line no-control-regex
 const ANSI_REGEX = /\x1b\[[0-9;]*[A-Za-z]/g;
+const PREFIX_REGEX = /^([a-zA-Z0-9_.-]+)(?:\s+\|\s+)/;
 const ERROR_REGEX = /\b(ERROR|ERR|FATAL|Exception)\b/i;
 const WARN_REGEX = /\b(WARN|WARNING|WRN)\b/i;
 
@@ -34,14 +37,20 @@ const WARN_REGEX = /\b(WARN|WARNING|WRN)\b/i;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 
 function parseLine(raw: string): Omit<LogRow, 'id'> {
-  const stripped = raw.replace(ANSI_REGEX, '').replace(/[\r\n]+$/, '');
+  let stripped = raw.replace(ANSI_REGEX, '').replace(/[\r\n]+$/, '');
+  let containerName: string | null = null;
+  const prefixMatch = stripped.match(PREFIX_REGEX);
+  if (prefixMatch) {
+    containerName = prefixMatch[1];
+    stripped = stripped.slice(prefixMatch[0].length);
+  }
   const match = stripped.match(TIMESTAMP_REGEX);
   const ts = match ? match[1] : null;
   const body = match ? match[2] : stripped;
   let level: LogLevel = 'info';
   if (ERROR_REGEX.test(body)) level = 'err';
   else if (WARN_REGEX.test(body)) level = 'warn';
-  return { ts, level, message: body };
+  return { ts, level, message: body, containerName };
 }
 
 function formatTs(iso: string | null): string {
@@ -100,6 +109,7 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
         ts: new Date().toISOString(),
         level,
         message,
+        containerName: null,
         synthetic: true,
       });
       scheduleFlush();
@@ -205,7 +215,11 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
   };
 
   const downloadLogs = () => {
-    const text = rows.map(r => `${r.ts ?? ''} ${r.level.toUpperCase()} ${r.message}`.trim()).join('\n');
+    const text = rows.map(r =>
+      r.containerName
+        ? `[${r.containerName}] ${r.ts ?? ''} ${r.level.toUpperCase()} ${r.message}`.trim()
+        : `${r.ts ?? ''} ${r.level.toUpperCase()} ${r.message}`.trim(),
+    ).join('\n');
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -289,7 +303,17 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
               )}>
                 {row.level}
               </span>
-              <span className="whitespace-pre-wrap break-all text-foreground/90">{row.message}</span>
+              <span className="whitespace-pre-wrap break-all text-foreground/90">
+                {row.containerName && (
+                  <span
+                    className="font-mono text-[10px] tracking-wide text-brand/80 bg-brand/10 rounded px-1.5 py-px mr-1.5 select-none"
+                    title={row.containerName}
+                  >
+                    {row.containerName}
+                  </span>
+                )}
+                {row.message}
+              </span>
             </div>
           ))
         )}
