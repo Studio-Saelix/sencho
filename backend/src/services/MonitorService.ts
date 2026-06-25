@@ -283,46 +283,54 @@ export class MonitorService {
         const suppressionMs = suppressionMin * 60 * 1000;
 
         // 1. Host Limits — fetch CPU, RAM, disk concurrently
-        try {
-            const [currentLoad, mem, fsSize] = await Promise.all([
-                withTimeout(si.currentLoad(), STATS_TIMEOUT_MS, 'host CPU stats'),
-                withTimeout(si.mem(), STATS_TIMEOUT_MS, 'host RAM stats'),
-                withTimeout(si.fsSize(), STATS_TIMEOUT_MS, 'host disk stats'),
-            ]);
+        if (settings['host_alerts_enabled'] !== '0') {
+            try {
+                const [currentLoad, mem, fsSize] = await Promise.all([
+                    withTimeout(si.currentLoad(), STATS_TIMEOUT_MS, 'host CPU stats'),
+                    withTimeout(si.mem(), STATS_TIMEOUT_MS, 'host RAM stats'),
+                    withTimeout(si.fsSize(), STATS_TIMEOUT_MS, 'host disk stats'),
+                ]);
 
-            const cpuUsage = currentLoad.currentLoad;
-            const cpuLimit = parseFloat(settings['host_cpu_limit']);
-            if (!isNaN(cpuLimit) && cpuLimit > 0 && cpuUsage > cpuLimit) {
-                await this.dispatchHostMetricAlert('cpu', 'warning', suppressionMs,
-                    `Host CPU utilization is critically high: ${cpuUsage.toFixed(1)}% (Threshold: ${cpuLimit}%)`);
-            } else {
-                this.clearHostMetricSuppression('cpu');
-            }
-
-            // Key off mem.active (the real working set), not mem.used: on Linux/BSD/macOS
-            // mem.used counts reclaimable page cache and reads ~99% on a busy host, which
-            // would fire spurious host-memory alerts.
-            const ramUsage = (mem.active / mem.total) * 100;
-            const ramLimit = parseFloat(settings['host_ram_limit']);
-            if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
-                await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
-                    `Host Memory utilization is critically high: ${ramUsage.toFixed(1)}% (Threshold: ${ramLimit}%)`);
-            } else {
-                this.clearHostMetricSuppression('ram');
-            }
-
-            const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
-            if (mainDisk) {
-                const diskLimit = parseFloat(settings['host_disk_limit']);
-                if (!isNaN(diskLimit) && diskLimit > 0 && mainDisk.use > diskLimit) {
-                    await this.dispatchHostMetricAlert('disk', 'warning', suppressionMs,
-                        `Host Disk space utilization is critically high: ${mainDisk.use.toFixed(1)}% (Threshold: ${diskLimit}%)`);
+                const cpuUsage = currentLoad.currentLoad;
+                const cpuLimit = parseFloat(settings['host_cpu_limit']);
+                if (!isNaN(cpuLimit) && cpuLimit > 0 && cpuUsage > cpuLimit) {
+                    await this.dispatchHostMetricAlert('cpu', 'warning', suppressionMs,
+                        `Host CPU utilization is critically high: ${cpuUsage.toFixed(1)}% (Threshold: ${cpuLimit}%)`);
                 } else {
-                    this.clearHostMetricSuppression('disk');
+                    this.clearHostMetricSuppression('cpu');
                 }
+
+                // Key off mem.active (the real working set), not mem.used: on Linux/BSD/macOS
+                // mem.used counts reclaimable page cache and reads ~99% on a busy host, which
+                // would fire spurious host-memory alerts.
+                const ramUsage = (mem.active / mem.total) * 100;
+                const ramLimit = parseFloat(settings['host_ram_limit']);
+                if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
+                    await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
+                        `Host Memory utilization is critically high: ${ramUsage.toFixed(1)}% (Threshold: ${ramLimit}%)`);
+                } else {
+                    this.clearHostMetricSuppression('ram');
+                }
+
+                const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
+                if (mainDisk) {
+                    const diskLimit = parseFloat(settings['host_disk_limit']);
+                    if (!isNaN(diskLimit) && diskLimit > 0 && mainDisk.use > diskLimit) {
+                        await this.dispatchHostMetricAlert('disk', 'warning', suppressionMs,
+                            `Host Disk space utilization is critically high: ${mainDisk.use.toFixed(1)}% (Threshold: ${diskLimit}%)`);
+                    } else {
+                        this.clearHostMetricSuppression('disk');
+                    }
+                }
+            } catch (e) {
+                console.error('Error checking host limits in watchdog', e);
             }
-        } catch (e) {
-            console.error('Error checking host limits in watchdog', e);
+        } else {
+            // Host threshold alerts are disabled: clear any stale suppression
+            // state so re-enabling starts fresh (no "Suppressed N" carryover).
+            this.clearHostMetricSuppression('cpu');
+            this.clearHostMetricSuppression('ram');
+            this.clearHostMetricSuppression('disk');
         }
 
         // 2. (Removed) Container crash + healthcheck detection moved to

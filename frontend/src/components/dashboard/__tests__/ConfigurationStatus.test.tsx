@@ -33,7 +33,7 @@ function makePayload(overrides: Partial<ConfigurationStatusPayload> = {}): Confi
       ssoProvider: null,
       scanPolicies: { total: 0, enabled: 0, locked: true },
     },
-    thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false },
+    thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false, hostAlertsEnabled: true },
     backup: { provider: 'disabled', autoUpload: false, locked: false },
     ...overrides,
   };
@@ -116,5 +116,34 @@ describe('ConfigurationStatus row visibility', () => {
     expect(screen.getByText('Cloud Backup')).toBeDefined();
     // SSO label maps the provider to a friendly name.
     expect(screen.getByText('Google')).toBeDefined();
+  });
+});
+
+describe('ConfigurationStatus threshold display', () => {
+  it('renders threshold values when hostAlertsEnabled is true', () => {
+    useConfigurationStatusMock.mockReturnValue({
+      status: makePayload({ thresholds: { cpuLimit: 80, ramLimit: 85, diskLimit: 90, dockerJanitorGb: 5, globalCrash: true, hostAlertsEnabled: true } }),
+      loading: false,
+    });
+    render(<ConfigurationStatus />);
+    expect(screen.getByText('CPU 80% · RAM 85% · Disk 90%')).toBeDefined();
+  });
+
+  it('renders OFF badge when hostAlertsEnabled is false', () => {
+    useConfigurationStatusMock.mockReturnValue({
+      status: makePayload({
+        thresholds: { cpuLimit: 80, ramLimit: 85, diskLimit: 90, dockerJanitorGb: 5, globalCrash: true, hostAlertsEnabled: false },
+      }),
+      loading: false,
+    });
+    render(<ConfigurationStatus />);
+    // StatusBadge uppercases 'Off' to 'OFF'. Since backup.provider is
+    // 'disabled' (also rendered as OFF), there are two OFF badges.
+    // Verify the Alert thresholds row specifically shows OFF.
+    const thresholdRow = screen.getByText('Alert thresholds').closest('button');
+    expect(thresholdRow).toBeDefined();
+    // The OFF badge is the span inside the row that has font-mono + uppercase.
+    const badge = thresholdRow!.querySelector('.font-mono');
+    expect(badge?.textContent?.trim()).toBe('OFF');
   });
 });

@@ -337,6 +337,57 @@ describe('env_block_deploy_on_missing_required setting', () => {
   });
 });
 
+describe('host_alerts_enabled toggle', () => {
+  it('seeds to "1" (on) in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().host_alerts_enabled).toBe('1');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.host_alerts_enabled).toBeDefined();
+  });
+
+  it('accepts a single-key POST write and persists it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'host_alerts_enabled', value: '0' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().host_alerts_enabled).toBe('0');
+    DatabaseService.getInstance().updateGlobalSetting('host_alerts_enabled', '1');
+  });
+
+  it('accepts a bulk PATCH alongside another key', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ host_alerts_enabled: '0', host_cpu_limit: 75 });
+    expect(res.status).toBe(200);
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    expect(settings.host_alerts_enabled).toBe('0');
+    expect(settings.host_cpu_limit).toBe('75');
+    DatabaseService.getInstance().updateGlobalSetting('host_alerts_enabled', '1');
+    DatabaseService.getInstance().updateGlobalSetting('host_cpu_limit', '90');
+  });
+
+  it('rejects non-enum values with 400', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'host_alerts_enabled', value: '2' });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects viewer write with 403', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'host_alerts_enabled', value: '0' });
+    expect(res.status).toBe(403);
+  });
+});
+
 describe('PATCH /api/settings (bulk update)', () => {
   it('rejects unauthenticated requests with 401', async () => {
     const res = await request(app).patch('/api/settings').send({ host_cpu_limit: 50 });

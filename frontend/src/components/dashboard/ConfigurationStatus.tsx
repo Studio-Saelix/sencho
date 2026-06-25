@@ -208,7 +208,9 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
           )}
           <Row
             label="Alert thresholds"
-            value={`CPU ${thresholds.cpuLimit}% · RAM ${thresholds.ramLimit}% · Disk ${thresholds.diskLimit}%`}
+            value={thresholds.hostAlertsEnabled === false
+                ? 'Off'
+                : `CPU ${thresholds.cpuLimit}% · RAM ${thresholds.ramLimit}% · Disk ${thresholds.diskLimit}%`}
             onClick={open('host-alerts')}
           />
           <Row
