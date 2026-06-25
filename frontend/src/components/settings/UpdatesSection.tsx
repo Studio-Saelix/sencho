@@ -223,6 +223,7 @@ export function UpdatesSection() {
                             value={uiMode}
                             onChange={handleModeChange}
                             ariaLabel="Image check scheduling mode"
+                            className="self-start"
                             options={[
                                 { value: 'interval', label: 'Interval' },
                                 { value: 'cron', label: 'Cron' },
