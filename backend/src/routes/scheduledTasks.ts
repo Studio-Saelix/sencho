@@ -1,6 +1,14 @@
 import { Router, type Request, type Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService, type ScheduledTask } from '../services/DatabaseService';
+import {
+  VALID_TARGET_TYPES,
+  VALID_ACTIONS,
+  INVALID_ACTION_MESSAGE,
+  validateActionTarget,
+  type TargetType,
+  type BackendScheduledAction,
+} from '../services/scheduledActionRegistry';
 import { SchedulerService } from '../services/SchedulerService';
 import { NotificationService } from '../services/NotificationService';
 import { requireAdmin } from '../middleware/tierGates';
@@ -24,32 +32,8 @@ function broadcastScheduledTasksChanged(): void {
   }
 }
 
-const VALID_TARGET_TYPES = ['stack', 'fleet', 'system'] as const;
-const VALID_ACTIONS = ['restart', 'snapshot', 'prune', 'update', 'scan', 'auto_backup', 'auto_stop', 'auto_down', 'auto_start'] as const;
 const VALID_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'] as const;
 const ERR_FLEET_NODE_REQUIRED = 'Fleet update requires node_id.';
-
-type TargetType = typeof VALID_TARGET_TYPES[number];
-type ScheduledAction = typeof VALID_ACTIONS[number];
-
-const STACK_ONLY_ACTIONS = new Set<ScheduledAction>(['auto_backup', 'auto_stop', 'auto_down', 'auto_start']);
-
-/**
- * Validate that the target_type is compatible with the action. Each action
- * has exactly one allowed target_type; the helper returns an error message
- * on mismatch and null otherwise.
- */
-function validateActionTarget(action: ScheduledAction, targetType: TargetType): string | null {
-  if (action === 'restart' && targetType !== 'stack') return 'Restart action requires target_type "stack".';
-  if (action === 'update' && targetType !== 'stack' && targetType !== 'fleet') return 'Update action requires target_type "stack" or "fleet".';
-  if (action === 'snapshot' && targetType !== 'fleet') return 'Snapshot action requires target_type "fleet".';
-  if (action === 'prune' && targetType !== 'system') return 'Prune action requires target_type "system".';
-  if (action === 'scan' && targetType !== 'system') return 'Scan action requires target_type "system".';
-  if (STACK_ONLY_ACTIONS.has(action) && targetType !== 'stack') {
-    return `${action} action requires target_type "stack".`;
-  }
-  return null;
-}
 
 function validateStackTarget(targetType: TargetType, targetId: unknown, nodeId: unknown): string | null {
   if (targetType !== 'stack') return null;
@@ -84,7 +68,7 @@ function validateScanNode(nodeId: unknown): string | null {
 
 /** Shared validation for prune_targets, target_services, prune_label_filter. Returns an error string or null. */
 function validateOptionalFields(
-  action: ScheduledAction,
+  action: BackendScheduledAction,
   targetType: TargetType,
   prune_targets: unknown,
   target_services: unknown,
@@ -163,7 +147,7 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       res.status(400).json({ error: 'Invalid target_type. Must be stack, fleet, or system.' }); return;
     }
     if (!(VALID_ACTIONS as readonly string[]).includes(action)) {
-      res.status(400).json({ error: 'Invalid action. Must be restart, snapshot, prune, update, scan, auto_backup, auto_stop, auto_down, or auto_start.' }); return;
+      res.status(400).json({ error: INVALID_ACTION_MESSAGE }); return;
     }
 
     const targetErr = validateActionTarget(action, target_type);
@@ -258,7 +242,7 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
       res.status(400).json({ error: 'Invalid action' }); return;
     }
 
-    const finalAction = (action ?? existing.action) as ScheduledAction;
+    const finalAction = (action ?? existing.action) as BackendScheduledAction;
     const finalTargetType = (target_type ?? existing.target_type) as TargetType;
     const finalTargetId = target_id !== undefined ? target_id : existing.target_id;
     const finalNodeId = node_id !== undefined ? node_id : existing.node_id;

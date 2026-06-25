@@ -6,6 +6,7 @@ import { isSeverityAtLeast } from '../utils/severity';
 import { evaluatePolicyRisk, policyInputs } from '../utils/policy-risk';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
+import type { BackendScheduledAction } from './scheduledActionRegistry';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -505,7 +506,7 @@ export interface ScheduledTask {
     target_type: 'stack' | 'fleet' | 'system';
     target_id: string | null;
     node_id: number | null;
-    action: 'restart' | 'snapshot' | 'prune' | 'update' | 'scan' | 'auto_backup' | 'auto_stop' | 'auto_down' | 'auto_start';
+    action: BackendScheduledAction;
     cron_expression: string;
     enabled: number;
     created_by: string;
