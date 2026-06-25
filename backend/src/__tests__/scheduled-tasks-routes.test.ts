@@ -247,6 +247,34 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.body.error).toMatch(/Scan action requires node_id/);
   });
 
+  for (const badNodeId of [true, '1.5', 0]) {
+    it(`rejects scan with malformed node_id ${JSON.stringify(badNodeId)}`, async () => {
+      const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+        name: 'bad-scan-node',
+        target_type: 'system',
+        node_id: badNodeId,
+        action: 'scan',
+        cron_expression: '0 0 * * *',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/valid node_id|node_id/);
+    });
+  }
+
+  for (const badNodeId of [true, '1.5', 0]) {
+    it(`rejects fleet update with malformed node_id ${JSON.stringify(badNodeId)}`, async () => {
+      const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+        name: 'bad-fleet-update-node',
+        target_type: 'fleet',
+        node_id: badNodeId,
+        action: 'update',
+        cron_expression: '0 0 * * *',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/valid node_id|node_id/);
+    });
+  }
+
   it('rejects scheduled scans on remote nodes', async () => {
     const remoteNodeId = DatabaseService.getInstance().addNode({
       name: 'remote-scan-node',
@@ -266,6 +294,45 @@ describe('POST /api/scheduled-tasks', () => {
     });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/local node/i);
+  });
+
+  it('rejects prune without node_id', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'cleanup', target_type: 'system', action: 'prune', cron_expression: '0 4 * * *',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Prune action requires node_id/);
+  });
+
+  it('rejects scheduled prunes on remote nodes', async () => {
+    const remoteNodeId = DatabaseService.getInstance().addNode({
+      name: 'remote-prune-node',
+      type: 'remote',
+      api_url: 'http://remote.local:1852',
+      api_token: 'token',
+      compose_dir: '/srv/compose',
+      is_default: false,
+    });
+
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'remote-prune',
+      target_type: 'system',
+      node_id: remoteNodeId,
+      action: 'prune',
+      cron_expression: '0 4 * * *',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/local node/i);
+  });
+
+  it('creates a prune task on a local node', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'local-prune', target_type: 'system', node_id: 1, action: 'prune',
+      cron_expression: '0 4 * * *', enabled: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.action).toBe('prune');
+    expect(res.body.node_id).toBe(1);
   });
 
   it('rejects target_services with wrong action', async () => {
@@ -560,6 +627,48 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
     expect(res.body.error).toMatch(/node_id/);
   });
 
+  it('rejects updates that clear node_id on a prune task', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const pruneId = db.createScheduledTask({
+      name: 'prune', target_type: 'system', target_id: null, node_id: 1, action: 'prune',
+      cron_expression: '0 4 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: null, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null,
+    });
+
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${pruneId}`)
+      .set('Cookie', adminCookie)
+      .send({ node_id: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Prune action requires node_id/);
+  });
+
+  it('rejects updates that point a prune task at a remote node', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const pruneId = db.createScheduledTask({
+      name: 'prune', target_type: 'system', target_id: null, node_id: 1, action: 'prune',
+      cron_expression: '0 4 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: null, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null,
+    });
+    const remoteNodeId = db.addNode({
+      name: 'remote-prune-update-node', type: 'remote', api_url: 'http://remote.local:1852',
+      api_token: 'token', compose_dir: '/srv/compose', is_default: false,
+    });
+
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${pruneId}`)
+      .set('Cookie', adminCookie)
+      .send({ node_id: remoteNodeId });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/local node/i);
+  });
+
   it('rejects updates that clear target_type', async () => {
     const res = await request(app)
       .put(`/api/scheduled-tasks/${taskId}`)
@@ -578,6 +687,45 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/Invalid action/);
+  });
+
+  it('clears stale stack and service fields when changing a task to a fleet snapshot', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const restartId = db.createScheduledTask({
+      name: 'restart',
+      target_type: 'stack',
+      target_id: 'web',
+      node_id: 1,
+      action: 'restart',
+      cron_expression: '0 3 * * *',
+      enabled: 1,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      last_status: null,
+      last_error: null,
+      prune_targets: null,
+      target_services: JSON.stringify(['api']),
+      prune_label_filter: null,
+      delete_after_run: 0,
+    });
+
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${restartId}`)
+      .set('Cookie', adminCookie)
+      .send({ action: 'snapshot', target_type: 'fleet' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('snapshot');
+    expect(res.body.target_type).toBe('fleet');
+    expect(res.body.target_id).toBeNull();
+    expect(res.body.node_id).toBeNull();
+    expect(res.body.target_services).toBeNull();
+    expect(res.body.prune_targets).toBeNull();
+    expect(res.body.prune_label_filter).toBeNull();
   });
 });
 
@@ -619,6 +767,16 @@ describe('PUT /api/scheduled-tasks/:id - cron validation', () => {
       .put(`/api/scheduled-tasks/${taskId}`)
       .set('Cookie', adminCookie)
       .send({ cron_expression: '   ' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/required/);
+  });
+
+  it('rejects an empty cron expression', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ cron_expression: '' });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/required/);

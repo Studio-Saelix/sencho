@@ -284,8 +284,8 @@ describe('POST /api/stacks/bulk execution', () => {
     const policySpy = vi.spyOn(policyMod, 'enforcePolicyPreDeploy').mockResolvedValue({
       ok: false,
       bypassed: false,
-      policy: { id: 1, name: 'block-criticals', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'HIGH', block_on_deploy: 1, enabled: 1, replicated_from_control: 0, created_at: Date.now(), updated_at: Date.now() },
-      violations: [{ imageRef: 'nginx:latest', severity: 'CRITICAL', criticalCount: 3, highCount: 0, scanId: 1 }],
+      policy: { id: 1, name: 'block-criticals', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'HIGH', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0, created_at: Date.now(), updated_at: Date.now() },
+      violations: [{ imageRef: 'nginx:latest', severity: 'CRITICAL', criticalCount: 3, highCount: 0, kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 1 }],
     });
     mockUpdateStack.mockResolvedValue(undefined);
     try {

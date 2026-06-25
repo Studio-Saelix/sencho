@@ -6,9 +6,13 @@ import type { Node } from '@/context/NodeContext';
 // buildMenuCtx derives canOpenApp from the active node plus the stack's
 // published port; only the fields it reads need to be real, the handler
 // closures are never invoked here.
-function makeOptions(activeNode: Node | null, stackPorts: Record<string, number | undefined>) {
+function makeOptions(
+  activeNode: Node | null,
+  stackPorts: Record<string, number | undefined>,
+  stackStatuses: Record<string, string> = { 'web.yml': 'running' },
+) {
   const stackListState = {
-    stackStatuses: { 'web.yml': 'running' },
+    stackStatuses,
     stackPorts,
     isStackBusy: () => false,
     isPinned: () => false,
@@ -60,5 +64,23 @@ describe('useSidebarContextMenu canOpenApp', () => {
     const { result } = renderHook(() =>
       useSidebarContextMenu(makeOptions({ id: 1, type: 'local' } as Node, {})));
     expect(result.current('web.yml').canOpenApp).toBe(false);
+  });
+});
+
+describe('useSidebarContextMenu stackStatus', () => {
+  it('maps a partial stack to running so it gets running-stack actions', () => {
+    const { result } = renderHook(() =>
+      useSidebarContextMenu(makeOptions({ id: 1, type: 'local' } as Node, {}, { 'web.yml': 'partial' })));
+    expect(result.current('web.yml').stackStatus).toBe('running');
+  });
+
+  it('passes exited and unknown through unchanged', () => {
+    const exited = renderHook(() =>
+      useSidebarContextMenu(makeOptions({ id: 1, type: 'local' } as Node, {}, { 'web.yml': 'exited' })));
+    expect(exited.result.current('web.yml').stackStatus).toBe('exited');
+
+    const missing = renderHook(() =>
+      useSidebarContextMenu(makeOptions({ id: 1, type: 'local' } as Node, {}, {})));
+    expect(missing.result.current('web.yml').stackStatus).toBe('unknown');
   });
 });

@@ -34,7 +34,7 @@ function makeRow(name: string, overrides: Partial<ScanPolicy> = {}): ScanPolicy 
     node_identity: '',
     stack_pattern: null,
     max_severity: 'CRITICAL',
-    block_on_deploy: 1,
+    block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
     enabled: 1,
     replicated_from_control: 1,
     created_at: 1,
@@ -130,7 +130,7 @@ describe('Fleet Sync apply flow (real DB round trip)', () => {
     // A local policy authored on this instance before it became a replica.
     db.createScanPolicy({
       name: 'local-keepme', node_id: null, node_identity: '', stack_pattern: null,
-      max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0,
+      max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0,
     });
 
     FleetSyncService.getInstance().applyIncomingSync('scan_policies', [makeRow('first-gen')], 'https://r.example', 1_000, 'fp');

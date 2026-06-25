@@ -4,6 +4,7 @@ import { Sparkline } from '@/components/ui/sparkline';
 import { ChevronLeft, ChevronRight, Layers } from 'lucide-react';
 import type { StackStatusEntry, MetricPoint, StackCpuSeries } from './types';
 import { aggregateCurrentUsage } from './aggregateCurrentUsage';
+import { classifyRow, type RowState } from './classifyRow';
 
 interface StackHealthTableProps {
   stackStatuses: Record<string, StackStatusEntry>;
@@ -14,8 +15,6 @@ interface StackHealthTableProps {
 }
 
 const PAGE_SIZE = 8;
-const WARN = 80;
-const CRIT = 90;
 // Shared by the header and data rows so their columns stay aligned. The
 // `max-md:min-w` keeps both at the same width below md, where the card scrolls
 // horizontally; desktop is unaffected by the `max-md:` prefix.
@@ -35,15 +34,6 @@ function formatUptime(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   if (minutes > 0) return `${minutes}m`;
   return `${Math.max(1, Math.floor(seconds))}s`;
-}
-
-type RowState = 'healthy' | 'warn' | 'error';
-
-function classifyRow(status: StackStatusEntry['status'], peakCpu: number): RowState {
-  if (status === 'exited') return 'error';
-  if (peakCpu >= CRIT) return 'error';
-  if (peakCpu >= WARN) return 'warn';
-  return 'healthy';
 }
 
 const stateDot: Record<RowState, string> = {

@@ -16,6 +16,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { SCHEDULED_ACTIONS } from '@/lib/scheduledActions';
 import ScheduledOperationsView from '../ScheduledOperationsView';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
@@ -50,16 +51,17 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
 }
 
 let tasksFixture: ScheduledTask[];
-let nodesFixture: { id: number; name: string }[];
+let nodesFixture: { id: number; name: string; type: 'local' | 'remote' }[];
 
 beforeEach(() => {
   tasksFixture = [];
-  nodesFixture = [{ id: 1, name: 'hub' }, { id: 2, name: 'edge' }];
+  nodesFixture = [{ id: 1, name: 'hub', type: 'local' }, { id: 2, name: 'edge', type: 'remote' }];
   mockedFetch.mockReset();
   mockedFetchForNode.mockReset();
 
   mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
     if (url === '/scheduled-tasks' && opts?.method === 'POST') return jsonResponse({ id: 99 }, { status: 201 });
+    if (/^\/scheduled-tasks\/\d+$/.test(url) && opts?.method === 'PUT') return jsonResponse({ id: Number(url.split('/').pop()) });
     if (url === '/scheduled-tasks') return jsonResponse(tasksFixture);
     if (url === '/nodes') return jsonResponse(nodesFixture);
     if (url === '/stacks') return jsonResponse([]);
@@ -151,6 +153,10 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(screen.getAllByRole('combobox')[0]);
     await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
 
+    // Prune is now node-scoped: pick the local node from its Node combobox.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => {
@@ -163,6 +169,7 @@ describe('ScheduledOperationsView', () => {
         name: 'cleanup',
         target_type: 'system',
         action: 'prune',
+        node_id: 1,
         cron_expression: '0 3 * * *',
         prune_targets: ['containers', 'images', 'networks', 'volumes'],
       });
@@ -176,9 +183,10 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
     await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'cleanup');
 
-    // Use System Prune so the form needs no stack target/node, isolating the cron check.
     await userEvent.click(screen.getAllByRole('combobox')[0]);
     await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
 
     const createButton = screen.getByRole('button', { name: 'Create' });
     expect(createButton).toBeEnabled();
@@ -193,5 +201,257 @@ describe('ScheduledOperationsView', () => {
     await userEvent.clear(cronInput);
     await userEvent.type(cronInput, '0 4 * * *');
     expect(createButton).toBeEnabled();
+  });
+
+  it('keeps Create disabled for a prune until a node is selected', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'cleanup');
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+
+    // Prune targets default to all four, but with no node the gate must hold.
+    expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+    expect(screen.getByRole('button', { name: 'Create' })).toBeEnabled();
+  });
+
+  it('excludes remote nodes from the System Prune node picker', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+
+    // Open the Node combobox; only the local node should be listed.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    expect(await screen.findByRole('button', { name: 'hub' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'edge' })).not.toBeInTheDocument();
+  });
+
+  it('excludes remote nodes from the Vulnerability Scan node picker', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Vulnerability Scan' }));
+
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    expect(await screen.findByRole('button', { name: 'hub' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'edge' })).not.toBeInTheDocument();
+  });
+
+  it('submits a vulnerability scan create with the selected local node', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'scan-local');
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Vulnerability Scan' }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      const postCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(postCall![1].body);
+      expect(body).toMatchObject({
+        name: 'scan-local',
+        target_type: 'system',
+        action: 'scan',
+        node_id: 1,
+        target_id: null,
+        prune_targets: null,
+        target_services: null,
+        prune_label_filter: null,
+      });
+      expect(postCall![1].localOnly).toBe(true);
+    });
+  });
+
+  it('shows a read-only "Entire fleet" scope for Fleet Snapshot', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Fleet Snapshot' }));
+
+    expect(await screen.findByText('Entire fleet')).toBeInTheDocument();
+  });
+
+  it('loads Restart Stack services from the selected node', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    // Default action is Restart Stack. Pick the remote node, then a stack on it.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    // The Stack combobox unlocks once a node is chosen; pick a stack to drive discovery.
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    // Service discovery must target the selected node, not the hub-local default.
+    await waitFor(() =>
+      expect(mockedFetchForNode).toHaveBeenCalledWith('/stacks/web/services', 2),
+    );
+  });
+
+  it('renders the five registry category lanes in the timeline view', async () => {
+    render(<ScheduledOperationsView />);
+    // Timeline is the default view; the lane track always renders.
+    for (const lane of ['Lifecycle', 'Updates', 'Security', 'Maintenance', 'Backups']) {
+      expect(await screen.findByText(lane)).toBeInTheDocument();
+    }
+  });
+
+  it('offers every registry action in the create picker', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+
+    for (const action of SCHEDULED_ACTIONS) {
+      expect(await screen.findByRole('button', { name: action.label })).toBeInTheDocument();
+    }
+  });
+
+  it('shows the correct conditional fields per action', async () => {
+    render(<ScheduledOperationsView />);
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+
+    // The Combobox toggles selection, so each step selects an action that
+    // differs from the current one (the modal opens on the first action,
+    // Restart Stack).
+    const selectAction = async (label: string) => {
+      await userEvent.click(screen.getAllByRole('combobox')[0]);
+      await userEvent.click(await screen.findByRole('button', { name: label }));
+    };
+
+    // Default stack action (Restart Stack): Node + Stack, no Prune Targets.
+    expect(await screen.findByText('Stack')).toBeInTheDocument();
+    expect(screen.getByText('Node')).toBeInTheDocument();
+    expect(screen.queryByText('Prune Targets')).not.toBeInTheDocument();
+
+    // Node-only action: Node shown, Stack hidden.
+    await selectAction('Auto-update All Stacks');
+    expect(screen.getByText('Node')).toBeInTheDocument();
+    expect(screen.queryByText('Stack')).not.toBeInTheDocument();
+
+    // Fleet snapshot: no Node, no Stack.
+    await selectAction('Fleet Snapshot');
+    expect(screen.queryByText('Node')).not.toBeInTheDocument();
+    expect(screen.queryByText('Stack')).not.toBeInTheDocument();
+
+    // Prune: local-only Node plus Prune Targets.
+    await selectAction('System Prune');
+    expect(screen.getByText('Prune Targets')).toBeInTheDocument();
+    expect(screen.getByText('Node')).toBeInTheDocument();
+  });
+
+  it('emits node_id and target_id for a stack update save', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'stack-update');
+
+    // Switch from the default restart to the stack update action.
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Auto-update Stack' }));
+
+    // Node selector, then the stack selector that loads once a node is chosen.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      const postCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(postCall![1].body);
+      expect(body).toMatchObject({
+        name: 'stack-update',
+        target_type: 'stack',
+        action: 'update',
+        target_id: 'web',
+        node_id: 1,
+      });
+    });
+  });
+
+  it('maps the update-fleet alias to action=update, target_type=fleet on save', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'fleet-update');
+
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Auto-update All Stacks' }));
+
+    // Node selector is the second combobox once the node-only field renders.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      const postCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(postCall![1].body);
+      expect(body).toMatchObject({
+        name: 'fleet-update',
+        target_type: 'fleet',
+        action: 'update',
+        node_id: 1,
+      });
+    });
+  });
+
+  it('clears stack-only fields when editing a restart task into a fleet snapshot', async () => {
+    tasksFixture = [makeTask({
+      id: 42,
+      name: 'restart-web',
+      target_type: 'stack',
+      target_id: 'web',
+      node_id: 1,
+      action: 'restart',
+      target_services: JSON.stringify(['web']),
+    })];
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByTitle('Edit'));
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Fleet Snapshot' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+    await waitFor(() => {
+      const putCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks/42' && opts?.method === 'PUT',
+      );
+      expect(putCall).toBeTruthy();
+      const body = JSON.parse(putCall![1].body);
+      expect(body).toMatchObject({
+        target_type: 'fleet',
+        action: 'snapshot',
+        target_id: null,
+        node_id: null,
+        target_services: null,
+        prune_targets: null,
+        prune_label_filter: null,
+      });
+    });
   });
 });

@@ -44,7 +44,7 @@ vi.mock('util', () => ({
   promisify: () => vi.fn(),
 }));
 
-import DockerController, { selectMainWebPort } from '../services/DockerController';
+import DockerController, { selectMainWebPort, parseExitCode, isContainerFailed } from '../services/DockerController';
 import { CacheService } from '../services/CacheService';
 
 beforeEach(() => {
@@ -1363,5 +1363,154 @@ describe('selectMainWebPort', () => {
 
   it('returns undefined when there are no ports', () => {
     expect(selectMainWebPort([])).toBeUndefined();
+  });
+});
+
+describe('parseExitCode', () => {
+  it('extracts the code from an exited Status string', () => {
+    expect(parseExitCode('Exited (0) 5 minutes ago')).toBe(0);
+    expect(parseExitCode('Exited (137) 2 minutes ago')).toBe(137);
+  });
+
+  it('reads the code from a restarting Status string', () => {
+    expect(parseExitCode('Restarting (1) 3 seconds ago')).toBe(1);
+  });
+
+  it('returns null when no parenthesized code is present', () => {
+    expect(parseExitCode('Up 3 hours')).toBeNull();
+    expect(parseExitCode('Up 2 hours (healthy)')).toBeNull();
+    expect(parseExitCode('Created')).toBeNull();
+    expect(parseExitCode(undefined)).toBeNull();
+  });
+});
+
+describe('isContainerFailed', () => {
+  it('treats a dead container as failed', () => {
+    expect(isContainerFailed('dead', 'Dead')).toBe(true);
+  });
+
+  it('treats a crash-looping restart as failed but a clean restart as not', () => {
+    expect(isContainerFailed('restarting', 'Restarting (1) 5 seconds ago')).toBe(true);
+    expect(isContainerFailed('restarting', 'Restarting (0) 2 seconds ago')).toBe(false);
+  });
+
+  it('treats a non-zero exit as failed and a clean exit as not failed', () => {
+    expect(isContainerFailed('exited', 'Exited (137) 2 minutes ago')).toBe(true);
+    expect(isContainerFailed('exited', 'Exited (0) 5 minutes ago')).toBe(false);
+  });
+
+  it('treats an exited container with an unreadable code as failed', () => {
+    expect(isContainerFailed('exited', 'Exited')).toBe(true);
+  });
+
+  it('does not treat running, created, or paused containers as failed', () => {
+    expect(isContainerFailed('running', 'Up 2 hours')).toBe(false);
+    expect(isContainerFailed('created', 'Created')).toBe(false);
+    expect(isContainerFailed('paused', 'Up 2 hours (Paused)')).toBe(false);
+  });
+});
+
+describe('DockerController - getBulkStackStatuses partial status', () => {
+  beforeEach(() => {
+    CacheService.getInstance().flush();
+  });
+
+  const container = (id: string, project: string, state: string, status: string) => ({
+    Id: id, Names: [`/${id}`], State: state, Status: status,
+    Image: 'nginx', Created: 1000, Labels: { 'com.docker.compose.project': project },
+  });
+
+  // Any running container triggers an inspect for uptime; stub a valid StartedAt.
+  const stubInspect = () => {
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '2026-06-09T12:00:00.000Z' } }),
+    });
+  };
+
+  it('keeps a stack UP when a one-shot container exits cleanly', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('clean-run', 'clean-stack', 'running', 'Up 2 hours'),
+      container('clean-init', 'clean-stack', 'exited', 'Exited (0) 5 minutes ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['clean-stack']);
+    expect(result['clean-stack'].status).toBe('running');
+    expect(result['clean-stack'].running).toBe(1);
+    expect(result['clean-stack'].total).toBe(2);
+  });
+
+  it('marks a stack partial when a container crashes alongside a running one', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('crash-run', 'crash-stack', 'running', 'Up 2 hours'),
+      container('crash-exit', 'crash-stack', 'exited', 'Exited (137) 1 minute ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['crash-stack']);
+    expect(result['crash-stack'].status).toBe('partial');
+    expect(result['crash-stack'].running).toBe(1);
+    expect(result['crash-stack'].total).toBe(2);
+  });
+
+  it('marks a stack partial for a dead or restart-looping container', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('d-run', 'dead-stack', 'running', 'Up 2 hours'),
+      container('d-dead', 'dead-stack', 'dead', 'Dead'),
+      container('r-run', 'restart-stack', 'running', 'Up 2 hours'),
+      container('r-loop', 'restart-stack', 'restarting', 'Restarting (1) 5 seconds ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['dead-stack', 'restart-stack']);
+    expect(result['dead-stack'].status).toBe('partial');
+    expect(result['restart-stack'].status).toBe('partial');
+  });
+
+  it('keeps a stack running when a sibling is paused rather than crashed', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('p-run', 'paused-stack', 'running', 'Up 2 hours'),
+      container('p-paused', 'paused-stack', 'paused', 'Up 2 hours (Paused)'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['paused-stack']);
+    expect(result['paused-stack'].status).toBe('running');
+    expect(result['paused-stack'].running).toBe(1);
+    expect(result['paused-stack'].total).toBe(2);
+  });
+
+  it('reports running when every container is up', async () => {
+    stubInspect();
+    mockDocker.listContainers.mockResolvedValue([
+      container('all-1', 'all-stack', 'running', 'Up 2 hours'),
+      container('all-2', 'all-stack', 'running', 'Up 1 hour'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['all-stack']);
+    expect(result['all-stack'].status).toBe('running');
+    expect(result['all-stack'].running).toBe(2);
+    expect(result['all-stack'].total).toBe(2);
+  });
+
+  it('reports exited when no container is running, even if some crashed', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      container('down-1', 'down-stack', 'exited', 'Exited (1) 3 minutes ago'),
+      container('down-2', 'down-stack', 'exited', 'Exited (0) 3 minutes ago'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['down-stack']);
+    expect(result['down-stack'].status).toBe('exited');
+    expect(result['down-stack'].running).toBe(0);
+    expect(result['down-stack'].total).toBe(2);
+  });
+
+  it('reports unknown for a stack with no containers', async () => {
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['empty-stack']);
+    expect(result['empty-stack'].status).toBe('unknown');
+    expect(result['empty-stack'].running).toBeUndefined();
+    expect(result['empty-stack'].total).toBeUndefined();
   });
 });
