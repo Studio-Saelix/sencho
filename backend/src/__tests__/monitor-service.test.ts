@@ -2,7 +2,7 @@
  * Unit tests for MonitorService — alert state machine, metric calculations,
  * cleanup delegation, global settings evaluation, and concurrency guards.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -367,6 +367,106 @@ describe('MonitorService - evaluateGlobalSettings', () => {
 
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: 'abc' });
     expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'));
+  });
+});
+
+describe('MonitorService - host_alerts_enabled toggle', () => {
+  beforeEach(() => {
+    mockGetGlobalSettings.mockReturnValue({});
+    mockDispatchAlert.mockClear();
+    mockCurrentLoad.mockClear();
+    mockMem.mockClear();
+    mockFsSize.mockClear();
+  });
+
+  afterEach(() => {
+    // Restore default mock implementations so version-check state does not
+    // leak into sibling describe blocks (F-11 suppression, version check).
+    mockGetLatestVersion.mockResolvedValue(null);
+    mockGetSenchoVersion.mockReturnValue(null);
+  });
+
+  it('skips host metrics and dispatch when disabled', async () => {
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 75 });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0', host_cpu_limit: '50' });
+
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+    expect(mockCurrentLoad).not.toHaveBeenCalled();
+    expect(mockMem).not.toHaveBeenCalled();
+    expect(mockFsSize).not.toHaveBeenCalled();
+  });
+
+  it('does not call systeminformation when disabled', async () => {
+    mockMem.mockResolvedValue(memSample(15e9)); // ~94% - would breach
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0', host_ram_limit: '80' });
+
+    expect(mockCurrentLoad).not.toHaveBeenCalled();
+    expect(mockMem).not.toHaveBeenCalled();
+    expect(mockFsSize).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('clears persisted suppression state when disabled', async () => {
+    const store: Record<string, string> = {};
+    mockGetSystemState.mockImplementation((key: string) => store[key] ?? null);
+    mockSetSystemState.mockImplementation((key: string, value: string) => { store[key] = value; });
+
+    // Simulate a prior breach that set the persisted suppression timestamp.
+    store['last_host_cpu_alert_ts'] = String(Date.now());
+    store['last_host_ram_alert_ts'] = String(Date.now());
+    store['last_host_disk_alert_ts'] = String(Date.now());
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0' });
+
+    expect(store['last_host_cpu_alert_ts']).toBe('0');
+    expect(store['last_host_ram_alert_ts']).toBe('0');
+    expect(store['last_host_disk_alert_ts']).toBe('0');
+  });
+
+  it('re-enable fires fresh without suppressed suffix', async () => {
+    const store: Record<string, string> = {};
+    mockGetSystemState.mockImplementation((key: string) => store[key] ?? null);
+    mockSetSystemState.mockImplementation((key: string, value: string) => { store[key] = value; });
+    mockMem.mockResolvedValue(memSample(15e9)); // ~94% - breaches 80% limit
+
+    const svc = MonitorService.getInstance();
+
+    // Step 1: breach while enabled — fires alert and seeds suppression state.
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Suppressed'));
+    mockDispatchAlert.mockClear();
+
+    // Step 2: disable — clears suppression state and skips dispatch.
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0', host_ram_limit: '80' });
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+    expect(store['last_host_ram_alert_ts']).toBe('0');
+
+    // Step 3: re-enable while still breaching — fires fresh, no "Suppressed" suffix.
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '1', host_ram_limit: '80' });
+    const calls = mockDispatchAlert.mock.calls.filter(
+      (c: unknown[]) => c[0] === 'warning' && c[1] === 'monitor_alert',
+    );
+    expect(calls.length).toBe(1);
+    const msg = calls[0] as string[];
+    expect(msg[2]).toContain('Memory');
+    expect(msg[2]).not.toContain('Suppressed');
+  });
+
+  it('still runs version check when disabled', async () => {
+    mockGetSenchoVersion.mockReturnValue('0.45.0');
+    mockGetLatestVersion.mockResolvedValue('0.46.0');
+
+    const svc = MonitorService.getInstance();
+    (svc as any).lastVersionCheckAt = 0;
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0' });
+
+    expect(mockGetLatestVersion).toHaveBeenCalled();
   });
 });
 

@@ -37,6 +37,7 @@ export interface ConfigurationStatus {
     diskLimit: number;
     dockerJanitorGb: number;
     globalCrash: boolean;
+    hostAlertsEnabled: boolean;
   };
   backup: {
     provider: 'disabled' | 'sencho' | 'custom';
@@ -80,6 +81,7 @@ export function buildLocalConfigurationStatus(
   const diskLimit = parseInt(settings['host_disk_limit'] ?? '90', 10);
   const dockerJanitorGb = parseFloat(settings['docker_janitor_gb'] ?? '5');
   const globalCrash = settings['global_crash'] === '1';
+  const hostAlertsEnabled = settings['host_alerts_enabled'] !== '0';
 
   const cloudSvc = CloudBackupService.getInstance();
   const cloudProvider = cloudSvc.getProvider();
@@ -140,6 +142,7 @@ export function buildLocalConfigurationStatus(
       diskLimit,
       dockerJanitorGb,
       globalCrash,
+      hostAlertsEnabled,
     },
     backup: {
       // Cloud Backup has a per-provider tier: Custom S3 is open to every

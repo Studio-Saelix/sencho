@@ -46,7 +46,7 @@ import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describeP
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
-import { resolveStackEnvSources } from '../helpers/envFileResolution';
+import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
@@ -147,20 +147,24 @@ async function requireStackExists(nodeId: number, stackName: string, res: Respon
 }
 
 // Thin wrapper over the shared env-source resolver. Returns the absolute paths of
-// the env files Compose would consult for this stack: the existing declared
-// `env_file:` paths when any are declared (no project `.env` fallback in that
-// case), otherwise the project `.env` when it exists. The multi-file Git case and
-// path validation live in resolveStackEnvSources so every consumer agrees.
+// the env files Compose would consult for this stack: existing declared `env_file:`
+// paths (injection sources) plus the project interpolation source(s). Configured
+// project env files are included as interpolation sources. The multi-file Git case
+// and path validation live in resolveStackEnvSources so every consumer agrees.
 export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
   const sources = await resolveStackEnvSources(nodeId, stackName);
-  const injection = sources.envFiles.filter(f => f.isInjectionSource);
-  if (injection.length > 0) {
-    return injection
-      .filter(f => f.existence === 'present' && f.resolvedPath)
-      .map(f => f.resolvedPath as string);
+  const present = sources.envFiles.filter(f => f.existence === 'present' && f.resolvedPath);
+  const injection = present.filter(f => f.isInjectionSource).map(f => f.resolvedPath as string);
+  const interpolation = present.filter(f => f.isInterpolationSource && !f.isInjectionSource).map(f => f.resolvedPath as string);
+  // Dedup: interpolation sources may also appear as injection sources.
+  const seen = new Set(injection);
+  for (const p of interpolation) {
+    if (!seen.has(p)) {
+      seen.add(p);
+      injection.push(p);
+    }
   }
-  const dotenv = sources.envFiles.find(f => f.isInterpolationSource && f.existence === 'present' && f.resolvedPath);
-  return dotenv ? [dotenv.resolvedPath as string] : [];
+  return injection;
 }
 
 // Uploads spool to disk (not memory) so a 25 MB upload is never held in RAM.
@@ -665,6 +669,101 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
   }
 });
 
+// Project env files: per-stack ordered list of env files that serve as the Docker
+// Compose project environment file(s) for ${VAR} interpolation. An empty array means
+// "use the default .env behavior".
+stacksRouter.get('/:stackName/project-env-files', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  try {
+    const files = DatabaseService.getInstance().getStackProjectEnvFiles(req.nodeId, stackName);
+    res.json({ envFiles: files });
+  } catch (error) {
+    console.error('[Stacks] Failed to read project env files:', error);
+    res.status(500).json({ error: 'Failed to read project env files' });
+  }
+});
+
+stacksRouter.put('/:stackName/project-env-files', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const { envFiles } = req.body as { envFiles?: unknown };
+    if (!Array.isArray(envFiles)) {
+      return res.status(400).json({ error: 'envFiles must be an array' });
+    }
+    const files = envFiles as string[];
+    const fsService = FileSystemService.getInstance(req.nodeId);
+
+    // Dedup while preserving order. Skip validation for duplicates: already
+    // confirmed on first occurrence and the file cannot change mid-handler.
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const file of files) {
+      if (typeof file !== 'string' || file.length === 0) {
+        return res.status(400).json({ error: 'Each env file must be a non-empty string' });
+      }
+      if (seen.has(file)) continue;
+      if (path.isAbsolute(file) || file.includes('..') || file.startsWith('.git')) {
+        return res.status(400).json({ error: `Invalid env file path: "${file}"` });
+      }
+      if (file.includes('/') || file.includes('\\')) {
+        return res.status(400).json({ error: `Project env files must be at the stack root: "${file}"` });
+      }
+      if (!isValidRelativeStackPath(file)) {
+        return res.status(400).json({ error: `Invalid env file path: "${file}"` });
+      }
+      // Canonical js/path-injection barrier inline with the fs sink: resolve both
+      // the compose root and the stack directory from a single canonical root so
+      // containment is unambiguous even when the compose dir is a symlink. The
+      // pattern mirrors authoredComposeArgs.ts and every FileSystemService sink.
+      const baseResolved = path.resolve(fsService.getBaseDir());
+      const stackDir = path.resolve(baseResolved, stackName);
+      if (!stackDir.startsWith(baseResolved + path.sep)) {
+        return res.status(400).json({ error: `Stack directory escapes the compose directory: "${stackName}"` });
+      }
+      const safePath = path.resolve(stackDir, file);
+      if (!safePath.startsWith(baseResolved + path.sep)) {
+        return res.status(400).json({ error: `Env file path escapes the compose directory: "${file}"` });
+      }
+      try {
+        await fsService.access(safePath);
+        const stat = await fsp.stat(safePath);
+        if (!stat.isFile()) {
+          return res.status(400).json({ error: `Not a regular file: "${file}"` });
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          return res.status(400).json({ error: `Env file not found: "${file}"` });
+        }
+        return res.status(400).json({ error: `Cannot access env file "${file}"` });
+      }
+      seen.add(file);
+      deduped.push(file);
+    }
+
+    DatabaseService.getInstance().setStackProjectEnvFiles(req.nodeId, stackName, deduped);
+    res.json({ envFiles: deduped });
+  } catch (error) {
+    console.error('[Stacks] Failed to save project env files:', error);
+    res.status(500).json({ error: 'Failed to save project env files' });
+  }
+});
+
+// Candidates for project env file selection: stack-local env-like files.
+stacksRouter.get('/:stackName/project-env-files/candidates', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  try {
+    const files = await discoverStackLocalEnvFiles(req.nodeId, stackName);
+    res.json({ envFiles: files });
+  } catch (error) {
+    console.error('[Stacks] Failed to discover project env file candidates:', error);
+    res.status(500).json({ error: 'Failed to discover project env file candidates' });
+  }
+});
+
 // Stack Dossier: operator-authored documentation persisted per (node, stack).
 // All fields default to '' so a PUT is a full-document save (an omitted field
 // clears it) and a GET for a stack with no dossier yet returns a clean blank.
@@ -947,6 +1046,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().deleteStackDriftFindings(req.nodeId, stackName);
     DatabaseService.getInstance().deleteStackExposureIntents(req.nodeId, stackName);
     DatabaseService.getInstance().deleteStackExposure(req.nodeId, stackName);
+    DatabaseService.getInstance().deleteStackProjectEnvFiles(req.nodeId, stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
   } catch (dbErr) {
     console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);

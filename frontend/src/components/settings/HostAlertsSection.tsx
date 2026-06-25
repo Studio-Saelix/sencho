@@ -30,9 +30,10 @@ function SectionSkeleton() {
     );
 }
 
-type HostAlertFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'global_crash' | 'health_gate_enabled' | 'health_gate_window_seconds' | 'env_block_deploy_on_missing_required'>;
+type HostAlertFields = Pick<PatchableSettings, 'host_alerts_enabled' | 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'global_crash' | 'health_gate_enabled' | 'health_gate_window_seconds' | 'env_block_deploy_on_missing_required'>;
 
 const DEFAULT_HOST_ALERTS: HostAlertFields = {
+    host_alerts_enabled: DEFAULT_SETTINGS.host_alerts_enabled,
     host_cpu_limit: DEFAULT_SETTINGS.host_cpu_limit,
     host_ram_limit: DEFAULT_SETTINGS.host_ram_limit,
     host_disk_limit: DEFAULT_SETTINGS.host_disk_limit,
@@ -74,6 +75,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                 const nodeRes = await apiFetch('/settings');
                 const nodeData: Record<string, string> = nodeRes.ok ? await nodeRes.json() : {};
                 const safe: HostAlertFields = {
+                    host_alerts_enabled: (nodeData.host_alerts_enabled as '0' | '1') ?? DEFAULT_SETTINGS.host_alerts_enabled,
                     host_cpu_limit: nodeData.host_cpu_limit ?? DEFAULT_SETTINGS.host_cpu_limit,
                     host_ram_limit: nodeData.host_ram_limit ?? DEFAULT_SETTINGS.host_ram_limit,
                     host_disk_limit: nodeData.host_disk_limit ?? DEFAULT_SETTINGS.host_disk_limit,
@@ -112,7 +114,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                 return;
             }
             markSaved(submitted);
-            toast.success('Host alerts saved.');
+            toast.success('Host alert settings saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
         } finally {
@@ -126,6 +128,15 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Host thresholds">
                 <SettingsField
+                    label="Host threshold alerts"
+                    helper="Master switch for CPU, RAM, and disk threshold alerts only. When OFF, no host threshold checks run and the controls below are inactive. Crash capture, stack alert rules, and health gate checks are unaffected."
+                >
+                    <TogglePill
+                        checked={settings.host_alerts_enabled === '1'}
+                        onChange={(next) => onSettingChange('host_alerts_enabled', next ? '1' : '0')}
+                    />
+                </SettingsField>
+                <SettingsField
                     label="CPU limit"
                     helper="Alerts fire when host CPU utilization exceeds this percentage."
                 >
@@ -136,6 +147,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         min={1}
                         max={100}
                         warnOver={95}
+                        disabled={settings.host_alerts_enabled !== '1'}
                     />
                 </SettingsField>
                 <SettingsField
@@ -149,6 +161,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         min={1}
                         max={100}
                         warnOver={95}
+                        disabled={settings.host_alerts_enabled !== '1'}
                     />
                 </SettingsField>
                 <SettingsField
@@ -162,6 +175,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         min={1}
                         max={100}
                         warnOver={95}
+                        disabled={settings.host_alerts_enabled !== '1'}
                     />
                 </SettingsField>
                 <SettingsField
@@ -174,6 +188,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         suffix="min"
                         min={1}
                         max={1440}
+                        disabled={settings.host_alerts_enabled !== '1'}
                     />
                 </SettingsField>
             </SettingsSection>

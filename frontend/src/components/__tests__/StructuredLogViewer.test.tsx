@@ -1,12 +1,14 @@
 /**
- * Unit tests for StructuredLogViewer's log-row lifecycle, specifically that
- * switching stacks clears the old stack's committed rows, closes the old
- * WebSocket, resets auto-follow, and preserves the level filter.
+ * Unit tests for StructuredLogViewer's log-row lifecycle (stack switching,
+ * row clearing, auto-follow reset, level filter), container name chip
+ * rendering, and chip color mode (unified / per-service).
  */
 import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import StructuredLogViewer from '../StructuredLogViewer';
+import { LOG_CHIP_COLOR_KEY } from '@/hooks/use-log-chip-color-mode';
+import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 
 class MockWS {
   static instances: MockWS[] = [];
@@ -30,6 +32,7 @@ beforeEach(() => {
     return 0;
   });
   localStorage.setItem('sencho-active-node', '');
+  localStorage.removeItem(LOG_CHIP_COLOR_KEY);
 });
 
 afterEach(() => {
@@ -177,5 +180,158 @@ describe('StructuredLogViewer', () => {
     rerender(<StructuredLogViewer stackName="another-stack.yaml" />);
     expect(MockWS.instances[1].url).toContain('/api/stacks/another-stack/logs');
     expect(MockWS.instances[1].url).not.toContain('.yaml');
+  });
+
+  // ── Container name chip ────────────────────────────────────────────
+
+  it('renders a container name chip when the WebSocket message includes a prefix', async () => {
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z connected\n' });
+    });
+
+    expect(container.textContent).toContain('redis');
+    expect(container.textContent).toContain('connected');
+  });
+
+  it('does not render a container name chip for old-format lines with no prefix', async () => {
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: '2025-01-01T12:00:00Z plain message\n' });
+    });
+
+    expect(container.textContent).toContain('plain message');
+    expect(container.querySelector('.select-none')).toBeNull();
+  });
+
+  it('renders a dotted container name correctly', async () => {
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'api.v1 | 2025-01-01T12:00:00Z ready\n' });
+    });
+
+    expect(container.textContent).toContain('api.v1');
+    expect(container.textContent).toContain('ready');
+  });
+
+  it('handles pipe in message body without false prefix extraction', async () => {
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z value | other\n' });
+    });
+
+    expect(container.textContent).toContain('redis');
+    expect(container.textContent).toContain('value');
+    expect(container.textContent).toContain('other');
+  });
+
+  // ── Download ────────────────────────────────────────────────────────
+
+  it('includes container name in downloaded logs', async () => {
+    let capturedBlob: Blob | null = null;
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn((blob: Blob) => {
+        capturedBlob = blob;
+        return 'blob:fake';
+      }),
+      revokeObjectURL: vi.fn(),
+    });
+
+    render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z connected\n' });
+    });
+
+    const downloadBtn = screen.getByLabelText('Download logs');
+    await userEvent.click(downloadBtn);
+
+    expect(capturedBlob).not.toBeNull();
+    const text = await capturedBlob!.text();
+    expect(text).toContain('[redis]');
+    expect(text).toContain('connected');
+  });
+
+  it('omits [container] prefix in download for rows without containerName', async () => {
+    let capturedBlob: Blob | null = null;
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn((blob: Blob) => {
+        capturedBlob = blob;
+        return 'blob:fake';
+      }),
+      revokeObjectURL: vi.fn(),
+    });
+
+    render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: '2025-01-01T12:00:00Z legacy line\n' });
+    });
+
+    const downloadBtn = screen.getByLabelText('Download logs');
+    await userEvent.click(downloadBtn);
+
+    expect(capturedBlob).not.toBeNull();
+    const text = await capturedBlob!.text();
+    expect(text).not.toContain('[null]');
+    expect(text).not.toContain('[');
+    expect(text).toContain('legacy line');
+  });
+
+  // ── Chip color mode ──────────────────────────────────────────────────
+
+  it('in unified mode (default), chip has brand classes and no inline style', async () => {
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z connected\n' });
+    });
+
+    const chip = container.querySelector('.select-none') as HTMLElement;
+    expect(chip).not.toBeNull();
+    expect(chip.className).toContain('text-brand/80');
+    expect(chip.className).toContain('bg-brand/10');
+    expect(chip.getAttribute('style')).toBeNull();
+  });
+
+  it('in per-service mode, chip has inline label-token style', async () => {
+    localStorage.setItem(LOG_CHIP_COLOR_KEY, 'per-service');
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z connected\n' });
+    });
+
+    const chip = container.querySelector('.select-none') as HTMLElement;
+    expect(chip).not.toBeNull();
+    const style = chip.getAttribute('style') ?? '';
+    expect(style).toContain('--label-');
+    expect(style).toContain('-bg');
+  });
+
+  it('updates chip style when setting changes from unified to per-service', async () => {
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z connected\n' });
+    });
+
+    const chip = container.querySelector('.select-none') as HTMLElement;
+    expect(chip.getAttribute('style')).toBeNull();
+
+    localStorage.setItem(LOG_CHIP_COLOR_KEY, 'per-service');
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+    });
+
+    const styleAfter = chip.getAttribute('style') ?? '';
+    expect(styleAfter).toContain('--label-');
+    expect(styleAfter).toContain('-bg');
   });
 });

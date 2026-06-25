@@ -515,7 +515,7 @@ export function EditorView(props: EditorViewProps) {
                                     {activeTab === 'env' && (
                                         <div className="bg-brand/8 border-b border-brand/20 px-4 py-2 flex items-center gap-2 text-xs text-brand">
                                             <span>
-                                                Variables defined here are automatically available for substitution in your compose.yaml (e.g., <code className="bg-background px-1 rounded text-[10px]">${'{}'}VAR</code>). To pass them directly into your container, you must add <code className="bg-background px-1 rounded text-[10px]">env_file: - .env</code> to your service definition.
+                                                Variables defined in the project environment file are available for substitution in your compose.yaml (e.g., <code className="bg-background px-1 rounded text-[10px]">${'{}'}VAR</code>). To pass them directly into your container, add <code className="bg-background px-1 rounded text-[10px]">env_file: - .env</code> to your service definition.
                                             </span>
                                         </div>
                                     )}
@@ -524,7 +524,7 @@ export function EditorView(props: EditorViewProps) {
                                             <Suspense fallback={<div className="w-full h-full" aria-busy="true" />}>
                                                 <Editor
                                                     height="100%"
-                                                    language={activeTab === 'compose' ? 'yaml' : 'plaintext'}
+                                                    language={activeTab === 'compose' ? 'yaml' : 'ini'}
                                                     theme={isDarkMode ? 'vs-dark' : 'vs'}
                                                     value={activeTab === 'compose' ? safeContent : safeEnvContent}
                                                     onMount={(editor) => { monacoEditorRef.current = editor; }}

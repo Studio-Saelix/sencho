@@ -288,6 +288,8 @@ Each metric (CPU, RAM, disk) carries its own suppression window. The first time 
 
 The suppression window defaults to 60 minutes and is configured per node in **Settings → Monitoring → Host Alerts → Alert suppression**.
 
+The entire host threshold evaluation can be silenced per node from **Settings · Monitoring · Host Alerts · Host threshold alerts** while keeping the configured limit values. This toggle affects only the CPU, RAM, and disk threshold checks; crash capture, stack alert rules, and health gate checks all continue to run independently.
+
 ### Docker janitor
 
 `info`/`system`: `Node "<name>" has accumulated <N> GB of unused Docker data. Consider using the Janitor tool.` 24-hour cooldown.

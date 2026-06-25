@@ -27,6 +27,7 @@ export const CAPABILITIES = [
   'update-guard',
   'compose-networking',
   'env-inventory',
+  'project-env-files',
   'compose-storage',
 ] as const;
 

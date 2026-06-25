@@ -28,8 +28,9 @@ export interface Anatomy {
 }
 
 // Matches ${VAR}, ${VAR:-default}, ${VAR-default}, ${VAR:?err}, ${VAR?err}.
+// The leading (?<!\$) skips Compose's `$${VAR}` escape (a literal, not a ref).
 // Capture group 1 is the variable name, group 2 (optional) is the modifier form.
-const INTERPOLATION_REGEX = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?])[^}]*)?\}/g;
+const INTERPOLATION_REGEX = /(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?])[^}]*)?\}/g;
 
 function parsePortMapping(raw: unknown): PortRow | null {
   if (typeof raw === 'string') {
