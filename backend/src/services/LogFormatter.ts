@@ -26,30 +26,39 @@ export class LogFormatter {
         let processedLine = line;
         let formatAccumulator = '';
 
-        // 1. Process prefix and timestamp tokens in arrival order.
-        // Each regex is anchored at ^ and strips its match from the
-        // remainder, so looping until neither matches naturally handles
-        // both "redis | 2024-...Z message" and "2024-...Z redis | message".
+        // 1. Process at most one container-name prefix and one Docker
+        // timestamp in arrival order. Each regex is anchored at ^ and
+        // strips its match from the remainder. The prefixFound /
+        // timestampFound guards prevent false matches on legitimate
+        // log bodies that happen to contain "word | " later in the line.
         let changed = true;
+        let prefixFound = false;
+        let timestampFound = false;
         while (changed) {
             changed = false;
 
-            const prefixMatch = processedLine.match(LogFormatter.PREFIX_REGEX);
-            if (prefixMatch) {
-                const pfxMatchStr = prefixMatch[0]; // e.g. "redis | "
-                const name = prefixMatch[1];
-                const restOfPrefix = pfxMatchStr.slice(name.length); // e.g. " | "
-                formatAccumulator += `${LogFormatter.CYAN}${name}${LogFormatter.WHITE}${LogFormatter.RESET}${restOfPrefix}`;
-                processedLine = processedLine.slice(pfxMatchStr.length);
-                changed = true;
+            if (!prefixFound) {
+                const prefixMatch = processedLine.match(LogFormatter.PREFIX_REGEX);
+                if (prefixMatch) {
+                    const pfxMatchStr = prefixMatch[0]; // e.g. "redis | "
+                    const name = prefixMatch[1];
+                    const restOfPrefix = pfxMatchStr.slice(name.length); // e.g. " | "
+                    formatAccumulator += `${LogFormatter.CYAN}${name}${LogFormatter.WHITE}${LogFormatter.RESET}${restOfPrefix}`;
+                    processedLine = processedLine.slice(pfxMatchStr.length);
+                    changed = true;
+                    prefixFound = true;
+                }
             }
 
-            const tsMatch = processedLine.match(LogFormatter.TIMESTAMP_REGEX);
-            if (tsMatch) {
-                const ts = tsMatch[1];
-                formatAccumulator += `${LogFormatter.GRAY}${ts}${LogFormatter.RESET}`;
-                processedLine = processedLine.slice(ts.length);
-                changed = true;
+            if (!timestampFound) {
+                const tsMatch = processedLine.match(LogFormatter.TIMESTAMP_REGEX);
+                if (tsMatch) {
+                    const ts = tsMatch[1];
+                    formatAccumulator += `${LogFormatter.GRAY}${ts}${LogFormatter.RESET}`;
+                    processedLine = processedLine.slice(ts.length);
+                    changed = true;
+                    timestampFound = true;
+                }
             }
         }
 

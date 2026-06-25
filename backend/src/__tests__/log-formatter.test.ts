@@ -55,4 +55,13 @@ describe('LogFormatter.process', () => {
     const result = LogFormatter.process('just a plain message');
     expect(result).toBe('just a plain message');
   });
+
+  it('does not colorize a second "word | " in the message body as a prefix', () => {
+    const result = LogFormatter.process('redis | 2024-01-01T00:00:00Z api | started');
+    // The first "redis | " is the genuine container prefix.
+    expect(result).toContain(`${CYAN}redis${WHITE}${RESET} | `);
+    // The "api | " in the body must not be colorized as a second prefix.
+    const afterPrefix = result.split(' | ').slice(1).join(' | ');
+    expect(afterPrefix).not.toContain(CYAN);
+  });
 });
