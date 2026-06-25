@@ -26,6 +26,7 @@ const SAFE_SETTING_KEYS = [
     'host_cpu_limit',
     'host_ram_limit',
     'host_disk_limit',
+    'host_alerts_enabled',
     'host_alert_suppression_mins',
     'docker_janitor_gb',
     'global_crash',

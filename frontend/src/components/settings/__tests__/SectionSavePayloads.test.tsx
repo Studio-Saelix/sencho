@@ -35,6 +35,7 @@ const FULL_SETTINGS: Record<string, string> = {
     host_ram_limit: '90',
     host_disk_limit: '90',
     host_alert_suppression_mins: '60',
+    host_alerts_enabled: '1',
     global_crash: '1',
     docker_janitor_gb: '5',
     prune_on_update: '1',
@@ -63,7 +64,7 @@ describe('split section save payloads', () => {
     it('HostAlertsSection patches only host alert and health gate keys', async () => {
         render(<HostAlertsSection />);
         const save = await screen.findByRole('button', { name: /save alerts/i });
-        fireEvent.click(screen.getAllByRole('switch')[0]); // global_crash
+        fireEvent.click(screen.getAllByRole('switch')[1]); // global_crash (index 0 is host_alerts_enabled)
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
         expect(patchedKeys()).toEqual([
@@ -72,6 +73,7 @@ describe('split section save payloads', () => {
             'health_gate_enabled',
             'health_gate_window_seconds',
             'host_alert_suppression_mins',
+            'host_alerts_enabled',
             'host_cpu_limit',
             'host_disk_limit',
             'host_ram_limit',
