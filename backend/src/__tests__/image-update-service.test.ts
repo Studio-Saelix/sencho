@@ -988,3 +988,111 @@ services:
     expect(checkedImages).not.toContain('someapp:v2');
   });
 });
+
+describe('ImageUpdateService cron scheduling', () => {
+  beforeEach(() => {
+    (ImageUpdateService as any).instance = undefined;
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
+  });
+
+  it('getStatus returns mode and cronExpression fields', () => {
+    const service = ImageUpdateService.getInstance();
+    // Before start/configureFromSettings, defaults apply.
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('interval');
+    expect(status.cronExpression).toBeNull();
+  });
+
+  it('configureFromSettings sets cron mode with valid expression', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '0 3 * * 1',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('cron');
+    expect(status.cronExpression).toBe('0 3 * * 1');
+  });
+
+  it('configureFromSettings falls back to interval on invalid cron', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: 'not a cron expression',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('interval');
+    expect(status.cronExpression).toBeNull();
+  });
+
+  it('configureFromSettings falls back to interval when cron mode has empty expression', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('interval');
+    expect(status.cronExpression).toBeNull();
+  });
+
+  it('configureFromSettings accepts cron nicknames like @daily', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '@daily',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('cron');
+    expect(status.cronExpression).toBe('@daily');
+  });
+
+  it('nextDelayMs computes a positive delay for a valid cron expression', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '0 3 * * 1',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    // nextDelayMs is private; access it to verify it does not throw and returns
+    // a positive number (next Monday at 03:00 is in the future).
+    const delay = (service as any).nextDelayMs();
+    expect(typeof delay).toBe('number');
+    expect(delay).toBeGreaterThan(0);
+  });
+
+  it('nextDelayMs falls back to interval on runtime parse failure', () => {
+    // Set up cron mode, then corrupt the expression at runtime before nextDelayMs.
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '0 3 * * 1',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    // Corrupt the expression directly on the private field.
+    (service as any).cronExpression = '0 0 31 2 *'; // Feb 31 — invalid
+    const delay = (service as any).nextDelayMs();
+    // Should fall back to interval mode after the parse error.
+    expect(service.getStatus().mode).toBe('interval');
+    expect(typeof delay).toBe('number');
+    expect(delay).toBeGreaterThan(0);
+  });
+});

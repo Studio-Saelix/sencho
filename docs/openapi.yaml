@@ -516,6 +516,35 @@ components:
           type: ["integer", "null"]
           description: Unix timestamp of the last check.
 
+    ImageUpdateCheckStatus:
+      type: object
+      properties:
+        checking:
+          type: boolean
+          description: "`true` if a scan is currently running."
+        intervalMinutes:
+          type: integer
+          description: Configured fallback interval in minutes (15-1440).
+        lastCheckedAt:
+          type: ["integer", "null"]
+          description: Unix epoch-ms of the last check start, or null if never checked.
+        nextCheckAt:
+          type: ["integer", "null"]
+          description: Unix epoch-ms of the next scheduled check, or null when not scheduled.
+        manualCooldownMinutes:
+          type: integer
+          description: Fixed cooldown ceiling in minutes for manual refresh.
+        manualCooldownRemainingMs:
+          type: integer
+          description: Live remaining cooldown in milliseconds (0 when refresh is allowed).
+        mode:
+          type: string
+          enum: [interval, cron]
+          description: Active scheduling mode.
+        cronExpression:
+          type: ["string", "null"]
+          description: 5-field cron expression when mode is 'cron', null otherwise.
+
   responses:
     Unauthorized:
       description: Authentication required. Provide a valid Bearer token.
@@ -3118,19 +3147,54 @@ paths:
     get:
       operationId: getImageUpdateCheckStatus
       tags: [Image Updates]
-      summary: Check if update scan is running
-      description: Returns whether an image update check is currently in progress.
+      summary: Get scanner cadence status
+      description: Returns the scanner's current status including scheduling mode and next check time.
       responses:
         "200":
-          description: Check status.
+          description: Scanner status.
           content:
             application/json:
               schema:
-                type: object
-                required: [checking]
-                properties:
-                  checking:
-                    type: boolean
-                    description: "`true` if a scan is currently running."
+                $ref: "#/components/schemas/ImageUpdateCheckStatus"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /api/image-updates/interval:
+    put:
+      operationId: setImageUpdateCheckSchedule
+      tags: [Image Updates]
+      summary: Set the detection schedule
+      description: Configure the image-update check cadence. In interval mode only `minutes` is required. In cron mode also send `mode` and `cron`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [minutes]
+              properties:
+                minutes:
+                  type: integer
+                  minimum: 15
+                  maximum: 1440
+                  description: Fallback interval in minutes (used in interval mode, or as fallback when cron is unset).
+                mode:
+                  type: string
+                  enum: [interval, cron]
+                  description: Scheduling mode. Omit to leave unchanged.
+                cron:
+                  type: string
+                  description: 5-field cron expression (required when mode is 'cron'). Nicknames like @daily are accepted.
+      responses:
+        "200":
+          description: Schedule updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageUpdateCheckStatus"
+        "400":
+          $ref: "#/components/responses/Forbidden"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Non-admin users cannot change the schedule.
