@@ -111,7 +111,7 @@ vi.mock('../services/FileSystemService', () => ({
 }));
 
 vi.mock('../services/LogFormatter', () => ({
-  LogFormatter: { formatLine: (line: string) => line },
+  LogFormatter: { process: (line: string) => line },
 }));
 
 // runCommand and the deploy/update paths route through authoredComposeArgs, which
@@ -1054,5 +1054,131 @@ describe('ComposeService - idle-output stall backstop', () => {
     expect(error).not.toBeNull();
     expect(error!.message).toContain('STACK_STALLED_OUTPUT');
     expect(getComposeRollbackInfo(error)).toMatchObject({ attempted: true });
+  });
+});
+
+// ── streamLogs ─────────────────────────────────────────────────────────
+
+describe('ComposeService - streamLogs', () => {
+  it('emits a normalized container name prefix for each container', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-redis-1'], State: 'running', Id: 'abc123' },
+      { Names: ['/mystack-api-1'], State: 'running', Id: 'def456' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc1 = createMockProcess();
+    const proc2 = createMockProcess();
+    mockSpawn
+      .mockReturnValueOnce(proc1)
+      .mockReturnValueOnce(proc2);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(2));
+
+    // Emit stdout from each container.
+    proc1.stdout.emit('data', Buffer.from('2024-01-01T00:00:00Z redis log line\n'));
+    proc2.stdout.emit('data', Buffer.from('2024-01-01T00:00:01Z api response\n'));
+
+    const calls = (ws.send as ReturnType<typeof vi.fn>).mock.calls as string[][];
+    const sentLines = calls.flatMap(c => c[0].split('\r\n')).filter(Boolean);
+
+    expect(sentLines).toContain('redis | 2024-01-01T00:00:00Z redis log line');
+    expect(sentLines).toContain('api | 2024-01-01T00:00:01Z api response');
+  });
+
+  it('prefixes flushBuffer trailing line on child close', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-web-1'], State: 'running', Id: 'ghi789' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    // Emit a line without a trailing newline, then close.
+    proc.stdout.emit('data', Buffer.from('trailing content'));
+    proc.emit('close', 0);
+
+    const calls = (ws.send as ReturnType<typeof vi.fn>).mock.calls as string[][];
+    const sentLines = calls.flatMap(c => c[0].split('\r\n')).filter(Boolean);
+
+    expect(sentLines).toContain('web | trailing content');
+  });
+
+  it('joins chunk-split lines and prefixes once', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-db-1'], State: 'running', Id: 'jkl012' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    // Split a single line across two data events.
+    proc.stdout.emit('data', Buffer.from('2024-01-01T00:00:00Z partial '));
+    proc.stdout.emit('data', Buffer.from('end of line\n'));
+
+    const calls = (ws.send as ReturnType<typeof vi.fn>).mock.calls as string[][];
+    const sentLines = calls.flatMap(c => c[0].split('\r\n')).filter(Boolean);
+
+    expect(sentLines).toContain('db | 2024-01-01T00:00:00Z partial end of line');
+  });
+
+  it('normalizes dotted container names', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-api.v1-1'], State: 'running', Id: 'mno345' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    proc.stdout.emit('data', Buffer.from('2024-01-01T00:00:00Z started\n'));
+
+    const calls = (ws.send as ReturnType<typeof vi.fn>).mock.calls as string[][];
+    const sentLines = calls.flatMap(c => c[0].split('\r\n')).filter(Boolean);
+
+    // normalizeContainerName strips stack prefix and -1 replica suffix, leaving 'api.v1'.
+    expect(sentLines).toContain('api.v1 | 2024-01-01T00:00:00Z started');
+  });
+
+  it('passes raw container name to docker logs, not normalized name', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-redis-1'], State: 'running', Id: 'pqr678' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    // Verify that docker logs uses the raw name, not the normalized one.
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['logs', '-f', '-t', '--tail', '100', 'mystack-redis-1'],
+      expect.anything(),
+    );
   });
 });

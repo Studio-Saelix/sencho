@@ -1,48 +1,34 @@
-const HUE_VARS = [
-    'teal', 'blue', 'purple', 'rose', 'amber',
-    'green', 'orange', 'pink', 'cyan', 'slate',
-] as const;
+	import { hashLabel } from '@/lib/label-colors';
 
-type Hue = typeof HUE_VARS[number];
+	interface NodeLabelPillProps {
+	    label: string;
+	    onRemove?: () => void;
+	    size?: 'sm' | 'md';
+	}
 
-function hashLabel(label: string): Hue {
-    let h = 0;
-    for (let i = 0; i < label.length; i += 1) {
-        h = (h * 31 + label.charCodeAt(i)) | 0;
-    }
-    return HUE_VARS[Math.abs(h) % HUE_VARS.length];
-}
-
-interface NodeLabelPillProps {
-    label: string;
-    onRemove?: () => void;
-    size?: 'sm' | 'md';
-}
-
-export function NodeLabelPill({ label, onRemove, size = 'md' }: NodeLabelPillProps) {
-    const hue = hashLabel(label);
-    const sizeClasses = size === 'sm' ? 'text-[10px] px-1.5 py-0' : 'text-[11px] px-2 py-0.5';
-    return (
-        <span
-            className={`inline-flex items-center gap-1 rounded-md border font-mono ${sizeClasses}`}
-            style={{
-                backgroundColor: `var(--label-${hue}-bg)`,
-                color: `var(--label-${hue})`,
-                borderColor: `color-mix(in oklch, var(--label-${hue}) 30%, transparent)`,
-            }}
-        >
-            {label}
-            {onRemove && (
-                <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); onRemove(); }}
-                    className="opacity-60 hover:opacity-100 ml-0.5 cursor-pointer"
-                    aria-label={`Remove ${label}`}
-                >
-                    ×
-                </button>
-            )}
-        </span>
-    );
-}
-
+	export function NodeLabelPill({ label, onRemove, size = 'md' }: NodeLabelPillProps) {
+	    const hue = hashLabel(label);
+	    const sizeClasses = size === 'sm' ? 'text-[10px] px-1.5 py-0' : 'text-[11px] px-2 py-0.5';
+	    return (
+	        <span
+	            className={`inline-flex items-center gap-1 rounded-md border font-mono ${sizeClasses}`}
+	            style={{
+	                backgroundColor: `var(--label-${hue}-bg)`,
+	                color: `var(--label-${hue})`,
+	                borderColor: `color-mix(in oklch, var(--label-${hue}) 30%, transparent)`,
+	            }}
+	        >
+	            {label}
+	            {onRemove && (
+	                <button
+	                    type="button"
+	                    onClick={(e) => { e.stopPropagation(); onRemove(); }}
+	                    className="opacity-60 hover:opacity-100 ml-0.5 cursor-pointer"
+	                    aria-label={`Remove ${label}`}
+	                >
+	                    ×
+	                </button>
+	            )}
+	        </span>
+	    );
+	}
