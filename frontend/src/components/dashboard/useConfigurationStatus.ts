@@ -37,6 +37,7 @@ export interface ConfigurationStatus {
     diskLimit: number;
     dockerJanitorGb: number;
     globalCrash: boolean;
+    hostAlertsEnabled: boolean;
   };
   backup: {
     provider: 'disabled' | 'sencho' | 'custom';

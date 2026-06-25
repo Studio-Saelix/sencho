@@ -45,6 +45,7 @@ const FULL_SETTINGS: Record<string, string> = {
     host_ram_limit: '90',
     host_disk_limit: '90',
     host_alert_suppression_mins: '60',
+    host_alerts_enabled: '1',
     global_crash: '1',
     docker_janitor_gb: '5',
     prune_on_update: '1',
@@ -84,7 +85,7 @@ describe('settings dirty reconcile on save', () => {
         const save = await screen.findByRole('button', { name: /save alerts/i });
 
         // Edit: section becomes dirty.
-        fireEvent.click(screen.getAllByRole('switch')[0]); // global_crash
+        fireEvent.click(screen.getAllByRole('switch')[1]); // global_crash (index 0 is host_alerts_enabled)
         await waitFor(() => expect(lastDirty(onDirty)).toBe(true));
         expect(masthead.last?.[0]).toMatchObject({ label: 'EDITED', value: '1 pending', tone: 'warn' });
         expect(save).not.toBeDisabled();
@@ -108,7 +109,7 @@ describe('settings dirty reconcile on save', () => {
         render(<HostAlertsSection onDirtyChange={onDirty} />);
         const save = await screen.findByRole('button', { name: /save alerts/i });
 
-        fireEvent.click(screen.getAllByRole('switch')[0]);
+        fireEvent.click(screen.getAllByRole('switch')[1]); // (index 0 is host_alerts_enabled)
         await waitFor(() => expect(lastDirty(onDirty)).toBe(true));
 
         fireEvent.click(save);
@@ -133,13 +134,13 @@ describe('settings dirty reconcile on save', () => {
         const save = await screen.findByRole('button', { name: /save alerts/i });
 
         // Change field A and submit (PATCH now pending).
-        fireEvent.click(screen.getAllByRole('switch')[0]); // global_crash
+        fireEvent.click(screen.getAllByRole('switch')[1]); // global_crash (index 0 is host_alerts_enabled)
         await waitFor(() => expect(lastDirty(onDirty)).toBe(true));
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
 
         // Change field B while the save is still in flight (fieldset stays editable).
-        const healthGate = screen.getAllByRole('switch')[1]; // health_gate_enabled
+        const healthGate = screen.getAllByRole('switch')[2]; // health_gate_enabled (0=host_alerts, 1=global_crash)
         const healthBefore = healthGate.getAttribute('aria-checked');
         fireEvent.click(healthGate);
         expect(healthGate.getAttribute('aria-checked')).not.toBe(healthBefore);
@@ -169,7 +170,7 @@ describe('every migrated section clears its dirty flag on save', () => {
             name: 'HostAlertsSection',
             render: onDirty => render(<HostAlertsSection onDirtyChange={onDirty} />),
             saveName: /save alerts/i,
-            edit: () => fireEvent.click(screen.getAllByRole('switch')[0]),
+            edit: () => fireEvent.click(screen.getAllByRole('switch')[1]), // global_crash (0=host_alerts_enabled)
         },
         {
             name: 'DockerStorageSection',

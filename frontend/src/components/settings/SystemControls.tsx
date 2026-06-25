@@ -9,9 +9,10 @@ interface NumberChipProps {
     max?: number;
     step?: number;
     warnOver?: number;
+    disabled?: boolean;
 }
 
-export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOver }: NumberChipProps) {
+export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOver, disabled }: NumberChipProps) {
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState(value);
     const inputRef = useRef<HTMLInputElement | null>(null);
@@ -20,7 +21,14 @@ export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOv
         if (editing) inputRef.current?.select();
     }, [editing]);
 
+    // When the chip is externally disabled (e.g. master toggle OFF), force
+    // exit from edit mode so the greyed-out button state is shown consistently.
+    useEffect(() => {
+        if (disabled) setEditing(false);
+    }, [disabled]);
+
     const startEdit = () => {
+        if (disabled) return;
         setDraft(value);
         setEditing(true);
     };
@@ -64,6 +72,7 @@ export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOv
                         if (e.key === 'Escape') setEditing(false);
                     }}
                     className="w-12 bg-transparent text-right outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    disabled={disabled}
                 />
                 <span className="text-stat-subtitle">{suffix}</span>
             </span>
@@ -75,6 +84,7 @@ export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOv
             type="button"
             className={cn(chipClass, 'focus-visible:ring-2 focus-visible:ring-brand/50 focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed')}
             onClick={startEdit}
+            disabled={disabled}
         >
             <span>{value || '0'}</span>
             <span className="text-stat-subtitle">{suffix}</span>

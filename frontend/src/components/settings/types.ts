@@ -3,6 +3,7 @@ export interface PatchableSettings {
     host_ram_limit?: string;
     host_disk_limit?: string;
     host_alert_suppression_mins?: string;
+    host_alerts_enabled?: '0' | '1';
     docker_janitor_gb?: string;
     global_crash?: '0' | '1';
     developer_mode?: '0' | '1';
@@ -25,6 +26,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     host_ram_limit: '90',
     host_disk_limit: '90',
     host_alert_suppression_mins: '60',
+    host_alerts_enabled: '1',
     global_crash: '1',
     docker_janitor_gb: '5',
     developer_mode: '0',
