@@ -5,7 +5,8 @@
  * configured".
  */
 import { it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import { toast } from '@/components/ui/toast-store';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/context/LicenseContext');
@@ -69,4 +70,56 @@ it('shows the empty state when there are genuinely no policies', async () => {
   setup({ isPaid: true });
   render(<ScanPolicyManager />);
   await waitFor(() => expect(screen.getByText('No scan policies configured')).toBeInTheDocument());
+});
+
+const riskPolicy = {
+  id: 1, name: 'risk-gate', node_id: null, node_identity: '', stack_pattern: null,
+  max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1,
+  block_on_severity: 0, block_on_kev: 1, block_on_fixable: 1,
+  replicated_from_control: 0, created_at: 1, updated_at: 1,
+};
+
+it('renders a per-input badge for each active input (KEV/Fixable, no severity)', async () => {
+  setup({ isPaid: true });
+  mockedFetch.mockImplementation((url: string) =>
+    Promise.resolve(url.startsWith('/fleet/role') ? jsonResponse(200, { role: 'control' }) : jsonResponse(200, [riskPolicy])),
+  );
+  render(<ScanPolicyManager />);
+  await waitFor(() => expect(screen.getByText('risk-gate')).toBeInTheDocument());
+  expect(screen.getByText('KEV')).toBeInTheDocument();
+  expect(screen.getByText('Fixable')).toBeInTheDocument();
+  expect(screen.queryByText(/^max:/)).not.toBeInTheDocument();
+});
+
+it('sends the risk-first defaults (KEV + fixable on, severity off) when creating a policy', async () => {
+  setup({ isPaid: true });
+  render(<ScanPolicyManager />);
+  await waitFor(() => expect(screen.getByText('Add policy')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Add policy'));
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'new-gate' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+  await waitFor(() => {
+    const call = mockedFetch.mock.calls.find(([url, opts]) => url === '/security/policies' && opts?.method === 'POST');
+    expect(call).toBeTruthy();
+    const body = JSON.parse((call![1] as { body: string }).body);
+    expect(body).toMatchObject({ block_on_severity: 0, block_on_kev: 1, block_on_fixable: 1 });
+  });
+});
+
+it('blocks a save that turns on block-on-deploy with no active input', async () => {
+  setup({ isPaid: true });
+  render(<ScanPolicyManager />);
+  await waitFor(() => expect(screen.getByText('Add policy')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Add policy'));
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'empty-gate' } });
+
+  const dialog = screen.getByRole('dialog');
+  fireEvent.click(within(dialog).getByRole('switch', { name: 'Known-exploited (KEV)' })); // KEV off
+  fireEvent.click(within(dialog).getByRole('switch', { name: 'Fixable Critical/High' })); // fixable off
+  fireEvent.click(within(dialog).getByRole('switch', { name: 'Block on deploy' })); // block-on-deploy on
+  fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+  expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/at least one input/i));
+  expect(mockedFetch.mock.calls.some(([url, opts]) => url === '/security/policies' && opts?.method === 'POST')).toBe(false);
 });

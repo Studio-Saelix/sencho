@@ -30,7 +30,7 @@ describe('buildStackDossierMarkdown', () => {
     const md = buildStackDossierMarkdown(anatomy, fields(), {
       stackIntent: 'internal',
       networks: [{ name: 'plex_default', external: false, internal: false }],
-      services: [{ name: 'plex', intent: null, ports: ['32400/tcp (all interfaces)'] }],
+      services: [{ name: 'plex', intent: null, ports: ['32400/tcp (all interfaces)'], hostNetwork: false }],
     });
     expect(md).toContain('## Network exposure');
     expect(md).toContain('**Stack intent:** internal');

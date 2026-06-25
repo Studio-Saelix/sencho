@@ -26,8 +26,8 @@ From top to bottom:
 Four chips sit below the search box. Each shows a live count to the right of its label, and counts above 99 render as **99+** to keep the row from overflowing.
 
 - **All**: every stack on the node.
-- **Up**: stacks where at least one container is running.
-- **Down**: stacks where no container is running.
+- **Up**: stacks that are running with nothing crashed. A stack with a cleanly finished one-shot container (an init job that exited without error) still counts as up.
+- **Down**: stacks that need attention, whether fully stopped or running with at least one crashed container (the `PT` state described below).
 - **Updates**: stacks with at least one image update available. The chip turns orange when the count is non-zero so you can spot pending updates at a glance.
 
 <Frame>
@@ -52,7 +52,7 @@ Right-click a stack and choose **Pin to top**. Pinned stacks sit in a dedicated 
 
 Each row gives you everything you need to read the stack at a glance, in a fixed column order:
 
-- **Status pill** on the left. Two uppercase letters in mono type, or a spinner while a lifecycle action is in flight. `UP` means at least one container is running; `DN` means the stack is stopped.
+- **Status pill** on the left. Two uppercase letters in mono type, or a spinner while a lifecycle action is in flight. `UP` (green) means the stack is running with nothing crashed, `DN` (red) means the stack is stopped, and `PT` (amber) means the stack is partially running: at least one container is up and at least one has crashed (exited with an error, died, or is restart-looping). Hover the `PT` pill to see how many containers are running, such as `3/5 running`. A stack whose only stopped container finished cleanly (an init job that exited without error) stays `UP`.
 - **Stack name** in mono type, truncated with an ellipsis when the row gets tight.
 - **Label dots** to the right of the name. Up to three colored dots representing the stack's labels render here. If a stack carries more than three labels, a **+N** counter appears for the extras.
 - **Update indicator**. When a stack has an image update pending, an extra colored dot appears alongside the label dots. If only a Git source update is pending (no image update), a small Git branch icon shows instead. The image-update dot takes priority when both apply.
