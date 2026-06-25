@@ -215,6 +215,34 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.body.error).toMatch(/Scan action requires node_id/);
   });
 
+  for (const badNodeId of [true, '1.5', 0]) {
+    it(`rejects scan with malformed node_id ${JSON.stringify(badNodeId)}`, async () => {
+      const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+        name: 'bad-scan-node',
+        target_type: 'system',
+        node_id: badNodeId,
+        action: 'scan',
+        cron_expression: '0 0 * * *',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/valid node_id|node_id/);
+    });
+  }
+
+  for (const badNodeId of [true, '1.5', 0]) {
+    it(`rejects fleet update with malformed node_id ${JSON.stringify(badNodeId)}`, async () => {
+      const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+        name: 'bad-fleet-update-node',
+        target_type: 'fleet',
+        node_id: badNodeId,
+        action: 'update',
+        cron_expression: '0 0 * * *',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/valid node_id|node_id/);
+    });
+  }
+
   it('rejects scheduled scans on remote nodes', async () => {
     const remoteNodeId = DatabaseService.getInstance().addNode({
       name: 'remote-scan-node',
@@ -627,6 +655,45 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/Invalid action/);
+  });
+
+  it('clears stale stack and service fields when changing a task to a fleet snapshot', async () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    const restartId = db.createScheduledTask({
+      name: 'restart',
+      target_type: 'stack',
+      target_id: 'web',
+      node_id: 1,
+      action: 'restart',
+      cron_expression: '0 3 * * *',
+      enabled: 1,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      last_status: null,
+      last_error: null,
+      prune_targets: null,
+      target_services: JSON.stringify(['api']),
+      prune_label_filter: null,
+      delete_after_run: 0,
+    });
+
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${restartId}`)
+      .set('Cookie', adminCookie)
+      .send({ action: 'snapshot', target_type: 'fleet' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('snapshot');
+    expect(res.body.target_type).toBe('fleet');
+    expect(res.body.target_id).toBeNull();
+    expect(res.body.node_id).toBeNull();
+    expect(res.body.target_services).toBeNull();
+    expect(res.body.prune_targets).toBeNull();
+    expect(res.body.prune_label_filter).toBeNull();
   });
 });
 

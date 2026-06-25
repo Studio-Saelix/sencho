@@ -138,10 +138,11 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, onNaviga
         </ChartCard>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <ChartCard title="Top exploit-risk findings">
-          <TopExploitRiskList items={exploitIntel} onInspect={onInspect} />
-        </ChartCard>
+      {/* items-start: each card keeps its natural height so the fixed-height chart
+          card never stretches to a taller exploit table (which left dead space
+          under the chart). The exploit-risk table owns its own card chrome. */}
+      <div className="grid items-start gap-4 lg:grid-cols-2">
+        <TopExploitRiskList items={exploitIntel} onInspect={onInspect} />
         <ChartCard title="Severity × exploitability">
           <CvssEpssQuadrantChart items={exploitIntel} />
         </ChartCard>

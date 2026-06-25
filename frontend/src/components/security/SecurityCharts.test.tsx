@@ -36,6 +36,7 @@ vi.mock('recharts', async () => {
         YAxis: stub('YAxis'),
         ZAxis: stub('ZAxis'),
         CartesianGrid: stub('CartesianGrid'),
+        Label: stub('Label'),
         LabelList: stub('LabelList'),
         ReferenceLine: stub('ReferenceLine'),
     };
@@ -102,6 +103,18 @@ describe('ActionPostureChart', () => {
 });
 
 describe('TopExploitRiskList', () => {
+    const rowsOf = (container: HTMLElement) => [...container.querySelectorAll('li[role="button"]')];
+
+    it('renders column headers for the table', () => {
+        const { container } = render(
+            <TopExploitRiskList items={[finding({ vulnerability_id: 'CVE-A', cvss_score: 8, epss_score: 0.2 })]} onInspect={vi.fn()} />,
+        );
+        expect(container.textContent).toContain('CVE');
+        expect(container.textContent).toContain('Image');
+        expect(container.textContent).toContain('EPSS');
+        expect(container.textContent).toContain('CVSS');
+    });
+
     it('ranks KEV > high EPSS > unknown EPSS > low EPSS (assume automatable), and opens the scan', () => {
         const items = [
             finding({ vulnerability_id: 'CVE-LOW', cvss_score: 5, epss_score: 0.01, scan_id: 10 }),
@@ -111,12 +124,61 @@ describe('TopExploitRiskList', () => {
         ];
         const onInspect = vi.fn();
         const { container } = render(<TopExploitRiskList items={items} onInspect={onInspect} />);
-        const buttons = [...container.querySelectorAll('button')];
-        const order = buttons.map((b) => b.querySelector('.font-mono')?.textContent);
+        const rows = rowsOf(container);
+        const order = rows.map((r) => r.querySelector('.font-mono')?.textContent);
         // Unknown-exploitability (CVE-UNK) outranks the evidenced-low one (CVE-LOW).
         expect(order).toEqual(['CVE-KEV', 'CVE-EPSS', 'CVE-UNK', 'CVE-LOW']);
-        fireEvent.click(buttons[0]);
+        fireEvent.click(rows[0]);
         expect(onInspect).toHaveBeenCalledWith(11);
+    });
+
+    it('paginates beyond the page size and advances and rewinds pages', () => {
+        const items = Array.from({ length: 9 }, (_, i) =>
+            finding({ vulnerability_id: `CVE-${i}`, cvss_score: 9 - i * 0.1, epss_score: 0.5, scan_id: i }),
+        );
+        const { container } = render(<TopExploitRiskList items={items} onInspect={vi.fn()} />);
+        expect(rowsOf(container)).toHaveLength(8);
+        expect(container.textContent).toContain('1 / 2');
+        const prev = container.querySelector('button[aria-label="Previous page"]') as HTMLButtonElement;
+        const next = container.querySelector('button[aria-label="Next page"]') as HTMLButtonElement;
+        expect(prev.disabled).toBe(true); // disabled on the first page
+        fireEvent.click(next);
+        expect(rowsOf(container)).toHaveLength(1);
+        expect(container.textContent).toContain('2 / 2');
+        fireEvent.click(prev);
+        expect(rowsOf(container)).toHaveLength(8);
+        expect(container.textContent).toContain('1 / 2');
+    });
+
+    it('does not collide keys or accumulate rows when CVE/scan pairs recur across a page boundary', () => {
+        // The same scan_id + vulnerability_id recurs across packages/images, so the
+        // old composite key was non-unique and React duplicated rows when paging.
+        // Position-based keys keep every row unique: no duplicate-key warning, and
+        // each page renders exactly its slice.
+        const items = Array.from({ length: 20 }, (_, i) =>
+            finding({ vulnerability_id: 'CVE-DUP', scan_id: 1, image_ref: `img-${i}:1`, cvss_score: 7, epss_score: 0.5 }),
+        );
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const { container } = render(<TopExploitRiskList items={items} onInspect={vi.fn()} />);
+            expect(rowsOf(container)).toHaveLength(8);
+            const next = container.querySelector('button[aria-label="Next page"]') as HTMLButtonElement;
+            fireEvent.click(next);
+            fireEvent.click(next);
+            expect(rowsOf(container)).toHaveLength(4); // page 3 of 20 = 4 rows, not an accumulation
+            expect(container.textContent).toContain('3 / 3');
+            const keyWarnings = errSpy.mock.calls.filter((c) => /same key|unique "key"/i.test(String(c[0])));
+            expect(keyWarnings).toEqual([]);
+        } finally {
+            errSpy.mockRestore();
+        }
+    });
+
+    it('shows no pager at or below the page size', () => {
+        const items = Array.from({ length: 8 }, (_, i) => finding({ vulnerability_id: `CVE-${i}`, cvss_score: 9, epss_score: 0.5, scan_id: i }));
+        const { container } = render(<TopExploitRiskList items={items} onInspect={vi.fn()} />);
+        expect(rowsOf(container)).toHaveLength(8);
+        expect(container.querySelector('button[aria-label="Next page"]')).toBeNull();
     });
 
     it('shows the severity-ranked hint when no intel is present', () => {

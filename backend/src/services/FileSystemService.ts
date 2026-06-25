@@ -9,6 +9,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { isBinaryBuffer } from '../utils/binaryDetect';
 import { sanitizeForLog } from '../utils/safeLog';
+import { sha256HexBuffer } from '../utils/hashing';
 
 export interface FileEntry {
   name: string;
@@ -55,6 +56,11 @@ const PROTECTED_STACK_FILES = new Set([
   'docker-compose.yml',
   '.env',
 ]);
+
+// Bookkeeping markers Sencho writes into the backup slot. They are never copied
+// back into the stack directory on restore: `.timestamp` records when the backup
+// was taken; `.checksums` is the integrity manifest verified before a restore.
+const BACKUP_MARKER_FILES = new Set(['.timestamp', '.checksums']);
 
 // Compose filenames Sencho recognizes, in resolution-priority order. Mirrors the
 // list FileSystemService uses elsewhere; named here for the import scan.
@@ -967,32 +973,67 @@ export class FileSystemService {
       }
     }
 
-    // Copy compose file
-    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-    for (const file of composeFiles) {
-      const src = path.join(stackDir, file);
+    // Copy each managed file by reading it into memory, writing it to the backup
+    // slot, and recording the SHA-256 of the source bytes. Hashing the source
+    // (not the destination) means a truncated copy is caught when restore re-hashes
+    // the backup and finds it no longer matches. Managed files (compose, .env) are
+    // small; revisit this read-into-memory if a large file is ever added to
+    // PROTECTED_STACK_FILES.
+    // Canonical js/path-injection barrier inline with each source read sink:
+    // resolve against the compose base and confirm containment, mirroring
+    // snapshotStackFiles. stackDir is already validated by resolveStackDir, but
+    // re-establishing containment at the readFile sink itself lets static analysis
+    // credit the barrier, which it does not through the helper.
+    const baseResolved = path.resolve(this.baseDir);
+    const checksums: Record<string, string> = {};
+    const writeManagedBackupFile = async (file: string, src: string): Promise<void> => {
+      let buf: Buffer;
       try {
-        await fsPromises.access(src);
-        await fsPromises.copyFile(src, path.join(backupDir, file));
+        buf = await fsPromises.readFile(src);
       } catch (e: unknown) {
         const code = (e as NodeJS.ErrnoException)?.code;
         if (code !== 'ENOENT') {
-          console.warn(`[FileSystemService] Could not back up ${file}:`, (e as Error).message);
+          console.warn(`[FileSystemService] Could not read ${file} for backup:`, (e as Error).message);
         }
+        return;
       }
+
+      const dest = path.join(backupDir, file);
+      try {
+        await fsPromises.writeFile(dest, buf);
+      } catch (e: unknown) {
+        try {
+          await fsPromises.unlink(dest);
+        } catch {
+          // Best-effort cleanup only. The write failure below is the actionable error.
+        }
+        throw new Error(`Could not write backup ${file}: ${(e as Error).message}`, { cause: e });
+      }
+      checksums[file] = sha256HexBuffer(buf);
+    };
+
+    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
+    for (const file of composeFiles) {
+      const src = path.resolve(baseResolved, path.join(stackDir, file));
+      if (!src.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      await writeManagedBackupFile(file, src);
     }
 
-    // Copy .env if it exists
-    const envSrc = path.join(stackDir, '.env');
-    try {
-      await fsPromises.access(envSrc);
-      await fsPromises.copyFile(envSrc, path.join(backupDir, '.env'));
-    } catch (e: unknown) {
-      const code = (e as NodeJS.ErrnoException)?.code;
-      if (code !== 'ENOENT') {
-        console.warn('[FileSystemService] Could not back up .env:', (e as Error).message);
-      }
+    // Copy .env if it exists (same inline containment barrier as above).
+    const envSrc = path.resolve(baseResolved, path.join(stackDir, '.env'));
+    if (!envSrc.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
+    await writeManagedBackupFile('.env', envSrc);
+
+    // Write the integrity manifest before the timestamp marker, so a crash
+    // between the two leaves the checksums present (a backup that restore can
+    // verify) rather than a timestamp with no integrity data. Only files that
+    // were actually written above appear here, so the manifest never claims a
+    // file the slot does not hold.
+    await fsPromises.writeFile(path.join(backupDir, '.checksums'), JSON.stringify(checksums), 'utf-8');
 
     // Write timestamp marker
     await fsPromises.writeFile(path.join(backupDir, '.timestamp'), Date.now().toString(), 'utf-8');
@@ -1018,6 +1059,44 @@ export class FileSystemService {
 
     const items = await fsPromises.readdir(backupDir);
     const backedUp = new Set(items);
+
+    // Verify the backup's integrity before mutating the stack, so a corrupt or
+    // truncated backup is rejected rather than copied back silently. Each backed-up
+    // file is re-hashed and compared to the .checksums manifest written at backup
+    // time. This runs before the orphan removal and copy below, so a failed check
+    // leaves the live stack exactly as it was. A backup with no manifest (taken
+    // before this guard existed) or a file with no recorded checksum is left
+    // unverified: the check is never stricter than what the backup recorded, so it
+    // cannot block a rollback the backup can still serve.
+    let checksums: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = JSON.parse(await fsPromises.readFile(path.join(backupDir, '.checksums'), 'utf-8'));
+      if (parsed !== null && typeof parsed === 'object') {
+        checksums = parsed as Record<string, unknown>;
+      }
+    } catch (e: unknown) {
+      // ENOENT is a pre-feature backup with no manifest: restore unverified. A
+      // present but unreadable or malformed manifest does not prove the data files
+      // are bad, and blocking would deny a needed rollback, so warn and proceed
+      // unverified rather than fail.
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        console.warn('[FileSystemService] Backup checksum manifest unreadable, restoring without integrity check:', (e as Error).message);
+      }
+    }
+    if (checksums) {
+      for (const item of items) {
+        if (BACKUP_MARKER_FILES.has(item)) continue;
+        const expected = checksums[item];
+        // A missing or non-string entry (a tampered or malformed-but-parseable
+        // manifest) is treated as no recorded checksum: skip rather than fail, so a
+        // manifest problem never blocks a rollback whose data files are intact.
+        if (typeof expected !== 'string') continue;
+        const actual = sha256HexBuffer(await fsPromises.readFile(path.join(backupDir, item)));
+        if (actual !== expected) {
+          throw new Error(`Rollback aborted: the backup of ${item} is corrupt (integrity check failed); the stack files were not changed.`);
+        }
+      }
+    }
 
     // Remove managed files the backup does not contain before copying, so a
     // rollback is a faithful revert rather than an additive overlay. If the
@@ -1056,10 +1135,10 @@ export class FileSystemService {
     }
 
     for (const item of items) {
-      if (item === '.timestamp') continue;
+      if (BACKUP_MARKER_FILES.has(item)) continue;
       await fsPromises.copyFile(path.join(backupDir, item), path.join(stackDir, item));
     }
-    if (debug) console.debug(`[FileSystemService:debug] Restore completed in ${Date.now() - t0}ms`, { stackName, restored: items.filter(i => i !== '.timestamp').length, removedOrphans });
+    if (debug) console.debug(`[FileSystemService:debug] Restore completed in ${Date.now() - t0}ms`, { stackName, restored: items.filter(i => !BACKUP_MARKER_FILES.has(i)).length, removedOrphans });
   }
 
   /**

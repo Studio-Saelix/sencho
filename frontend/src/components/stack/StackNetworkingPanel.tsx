@@ -255,6 +255,14 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
                   ))}
                 </div>
               )}
+              {svc.networkMode === 'host' && (
+                // Host networking publishes every container port on the host, so
+                // the service is host-exposed even with no published-port rows.
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-[11px] text-foreground/80">all container ports</span>
+                  <span className="rounded border border-warning/40 bg-warning/[0.08] px-1 py-0.5 font-mono text-[10px] text-warning">host-exposed</span>
+                </div>
+              )}
               {svc.publishedPorts.length > 0 && (
                 <div className="flex flex-col gap-1">
                   {svc.publishedPorts.map((p, i) => (

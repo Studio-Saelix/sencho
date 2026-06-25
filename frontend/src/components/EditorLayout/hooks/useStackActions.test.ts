@@ -862,6 +862,22 @@ describe('useStackActions recovery records', () => {
   });
 });
 
+describe('useStackActions.getStackMenuVisibility', () => {
+  it('gives a partial stack the running-stack lifecycle actions', () => {
+    const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'partial' } as never } });
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: false, showStop: true, showRestart: true, showUpdate: true,
+    });
+  });
+
+  it('shows deploy (not stop/restart/update) for an exited stack', () => {
+    const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'exited' } as never } });
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: true, showStop: false, showRestart: false, showUpdate: false,
+    });
+  });
+});
+
 describe('useStackActions.openStackApp', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
