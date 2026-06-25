@@ -149,9 +149,9 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
     await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'cleanup');
 
-    // The action selector is the first combobox; switch it to System Prune.
+    // The action selector is the first combobox; switch it to Prune Node Resources.
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Prune Node Resources' }));
 
     // Prune is now node-scoped: pick the local node from its Node combobox.
     await userEvent.click(screen.getAllByRole('combobox')[1]);
@@ -184,7 +184,7 @@ describe('ScheduledOperationsView', () => {
     await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'cleanup');
 
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Prune Node Resources' }));
     await userEvent.click(screen.getAllByRole('combobox')[1]);
     await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
 
@@ -209,7 +209,7 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
     await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'cleanup');
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Prune Node Resources' }));
 
     // Prune targets default to all four, but with no node the gate must hold.
     expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
@@ -219,12 +219,12 @@ describe('ScheduledOperationsView', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeEnabled();
   });
 
-  it('excludes remote nodes from the System Prune node picker', async () => {
+  it('excludes remote nodes from the Prune Node Resources node picker', async () => {
     render(<ScheduledOperationsView />);
 
     await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Prune Node Resources' }));
 
     // Open the Node combobox; only the local node should be listed.
     await userEvent.click(screen.getAllByRole('combobox')[1]);
@@ -232,12 +232,12 @@ describe('ScheduledOperationsView', () => {
     expect(screen.queryByRole('button', { name: 'edge' })).not.toBeInTheDocument();
   });
 
-  it('excludes remote nodes from the Vulnerability Scan node picker', async () => {
+  it('excludes remote nodes from the Scan Node Images node picker', async () => {
     render(<ScheduledOperationsView />);
 
     await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'Vulnerability Scan' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Scan Node Images' }));
 
     await userEvent.click(screen.getAllByRole('combobox')[1]);
     expect(await screen.findByRole('button', { name: 'hub' })).toBeInTheDocument();
@@ -250,7 +250,7 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
     await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'scan-local');
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'Vulnerability Scan' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Scan Node Images' }));
     await userEvent.click(screen.getAllByRole('combobox')[1]);
     await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
 
@@ -276,12 +276,12 @@ describe('ScheduledOperationsView', () => {
     });
   });
 
-  it('shows a read-only "Entire fleet" scope for Fleet Snapshot', async () => {
+  it('shows a read-only "Entire fleet" scope for Create Fleet Snapshot', async () => {
     render(<ScheduledOperationsView />);
 
     await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'Fleet Snapshot' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Create Fleet Snapshot' }));
 
     expect(await screen.findByText('Entire fleet')).toBeInTheDocument();
   });
@@ -340,17 +340,17 @@ describe('ScheduledOperationsView', () => {
     expect(screen.queryByText('Prune Targets')).not.toBeInTheDocument();
 
     // Node-only action: Node shown, Stack hidden.
-    await selectAction('Auto-update All Stacks');
+    await selectAction('Auto-update All Stacks on Node');
     expect(screen.getByText('Node')).toBeInTheDocument();
     expect(screen.queryByText('Stack')).not.toBeInTheDocument();
 
     // Fleet snapshot: no Node, no Stack.
-    await selectAction('Fleet Snapshot');
+    await selectAction('Create Fleet Snapshot');
     expect(screen.queryByText('Node')).not.toBeInTheDocument();
     expect(screen.queryByText('Stack')).not.toBeInTheDocument();
 
     // Prune: local-only Node plus Prune Targets.
-    await selectAction('System Prune');
+    await selectAction('Prune Node Resources');
     expect(screen.getByText('Prune Targets')).toBeInTheDocument();
     expect(screen.getByText('Node')).toBeInTheDocument();
   });
@@ -396,7 +396,7 @@ describe('ScheduledOperationsView', () => {
     await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'fleet-update');
 
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'Auto-update All Stacks' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Auto-update All Stacks on Node' }));
 
     // Node selector is the second combobox once the node-only field renders.
     await userEvent.click(screen.getAllByRole('combobox')[1]);
@@ -434,7 +434,7 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
     await userEvent.click(await screen.findByTitle('Edit'));
     await userEvent.click(screen.getAllByRole('combobox')[0]);
-    await userEvent.click(await screen.findByRole('button', { name: 'Fleet Snapshot' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Create Fleet Snapshot' }));
     await userEvent.click(screen.getByRole('button', { name: 'Update' }));
 
     await waitFor(() => {

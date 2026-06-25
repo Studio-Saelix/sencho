@@ -41,18 +41,26 @@ export interface ScheduledActionDefinition {
   helperText?: string;
 }
 
-/** Ordered for the create-flow action picker. */
+/** Action pre-selected when the create modal opens. Decoupled from picker order. */
+export const DEFAULT_SCHEDULED_ACTION_ID: ScheduledActionId = 'restart';
+
+/** Ordered for the create-flow action picker, grouped by category. */
 export const SCHEDULED_ACTIONS: ScheduledActionDefinition[] = [
+  // Lifecycle
+  { id: 'auto_backup', backendAction: 'auto_backup', label: 'Backup Stack Compose Files', shortLabel: 'backup', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
+  { id: 'auto_start', backendAction: 'auto_start', label: 'Start / Bring Up Stack', shortLabel: 'start', category: 'lifecycle', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
   { id: 'restart', backendAction: 'restart', label: 'Restart Stack', shortLabel: 'restart', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, supportsServiceSelection: true },
+  { id: 'auto_stop', backendAction: 'auto_stop', label: 'Stop Stack', shortLabel: 'stop', category: 'lifecycle', targetType: 'stack', tone: 'warning', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
+  { id: 'auto_down', backendAction: 'auto_down', label: 'Take Stack Down', shortLabel: 'down', category: 'lifecycle', targetType: 'stack', tone: 'destructive', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
+  // Updates
   { id: 'update', backendAction: 'update', label: 'Auto-update Stack', shortLabel: 'update', category: 'updates', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
-  { id: 'update-fleet', backendAction: 'update', label: 'Auto-update All Stacks', shortLabel: 'update', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, helperText: 'Every stack on the selected node will be checked and updated when new images are available.' },
-  { id: 'snapshot', backendAction: 'snapshot', label: 'Fleet Snapshot', shortLabel: 'snapshot', category: 'backups', targetType: 'fleet', tone: 'warning', requiresNode: false, requiresStack: false, supportsServiceSelection: false },
-  { id: 'prune', backendAction: 'prune', label: 'System Prune', shortLabel: 'prune', category: 'maintenance', targetType: 'system', tone: 'warning', requiresNode: true, requiresStack: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Resources are pruned on the selected node. Prunes run on local nodes only.' },
-  { id: 'scan', backendAction: 'scan', label: 'Vulnerability Scan', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Every image on the selected node will be scanned. Scans run on local nodes only.' },
-  { id: 'auto_backup', backendAction: 'auto_backup', label: 'Backup Stack Files', shortLabel: 'backup', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
-  { id: 'auto_stop', backendAction: 'auto_stop', label: 'Stop Stack (keep containers)', shortLabel: 'stop', category: 'lifecycle', targetType: 'stack', tone: 'warning', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
-  { id: 'auto_down', backendAction: 'auto_down', label: 'Take Stack Down (remove containers)', shortLabel: 'down', category: 'lifecycle', targetType: 'stack', tone: 'destructive', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
-  { id: 'auto_start', backendAction: 'auto_start', label: 'Start Stack', shortLabel: 'start', category: 'lifecycle', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, supportsServiceSelection: false },
+  { id: 'update-fleet', backendAction: 'update', label: 'Auto-update All Stacks on Node', shortLabel: 'update', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, helperText: 'Every stack on the selected node will be checked and updated when new images are available.' },
+  // Security
+  { id: 'scan', backendAction: 'scan', label: 'Scan Node Images', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Every image on the selected node will be scanned. Scans run on local nodes only.' },
+  // Maintenance
+  { id: 'prune', backendAction: 'prune', label: 'Prune Node Resources', shortLabel: 'prune', category: 'maintenance', targetType: 'system', tone: 'warning', requiresNode: true, requiresStack: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Resources are pruned on the selected node. Prunes run on local nodes only.' },
+  // Backups
+  { id: 'snapshot', backendAction: 'snapshot', label: 'Create Fleet Snapshot', shortLabel: 'snapshot', category: 'backups', targetType: 'fleet', tone: 'warning', requiresNode: false, requiresStack: false, supportsServiceSelection: false },
 ];
 
 const ACTION_BY_ID = new Map<string, ScheduledActionDefinition>(SCHEDULED_ACTIONS.map(a => [a.id, a]));

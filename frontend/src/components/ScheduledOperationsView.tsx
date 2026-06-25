@@ -20,6 +20,7 @@ import {
   SCHEDULED_ACTION_CATEGORIES,
   getActionById,
   resolveTaskAction,
+  DEFAULT_SCHEDULED_ACTION_ID,
 } from '@/lib/scheduledActions';
 
 const DEFAULT_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'];
@@ -194,7 +195,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     const nodeId = prefillData?.nodeId ?? (filterNodeId != null ? String(filterNodeId) : '');
     setEditingTask(null);
     setFormName('');
-    setFormAction(SCHEDULED_ACTIONS[0]?.id ?? 'restart');
+    setFormAction(DEFAULT_SCHEDULED_ACTION_ID);
     setFormTargetId(prefillData?.stackName ?? '');
     setFormNodeId(nodeId);
     setFormCron('0 3 * * *');
@@ -342,6 +343,15 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const cronDescription = getCronDescription(formCron);
   const cronFieldError = getCronFieldError(formCron);
   const nodeOptions = useMemo(() => nodes.map(n => ({ value: String(n.id), label: n.name })), [nodes]);
+  const actionOptions = useMemo(
+    () =>
+      SCHEDULED_ACTIONS.map(o => ({
+        value: o.id,
+        label: o.label,
+        group: SCHEDULED_ACTION_CATEGORIES.find(c => c.key === o.category)?.label,
+      })),
+    [],
+  );
   // Scan and prune run on the hub-local Docker daemon only; remote nodes are excluded from their pickers.
   const localNodeOptions = useMemo(
     () => nodes.filter(n => n.type === 'local').map(n => ({ value: String(n.id), label: n.name })),
@@ -670,7 +680,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
             <div className="space-y-2">
               <Label>Action</Label>
               <Combobox
-                options={SCHEDULED_ACTIONS.map(o => ({ value: o.id, label: o.label }))}
+                options={actionOptions}
                 value={formAction}
                 onValueChange={(val) => { setFormAction(val); setFormTargetId(''); setFormNodeId(''); setFormTargetServices([]); setFormPruneLabelFilter(''); }}
                 placeholder="Select action..."
