@@ -56,6 +56,17 @@ describe('parseAnatomy', () => {
     expect(a.referencedVars).not.toContain('HAS');
   });
 
+  it('skips the $${ESCAPED} literal (Compose escape)', () => {
+    const a = parseAnatomy('services:\n  app:\n    image: x\n    labels:\n      - template=$${ESCAPED}\n')!;
+    expect(a.referencedVars).not.toContain('ESCAPED');
+  });
+
+  it('skips $$ escaped vars but still catches real interpolations', () => {
+    const a = parseAnatomy('services:\n  app:\n    image: x\n    environment:\n      - A=${REAL}\n      - B=$${ESCAPED}\n')!;
+    expect(a.referencedVars).toContain('REAL');
+    expect(a.referencedVars).not.toContain('ESCAPED');
+  });
+
   it('marks container-only short-form ports as not published', () => {
     const a = parseAnatomy('services:\n  web:\n    image: x\n    ports:\n      - "80"\n')!;
     expect(a.ports.web).toEqual([{ host: '80', container: '80', proto: 'tcp', published: false }]);
@@ -141,6 +152,18 @@ describe('assembleAnatomyInput', () => {
     expect(input.envVarCount).toBe(1);
     expect(input.missingVars).toEqual(['TOKEN']);
     expect(input.gitSource).toBe('github.com/acme/plex#main');
+  });
+
+  it('excludes $$ escaped vars from missingVars while real refs still appear', () => {
+    const input = assembleAnatomyInput({
+      stackName: 'test',
+      content: 'services:\n  app:\n    image: x\n    labels:\n      - template=$${ESCAPED}\n    environment:\n      - TOKEN=${REAL}\n',
+      envContent: '',
+      selectedEnvFile: null,
+      gitSource: null,
+    })!;
+    expect(input.missingVars).toContain('REAL');
+    expect(input.missingVars).not.toContain('ESCAPED');
   });
 
   it('returns null when compose cannot be parsed', () => {

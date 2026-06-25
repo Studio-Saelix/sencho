@@ -16,6 +16,7 @@ import { deriveStackExposure } from './preflight/exposure';
 
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { normalizeContainerName } from '../utils/log-parsing';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
@@ -553,7 +554,8 @@ export class ComposeService {
         };
 
         for (const container of containersToLog) {
-          const containerName = container.Names?.[0]?.replace(/^\//, '') || container.Id;
+          const rawName = container.Names?.[0]?.replace(/^\//, '') || container.Id;
+          const displayName = normalizeContainerName(rawName, stackName);
           activeProcesses++;
           let lineBuffer = '';
 
@@ -563,19 +565,19 @@ export class ComposeService {
               const lines = lineBuffer.split(/\r?\n/);
               lineBuffer = lines.pop() || '';
               for (const line of lines) {
-                ws.send(LogFormatter.process(line) + '\r\n');
+                ws.send(LogFormatter.process(`${displayName} | ${line}`) + '\r\n');
               }
             }
           };
 
           const flushBuffer = () => {
             if (lineBuffer && ws.readyState === WebSocket.OPEN) {
-              ws.send(LogFormatter.process(lineBuffer) + '\r\n');
+              ws.send(LogFormatter.process(`${displayName} | ${lineBuffer}`) + '\r\n');
               lineBuffer = '';
             }
           };
 
-          const child = spawn('docker', ['logs', '-f', '-t', '--tail', '100', containerName], {
+          const child = spawn('docker', ['logs', '-f', '-t', '--tail', '100', rawName], {
             env: {
               ...process.env,
               PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
