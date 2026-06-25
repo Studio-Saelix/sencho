@@ -178,7 +178,7 @@ function SheetHeaderBand({ crumb, name, meta, onDismiss }: SheetHeaderBandProps)
         })}
       </nav>
 
-      <SheetTitle className="mt-2 font-display italic text-[1.5rem] leading-tight text-stat-value text-left">
+      <SheetTitle className="mt-2 font-heading text-[1.5rem] leading-tight text-stat-value text-left">
         {name}
       </SheetTitle>
 

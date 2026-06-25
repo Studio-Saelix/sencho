@@ -202,7 +202,7 @@ describe('FleetSyncService.applyIncomingSync', () => {
     const rows = [{
       id: 0, name: 'from-control', node_id: null, node_identity: '',
       stack_pattern: null, max_severity: 'CRITICAL' as const,
-      block_on_deploy: 0, enabled: 1, replicated_from_control: 1,
+      block_on_deploy: 0, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 1,
       created_at: 1, updated_at: 1,
     }];
     FleetSyncService.getInstance().applyIncomingSync('scan_policies', rows, 'https://me.example');

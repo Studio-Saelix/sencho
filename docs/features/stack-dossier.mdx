@@ -21,7 +21,7 @@ The top of the tab shows a read-only summary derived live from the stack's curre
 | **Env file** | The env file, its variable count, and any referenced `${VAR}` with no value |
 | **Source** | Git source when the stack is linked, otherwise local |
 
-Secret values are never read or shown. Only env variable **names** and **counts** appear, exactly as in the Anatomy tab.
+Environment and label values are never read or shown: only variable **names** and **counts** appear, exactly as in the Anatomy tab. The one exception is a secret interpolated into a structural fact, such as a published port written as `${DB_PORT}`, which Compose resolves before the facts are read, so its value appears. The same is true of the resolved paths and network names shown on the Storage and Networking tabs. Keep secrets in `environment:` or `env_file:` rather than interpolating them into structural fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
 ## Operator notes
 

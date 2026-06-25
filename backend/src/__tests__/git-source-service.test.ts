@@ -1252,7 +1252,7 @@ describe('GitSourceService.apply', () => {
             node_identity: '',
             stack_pattern: 'apply-policy-block',
             max_severity: 'HIGH',
-            block_on_deploy: 1,
+            block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 0,
         });

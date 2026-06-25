@@ -430,6 +430,61 @@ test.describe('Stack file explorer: UI lifecycle', () => {
       page.locator('span.font-mono').filter({ hasText: /^lifecycle-new-folder$/ }).first(),
     ).toBeVisible({ timeout: 8_000 });
   });
+
+  test('the New file toolbar button creates a root-level file', async ({ page }) => {
+    await page.getByRole('button', { name: 'New file' }).click();
+    await page.getByLabel('File name').fill('ui-new-file.txt');
+    await page.getByRole('button', { name: /^create$/i }).click();
+
+    await expect(page.getByText(/file created/i).first()).toBeVisible({ timeout: 8_000 });
+    await expect(
+      page.locator('span.font-mono').filter({ hasText: /^ui-new-file\.txt$/ }).first(),
+    ).toBeVisible({ timeout: 8_000 });
+  });
+
+  test('creating a duplicate name is blocked and does not overwrite the existing file', async ({ page }) => {
+    await fs.writeFile(nodePath.join(stackDir(), 'dup-guard.txt'), 'original\n');
+    await page.reload();
+    await openFilesTab(page);
+
+    await page.getByRole('button', { name: 'New file' }).click();
+    await page.getByLabel('File name').fill('dup-guard.txt');
+    await page.getByRole('button', { name: /^create$/i }).click();
+
+    await expect(page.getByText(/a file with that name already exists/i)).toBeVisible({ timeout: 8_000 });
+    // The server rejected the create, so the existing contents are intact.
+    expect(await fs.readFile(nodePath.join(stackDir(), 'dup-guard.txt'), 'utf-8')).toBe('original\n');
+  });
+
+  test('right-clicking away from the filename still opens the Sencho context menu', async ({ page }) => {
+    const row = page.locator('[role="treeitem"]').filter({ hasText: 'compose.yaml' }).first();
+    await expect(row).toBeVisible({ timeout: 8_000 });
+    const box = await row.boundingBox();
+    if (!box) throw new Error('no bounding box for the compose.yaml row');
+
+    // Right-click near the right edge, well past the filename text: the whole
+    // row is the trigger, so the Sencho menu (not the native one) must open.
+    await row.click({ button: 'right', position: { x: box.width - 6, y: box.height / 2 } });
+    await expect(page.getByText('Rename')).toBeVisible({ timeout: 5_000 });
+  });
+
+  test('a long filename overflows the pane horizontally instead of being clipped', async ({ page }) => {
+    const longName = 'a-really-long-file-name-that-should-overflow-the-narrow-file-tree-pane.txt';
+    await fs.writeFile(nodePath.join(stackDir(), longName), '');
+    await page.reload();
+    await openFilesTab(page);
+    await expect(
+      page.locator('span.font-mono').filter({ hasText: longName }).first(),
+    ).toBeVisible({ timeout: 8_000 });
+
+    // The tree's scroll viewport overflows horizontally, so the name is reachable
+    // by scrolling rather than truncated.
+    const overflows = await page.getByTestId('file-tree-root-dropzone').evaluate((el) => {
+      const vp = el.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+      return vp ? vp.scrollWidth > vp.clientWidth : false;
+    });
+    expect(overflows).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

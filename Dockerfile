@@ -6,7 +6,7 @@ FROM --platform=$BUILDPLATFORM tonistiigi/xx@sha256:c64defb9ed5a91eacb37f96ccc3d
 # Stage 1: Build Frontend
 # Runs on the BUILD platform (amd64) - frontend has no native modules so the
 # compiled output (JS/CSS/HTML) is entirely platform-agnostic.
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:9c0e1e52125d6b67d505cf75b4880fcf1290ccea5c480849910e1d57b2cf72b5 AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 AS frontend-builder
 
 WORKDIR /app/frontend
 
@@ -22,7 +22,7 @@ RUN npm run build
 
 # Stage 2: Compile TypeScript
 # Runs on the BUILD platform (amd64) - tsc output is platform-agnostic JS.
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:9c0e1e52125d6b67d505cf75b4880fcf1290ccea5c480849910e1d57b2cf72b5 AS backend-builder
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 AS backend-builder
 
 WORKDIR /app/backend
 
@@ -44,7 +44,7 @@ RUN npm run build
 # tonistiigi/xx + clang as the cross-compiler.
 # This avoids the Node.js v20 SIGILL crash that occurs when npm runs
 # under QEMU because QEMU lacks ARMv8.1 LSE atomic instruction support.
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:9c0e1e52125d6b67d505cf75b4880fcf1290ccea5c480849910e1d57b2cf72b5 AS prod-deps
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 AS prod-deps
 
 # Copy xx cross-compilation tools into this stage
 COPY --from=xx / /
@@ -101,11 +101,17 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # Runs on the BUILD platform; GOARCH cross-compiles the static binary for TARGET.
 # The fetch pulls only the v29.4.1 commit, minimising transfer size.
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid SemVer
-# compliance requirements. We copy vendor.mod -> go.mod and build with -mod=vendor
-# so all deps come from the vendored tree (no network access needed).
+# compliance requirements. We copy vendor.mod -> go.mod, drop the committed vendor
+# tree, bump golang.org/x/net to v0.55.0, and build with -mod=mod so the patched
+# module is resolved from the module proxy instead of the pinned v0.53.0 that the
+# image scan flags for six HIGH advisories (CVE-2026-25680, -25681, -27136, -39821,
+# -42502, -42506; x/net/html parsing and x/net/idna). Removing vendor/ keeps -mod=mod
+# from reading the stale copy, and avoids `go mod tidy` (which does not run cleanly
+# against docker/cli's vendor.mod manifest). This stage now fetches modules at build
+# time rather than building fully offline.
 # Base image pinned by digest so the Go toolchain that compiles the static
 # Docker CLI binary cannot change without an explicit Dependabot bump.
-FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:f1ddd9fe14fffc091dd98cb4bfa999f32c5fc77d2f2305ea9f0e2595c5437c14 AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS cli-builder
 
 ARG TARGETARCH
 
@@ -125,8 +131,10 @@ WORKDIR /src/docker-cli
 RUN mkdir -p /build
 
 RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
+    rm -rf vendor && \
+    go get golang.org/x/net@v0.55.0 && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
-      -mod=vendor \
+      -mod=mod \
       -ldflags "-extldflags=-static \
         -X github.com/docker/cli/cli/version.Version=29.4.1 \
         -X github.com/docker/cli/cli/version.GitCommit=source-go1.26.3" \
@@ -162,7 +170,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # so this is defense-in-depth rather than a live exposure.
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:f1ddd9fe14fffc091dd98cb4bfa999f32c5fc77d2f2305ea9f0e2595c5437c14 AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS compose-builder
 
 ARG TARGETARCH
 
@@ -229,7 +237,7 @@ RUN test -f /build/docker-compose \
 # in this image; operators who want the feature install Trivy on the host
 # and mount the binary into the container, or run a sidecar. See
 # docs/operations/trivy-setup.mdx for the supported integration paths.
-FROM node:26-alpine@sha256:9c0e1e52125d6b67d505cf75b4880fcf1290ccea5c480849910e1d57b2cf72b5
+FROM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606
 
 # Daily cache-bust for the apk upgrade layer. CI passes the current date
 # (YYYY-MM-DD) as a build-arg, so this RUN layer's hash changes at most

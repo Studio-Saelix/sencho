@@ -71,7 +71,7 @@ Blocked updates still surface in scheduled check runs so you stay informed, but 
 Auto-update is opt-in per stack. A stack participates in unattended updates only when an enabled scheduled task covers it. To leave a stack out (databases, self-built images, anything pinned to a fixed tag), simply do not create a schedule for it.
 
 - **Per-stack schedule.** Create a **Auto-update Stack** task targeting that stack alone. Only this stack is updated when the cron fires.
-- **Fleet-wide schedule.** Create a **Auto-update All Stacks** task targeting a node. Every stack on that node is checked and updated when new images are available. If you do not want every stack covered, create per-stack schedules instead.
+- **Fleet-wide schedule.** Create a **Auto-update All Stacks on Node** task targeting a node. Every stack on that node is checked and updated when new images are available. If you do not want every stack covered, create per-stack schedules instead.
 - **Stack list dot.** Image-update *detection* runs on the configured interval (every 2 hours by default) regardless of whether any schedule is configured. The sidebar dot and the readiness board still show available updates so you can decide what to do with them.
 - **Manual updates are always available.** The lifecycle **Update** action on a stack applies an update on demand, independent of any scheduled task.
 
@@ -129,7 +129,7 @@ The preview is recomputed each time the readiness board loads, so it reflects th
     Image update detection runs on the configured interval (every 2 hours by default) on each node, and the readiness board uses the same cached status. Trigger **Recheck** to force a fresh check across every reachable node, or shorten the interval under **Settings > Automation > Image update checks**.
   </Accordion>
   <Accordion title='Scheduled auto-update runs are not applying to a specific stack'>
-    No schedule covers that stack. Open **Schedules** in the top nav, create a new **Auto-update Stack** task targeting the stack (or an **Auto-update All Stacks** task on its node), and pick a cron. The next firing will include the stack, or you can trigger an immediate run from the row.
+    No schedule covers that stack. Open **Schedules** in the top nav, create a new **Auto-update Stack** task targeting the stack (or an **Auto-update All Stacks on Node** task on its node), and pick a cron. The next firing will include the stack, or you can trigger an immediate run from the row.
   </Accordion>
   <Accordion title='Banner says "X of Y nodes reachable"'>
     One or more nodes that are marked online in your fleet did not respond within the request timeout. Pending updates from those nodes are not shown until they come back. Check the node's status from the Fleet view and the network path between this Sencho instance and the unreachable node.

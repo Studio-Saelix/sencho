@@ -163,6 +163,46 @@ describe('applySuppressions', () => {
     expect(applySuppressions([], 'nginx:1.25', [], NOW)).toEqual([]);
   });
 
+  it('treats a missing status as accepted (back-compat) and dismisses it', () => {
+    const [r] = applySuppressions(
+      [{ vulnerability_id: 'CVE-2024-1234', pkg_name: 'openssl' }],
+      'nginx:1.25',
+      [makeSuppression({})],
+      NOW,
+    );
+    expect(r).toMatchObject({ suppressed: true, triage_status: 'accepted' });
+  });
+
+  it('surfaces a dismissing status (not_affected) as suppressed with the status', () => {
+    const [r] = applySuppressions(
+      [{ vulnerability_id: 'CVE-2024-1234', pkg_name: 'openssl' }],
+      'nginx:1.25',
+      [makeSuppression({ status: 'not_affected', justification: 'component_not_present' })],
+      NOW,
+    );
+    expect(r).toMatchObject({ suppressed: true, triage_status: 'not_affected', triage_justification: 'component_not_present' });
+  });
+
+  it('does NOT dismiss a needs_review decision (stays actionable, still tagged)', () => {
+    const [r] = applySuppressions(
+      [{ vulnerability_id: 'CVE-2024-1234', pkg_name: 'openssl' }],
+      'nginx:1.25',
+      [makeSuppression({ status: 'needs_review' })],
+      NOW,
+    );
+    expect(r).toMatchObject({ suppressed: false, triage_status: 'needs_review' });
+  });
+
+  it('does NOT dismiss an affected decision', () => {
+    const [r] = applySuppressions(
+      [{ vulnerability_id: 'CVE-2024-1234', pkg_name: 'openssl' }],
+      'nginx:1.25',
+      [makeSuppression({ status: 'affected' })],
+      NOW,
+    );
+    expect(r.suppressed).toBe(false);
+  });
+
   // Regression guard for the cve_id bucketing optimization. A naive O(N*M)
   // implementation drifts into the tens of millions of comparisons at this
   // scale; the bucketed implementation lands in low-tens of milliseconds on

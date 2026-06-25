@@ -1,6 +1,15 @@
 import { Router, type Request, type Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService, type ScheduledTask } from '../services/DatabaseService';
+import {
+  VALID_TARGET_TYPES,
+  VALID_ACTIONS,
+  INVALID_ACTION_MESSAGE,
+  validateActionTarget,
+  getScheduledActionDefinition,
+  type TargetType,
+  type BackendScheduledAction,
+} from '../services/scheduledActionRegistry';
 import { SchedulerService } from '../services/SchedulerService';
 import { NotificationService } from '../services/NotificationService';
 import { requireAdmin } from '../middleware/tierGates';
@@ -24,31 +33,31 @@ function broadcastScheduledTasksChanged(): void {
   }
 }
 
-const VALID_TARGET_TYPES = ['stack', 'fleet', 'system'] as const;
-const VALID_ACTIONS = ['restart', 'snapshot', 'prune', 'update', 'scan', 'auto_backup', 'auto_stop', 'auto_down', 'auto_start'] as const;
 const VALID_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'] as const;
 const ERR_FLEET_NODE_REQUIRED = 'Fleet update requires node_id.';
 
-type TargetType = typeof VALID_TARGET_TYPES[number];
-type ScheduledAction = typeof VALID_ACTIONS[number];
+function parsePositiveNodeId(nodeId: unknown): number | null {
+  if (typeof nodeId !== 'number' && typeof nodeId !== 'string') return null;
+  if (typeof nodeId === 'string' && nodeId.trim().length === 0) return null;
+  const parsedNodeId = Number(nodeId);
+  return Number.isInteger(parsedNodeId) && parsedNodeId > 0 ? parsedNodeId : null;
+}
 
-const STACK_ONLY_ACTIONS = new Set<ScheduledAction>(['auto_backup', 'auto_stop', 'auto_down', 'auto_start']);
+function actionRequiresNode(action: BackendScheduledAction): boolean {
+  return getScheduledActionDefinition(action)?.requiresNode === true;
+}
 
-/**
- * Validate that the target_type is compatible with the action. Each action
- * has exactly one allowed target_type; the helper returns an error message
- * on mismatch and null otherwise.
- */
-function validateActionTarget(action: ScheduledAction, targetType: TargetType): string | null {
-  if (action === 'restart' && targetType !== 'stack') return 'Restart action requires target_type "stack".';
-  if (action === 'update' && targetType !== 'stack' && targetType !== 'fleet') return 'Update action requires target_type "stack" or "fleet".';
-  if (action === 'snapshot' && targetType !== 'fleet') return 'Snapshot action requires target_type "fleet".';
-  if (action === 'prune' && targetType !== 'system') return 'Prune action requires target_type "system".';
-  if (action === 'scan' && targetType !== 'system') return 'Scan action requires target_type "system".';
-  if (STACK_ONLY_ACTIONS.has(action) && targetType !== 'stack') {
-    return `${action} action requires target_type "stack".`;
-  }
-  return null;
+function nodeRequirementLabel(action: BackendScheduledAction, targetType: TargetType): string {
+  if (action === 'scan') return 'Scan';
+  if (action === 'prune') return 'Prune';
+  if (action === 'update' && targetType === 'fleet') return 'Fleet update';
+  return action;
+}
+
+function localNodeRequirementLabel(action: BackendScheduledAction): string {
+  if (action === 'scan') return 'Scheduled vulnerability scans';
+  if (action === 'prune') return 'Scheduled prunes';
+  return `${action} tasks`;
 }
 
 function validateStackTarget(targetType: TargetType, targetId: unknown, nodeId: unknown): string | null {
@@ -62,29 +71,44 @@ function validateStackTarget(targetType: TargetType, targetId: unknown, nodeId: 
     return 'Stack target_id must be a valid stack name.';
   }
 
-  const parsedNodeId = Number(nodeId);
-  if (!Number.isInteger(parsedNodeId) || parsedNodeId <= 0) {
+  if (parsePositiveNodeId(nodeId) === null) {
     return 'Stack operations require a valid node_id.';
   }
 
   return null;
 }
 
-function validateScanNode(nodeId: unknown): string | null {
-  if (nodeId == null) return 'Scan action requires node_id.';
-  const parsedNodeId = Number(nodeId);
-  if (!Number.isFinite(parsedNodeId)) return 'Scan action requires a valid node_id.';
-  const node = DatabaseService.getInstance().getNode(parsedNodeId);
-  if (!node) return 'Scheduled vulnerability scans require an existing local node.';
-  if (node?.type === 'remote') {
-    return 'Scheduled vulnerability scans currently require a local node.';
+/**
+ * Shared guard for non-stack actions that require a node. Stack actions use
+ * validateStackTarget because they also require target_id.
+ */
+function validateActionNode(action: BackendScheduledAction, targetType: TargetType, nodeId: unknown): string | null {
+  if (targetType === 'stack') return null;
+  const def = getScheduledActionDefinition(action);
+  if (!def?.requiresNode) return null;
+
+  const labelSingular = nodeRequirementLabel(action, targetType);
+  const labelPlural = localNodeRequirementLabel(action);
+
+  if (nodeId == null) {
+    return action === 'update' && targetType === 'fleet'
+      ? ERR_FLEET_NODE_REQUIRED
+      : `${labelSingular} action requires node_id.`;
   }
+
+  const parsedNodeId = parsePositiveNodeId(nodeId);
+  if (parsedNodeId === null) return `${labelSingular} action requires a valid node_id.`;
+  if (def.nodeScope !== 'local') return null;
+
+  const node = DatabaseService.getInstance().getNode(parsedNodeId);
+  if (!node) return `${labelPlural} require an existing local node.`;
+  if (node.type === 'remote') return `${labelPlural} currently require a local node.`;
   return null;
 }
 
 /** Shared validation for prune_targets, target_services, prune_label_filter. Returns an error string or null. */
 function validateOptionalFields(
-  action: ScheduledAction,
+  action: BackendScheduledAction,
   targetType: TargetType,
   prune_targets: unknown,
   target_services: unknown,
@@ -112,6 +136,29 @@ function validateOptionalFields(
     if (action !== 'prune') {
       return 'prune_label_filter can only be used with prune action';
     }
+  }
+  return null;
+}
+
+/**
+ * Validate a cron expression for Scheduled Operations. The scheduler ticks once
+ * per minute, so an expression with a leading seconds field (6 or more fields)
+ * is rejected: its sub-minute precision could never be honored. Cron nicknames
+ * such as `@daily` (a single token) are left untouched. Returns an error message
+ * or null.
+ */
+function validateCronExpression(cron: unknown): string | null {
+  if (typeof cron !== 'string' || !cron.trim()) {
+    return 'Cron expression is required.';
+  }
+  if (cron.trim().split(/\s+/).length >= 6) {
+    return 'Cron expression must use 5 fields (minute hour day month weekday). The seconds field is not supported.';
+  }
+  try {
+    CronExpressionParser.parse(cron);
+  } catch (e) {
+    console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron), sanitizeForLog(getErrorMessage(e, 'unknown')));
+    return 'Invalid cron expression.';
   }
   return null;
 }
@@ -163,42 +210,34 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       res.status(400).json({ error: 'Invalid target_type. Must be stack, fleet, or system.' }); return;
     }
     if (!(VALID_ACTIONS as readonly string[]).includes(action)) {
-      res.status(400).json({ error: 'Invalid action. Must be restart, snapshot, prune, update, scan, auto_backup, auto_stop, auto_down, or auto_start.' }); return;
+      res.status(400).json({ error: INVALID_ACTION_MESSAGE }); return;
     }
 
     const targetErr = validateActionTarget(action, target_type);
     if (targetErr) { res.status(400).json({ error: targetErr }); return; }
 
-    if (action === 'scan' && !node_id) {
-      res.status(400).json({ error: 'Scan action requires node_id.' }); return;
-    }
-    if (action === 'scan') {
-      const nodeErr = validateScanNode(node_id);
-      if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
-    }
-    if (action === 'update' && target_type === 'fleet' && !node_id) {
-      res.status(400).json({ error: ERR_FLEET_NODE_REQUIRED }); return;
-    }
+    const nodeErr = validateActionNode(action, target_type, node_id);
+    if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     const stackTargetErr = validateStackTarget(target_type, target_id, node_id);
     if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
 
     const optionalErr = validateOptionalFields(action, target_type, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
 
-    try { CronExpressionParser.parse(cron_expression); } catch (e) {
-      console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron_expression), sanitizeForLog(getErrorMessage(e, 'unknown')));
-      res.status(400).json({ error: 'Invalid cron expression.' }); return;
-    }
+    const cronErr = validateCronExpression(cron_expression);
+    if (cronErr) { res.status(400).json({ error: cronErr }); return; }
 
     const scheduler = SchedulerService.getInstance();
     const now = Date.now();
     const nextRun = (enabled !== false) ? scheduler.calculateNextRun(cron_expression) : null;
+    const normalizedTargetId = target_type === 'stack' ? target_id : null;
+    const normalizedNodeId = actionRequiresNode(action) ? parsePositiveNodeId(node_id) : null;
 
     const id = DatabaseService.getInstance().createScheduledTask({
       name: name.trim(),
       target_type,
-      target_id: target_id || null,
-      node_id: node_id != null ? Number(node_id) : null,
+      target_id: normalizedTargetId,
+      node_id: normalizedNodeId,
       action,
       cron_expression,
       enabled: enabled !== false ? 1 : 0,
@@ -209,9 +248,9 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       next_run_at: nextRun,
       last_status: null,
       last_error: null,
-      prune_targets: prune_targets ? JSON.stringify(prune_targets) : null,
-      target_services: target_services ? JSON.stringify(target_services) : null,
-      prune_label_filter: prune_label_filter ? prune_label_filter.trim() : null,
+      prune_targets: action === 'prune' && prune_targets ? JSON.stringify(prune_targets) : null,
+      target_services: action === 'restart' && target_type === 'stack' && target_services ? JSON.stringify(target_services) : null,
+      prune_label_filter: action === 'prune' && prune_label_filter ? prune_label_filter.trim() : null,
       delete_after_run: delete_after_run ? 1 : 0,
     });
 
@@ -258,22 +297,19 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
       res.status(400).json({ error: 'Invalid action' }); return;
     }
 
-    const finalAction = (action ?? existing.action) as ScheduledAction;
+    const finalAction = (action ?? existing.action) as BackendScheduledAction;
     const finalTargetType = (target_type ?? existing.target_type) as TargetType;
-    const finalTargetId = target_id !== undefined ? target_id : existing.target_id;
-    const finalNodeId = node_id !== undefined ? node_id : existing.node_id;
+    const finalTargetId = finalTargetType === 'stack'
+      ? (target_id !== undefined ? target_id : existing.target_id)
+      : null;
+    const finalNodeId = actionRequiresNode(finalAction)
+      ? (node_id !== undefined ? node_id : existing.node_id)
+      : null;
     const targetErr = validateActionTarget(finalAction, finalTargetType);
     if (targetErr) { res.status(400).json({ error: targetErr }); return; }
 
-    if (finalAction === 'scan') {
-      const nodeErr = validateScanNode(finalNodeId);
-      if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
-    }
-    if (finalAction === 'update' && finalTargetType === 'fleet') {
-      if (!finalNodeId) {
-        res.status(400).json({ error: ERR_FLEET_NODE_REQUIRED }); return;
-      }
-    }
+    const nodeErr = validateActionNode(finalAction, finalTargetType, finalNodeId);
+    if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
 
     const stackTargetErr = validateStackTarget(finalTargetType, finalTargetId, finalNodeId);
     if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
@@ -281,24 +317,43 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const optionalErr = validateOptionalFields(finalAction, finalTargetType, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
 
-    if (cron_expression) {
-      try { CronExpressionParser.parse(cron_expression); } catch (e) {
-        console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron_expression), sanitizeForLog(getErrorMessage(e, 'unknown')));
-        res.status(400).json({ error: 'Invalid cron expression.' }); return;
-      }
+    if (cron_expression !== undefined) {
+      const cronErr = validateCronExpression(cron_expression);
+      if (cronErr) { res.status(400).json({ error: cronErr }); return; }
     }
 
-    const updates: Record<string, unknown> = { updated_at: Date.now() };
-    if (name !== undefined) updates.name = typeof name === 'string' ? name.trim() : name;
-    if (target_type !== undefined) updates.target_type = target_type;
-    if (target_id !== undefined) updates.target_id = target_id || null;
-    if (node_id !== undefined) updates.node_id = node_id != null ? Number(node_id) : null;
-    if (action !== undefined) updates.action = action;
-    if (cron_expression !== undefined) updates.cron_expression = cron_expression;
+    const updates: Partial<Omit<ScheduledTask, 'id'>> = { updated_at: Date.now() };
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name.trim()) {
+        res.status(400).json({ error: 'Name is required' }); return;
+      }
+      updates.name = name.trim();
+    }
+    if (target_type !== undefined) updates.target_type = finalTargetType;
+    if (target_id !== undefined || finalTargetType !== 'stack') updates.target_id = finalTargetId || null;
+    if (node_id !== undefined || !actionRequiresNode(finalAction)) {
+      updates.node_id = finalNodeId != null ? parsePositiveNodeId(finalNodeId) : null;
+    }
+    if (action !== undefined) updates.action = finalAction;
+    if (cron_expression !== undefined && typeof cron_expression === 'string') updates.cron_expression = cron_expression;
     if (enabled !== undefined) updates.enabled = enabled ? 1 : 0;
-    if (prune_targets !== undefined) updates.prune_targets = prune_targets ? JSON.stringify(prune_targets) : null;
-    if (target_services !== undefined) updates.target_services = target_services ? JSON.stringify(target_services) : null;
-    if (prune_label_filter !== undefined) updates.prune_label_filter = prune_label_filter ? prune_label_filter.trim() : null;
+    if (prune_targets !== undefined) {
+      updates.prune_targets = finalAction === 'prune' && prune_targets ? JSON.stringify(prune_targets) : null;
+    } else if (finalAction !== 'prune') {
+      updates.prune_targets = null;
+    }
+    if (target_services !== undefined) {
+      updates.target_services = finalAction === 'restart' && finalTargetType === 'stack' && target_services
+        ? JSON.stringify(target_services)
+        : null;
+    } else if (finalAction !== 'restart' || finalTargetType !== 'stack') {
+      updates.target_services = null;
+    }
+    if (prune_label_filter !== undefined) {
+      updates.prune_label_filter = finalAction === 'prune' && prune_label_filter ? prune_label_filter.trim() : null;
+    } else if (finalAction !== 'prune') {
+      updates.prune_label_filter = null;
+    }
     if (delete_after_run !== undefined) updates.delete_after_run = delete_after_run ? 1 : 0;
 
     const finalCron = cron_expression || existing.cron_expression;
@@ -309,7 +364,7 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
       updates.next_run_at = null;
     }
 
-    db.updateScheduledTask(id, updates as Partial<Omit<ScheduledTask, 'id'>>);
+    db.updateScheduledTask(id, updates);
     console.log(`[ScheduledTasks] Updated task id=${id}`);
     const task = db.getScheduledTask(id);
     broadcastScheduledTasksChanged();

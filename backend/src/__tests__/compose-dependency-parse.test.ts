@@ -66,6 +66,15 @@ describe('parseComposeDependencies - ports', () => {
   });
 });
 
+describe('parseComposeDependencies - network_mode', () => {
+  it('captures network_mode and leaves it undefined when absent', () => {
+    const host = parseComposeDependencies(svc('web', 'image: nginx\nnetwork_mode: host'));
+    expect(host.services[0].networkMode).toBe('host');
+    const none = parseComposeDependencies(svc('web', 'image: nginx'));
+    expect(none.services[0].networkMode).toBeUndefined();
+  });
+});
+
 describe('parseComposeDependencies - top-level resources', () => {
   it('normalizes external (bool), legacy external object, and name: override', () => {
     const r = parseComposeDependencies('services:\n  web:\n    image: nginx\nnetworks:\n  a:\n  b:\n    external: true\n  c:\n    external:\n      name: legacy_net\n  d:\n    name: custom_net\nvolumes:\n  v:\n    external: true\n');

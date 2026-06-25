@@ -4,7 +4,12 @@
  * Community user reads (network map, membership, published ports/bindings,
  * network_mode, extra_hosts, and runtime drift). Advisory and read-only; it
  * renders the AUTHORED model only (no Mesh overrides) and never returns or logs
- * raw docker stderr, env values, or label values.
+ * raw docker stderr, env values, or label values. One caveat: a secret
+ * interpolated into a structural field (a network name, published port, or
+ * `extra_hosts` entry built from a `${VAR}`) is resolved by `docker compose
+ * config` before this reads the model, so its value does appear; that value is
+ * already readable at the same `stack:read` scope via the stack's files
+ * (documented caveat, see docs/features/environment-guardrails).
  */
 import DockerController, { type DependencySnapshot } from '../DockerController';
 import { ComposeService } from '../ComposeService';

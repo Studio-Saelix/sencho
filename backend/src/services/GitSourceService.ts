@@ -7,6 +7,7 @@ import YAML from 'yaml';
 import { CryptoService } from './CryptoService';
 import { DatabaseService, type StackGitSource, type GitSourceAuthType, type GitSourceAppliedSpec } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
+import { StackFileRootsService } from './StackFileRootsService';
 import { ComposeService } from './ComposeService';
 import { StackOpLockService } from './StackOpLockService';
 import { HealthGateService } from './HealthGateService';
@@ -1166,6 +1167,12 @@ export class GitSourceService {
                 }
             }
         }
+
+        // Materializing changes the compose/env files on disk, which can add or
+        // remove declared mounts, so the file-root allowlist must be recomputed.
+        // GitSourceService is default-node scoped (it uses the default
+        // FileSystemService instance), so invalidate the default node's cache.
+        StackFileRootsService.getInstance().invalidate(stackName);
 
         return this.deriveAppliedSpec(composeFiles.map(f => f.path), contextDir);
     }

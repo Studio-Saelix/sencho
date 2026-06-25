@@ -1,4 +1,5 @@
 import { CacheService } from '../services/CacheService';
+import { StackFileRootsService } from '../services/StackFileRootsService';
 
 export const REMOTE_META_NAMESPACE = 'remote-meta';
 
@@ -8,13 +9,15 @@ export const REMOTE_META_NAMESPACE = 'remote-meta';
  *
  * Also drops the global `project-name-map` since stack writes (create,
  * delete, rename, compose edits) can reshape the on-disk layout used to
- * build it.
+ * build it, and the file-root allowlists for the node so a stack deleted and
+ * recreated under the same name cannot serve the old stack's roots.
  */
 export function invalidateNodeCaches(nodeId: number): void {
   const cache = CacheService.getInstance();
   cache.invalidate(`stats:${nodeId}`);
   cache.invalidate(`stack-statuses:${nodeId}`);
   cache.invalidate('project-name-map');
+  StackFileRootsService.invalidateNode(nodeId);
 }
 
 /**

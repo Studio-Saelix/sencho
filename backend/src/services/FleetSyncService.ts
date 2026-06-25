@@ -565,6 +565,9 @@ export class FleetSyncService {
                 max_severity: p.max_severity,
                 block_on_deploy: p.block_on_deploy,
                 enabled: p.enabled,
+                block_on_severity: p.block_on_severity,
+                block_on_kev: p.block_on_kev,
+                block_on_fixable: p.block_on_fixable,
                 created_at: p.created_at,
                 updated_at: p.updated_at,
             }));
@@ -577,6 +580,9 @@ export class FleetSyncService {
                 created_by: s.created_by,
                 created_at: s.created_at,
                 expires_at: s.expires_at,
+                // Replicate the triage decision so a replica's posture matches control.
+                status: s.status,
+                justification: s.justification,
             }));
         } else if (resource === 'misconfig_acknowledgements') {
             rows = db.getLocalMisconfigAcknowledgements().map((a) => ({

@@ -51,7 +51,7 @@ export function MobileSettings({ headerActions }: MobileSettingsProps) {
         <div className="relative border-b border-hairline px-4 pb-[15px] pt-1">
           <span aria-hidden className="absolute left-0 top-1 bottom-[15px] w-[3px] bg-brand" />
           <div className="mb-1"><Kicker>{`settings · ${group?.label ?? ''} · ${item.label}`}</Kicker></div>
-          <span className="font-display italic text-[30px] leading-[34px] text-stat-value">{item.label}</span>
+          <span className="font-heading text-[30px] leading-[34px] text-stat-value">{item.label}</span>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden px-4 pb-8 pt-4 flex flex-col gap-6">
           <SettingsSectionContent sectionId={activeSection} onDirtyChange={NOOP} showDescription />

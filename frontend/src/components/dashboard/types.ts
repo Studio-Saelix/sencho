@@ -71,7 +71,7 @@ export interface NotificationItem {
 }
 
 export interface StackStatusEntry {
-  status: 'running' | 'exited' | 'unknown';
+  status: 'running' | 'exited' | 'unknown' | 'partial';
   mainPort?: number;
   /** Unix seconds of the oldest running container (approximates stack uptime). */
   runningSince?: number;

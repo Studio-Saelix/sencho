@@ -7,7 +7,7 @@ The **Networking** tab in the right-hand **Anatomy** panel answers a Compose-fir
 
 The view is read-only with respect to the stack: it never changes a deployment. The one thing you can edit here is the stack's *exposure intent*, which is stored separately so Sencho can flag mismatches over time.
 
-Compose Networking never shows a secret value. It reads the structure of the model, network names, service-to-network membership, published ports, and the *names* of environment variables and labels, but never their values, so nothing sensitive appears in the view or the logs.
+Compose Networking reads the structure of the model, network names, service-to-network membership, published ports, and the *names* of environment variables and labels, never their values, so a secret injected through `environment:` or `env_file:` never appears in the view or the logs. One caveat: a structural field built by interpolating a secret, such as a network name, a published port, or an `extra_hosts` entry assembled from a `${VAR}`, is resolved before the tab reads it, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into these fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
 ## Networks
 
@@ -25,6 +25,8 @@ Each service lists its published ports with the interface they bind to:
 - **all interfaces** marks a port published on `0.0.0.0`, reachable from every network the host is attached to.
 - **loopback** marks a port bound only to `127.0.0.1`, reachable only from the host itself.
 - A specific address is shown as-is.
+
+A service running with `network_mode: host` is treated as **host-exposed**: it publishes every container port directly on the host, so it counts as exposed regardless of whether it declares any `ports:`. The exposure summary reflects that even when the port list is empty.
 
 The tab also surfaces each service's network membership and aliases, `network_mode` (`host`, `none`, `service:`, and `container:` modes are called out), and `extra_hosts` entries.
 

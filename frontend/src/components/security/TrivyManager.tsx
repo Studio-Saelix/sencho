@@ -46,7 +46,7 @@ interface TrivyManagerProps {
  */
 export function TrivyManager({ status, updateCheck, refresh, refreshUpdateCheck }: TrivyManagerProps) {
   const { isAdmin } = useAuth();
-  const [trivyBusy, setTrivyBusy] = useState<null | 'install' | 'update' | 'uninstall' | 'auto-update' | 'advisory'>(null);
+  const [trivyBusy, setTrivyBusy] = useState<null | 'install' | 'update' | 'uninstall' | 'auto-update' | 'advisory' | 'cve-intel'>(null);
   const [uninstallConfirm, setUninstallConfirm] = useState(false);
 
   const runTrivyOp = async (
@@ -103,6 +103,25 @@ export function TrivyManager({ status, updateCheck, refresh, refreshUpdateCheck 
     setTrivyBusy('advisory');
     try {
       const res = await apiFetch('/security/pre-deploy-scan-advisory', {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to update setting');
+      }
+      await refresh();
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Failed to update setting');
+    } finally {
+      setTrivyBusy(null);
+    }
+  };
+
+  const handleCveIntelToggle = async (enabled: boolean) => {
+    setTrivyBusy('cve-intel');
+    try {
+      const res = await apiFetch('/security/cve-intel-enabled', {
         method: 'PUT',
         body: JSON.stringify({ enabled }),
       });
@@ -203,6 +222,22 @@ export function TrivyManager({ status, updateCheck, refresh, refreshUpdateCheck 
             <TogglePill
               checked={status.preDeployScanAdvisory}
               onChange={handleAdvisoryToggle}
+              disabled={trivyBusy !== null}
+            />
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
+            <div>
+              <Label className="text-sm">Exploit intelligence (KEV + EPSS)</Label>
+              <p className="text-xs text-muted-foreground">
+                Fetch CISA Known Exploited Vulnerabilities and EPSS scores daily to prioritize findings. Reaches cisa.gov and api.first.org; turn off for air-gapped hosts.
+              </p>
+            </div>
+            <TogglePill
+              checked={status.cveIntelEnabled}
+              onChange={handleCveIntelToggle}
               disabled={trivyBusy !== null}
             />
           </div>

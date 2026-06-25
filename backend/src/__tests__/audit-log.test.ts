@@ -655,6 +655,7 @@ describe('GET /api/audit-log/stats', () => {
       .get('/api/audit-log/stats')
       .set('Authorization', `Bearer ${adminToken()}`);
     expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
   });
 
   it('returns the four-tile stat structure for admin', async () => {
@@ -682,6 +683,7 @@ describe('GET /api/audit-log/export', () => {
       .get('/api/audit-log/export?format=json')
       .set('Authorization', `Bearer ${adminToken()}`);
     expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
   });
 
   it('exports JSON with correct Content-Type', async () => {

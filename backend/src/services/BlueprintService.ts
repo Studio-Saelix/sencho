@@ -473,6 +473,13 @@ export class BlueprintService {
                 if (await this.stackDirExists(node.id, blueprint.name)) {
                     await FileSystemService.getInstance(node.id).deleteStack(blueprint.name);
                 }
+                // Remove the exposure descriptor so a withdrawn blueprint
+                // stack does not leave a stale row that escalates posture.
+                try {
+                    DatabaseService.getInstance().deleteStackExposure(node.id, blueprint.name);
+                } catch (e) {
+                    console.warn(`[BlueprintService] deleteStackExposure failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(e)}`);
+                }
             },
         );
         if (!lock.ran) {

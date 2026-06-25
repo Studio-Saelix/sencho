@@ -6,6 +6,7 @@ import type { DeclaredCompose } from '../helpers/composeDependencyParse';
 import { sha256Hex } from '../utils/hashing';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
+import { buildStackDriftReport } from './DriftDetectionService';
 import type { StackDriftReport, StackDriftFinding } from './DriftDetectionService';
 
 /**
@@ -130,6 +131,7 @@ export class DriftLedgerService {
             return { detected: 0, resolved: 0 };
         }
         const db = DatabaseService.getInstance();
+        const now = Date.now();
         const openByKey = new Map(db.getOpenDriftFindings(nodeId, stackName).map(r => [findingKey(r.service, r.finding_type), r]));
         const currentByKey = new Map(report.findings.map(f => [findingKey(f.service, f.kind), f]));
 
@@ -141,12 +143,13 @@ export class DriftLedgerService {
         for (const [key, row] of openByKey) {
             if (!currentByKey.has(key)) toResolve.push(row);
         }
-        if (toInsert.length === 0 && toResolve.length === 0) {
-            return { detected: 0, resolved: 0 };
-        }
-
-        const now = Date.now();
+        // Stamp the check time and apply any transitions in one transaction, so the
+        // "checked {time ago}" the Drift tab shows can never persist without the ledger
+        // update it describes. The stamp runs even on a no-op authoritative check (no
+        // transitions), so the history's "as of" stays honest while a stale finding
+        // reads as history rather than as live truth.
         db.getDb().transaction(() => {
+            db.setStackDossierDriftCheck(nodeId, stackName, now);
             for (const f of toInsert) {
                 db.insertDriftFinding({
                     node_id: nodeId,
@@ -174,6 +177,23 @@ export class DriftLedgerService {
                 `Drift resolved on ${stackName}: ${toResolve.length} finding${toResolve.length === 1 ? '' : 's'} cleared`, now);
         }
         return { detected: toInsert.length, resolved: toResolve.length };
+    }
+
+    /**
+     * Build the spatial report for one stack and reconcile it into the ledger.
+     * Used by the deploy and update success hooks (and the rollback route, which
+     * re-deploys through deployStack) so a change resolves the findings it fixed and
+     * records what it left behind. Best-effort: a build or reconcile failure is
+     * logged and swallowed so it never fails the deploy that triggered it.
+     */
+    async reconcileStack(nodeId: number, stackName: string): Promise<DriftReconcileResult> {
+        try {
+            const report = await buildStackDriftReport(nodeId, stackName);
+            return this.reconcile(nodeId, stackName, report);
+        } catch (error) {
+            console.error('[DriftLedger] reconcileStack failed for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+            return { detected: 0, resolved: 0 };
+        }
     }
 
     /**
