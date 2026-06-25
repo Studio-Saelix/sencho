@@ -110,7 +110,7 @@ A Scan Node Images task runs Trivy against every image on the selected node and 
 When a scheduled scan finishes, Sencho dispatches a completion notification. The severity reflects the outcome (info on a clean run, warning when findings are present); the category is `scan_finding`. The full message format and how it surfaces in the bell is documented in [Alerts & Notifications · Vulnerability scanning](/features/alerts-notifications#vulnerability-scanning).
 
 <Frame>
-  <img src="/images/scheduled-operations/create-scan.png" alt="The New scheduled task modal configured for a Scan Node Images. Name reads 'Nightly vulnerability scan'. Action is Scan Node Images. Node is Local with helper text explaining every image on the selected node will be scanned and scans run on local nodes only. Cron Expression is '0 3 * * *' with the preview 'At 03:00 AM'. The Enabled toggle reads ON. Cancel and Create buttons sit at the bottom right." />
+  <img src="/images/scheduled-operations/create-scan.png" alt="The New scheduled task modal configured for a Scan Node Images task. Name reads 'Nightly vulnerability scan'. Action is Scan Node Images. Node is Local. A Read-only risk badge and the helper text 'Runs Trivy against images on the selected local node and records the findings.' appear below the action picker. Cron Expression is '0 3 * * *' with the preview 'At 03:00 AM'. The Enabled toggle reads ON. Cancel and Create buttons sit at the bottom right." />
 </Frame>
 
 ### Prune label filter
