@@ -445,8 +445,8 @@ export async function enforcePolicyForImageRefs(
         }
         if (debug) {
             console.log(
-                '[Policy:debug] Bypass by "%s" for "%s" (%d violation(s))',
-                sanitizeForLog(opts.actor), sanitizeForLog(stackName), violations.length,
+                '[Policy:debug] Bypass for "%s" (%d violation(s))',
+                sanitizeForLog(stackName), violations.length,
             );
         }
         return { ok: true, bypassed: true, policy, violations };
