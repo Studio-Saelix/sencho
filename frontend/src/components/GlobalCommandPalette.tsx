@@ -33,6 +33,7 @@ const statusDot: Record<StackStatus, string> = {
     running: 'bg-success',
     exited: 'bg-muted-foreground',
     unknown: 'bg-muted-foreground/60',
+    partial: 'bg-warning',
 };
 
 interface PaletteState {

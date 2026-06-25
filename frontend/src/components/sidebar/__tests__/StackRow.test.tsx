@@ -36,6 +36,26 @@ describe('StackRow', () => {
     expect(screen.getByText('--')).toBeInTheDocument();
   });
 
+  it('renders PT with the amber class for partial', () => {
+    const { container } = render(<StackRow {...base({ status: 'partial', running: 3, total: 5 })} />);
+    expect(screen.getByText('PT')).toBeInTheDocument();
+    expect(container.querySelector('.text-warning')).not.toBeNull();
+  });
+
+  it('wraps the partial pill in a hover tooltip', () => {
+    // jsdom does not mount the cursor-follow label, so assert the PT trigger is
+    // wrapped in the RowTooltip cursor-container; the visible "3/5 running"
+    // tooltip text is verified in the Playwright drive.
+    const { container } = render(<StackRow {...base({ status: 'partial', running: 3, total: 5 })} />);
+    expect(screen.getByText('PT').closest('[data-slot="cursor-container"]')).not.toBeNull();
+    expect(container.querySelector('[data-slot="cursor-container"]')).not.toBeNull();
+  });
+
+  it('does not wrap a non-partial pill in a tooltip', () => {
+    render(<StackRow {...base({ status: 'running' })} />);
+    expect(screen.getByText('UP').closest('[data-slot="cursor-container"]')).toBeNull();
+  });
+
   it('renders cyan rail only when active', () => {
     const { rerender } = render(<StackRow {...base({ isActive: false })} />);
     expect(screen.getByTestId('stack-row')).not.toHaveClass('bg-accent/[0.07]');

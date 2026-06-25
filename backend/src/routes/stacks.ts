@@ -13,7 +13,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
 import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
-import DockerController from '../services/DockerController';
+import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { MeshService } from '../services/MeshService';
 import { CacheService } from '../services/CacheService';
@@ -42,7 +42,7 @@ import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
@@ -240,7 +240,7 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
         const stackNames = stacks.map((s: string) => s.replace(/\.(yml|yaml)$/, ''));
         const dockerController = DockerController.getInstance(req.nodeId);
         const bulkInfo = await dockerController.getBulkStackStatuses(stackNames);
-        const data: Record<string, { status: 'running' | 'exited' | 'unknown'; mainPort?: number; runningSince?: number }> = {};
+        const data: Record<string, BulkStackInfo> = {};
         for (const stack of stacks) {
           const name = stack.replace(/\.(yml|yaml)$/, '');
           data[stack] = bulkInfo[name] ?? { status: 'unknown' };
@@ -391,7 +391,7 @@ async function runStackBulkOp(
         return {
           stackName,
           ok: false,
-          error: `Policy "${gate.policy?.name}" blocked update`,
+          error: describePolicyBlock(gate.policy, gate.violations, 'update'),
           code: 'policy_blocked',
         };
       }
@@ -849,7 +849,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         buildPolicyGateOptions(req),
       );
       if (!gate.ok) {
-        deployError = `Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`;
+        deployError = describePolicyBlock(gate.policy, gate.violations);
       } else {
         try {
           await ComposeService.getInstance(req.nodeId).deployStack(stack_name);

@@ -188,6 +188,12 @@ export interface ScanPolicy {
   max_severity: VulnSeverity;
   block_on_deploy: number;
   enabled: number;
+  /** Block when an image's highest non-suppressed severity meets max_severity. */
+  block_on_severity: number;
+  /** Block when any non-suppressed CVE is in the CISA known-exploited (KEV) set. */
+  block_on_kev: number;
+  /** Block when any non-suppressed Critical/High finding has a fix available. */
+  block_on_fixable: number;
   replicated_from_control: number;
   created_at: number;
   updated_at: number;
@@ -273,4 +279,24 @@ export interface SecurityRiskTrendPoint {
   date: string;
   critical: number;
   high: number;
+}
+
+/** One actionable Critical/High finding for the overview exploit-intel charts
+ *  (Top exploit-risk list + CVSS-by-EPSS quadrant). Intel fields are null until
+ *  CveIntelService has fetched; cvss_score is null on pre-enrichment scans. */
+export interface ExploitIntelFinding {
+  vulnerability_id: string;
+  image_ref: string;
+  scan_id: number;
+  severity: VulnSeverity;
+  cvss_score: number | null;
+  epss_score: number | null;
+  epss_percentile: number | null;
+  kev: boolean;
+  fixed_version: string | null;
+}
+
+export interface ExploitIntelOverview {
+  items: ExploitIntelFinding[];
+  truncated: boolean;
 }

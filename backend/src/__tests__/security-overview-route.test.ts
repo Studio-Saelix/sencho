@@ -108,9 +108,9 @@ describe('GET /api/security/overview', () => {
     seedScan({ node_id: 2, image_ref: 'other:1', scanned_at: now, critical: 99 });
 
     // One fleet-wide and one this-node block policy count; an other-node one does not.
-    db().createScanPolicy({ name: 'fw', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
-    db().createScanPolicy({ name: 'n1', node_id: 1, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
-    db().createScanPolicy({ name: 'n2', node_id: 2, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'fw', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'n1', node_id: 1, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'n2', node_id: 2, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
 
     const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
@@ -393,5 +393,51 @@ describe('GET /api/security/vex/export (Admiral)', () => {
     const stmt = (res.body.statements as Array<{ vulnerability: { name: string }; status: string; justification?: string; products: string[] }>)
       .find((s) => s.vulnerability.name === 'CVE-2024-2222');
     expect(stmt).toMatchObject({ status: 'not_affected', justification: 'component_not_present', products: ['nginx*'] });
+  });
+});
+
+describe('GET /api/security/overview/exploit-intel', () => {
+  beforeEach(() => resetSecurity());
+
+  it('returns actionable Crit/High findings with KEV/EPSS joined and dismissed excluded', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'app:1', image_digest: 'sha256:app', scanned_at: now,
+      total_vulnerabilities: 3, critical_count: 2, high_count: 1, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 2, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    const d = (id: string, severity: 'CRITICAL' | 'HIGH', cvss: number | null, fixed: string | null) => ({
+      vulnerability_id: id, pkg_name: `p-${id}`, installed_version: '1', fixed_version: fixed,
+      severity, title: null, description: null, primary_url: null, cvss_score: cvss,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      d('CVE-2024-AAAA', 'CRITICAL', 9.8, '2'),   // actionable, has KEV + EPSS
+      d('CVE-2024-BBBB', 'HIGH', 7.2, null),       // actionable, no intel yet
+      d('CVE-2024-CCCC', 'CRITICAL', 8.1, '3'),    // dismissed -> excluded
+    ]);
+    db().replaceKev([{ cve_id: 'CVE-2024-AAAA', date_added: '2024-01-01' }], now);
+    db().upsertEpss([{ cve_id: 'CVE-2024-AAAA', epss_score: 0.6, epss_percentile: 0.97 }], now);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-CCCC', pkg_name: null, image_pattern: null, reason: 'accepted',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'accepted',
+    });
+
+    const res = await request(app).get('/api/security/overview/exploit-intel').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const items = res.body.items as Array<{ vulnerability_id: string; cvss_score: number | null; epss_score: number | null; kev: boolean; severity: string; scan_id: number }>;
+    const ids = items.map((i) => i.vulnerability_id);
+    expect(ids).toContain('CVE-2024-AAAA');
+    expect(ids).toContain('CVE-2024-BBBB');
+    expect(ids).not.toContain('CVE-2024-CCCC'); // dismissed triage decision
+    expect(items.find((i) => i.vulnerability_id === 'CVE-2024-AAAA')).toMatchObject({ cvss_score: 9.8, epss_score: 0.6, kev: true, severity: 'CRITICAL', scan_id: scanId });
+    expect(items.find((i) => i.vulnerability_id === 'CVE-2024-BBBB')).toMatchObject({ cvss_score: 7.2, epss_score: null, kev: false });
+    expect(res.body.truncated).toBe(false);
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).get('/api/security/overview/exploit-intel');
+    expect(res.status).toBe(401);
   });
 });

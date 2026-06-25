@@ -29,7 +29,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     missingEnvFiles: [],
     sourceServiceNames: m ? m.services.map(s => s.name) : [], sourceReadable: true,
     nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
-    existingContainers: [], bindChecks: [],
+    existingContainers: [], nodeStateAvailable: true, bindChecks: [],
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false, ...over,
   };
 }
@@ -342,6 +342,68 @@ describe('exposure-intent rules', () => {
   });
 });
 
+describe('node-state availability', () => {
+  // When the node's Docker snapshot could not be collected, the empty sets must not
+  // be read as "resource absent" or "no conflict". Every node-state rule suppresses
+  // itself, and one advisory explains the partial coverage.
+  const externalRes = model([svc()], {
+    networks: { ext: { name: 'shared', external: true, internal: false } },
+    volumes: { v: { name: 'data', external: true, internal: false } },
+  });
+  const newRes = model([svc()], {
+    networks: { backend: { name: 'backend', external: false, internal: false } },
+    volumes: { data: { name: 'data', external: false, internal: false } },
+  });
+  const portModel = model([svc({ ports: [{ startPort: 8080, endPort: 8080, hostIp: '', protocol: 'tcp' }] })]);
+  const nameModel = model([svc({ containerName: 'taken' })]);
+
+  it('does not assert an external network/volume is absent', () => {
+    const f = runRules(ctx({ model: externalRes, nodeStateAvailable: false }));
+    expect(ids(f, 'external-network-missing')).toHaveLength(0);
+    expect(ids(f, 'external-volume-missing')).toHaveLength(0);
+  });
+  it('does not claim a network/volume is new', () => {
+    const f = runRules(ctx({ model: newRes, nodeStateAvailable: false }));
+    expect(ids(f, 'new-network')).toHaveLength(0);
+    expect(ids(f, 'new-volume')).toHaveLength(0);
+  });
+  it('does not report a clean all-clear over a real port conflict', () => {
+    const f = runRules(ctx({ model: portModel, nodeStateAvailable: false,
+      nodePorts: [{ publishedPort: 8080, protocol: 'tcp', ip: '', stack: 'other' }] }));
+    expect(ids(f, 'port-conflict-node')).toHaveLength(0);
+  });
+  it('does not report a clean all-clear over a real container_name collision', () => {
+    const f = runRules(ctx({ model: nameModel, nodeStateAvailable: false,
+      existingContainers: [{ name: 'taken', stack: 'other' }] }));
+    expect(ids(f, 'container-name-collision')).toHaveLength(0);
+  });
+  it('still runs node-state rules when the snapshot is available', () => {
+    const f = runRules(ctx({ model: externalRes, nodeStateAvailable: true }));
+    expect(ids(f, 'external-network-missing')).toHaveLength(1);
+    expect(ids(f, 'external-volume-missing')).toHaveLength(1);
+  });
+  it('does not suppress higher-severity model findings while node state is unavailable', () => {
+    const f = runRules(ctx({ model: model([svc({ privileged: true })]), nodeStateAvailable: false }));
+    expect(ids(f, 'node-state-unavailable')).toHaveLength(1);
+    expect(ids(f, 'privileged')).toHaveLength(1); // a real model finding is still reported alongside the advisory
+  });
+
+  describe('node-state-unavailable advisory', () => {
+    it('fires one info finding when the model rendered but node state is unavailable', () => {
+      const f = ids(runRules(ctx({ model: model([svc()]), nodeStateAvailable: false })), 'node-state-unavailable');
+      expect(f).toHaveLength(1);
+      expect(f[0].severity).toBe('info');
+    });
+    it('stays silent when node state is available', () => {
+      expect(ids(runRules(ctx({ model: model([svc()]), nodeStateAvailable: true })), 'node-state-unavailable')).toHaveLength(0);
+    });
+    it('stays silent when the model is unrenderable (render-failed already covers it)', () => {
+      const f = runRules(ctx({ model: null, renderable: false, renderError: 'boom', nodeStateAvailable: false }));
+      expect(ids(f, 'node-state-unavailable')).toHaveLength(0);
+    });
+  });
+});
+
 describe('rule registry completeness', () => {
   // The canonical rule set. Adding or removing a rule must update this list,
   // which forces a deliberate pass over the docs and the frontend severity map.
@@ -349,6 +411,7 @@ describe('rule registry completeness', () => {
     'render-failed', 'env-unset', 'env-file-missing', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
     'bind-path-missing', 'bind-path-permission', 'docker-socket-mount', 'privileged', 'network-mode-host',
     'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck', 'deploy-swarm-only',
+    'node-state-unavailable',
     'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',
     'exposure-internal-published', 'sensitive-service-broad-exposure', 'exposure-unclassified',

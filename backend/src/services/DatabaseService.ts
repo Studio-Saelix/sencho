@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
+import { evaluatePolicyRisk, policyInputs } from '../utils/policy-risk';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
@@ -688,6 +689,12 @@ export interface ScanPolicy {
     block_on_deploy: number;
     enabled: number;
     replicated_from_control: number;
+    /** Block when an image's highest non-suppressed severity meets max_severity. */
+    block_on_severity: number;
+    /** Block when any non-suppressed CVE is in the CISA known-exploited (KEV) set. */
+    block_on_kev: number;
+    /** Block when any non-suppressed Critical/High finding has a fix available. */
+    block_on_fixable: number;
     created_at: number;
     updated_at: number;
 }
@@ -816,6 +823,7 @@ export class DatabaseService {
         this.migrateNotificationRoutesMatchers();
         this.migrateNotificationHistoryContext();
         this.migrateScanPolicyFleetColumns();
+        this.migrateScanPolicyRiskColumns();
         this.migrateSecretMisconfigColumns();
         this.migrateAgentsAndNotificationsNodeId();
         this.migratePolicyEvaluationColumn();
@@ -1149,6 +1157,9 @@ export class DatabaseService {
         max_severity TEXT NOT NULL DEFAULT 'CRITICAL',
         block_on_deploy INTEGER NOT NULL DEFAULT 0,
         enabled INTEGER NOT NULL DEFAULT 1,
+        block_on_severity INTEGER NOT NULL DEFAULT 1,
+        block_on_kev INTEGER NOT NULL DEFAULT 0,
+        block_on_fixable INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -1753,6 +1764,17 @@ export class DatabaseService {
     private migrateScanPolicyFleetColumns(): void {
         this.tryAddColumn('scan_policies', 'node_identity', "TEXT NOT NULL DEFAULT ''");
         this.tryAddColumn('scan_policies', 'replicated_from_control', 'INTEGER NOT NULL DEFAULT 0');
+    }
+
+    /**
+     * Risk-based deploy-gate inputs. The defaults preserve existing rows as
+     * severity-only (block_on_severity=1, KEV/fixable off); new policies set
+     * these explicitly to the risk-first posture at their create path.
+     */
+    private migrateScanPolicyRiskColumns(): void {
+        this.tryAddColumn('scan_policies', 'block_on_severity', 'INTEGER NOT NULL DEFAULT 1');
+        this.tryAddColumn('scan_policies', 'block_on_kev', 'INTEGER NOT NULL DEFAULT 0');
+        this.tryAddColumn('scan_policies', 'block_on_fixable', 'INTEGER NOT NULL DEFAULT 0');
     }
 
     private migrateSecretMisconfigColumns(): void {
@@ -4777,6 +4799,57 @@ export class DatabaseService {
     }
 
     /**
+     * Critical/High findings from the latest completed scan per image, with the
+     * severity + CVSS the overview's exploit-intel charts need. Same bounded
+     * shape as getLatestCritHighVulnFindingsForNode (single latest-per-image
+     * JOIN, capped, `truncated` flagged). Intel (KEV/EPSS) and suppression
+     * filtering are applied by the caller at read time.
+     */
+    public getLatestCritHighFindingsWithCvssForNode(
+        nodeId: number,
+        limit = 2000,
+    ): {
+        items: Array<{
+            image_ref: string;
+            scan_id: number;
+            vulnerability_id: string;
+            pkg_name: string;
+            severity: VulnSeverity;
+            cvss_score: number | null;
+            fixed_version: string | null;
+        }>;
+        truncated: boolean;
+    } {
+        const rows = this.db
+            .prepare(
+                `SELECT vs.image_ref, vs.id AS scan_id, vd.vulnerability_id, vd.pkg_name,
+                        vd.severity, vd.cvss_score, vd.fixed_version
+                 FROM vulnerability_details vd
+                 INNER JOIN vulnerability_scans vs ON vs.id = vd.scan_id
+                 INNER JOIN (
+                   SELECT image_ref, MAX(scanned_at) AS max_scanned
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed'
+                   GROUP BY image_ref
+                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
+                 WHERE vs.node_id = ? AND vs.status = 'completed'
+                   AND vd.severity IN ('CRITICAL', 'HIGH')
+                 LIMIT ?`,
+            )
+            .all(nodeId, nodeId, limit + 1) as Array<{
+                image_ref: string;
+                scan_id: number;
+                vulnerability_id: string;
+                pkg_name: string;
+                severity: VulnSeverity;
+                cvss_score: number | null;
+                fixed_version: string | null;
+            }>;
+        const truncated = rows.length > limit;
+        return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
      * Distinct CVE ids present in stored findings, for the intel service to fetch
      * EPSS only for what exists (EPSS covers CVEs, not GHSA, so filter to CVE-*).
      */
@@ -4998,8 +5071,8 @@ export class DatabaseService {
         const now = Date.now();
         const result = this.db
             .prepare(
-                `INSERT INTO scan_policies (name, node_id, node_identity, stack_pattern, max_severity, block_on_deploy, enabled, replicated_from_control, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO scan_policies (name, node_id, node_identity, stack_pattern, max_severity, block_on_deploy, enabled, block_on_severity, block_on_kev, block_on_fixable, replicated_from_control, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
                 policy.name,
@@ -5009,6 +5082,9 @@ export class DatabaseService {
                 policy.max_severity,
                 policy.block_on_deploy,
                 policy.enabled,
+                policy.block_on_severity,
+                policy.block_on_kev,
+                policy.block_on_fixable,
                 policy.replicated_from_control ?? 0,
                 now,
                 now,
@@ -5031,7 +5107,8 @@ export class DatabaseService {
         if (!existing) return null;
         const ALLOWED_COLUMNS = new Set([
             'name', 'node_id', 'node_identity', 'stack_pattern', 'max_severity',
-            'block_on_deploy', 'enabled', 'replicated_from_control',
+            'block_on_deploy', 'enabled', 'block_on_severity', 'block_on_kev',
+            'block_on_fixable', 'replicated_from_control',
         ]);
         const fields: string[] = [];
         const values: unknown[] = [];
@@ -5082,8 +5159,8 @@ export class DatabaseService {
         const now = Date.now();
         const deleteStmt = this.db.prepare('DELETE FROM scan_policies WHERE replicated_from_control = 1');
         const insertStmt = this.db.prepare(
-            `INSERT INTO scan_policies (name, node_id, node_identity, stack_pattern, max_severity, block_on_deploy, enabled, replicated_from_control, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+            `INSERT INTO scan_policies (name, node_id, node_identity, stack_pattern, max_severity, block_on_deploy, enabled, block_on_severity, block_on_kev, block_on_fixable, replicated_from_control, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         );
         const txn = this.db.transaction((policies: ScanPolicy[]) => {
             deleteStmt.run();
@@ -5096,6 +5173,11 @@ export class DatabaseService {
                     p.max_severity,
                     p.block_on_deploy,
                     p.enabled,
+                    // A legacy control omits the risk columns; default replicated rows
+                    // to severity-only so an older control's intent is preserved.
+                    p.block_on_severity ?? 1,
+                    p.block_on_kev ?? 0,
+                    p.block_on_fixable ?? 0,
                     p.created_at ?? now,
                     p.updated_at ?? now,
                 );
@@ -5171,11 +5253,25 @@ export class DatabaseService {
     ): PolicyEvaluation | null {
         const policy = this.getMatchingPolicy(nodeId, scan.stack_context, selfIdentity);
         if (!policy) return null;
+        const inputs = policyInputs(policy);
+        let violated: boolean;
+        if (!inputs.blockOnKev && !inputs.blockOnFixable) {
+            // Severity-only banner from the stored aggregate: no per-finding read.
+            violated = inputs.blockOnSeverity && isSeverityAtLeast(scan.highest_severity, policy.max_severity);
+        } else {
+            // Best-effort banner: scores the raw findings without honoring
+            // suppressions or the truncation fail-closed rule. The pre-deploy gate
+            // is authoritative; this only drives the informational scan banner.
+            const findings = this.getAllVulnerabilityDetails(scan.id);
+            const intel = inputs.blockOnKev ? this.getCveIntel(findings.map((f) => f.vulnerability_id)) : null;
+            const outcome = evaluatePolicyRisk(findings, (cveId) => intel?.get(cveId)?.kev === true, inputs);
+            violated = outcome.reasons.length > 0;
+        }
         return {
             policyId: policy.id,
             policyName: policy.name,
             maxSeverity: policy.max_severity,
-            violated: isSeverityAtLeast(scan.highest_severity, policy.max_severity),
+            violated,
             evaluatedAt: Date.now(),
         };
     }

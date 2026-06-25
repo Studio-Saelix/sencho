@@ -149,6 +149,21 @@ describe('GlobalCommandPalette', () => {
     expect(screen.queryByText('No results.')).not.toBeInTheDocument();
   });
 
+  it('renders a partial stack hit with the amber status dot', () => {
+    hookReturn = {
+      hits: [{ nodeId: 2, nodeName: 'opsix', file: 'web.yml', status: 'partial' }],
+      failedNodes: [],
+      loading: false,
+    };
+    renderPalette();
+    open();
+    type('web');
+    // The dialog renders in a portal outside the render container, so scope the
+    // dot lookup to the hit row reached via screen.
+    const row = screen.getByText('web.yml').closest('[cmdk-item]');
+    expect(row?.querySelector('.bg-warning')).not.toBeNull();
+  });
+
   it('renders stack hits and caps the list with an overflow line', () => {
     const hits: StackHit[] = Array.from({ length: 55 }, (_, i) => ({
       nodeId: 2,

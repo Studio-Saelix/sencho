@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNodes } from '@/context/NodeContext';
 import { fetchForNode } from '@/lib/api';
 
-export type StackStatus = 'running' | 'exited' | 'unknown';
+export type StackStatus = 'running' | 'exited' | 'unknown' | 'partial';
 
 export interface StackStatusInfo {
     status: StackStatus;
