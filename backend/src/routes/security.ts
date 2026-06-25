@@ -15,6 +15,7 @@ import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
 import { deriveSecurityPosture, type SecurityPostureFacts, type SecurityPostureState } from '../services/securityPosture';
+import { buildExposedImageMap } from '../services/preflight/exposure';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -555,11 +556,21 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   if (!Number.isFinite(scanId)) {
     res.status(400).json({ error: 'Invalid scan id' }); return;
   }
-  const scan = DatabaseService.getInstance().getVulnerabilityScan(scanId);
+  const db = DatabaseService.getInstance();
+  const scan = db.getVulnerabilityScan(scanId);
   if (!scan || scan.node_id !== req.nodeId) {
     res.status(404).json({ error: 'Scan not found' }); return;
   }
-  res.json(shapeScanForResponse(scan));
+  // Attach the exposure status for the scan sheet badge (tri-state:
+  // true = public, false = internal, absent = no descriptor cached).
+  const exposures = db.getStackExposures(req.nodeId);
+  const exposedMap = buildExposedImageMap(
+    exposures.map((r) => {
+      try { return JSON.parse(r.descriptor); } catch { return null; }
+    }).filter(Boolean),
+  );
+  const publiclyExposed = exposedMap.get(scan.image_ref) ?? null;
+  res.json({ ...shapeScanForResponse(scan), publicly_exposed: publiclyExposed });
 });
 
 securityRouter.get(
@@ -752,8 +763,19 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       }
     }
 
-    // Compose exposure is joined in a later phase; until then it is honestly zero.
-    const publiclyExposed = 0;
+    // Count distinct images that are publicly exposed AND have at least one
+    // non-suppressed Critical/High finding. The exposure descriptor is cached
+    // at deploy/update time, so this is O(stacks) + O(images), zero subprocess.
+    const exposures = db.getStackExposures(req.nodeId);
+    const exposedMap = buildExposedImageMap(
+      exposures.map((r) => {
+        try { return JSON.parse(r.descriptor); } catch { return null; }
+      }).filter(Boolean),
+    );
+    let publiclyExposed = 0;
+    for (const [imageRef] of critHighByImage) {
+      if (exposedMap.get(imageRef) === true) publiclyExposed += 1;
+    }
 
     const postureFacts: SecurityPostureFacts = {
       scannerAvailable: svc.isTrivyAvailable(),

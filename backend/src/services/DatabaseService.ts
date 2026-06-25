@@ -111,6 +111,15 @@ export interface PreflightRunRow {
     created_by: string | null;
 }
 
+/** Per-stack per-service Compose exposure descriptor (one row per node+stack). */
+export interface StackExposureRow {
+    node_id: number;
+    stack_name: string;
+    /** JSON StackExposure from preflight/exposure.ts. */
+    descriptor: string;
+    computed_at: number;
+}
+
 /** One post-update health gate observation run. */
 export interface HealthGateRunRow {
     id: string;
@@ -1398,6 +1407,14 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_preflight_findings_run
         ON preflight_findings(run_id);
 
+      CREATE TABLE IF NOT EXISTS stack_exposure (
+        node_id INTEGER NOT NULL DEFAULT 0,
+        stack_name TEXT NOT NULL,
+        descriptor TEXT NOT NULL,
+        computed_at INTEGER NOT NULL,
+        PRIMARY KEY (node_id, stack_name)
+      );
+
       CREATE TABLE IF NOT EXISTS health_gate_runs (
         id TEXT PRIMARY KEY,
         node_id INTEGER NOT NULL,
@@ -2504,6 +2521,42 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
+    // --- Stack Exposure (Compose reachability descriptor) ---
+
+    /** Store a per-stack exposure descriptor, replacing any prior row. */
+    public upsertStackExposure(nodeId: number, stackName: string, descriptor: string, computedAt: number): void {
+        this.db.prepare(
+            `INSERT INTO stack_exposure (node_id, stack_name, descriptor, computed_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (node_id, stack_name) DO UPDATE SET
+               descriptor = excluded.descriptor,
+               computed_at = excluded.computed_at`
+        ).run(nodeId, stackName, descriptor, computedAt);
+    }
+
+    /** Return every cached exposure descriptor for a node. Malformed rows are
+     *  skipped (logged) so a single corrupt row cannot fail the overview. */
+    public getStackExposures(nodeId: number): StackExposureRow[] {
+        const rows = this.db.prepare(
+            'SELECT node_id, stack_name, descriptor, computed_at FROM stack_exposure WHERE node_id = ?'
+        ).all(nodeId) as StackExposureRow[];
+        return rows.filter((r) => {
+            try {
+                JSON.parse(r.descriptor);
+                return true;
+            } catch {
+                console.warn('[DatabaseService] Dropping malformed stack_exposure row for node=%d stack=%s',
+                    r.node_id, r.stack_name);
+                return false;
+            }
+        });
+    }
+
+    /** Remove the exposure row for a single stack. */
+    public deleteStackExposure(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    }
+
     // --- Compose Doctor / Preflight ---
 
     /** Store a run and its findings, replacing any prior run for this (node, stack). */
@@ -2939,6 +2992,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
