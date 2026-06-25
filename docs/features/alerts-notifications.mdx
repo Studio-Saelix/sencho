@@ -373,9 +373,9 @@ The global crash-capture switch lives under **Settings · Monitoring · Containe
   <img src="/images/alerts-notifications/system-crash-toggle.png" alt="Settings · Monitoring · Container Alerts panel showing a Container crash & health alerts toggle in the ON state with the helper line about unexpected exits, OOM kills, and healthcheck failures." />
 </Frame>
 
-The **Global crash capture** toggle controls whether `DockerEventService` raises crash, OOM, and healthcheck alerts on the active node. Helper text: `Watch every managed container for unexpected exits.` Defaults to on; if the database read fails, Sencho falls back to default-deny so the system never leaks alerts you cannot turn off.
+The **Container crash & health alerts** toggle controls whether `DockerEventService` raises crash, OOM, and healthcheck alerts on the active node. Helper text: `Send alerts for unexpected container exits, OOM kills, and Docker healthcheck failures. Auto-Heal can still observe crash signals independently.` Defaults to on; if the database read fails, Sencho falls back to default-deny so the system never leaks alerts you cannot turn off.
 
-The **Host Alerts** panel also carries the **Host thresholds** rows (CPU limit, RAM limit, Disk limit, all expressed as percent) that drive the host-level monitor warnings. The **Janitor threshold** (in GiB) that drives the unused-Docker-data alert lives in the **Docker & Storage** panel.
+The **Host Alerts** panel carries the **Host thresholds** rows (CPU limit, RAM limit, Disk limit, all expressed as percent) that drive the host-level monitor warnings. Container crash and health alerts live in the **Container Alerts** panel. The **Janitor threshold** (in GiB) that drives the unused-Docker-data alert lives in the **Docker & Storage** panel.
 
 ## Refresh cadence
 
