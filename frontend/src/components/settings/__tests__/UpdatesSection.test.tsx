@@ -30,6 +30,8 @@ const STATUS = {
     nextCheckAt: Date.now() + 115 * 60 * 1000,
     manualCooldownMinutes: 2,
     manualCooldownRemainingMs: 0,
+    mode: 'interval' as const,
+    cronExpression: null,
 };
 
 beforeEach(() => {
