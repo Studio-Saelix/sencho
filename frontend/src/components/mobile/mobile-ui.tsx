@@ -194,7 +194,7 @@ export function Masthead({
           <div className="mb-1">{kickerSlot ?? <Kicker>{kicker}</Kicker>}</div>
           <div className="flex items-center gap-[11px]">
             <StateDot tone={stateTone} size={11} pulse={live} />
-            <span className={cn('font-display italic text-[38px] leading-[40px] text-stat-value', stateClassName)}>{state}</span>
+            <span className={cn('font-heading text-[38px] leading-[40px] text-stat-value', stateClassName)}>{state}</span>
           </div>
         </div>
         {right ? <div className="shrink-0 text-right">{right}</div> : null}

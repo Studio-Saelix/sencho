@@ -49,6 +49,7 @@ interface FilePermissionsDialogProps {
   stackName: string;
   relPath: string;
   entryName: string;
+  rootId?: string;
   canEdit: boolean;
 }
 
@@ -58,6 +59,7 @@ export function FilePermissionsDialog({
   stackName,
   relPath,
   entryName,
+  rootId,
   canEdit,
 }: FilePermissionsDialogProps) {
   const [mode, setMode] = useState<number>(0o644);
@@ -69,14 +71,14 @@ export function FilePermissionsDialog({
     setLoading(true);
     setError(null);
     try {
-      const result = await getStackEntryPermissions(stackName, relPath);
+      const result = await getStackEntryPermissions(stackName, relPath, rootId);
       setMode(result.mode);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load permissions.');
     } finally {
       setLoading(false);
     }
-  }, [stackName, relPath]);
+  }, [stackName, relPath, rootId]);
 
   useEffect(() => {
     if (open) void load();
@@ -90,7 +92,7 @@ export function FilePermissionsDialog({
   const handleSave = async () => {
     setSaving(true);
     try {
-      await setStackEntryPermissions(stackName, relPath, mode);
+      await setStackEntryPermissions(stackName, relPath, mode, rootId);
       toast.success('Permissions updated.');
       onOpenChange(false);
     } catch (e) {

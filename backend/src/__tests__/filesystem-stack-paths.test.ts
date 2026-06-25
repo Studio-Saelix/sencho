@@ -1,7 +1,7 @@
 /**
  * Tests for isValidRelativeStackPath (pure function) and the stack-scoped
  * file methods on FileSystemService (listStackDirectory, readStackFile,
- * writeStackFile, writeStackFileBuffer, deleteStackPath, mkdirStackPath).
+ * writeStackFile, writeScopedFileFromTemp, deleteStackPath, mkdirStackPath).
  *
  * FileSystemService stack methods are tested against a real temp directory so
  * that realpath, stat, and fs I/O all run with actual OS semantics.
@@ -215,28 +215,6 @@ describe('FileSystemService stack methods', () => {
     });
   });
 
-  // ── writeStackFileBuffer ────────────────────────────────────────────────
-
-  describe('writeStackFileBuffer', () => {
-    it('writes raw bytes correctly', async () => {
-      const data = Buffer.from([0x01, 0x02, 0x03, 0xff]);
-      const service = FileSystemService.getInstance();
-      await service.writeStackFileBuffer(STACK, 'binary.bin', data);
-
-      const read = await fs.readFile(path.join(stackDir, 'binary.bin'));
-      expect(read).toEqual(data);
-    });
-
-    it('creates parent directories when needed', async () => {
-      const payload = Buffer.from([0xde, 0xad]);
-      const service = FileSystemService.getInstance();
-      await service.writeStackFileBuffer(STACK, 'sub/img.bin', payload);
-
-      const read = await fs.readFile(path.join(stackDir, 'sub', 'img.bin'));
-      expect(read).toEqual(payload);
-    });
-  });
-
   // ── atomic write semantics ──────────────────────────────────────────────
 
   describe('atomic write semantics', () => {
@@ -346,6 +324,123 @@ describe('FileSystemService stack methods', () => {
       const dirEntries = await fs.readdir(stackDir);
       const leftovers = dirEntries.filter(name => name.startsWith('race.txt.sencho-tmp-'));
       expect(leftovers).toEqual([]);
+    });
+  });
+
+  // ── writeScopedFileFromTemp (disk-backed upload path) ───────────────────
+
+  describe('writeScopedFileFromTemp', () => {
+    let tempSrcDir: string;
+    beforeEach(async () => {
+      // A separate base dir stands in for the OS upload-spool location, which on
+      // a real host may sit on a different filesystem than the stack dir.
+      tempSrcDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-uptmp-'));
+    });
+    afterEach(async () => {
+      await fs.rm(tempSrcDir, { recursive: true, force: true });
+    });
+
+    it('streams a temp file into the stack and leaves the source temp for the caller', async () => {
+      const src = path.join(tempSrcDir, 'spool-bin');
+      const payload = Buffer.from('streamed upload payload');
+      await fs.writeFile(src, payload);
+
+      const service = FileSystemService.getInstance();
+      await service.writeScopedFileFromTemp(STACK, 'sub/uploaded.bin', src);
+
+      const written = await fs.readFile(path.join(stackDir, 'sub', 'uploaded.bin'));
+      expect(written).toEqual(payload);
+      // The method copies (streams) the source; the caller still owns the temp.
+      await expect(fs.access(src)).resolves.toBeUndefined();
+      const leftovers = (await fs.readdir(path.join(stackDir, 'sub'))).filter(n => n.includes('.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('exclusive write to an existing target throws FILE_EXISTS, preserves the original, and leaks no tmp', async () => {
+      const target = path.join(stackDir, 'keep.txt');
+      await fs.writeFile(target, 'ORIGINAL');
+      const src = path.join(tempSrcDir, 'incoming');
+      await fs.writeFile(src, 'INCOMING');
+
+      const service = FileSystemService.getInstance();
+      await expect(
+        service.writeScopedFileFromTemp(STACK, 'keep.txt', src, { exclusive: true }),
+      ).rejects.toMatchObject({ code: 'FILE_EXISTS' });
+
+      expect(await fs.readFile(target, 'utf-8')).toBe('ORIGINAL');
+      const leftovers = (await fs.readdir(stackDir)).filter(n => n.startsWith('keep.txt.sencho-tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('cleans up the staging sibling when the rename step throws', async () => {
+      const src = path.join(tempSrcDir, 'incoming2');
+      await fs.writeFile(src, 'NEW');
+      const fsModule = await import('fs');
+      const renameSpy = vi
+        .spyOn(fsModule.promises, 'rename')
+        .mockRejectedValueOnce(Object.assign(new Error('disk yanked'), { code: 'EIO' }));
+
+      const service = FileSystemService.getInstance();
+      await expect(service.writeScopedFileFromTemp(STACK, 'rfail.txt', src)).rejects.toThrow(/disk yanked/);
+
+      const dirEntries = await fs.readdir(stackDir);
+      expect(dirEntries).not.toContain('rfail.txt');
+      expect(dirEntries.filter(n => n.startsWith('rfail.txt.sencho-tmp-'))).toEqual([]);
+      renameSpy.mockRestore();
+    });
+  });
+
+  // ── copyScopedPath ──────────────────────────────────────────────────────
+
+  describe('copyScopedPath', () => {
+    it('copies a file and preserves the original', async () => {
+      await fs.writeFile(path.join(stackDir, 'src.txt'), 'hello');
+      const service = FileSystemService.getInstance();
+      await service.copyScopedPath(STACK, 'src.txt', 'dst.txt');
+      expect(await fs.readFile(path.join(stackDir, 'dst.txt'), 'utf-8')).toBe('hello');
+      expect(await fs.readFile(path.join(stackDir, 'src.txt'), 'utf-8')).toBe('hello');
+    });
+
+    it('recursively copies a directory tree', async () => {
+      await fs.mkdir(path.join(stackDir, 'dir/inner'), { recursive: true });
+      await fs.writeFile(path.join(stackDir, 'dir/inner/leaf.txt'), 'leaf');
+      const service = FileSystemService.getInstance();
+      await service.copyScopedPath(STACK, 'dir', 'dir-copy');
+      expect(await fs.readFile(path.join(stackDir, 'dir-copy/inner/leaf.txt'), 'utf-8')).toBe('leaf');
+    });
+
+    it('rejects an existing destination with EEXIST', async () => {
+      await fs.writeFile(path.join(stackDir, 'e-src.txt'), 'a');
+      await fs.writeFile(path.join(stackDir, 'e-dst.txt'), 'b');
+      const service = FileSystemService.getInstance();
+      await expect(service.copyScopedPath(STACK, 'e-src.txt', 'e-dst.txt')).rejects.toMatchObject({ code: 'EEXIST' });
+      expect(await fs.readFile(path.join(stackDir, 'e-dst.txt'), 'utf-8')).toBe('b');
+    });
+
+    it('rejects copying a directory into its own descendant with INVALID_PATH', async () => {
+      await fs.mkdir(path.join(stackDir, 'sc/sub'), { recursive: true });
+      const service = FileSystemService.getInstance();
+      await expect(service.copyScopedPath(STACK, 'sc', 'sc/sub/sc')).rejects.toMatchObject({ code: 'INVALID_PATH' });
+    });
+
+    it('blocks copying onto a protected root name but allows a protected source', async () => {
+      await fs.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+      const service = FileSystemService.getInstance();
+      // Source is protected, destination is not -> allowed.
+      await service.copyScopedPath(STACK, 'compose.yaml', 'compose.yaml.bak');
+      expect(await fs.readFile(path.join(stackDir, 'compose.yaml.bak'), 'utf-8')).toBe('services: {}\n');
+      // Destination is a reserved root name -> blocked.
+      await fs.writeFile(path.join(stackDir, 'plain.yaml'), 'x\n');
+      await expect(service.copyScopedPath(STACK, 'plain.yaml', 'docker-compose.yml')).rejects.toMatchObject({ code: 'PROTECTED_FILE' });
+    });
+
+    it.skipIf(isWindows)('copies a symlink as a link, not its target', async () => {
+      await fs.writeFile(path.join(stackDir, 'target.txt'), 'real');
+      await fs.symlink('target.txt', path.join(stackDir, 'link.txt'));
+      const service = FileSystemService.getInstance();
+      await service.copyScopedPath(STACK, 'link.txt', 'link-copy.txt');
+      const lst = await fs.lstat(path.join(stackDir, 'link-copy.txt'));
+      expect(lst.isSymbolicLink()).toBe(true);
     });
   });
 
@@ -721,5 +816,70 @@ describe('FileSystemService stack methods', () => {
       expect(moved.isSymbolicLink()).toBe(true);
       expect(await fs.readFile(externalFile, 'utf-8')).toBe('external');
     });
+  });
+});
+
+// Root-scoped (bind-mount) behaviour: the file methods accept an arbitrary
+// absolute root that may sit OUTSIDE the compose dir, contain paths within it,
+// and disable compose/.env protection.
+describe('FileSystemService root-scoped methods', () => {
+  let tmpBase: string;
+  let rootDir: string;
+
+  beforeEach(async () => {
+    tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-fsr-'));
+    // A bind root that is deliberately not under the compose dir.
+    mockState.composeDir = path.join(tmpBase, 'compose');
+    rootDir = path.join(tmpBase, 'volume-root');
+    await fs.mkdir(rootDir, { recursive: true });
+    await fs.mkdir(mockState.composeDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  });
+
+  it('lists, reads, and writes within an arbitrary root outside the compose dir', async () => {
+    await fs.writeFile(path.join(rootDir, 'app.conf'), 'listen 80;');
+    const scope = { rootAbsDir: rootDir, protectedEnabled: false };
+    const service = FileSystemService.getInstance();
+
+    const entries = await service.listStackDirectory('ignored', '', scope);
+    expect(entries.map(e => e.name)).toContain('app.conf');
+
+    const read = await service.readStackFile('ignored', 'app.conf', undefined, { scope });
+    expect(read.content).toBe('listen 80;');
+
+    const write = await service.writeStackFileIfUnchanged('ignored', 'app.conf', 'listen 8080;', read.mtimeMs, scope);
+    expect(write.ok).toBe(true);
+    expect(await fs.readFile(path.join(rootDir, 'app.conf'), 'utf-8')).toBe('listen 8080;');
+  });
+
+  it('rejects a path that escapes the root via ..', async () => {
+    const scope = { rootAbsDir: rootDir, protectedEnabled: false };
+    const service = FileSystemService.getInstance();
+    await expect(service.readStackFile('ignored', '../compose/secret', undefined, { scope }))
+      .rejects.toMatchObject({ code: 'INVALID_PATH' });
+  });
+
+  it('does not mark a volume compose.yaml/.env as protected when protection is disabled', async () => {
+    await fs.writeFile(path.join(rootDir, 'compose.yaml'), '');
+    await fs.writeFile(path.join(rootDir, '.env'), '');
+    const service = FileSystemService.getInstance();
+    const entries = await service.listStackDirectory('ignored', '', { rootAbsDir: rootDir, protectedEnabled: false });
+    expect(entries.every(e => !e.isProtected)).toBe(true);
+    // A delete of a volume .env is allowed (not blocked as a protected stack file).
+    await service.deleteStackPath('ignored', '.env', false, { rootAbsDir: rootDir, protectedEnabled: false });
+    await expect(fs.lstat(path.join(rootDir, '.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a symlink leaf whose target escapes the root', async () => {
+    if (isWindows) return; // POSIX symlink semantics
+    const outside = path.join(tmpBase, 'outside.txt');
+    await fs.writeFile(outside, 'secret');
+    await fs.symlink(outside, path.join(rootDir, 'escape'));
+    const service = FileSystemService.getInstance();
+    await expect(service.readStackFile('ignored', 'escape', undefined, { scope: { rootAbsDir: rootDir, protectedEnabled: false } }))
+      .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
   });
 });

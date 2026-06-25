@@ -18,6 +18,7 @@ import { SchedulerService } from '../services/SchedulerService';
 import { MfaService } from '../services/MfaService';
 import { MeshService } from '../services/MeshService';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { CveIntelService } from '../services/CveIntelService';
 import { applyPilotModeCapabilityFilter } from '../services/CapabilityRegistry';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotMetrics } from '../services/PilotMetrics';
@@ -128,6 +129,7 @@ export async function startServer(server: Server): Promise<void> {
     console.warn('[Startup] MeshService start failed:', (err as Error).message);
   });
   BlueprintReconciler.getInstance().start();
+  CveIntelService.getInstance().start();
 
   // Drop the cached /api/meta entry on tunnel reconnect so the next
   // /api/nodes/:id/meta refetches fresh capabilities and version through

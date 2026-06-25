@@ -12,10 +12,41 @@
  */
 import type { CveSuppression } from '../services/DatabaseService';
 
+/** Triage decision states layered on top of a suppression row. `accepted` is the
+ *  back-compat default for rows created before triage existed. */
+export const TRIAGE_STATUSES = [
+    'needs_review', 'affected', 'not_affected', 'accepted', 'fixed', 'false_positive', 'ignored',
+] as const;
+export type TriageStatus = typeof TRIAGE_STATUSES[number];
+
+/** Statuses that DISMISS a finding from the actionable posture (a decision was
+ *  made not to act). `needs_review` and `affected` are NOT dismissing: the
+ *  finding stays actionable and surfaces as a count. */
+export const DISMISSING_STATUSES: ReadonlySet<TriageStatus> = new Set([
+    'not_affected', 'accepted', 'fixed', 'false_positive', 'ignored',
+]);
+
+/** Optional OpenVEX-aligned justification taxonomy (never required). */
+export const TRIAGE_JUSTIFICATIONS = [
+    'vulnerable_code_not_in_execute_path', 'vulnerable_code_not_present',
+    'component_not_present', 'inline_mitigations_already_exist',
+] as const;
+export type TriageJustification = typeof TRIAGE_JUSTIFICATIONS[number];
+
+export function isTriageStatus(v: unknown): v is TriageStatus {
+    return typeof v === 'string' && (TRIAGE_STATUSES as readonly string[]).includes(v);
+}
+export function isTriageJustification(v: unknown): v is TriageJustification {
+    return typeof v === 'string' && (TRIAGE_JUSTIFICATIONS as readonly string[]).includes(v);
+}
+
 export interface SuppressionDecision {
+    /** True only when the matched decision DISMISSES the finding (see DISMISSING_STATUSES). */
     suppressed: boolean;
     suppression_id?: number;
     suppression_reason?: string;
+    triage_status?: TriageStatus;
+    triage_justification?: string | null;
 }
 
 export interface SuppressibleFinding {
@@ -113,11 +144,14 @@ export function applySuppressions<T extends SuppressibleFinding>(
         const bucket = buckets.get(f.vulnerability_id);
         const match = bucket ? pickFromBucket(bucket, f, imageRef, now) : null;
         if (!match) return { ...f, suppressed: false };
+        const status = (isTriageStatus(match.status) ? match.status : 'accepted');
         return {
             ...f,
-            suppressed: true,
+            suppressed: DISMISSING_STATUSES.has(status),
             suppression_id: match.id,
             suppression_reason: match.reason,
+            triage_status: status,
+            triage_justification: match.justification ?? null,
         };
     });
 }

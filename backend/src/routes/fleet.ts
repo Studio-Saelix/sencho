@@ -31,6 +31,7 @@ import { withTimeout, TimeoutError } from '../utils/withTimeout';
 // paths cap the slow `docker system df` call at the same 8s budget (F-6).
 const FLEET_DF_TIMEOUT_MS = 8_000;
 import { POLICY_SEVERITIES } from '../utils/severity';
+import { isNoOpBlockingPolicy } from '../utils/policy-risk';
 import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { CloudBackupService } from '../services/CloudBackupService';
@@ -104,6 +105,20 @@ function validateScanPolicyRow(row: unknown): string | null {
   if (r.node_identity.length > 500) return 'node_identity is too long';
   if (!isIntFlag(r.block_on_deploy)) return 'block_on_deploy must be 0 or 1';
   if (!isIntFlag(r.enabled)) return 'enabled must be 0 or 1';
+  // Risk inputs are optional for back-compat: a legacy control omits them and
+  // the receiver defaults such rows to severity-only. Reject only bad values.
+  if (r.block_on_severity !== undefined && !isIntFlag(r.block_on_severity)) return 'block_on_severity must be 0 or 1';
+  if (r.block_on_kev !== undefined && !isIntFlag(r.block_on_kev)) return 'block_on_kev must be 0 or 1';
+  if (r.block_on_fixable !== undefined && !isIntFlag(r.block_on_fixable)) return 'block_on_fixable must be 0 or 1';
+  // Cross-field invariant at the trust boundary: a replicated blocking policy
+  // must have at least one active input, or it would persist as a silent no-op
+  // gate. Absent fields default to severity-only (same as the receiver apply).
+  const sev = r.block_on_severity === undefined ? 1 : (r.block_on_severity as number);
+  const kev = r.block_on_kev === undefined ? 0 : (r.block_on_kev as number);
+  const fix = r.block_on_fixable === undefined ? 0 : (r.block_on_fixable as number);
+  if (isNoOpBlockingPolicy(r.block_on_deploy, sev, kev, fix)) {
+    return 'a blocking policy must enable at least one of severity, KEV, or fixable';
+  }
   return null;
 }
 

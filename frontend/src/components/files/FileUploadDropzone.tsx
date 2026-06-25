@@ -11,6 +11,7 @@ interface FileUploadDropzoneProps {
   stackName: string;
   currentDir: string;
   canEdit: boolean;
+  rootId?: string;
   onUploaded: () => void;
 }
 
@@ -18,6 +19,7 @@ export function FileUploadDropzone({
   stackName,
   currentDir,
   canEdit,
+  rootId,
   onUploaded,
 }: FileUploadDropzoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -29,7 +31,7 @@ export function FileUploadDropzone({
   const runUpload = async (file: File, overwrite: boolean): Promise<void> => {
     const loadingId = toast.loading(`Uploading ${file.name}...`);
     try {
-      await uploadStackFile(stackName, currentDir, file, { overwrite });
+      await uploadStackFile(stackName, currentDir, file, { overwrite, rootId });
       toast.success(overwrite ? 'Replaced.' : 'Uploaded.');
       onUploaded();
     } catch (e: unknown) {

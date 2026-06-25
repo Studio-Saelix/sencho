@@ -3,7 +3,7 @@ title: "Deploy Enforcement"
 description: "Block deploys that violate a scan policy before docker compose up runs, with an admin bypass path and a full audit trail."
 ---
 
-Deploy enforcement is the pre-flight half of Sencho's vulnerability workflow. When a [scan policy](/features/vulnerability-scanning#scan-policies) with **Block on deploy** enabled matches a stack, Sencho scans every image referenced by the stack's compose file before starting any container. If any image meets or exceeds the policy's severity threshold, the deploy is rejected and the stack never starts. Detection always continues post-deploy and on a schedule, so images that develop new vulnerabilities after the initial deploy still surface through alerts.
+Deploy enforcement is the pre-flight half of Sencho's vulnerability workflow. When a [scan policy](/features/vulnerability-scanning#scan-policies) with **Block on deploy** enabled matches a stack, Sencho scans every image referenced by the stack's compose file before starting any container. A policy gates on exploitation risk: a known-exploited CVE (CISA KEV), a fixable Critical/High finding, or a raw severity threshold. If any image matches an enabled condition, the deploy is rejected and the stack never starts. Detection always continues post-deploy and on a schedule, so images that develop new vulnerabilities after the initial deploy still surface through alerts.
 
 <Note>
   Deploy enforcement and scan policies require an **Admiral** license.
@@ -11,27 +11,29 @@ Deploy enforcement is the pre-flight half of Sencho's vulnerability workflow. Wh
 
 ## Configuring a block policy
 
-Policies are managed on the **Security** page → **Policies** tab. The **Add policy** button opens the editor; existing policies appear as a list of cards with `max: <SEVERITY>` and `block` badges, the configured stack-pattern scope, and pencil and trash buttons.
+Policies are managed on the **Security** page → **Policies** tab. The **Add policy** button opens the editor; existing policies appear as a list of cards with a badge per active block condition (`KEV`, `Fixable`, and `max: <SEVERITY>` when the severity threshold is on), a `block` badge, the configured stack-pattern scope, and pencil and trash buttons.
 
 <Frame>
   <img src="/images/deploy-enforcement/policy-list.png" alt="Scan Policies card showing a configured policy with the name 'Production block on critical', a max: CRITICAL badge, a block badge, and the Scope demo-blocked-* set as the stack pattern" />
 </Frame>
 
-The editor exposes the five fields that govern enforcement:
+The editor exposes the fields that govern enforcement:
 
 <Frame>
-  <img src="/images/deploy-enforcement/policy-edit-modal.png" alt="New policy modal with kicker SECURITY · NEW POLICY, fields for Name, Stack pattern, Max severity (Critical), Block on deploy toggle ON, and Enabled toggle ON" />
+  <img src="/images/deploy-enforcement/policy-edit-modal.png" alt="New policy modal with kicker SECURITY · NEW POLICY, fields for Name, Stack pattern, the Block conditions group (Severity threshold, Known-exploited (KEV), Fixable Critical/High), a Block on deploy toggle, and an Enabled toggle" />
 </Frame>
 
 | Field | Purpose |
 |-------|---------|
 | **Name** | A descriptive label that appears on the block dialog and in audit log entries. |
 | **Stack pattern (optional)** | Glob-style match against stack names. `prod-*` matches `prod-api` but not `production-api`. Leave blank to apply to every stack on the node. |
-| **Max severity** | The threshold. If any image's highest finding meets or exceeds this severity, the policy fires. |
-| **Block on deploy** | When on, the pre-flight gate hard-rejects deploys that violate the threshold. When off, the policy still evaluates post-deploy and scheduled scans and dispatches warning alerts on violations. |
+| **Block conditions** | What makes the policy fire. Enable any combination: **Severity threshold** (highest finding meets or exceeds the chosen severity), **Known-exploited (KEV)** (a CVE on the CISA known-exploited list), and **Fixable Critical/High** (a Critical or High finding with a fix available). At least one is required to block on deploy. |
+| **Block on deploy** | When on, the pre-flight gate hard-rejects deploys that match any block condition. When off, the policy still evaluates post-deploy and scheduled scans and dispatches warning alerts on matches. |
 | **Enabled** | Disabled policies are skipped during evaluation. |
 
-The editor sets the pattern, severity, and toggles. Per-node scoping is set via the [Security API](/api-reference/security#scan-policies) (`node_id`) or replicated from a control node via [Fleet Federation](/features/fleet-federation). When more than one enabled policy matches a stack on the target node, a node-scoped policy wins over a fleet-wide one, a policy with a stack pattern wins over a catch-all, and the lowest-numbered policy breaks any remaining tie.
+New policies default to a risk-first posture: known-exploited and fixable conditions on, the severity threshold off until you turn it on. CVSS is always captured and shown for context but is never the sole basis for a block. A finding whose exploitability cannot be confirmed is treated as risky, not safe.
+
+The editor sets the pattern, the block conditions, and the toggles. Per-node scoping is set via the [Security API](/api-reference/security#scan-policies) (`node_id`) or replicated from a control node via [Fleet Federation](/features/fleet-federation). When more than one enabled policy matches a stack on the target node, a node-scoped policy wins over a fleet-wide one, a policy with a stack pattern wins over a catch-all, and the lowest-numbered policy breaks any remaining tie.
 
 ## How enforcement runs
 
@@ -52,10 +54,10 @@ On every one of these actions, Sencho:
 
 1. Picks the matching enabled policy by precedence (node-scoped over fleet-wide, stack-pattern over catch-all, then lowest id) on the target node.
 2. If the policy has **Block on deploy** off, lets the deploy proceed and evaluates the post-deploy scan against the policy for alerting.
-3. If **Block on deploy** is on, enumerates the stack's images with `docker compose config --images`, runs a pre-flight Trivy scan against each one, and compares the highest severity in each scan against the policy threshold.
-4. If every image is below the threshold, the deploy proceeds. A post-deploy drift scan still runs in the background.
+3. If **Block on deploy** is on, enumerates the stack's images with `docker compose config --images`, runs a pre-flight Trivy scan against each one, and evaluates each enabled block condition (known-exploited, fixable, severity threshold) against the scan's non-suppressed findings.
+4. If no image matches a block condition, the deploy proceeds. A post-deploy drift scan still runs in the background.
 5. If the compose file fails to parse, enforcement fails closed: the deploy is rejected with a single synthetic violation labeled `(compose parse error)` so a malformed file cannot slip past the gate.
-6. If any image violates the threshold, the deploy is rejected with HTTP `409 Conflict` and the stack never starts. The UI opens a dialog listing the offending images.
+6. If any image matches a block condition, the deploy is rejected with HTTP `409 Conflict` and the stack never starts. The UI opens a dialog listing the offending images and the conditions each one matched.
 
 Pre-flight scans use the same 24-hour digest cache as on-demand scans, so the second deploy of the same image does not pay the full scan time.
 
@@ -68,8 +70,8 @@ Pre-flight scans use the same 24-hour digest cache as on-demand scans, so the se
 The dialog shows:
 
 - A kicker with the stack name, the words **SCAN POLICY**, and **BLOCKED** in the destructive accent color.
-- The policy name and a sentence naming the threshold the image crossed.
-- One row per offending image, with the image reference in monospace, the counts of critical and high findings, and a severity chip in the matching color.
+- The policy name and a sentence naming the conditions the policy blocks on.
+- One row per offending image, with the image reference in monospace, the counts of critical and high findings (plus known-exploited and fixable counts when present), a badge for each matched condition, and a severity chip in the matching color.
 - A **Close** button that dismisses the dialog without deploying.
 - A destructive **Deploy anyway** button when the current user is an admin (see bypass below). For non-admin sessions the primary slot is replaced by a disabled outline button labeled **Admin required to bypass**.
 
@@ -114,7 +116,7 @@ Neither drift mechanism blocks, stops, or quarantines a running stack automatica
 
     1. Open the **Security** page → **Scanner setup** tab on the target node and confirm Trivy is installed. Sencho fails open when Trivy is missing, dispatching a warning alert instead of blocking. [Install Trivy](/operations/trivy-setup) to enforce the policy.
     2. Confirm the policy is enabled and the stack pattern matches the stack name. `prod-*` matches `prod-api` but not `production-api`. An empty pattern matches every stack on the node.
-    3. Check the highest severity in the latest scan for each image. If no image reached the threshold, the gate correctly allowed the deploy.
+    3. Check the latest scan for each image against the policy's block conditions. If no image carried a known-exploited CVE, a fixable Critical/High finding, or (when the severity threshold is on) a finding at or above the threshold, the gate correctly allowed the deploy.
   </Accordion>
   <Accordion title="A deploy is blocked and I cannot bypass as a non-admin">
     Only users with the `admin` role can bypass a block. Ask an admin to review the violations and either bypass the single deploy, upgrade the base image, or [suppress](/features/cve-suppressions) the offending CVE with an expiry.

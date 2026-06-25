@@ -174,8 +174,8 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
       </div>
 
       <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-        <ScrollArea className="max-h-[60vh] bg-background">
-          <Table>
+        <ScrollArea block className="max-h-[60vh] bg-background">
+          <Table className="max-md:min-w-[720px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead className="w-[40px]" />

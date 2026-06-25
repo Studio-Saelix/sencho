@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/command';
 import { DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { useNodes, type Node } from '@/context/NodeContext';
+import { isInputFocused } from '@/lib/keyboard-guards';
 import { cn } from '@/lib/utils';
 import {
     useCrossNodeStackSearch,
@@ -32,6 +33,7 @@ const statusDot: Record<StackStatus, string> = {
     running: 'bg-success',
     exited: 'bg-muted-foreground',
     unknown: 'bg-muted-foreground/60',
+    partial: 'bg-warning',
 };
 
 interface PaletteState {
@@ -51,6 +53,10 @@ export function GlobalCommandPaletteProvider({ children }: { children: ReactNode
                 // Let cmdk's own Ctrl+K handling take precedence when focus is already inside a palette
                 const target = e.target as HTMLElement | null;
                 if (target?.closest('[cmdk-root]')) return;
+                // Don't hijack Cmd/Ctrl+K while the user is typing in a field or the code
+                // editor: stealing focus mid-edit is surprising, and on macOS Ctrl+K is the
+                // native delete-to-end-of-line. Search still opens elsewhere, or via the icon.
+                if (isInputFocused()) return;
                 e.preventDefault();
                 setOpen(prev => !prev);
             }

@@ -64,6 +64,16 @@ describe('StackNetworkingPanel', () => {
     expect(screen.getByText(/runtime matches compose/i)).toBeInTheDocument(); // no-drift success card
   });
 
+  it('marks a host-network service as host-exposed', async () => {
+    mockApi(facts({
+      services: [{ name: 'app', networks: [], publishedPorts: [], networkMode: 'host', extraHosts: [] }],
+    }));
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByText('web_backend');
+    expect(screen.getByText('host-exposed')).toBeInTheDocument();
+    expect(screen.getByText('all container ports')).toBeInTheDocument();
+  });
+
   it('saves a stack-level exposure intent on click', async () => {
     mockApi(facts());
     render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);

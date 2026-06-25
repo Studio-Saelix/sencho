@@ -111,6 +111,7 @@ export default function EditorLayout() {
     isScanning,
     searchQuery, setSearchQuery,
     stackStatuses,
+    stackCounts,
     stackLabelMap,
     filterChip, setFilterChip,
     bulkMode,
@@ -629,6 +630,7 @@ export default function EditorLayout() {
             searchQuery,
             stackLabelMap,
             stackStatuses: stackStatuses as Record<string, StackRowStatus | undefined>,
+            stackCounts,
             stackUpdates,
             gitSourcePendingMap,
             pinnedFiles: pinned,
@@ -669,7 +671,7 @@ export default function EditorLayout() {
           onNavigate={stackActions.navigateToNotification}
         />
       );
-      const themeSwitchEl = <ThemeQuickSwitch />;
+      const themeSwitchEl = <ThemeQuickSwitch onOpenAppearance={() => openSettings('appearance')} />;
       const userMenuEl = <UserProfileDropdown onOpenSettings={() => openSettings('account')} />;
 
       const topBarEl = (
@@ -951,7 +953,7 @@ function MobileDetailLoading({ name, onBack, headerActions }: { name: string; on
           <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
           Stacks
         </button>
-        <span className="min-w-0 flex-1 truncate font-display text-2xl italic text-stat-value">
+        <span className="min-w-0 flex-1 truncate font-heading text-2xl text-stat-value">
           {name.replace(/\.(ya?ml)$/, '')}
         </span>
         {headerActions ? <div className="shrink-0">{headerActions}</div> : null}

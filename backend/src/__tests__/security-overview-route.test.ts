@@ -83,8 +83,12 @@ function seedScan(o: {
 
 function resetSecurity(): void {
   const raw = (db() as unknown as { db: { prepare: (s: string) => { run: () => void } } }).db;
+  raw.prepare('DELETE FROM vulnerability_details').run();
   raw.prepare('DELETE FROM vulnerability_scans').run();
   raw.prepare('DELETE FROM scan_policies').run();
+  raw.prepare('DELETE FROM cve_suppressions').run();
+  raw.prepare('DELETE FROM misconfig_acknowledgements').run();
+  raw.prepare('DELETE FROM cve_intel').run();
 }
 
 describe('GET /api/security/overview', () => {
@@ -104,9 +108,9 @@ describe('GET /api/security/overview', () => {
     seedScan({ node_id: 2, image_ref: 'other:1', scanned_at: now, critical: 99 });
 
     // One fleet-wide and one this-node block policy count; an other-node one does not.
-    db().createScanPolicy({ name: 'fw', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
-    db().createScanPolicy({ name: 'n1', node_id: 1, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
-    db().createScanPolicy({ name: 'n2', node_id: 2, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'fw', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'n1', node_id: 1, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
+    db().createScanPolicy({ name: 'n2', node_id: 2, node_identity: '', stack_pattern: null, max_severity: 'CRITICAL', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0 });
 
     const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
@@ -126,6 +130,126 @@ describe('GET /api/security/overview', () => {
       honorSuppressionsOnDeploy: true,
       eligibleBlockPolicies: 2,
     });
+  });
+
+  it('derives suppression- and ack-aware posture facts from detail rows', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1,
+      image_ref: 'app:1',
+      image_digest: `sha256:app-${Math.random().toString(16).slice(2)}`,
+      scanned_at: now,
+      total_vulnerabilities: 3,
+      critical_count: 2,
+      high_count: 1,
+      medium_count: 0,
+      low_count: 0,
+      unknown_count: 0,
+      fixable_count: 2,
+      secret_count: 0,
+      misconfig_count: 2,
+      scanners_used: 'vuln',
+      highest_severity: 'CRITICAL',
+      os_info: null,
+      trivy_version: null,
+      scan_duration_ms: null,
+      triggered_by: 'manual',
+      status: 'completed',
+      error: null,
+      stack_context: null,
+    });
+    const detail = (vulnerability_id: string, severity: 'CRITICAL' | 'HIGH', fixed_version: string | null) => ({
+      vulnerability_id, pkg_name: `pkg-${vulnerability_id}`, installed_version: '1', fixed_version,
+      severity, title: null, description: null, primary_url: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      detail('CVE-2024-0001', 'CRITICAL', '2'),   // fixable, counts
+      detail('CVE-2024-0002', 'HIGH', null),       // unfixable, does not count
+      detail('CVE-2024-0003', 'CRITICAL', '9'),    // fixable but suppressed -> accepted, not fixable
+    ]);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-0003', pkg_name: null, image_pattern: null, reason: 'accepted risk',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0,
+    });
+    db().insertMisconfigFindings(scanId, [
+      { rule_id: 'DS001', check_id: null, severity: 'HIGH', title: null, message: null, resolution: null, target: 'app', primary_url: null },
+      { rule_id: 'DS002', check_id: null, severity: 'CRITICAL', title: null, message: null, resolution: null, target: 'app', primary_url: null },
+    ]);
+    db().createMisconfigAcknowledgement({
+      rule_id: 'DS001', stack_pattern: null, reason: 'acknowledged',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0,
+    });
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      rawCritical: 2,
+      rawHigh: 1,
+      fixableCriticalHigh: 1,   // 0001 only (0003 suppressed, 0002 unfixable)
+      accepted: 1,              // 0003 suppressed
+      dangerousCompose: 1,      // DS002 (DS001 acknowledged)
+      knownExploited: 0,
+      publiclyExposed: 0,
+      needsReview: 0,
+      notAffected: 0,
+      posture: 'Action needed',
+      posturePartial: false,
+    });
+  });
+
+  it('separates not_affected and needs_review triage facts in the overview', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'triage:1', image_digest: 'sha256:triage', scanned_at: now,
+      total_vulnerabilities: 2, critical_count: 2, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-0010', pkg_name: 'a', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+      { vulnerability_id: 'CVE-2024-0011', pkg_name: 'b', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    db().createCveSuppression({ cve_id: 'CVE-2024-0010', pkg_name: null, image_pattern: null, reason: 'not affected', created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'not_affected' });
+    db().createCveSuppression({ cve_id: 'CVE-2024-0011', pkg_name: null, image_pattern: null, reason: 'reviewing', created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'needs_review' });
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ notAffected: 1, needsReview: 1, accepted: 0, fixableCriticalHigh: 0, posture: 'Monitoring' });
+  });
+
+  it('escalates an unfixable known-exploited (KEV) finding to Action needed', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'kev:1', image_digest: 'sha256:kev', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-9999', pkg_name: 'libkev', installed_version: '1', fixed_version: null,
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    // No fix available, but the CVE is known-exploited: KEV overrides "no fix".
+    db().replaceKev([{ cve_id: 'CVE-2024-9999', date_added: '2024-01-01' }], now);
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ knownExploited: 1, fixableCriticalHigh: 0, posture: 'Action needed' });
+  });
+
+  it('reads Secure when a scan completed with nothing actionable or severe', async () => {
+    db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'clean:1', image_digest: 'sha256:clean', scanned_at: Date.now(),
+      total_vulnerabilities: 0, critical_count: 0, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: null, os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.posture).toBe('Secure');
   });
 
   it('is reachable by a Community viewer (read-only, auth-only)', async () => {
@@ -212,5 +336,108 @@ describe('GET /api/security/policy-packs', () => {
     const paid = await request(app).get('/api/security/policy-packs').set('Cookie', adminCookie);
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
     expect(paid.body).toEqual(community.body);
+  });
+});
+
+describe('GET /api/security/scans/:scanId/vulnerabilities', () => {
+  beforeEach(() => resetSecurity());
+
+  it('attaches read-time exploit intel (KEV/EPSS) to each finding', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'vex:1', image_digest: 'sha256:vex', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-7777', pkg_name: 'p', installed_version: '1', fixed_version: null,
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().replaceKev([{ cve_id: 'CVE-2024-7777', date_added: '2024-02-02' }], now);
+    db().upsertEpss([{ cve_id: 'CVE-2024-7777', epss_score: 0.42, epss_percentile: 0.95 }], now);
+
+    const res = await request(app).get(`/api/security/scans/${scanId}/vulnerabilities`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const item = (res.body.items as Array<{ vulnerability_id: string; kev: boolean; epss_score: number }>)
+      .find((i) => i.vulnerability_id === 'CVE-2024-7777');
+    expect(item).toMatchObject({ kev: true, epss_score: 0.42, epss_percentile: 0.95 });
+  });
+});
+
+describe('GET /api/security/vex/export (Admiral)', () => {
+  beforeEach(() => {
+    resetSecurity();
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+  });
+  afterAll(() => {
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+  });
+
+  it('is gated to Admiral: 403 for Community', async () => {
+    const res = await request(app).get('/api/security/vex/export').set('Cookie', adminCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it('exports an OpenVEX document from triage decisions for Admiral', async () => {
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-2222', pkg_name: null, image_pattern: 'nginx*', reason: 'not present in build',
+      created_by: 'admin', created_at: Date.now(), expires_at: null, replicated_from_control: 0,
+      status: 'not_affected', justification: 'component_not_present',
+    });
+    const res = await request(app).get('/api/security/vex/export').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['@context']).toContain('openvex');
+    const stmt = (res.body.statements as Array<{ vulnerability: { name: string }; status: string; justification?: string; products: string[] }>)
+      .find((s) => s.vulnerability.name === 'CVE-2024-2222');
+    expect(stmt).toMatchObject({ status: 'not_affected', justification: 'component_not_present', products: ['nginx*'] });
+  });
+});
+
+describe('GET /api/security/overview/exploit-intel', () => {
+  beforeEach(() => resetSecurity());
+
+  it('returns actionable Crit/High findings with KEV/EPSS joined and dismissed excluded', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'app:1', image_digest: 'sha256:app', scanned_at: now,
+      total_vulnerabilities: 3, critical_count: 2, high_count: 1, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 2, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    const d = (id: string, severity: 'CRITICAL' | 'HIGH', cvss: number | null, fixed: string | null) => ({
+      vulnerability_id: id, pkg_name: `p-${id}`, installed_version: '1', fixed_version: fixed,
+      severity, title: null, description: null, primary_url: null, cvss_score: cvss,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      d('CVE-2024-AAAA', 'CRITICAL', 9.8, '2'),   // actionable, has KEV + EPSS
+      d('CVE-2024-BBBB', 'HIGH', 7.2, null),       // actionable, no intel yet
+      d('CVE-2024-CCCC', 'CRITICAL', 8.1, '3'),    // dismissed -> excluded
+    ]);
+    db().replaceKev([{ cve_id: 'CVE-2024-AAAA', date_added: '2024-01-01' }], now);
+    db().upsertEpss([{ cve_id: 'CVE-2024-AAAA', epss_score: 0.6, epss_percentile: 0.97 }], now);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-CCCC', pkg_name: null, image_pattern: null, reason: 'accepted',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'accepted',
+    });
+
+    const res = await request(app).get('/api/security/overview/exploit-intel').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const items = res.body.items as Array<{ vulnerability_id: string; cvss_score: number | null; epss_score: number | null; kev: boolean; severity: string; scan_id: number }>;
+    const ids = items.map((i) => i.vulnerability_id);
+    expect(ids).toContain('CVE-2024-AAAA');
+    expect(ids).toContain('CVE-2024-BBBB');
+    expect(ids).not.toContain('CVE-2024-CCCC'); // dismissed triage decision
+    expect(items.find((i) => i.vulnerability_id === 'CVE-2024-AAAA')).toMatchObject({ cvss_score: 9.8, epss_score: 0.6, kev: true, severity: 'CRITICAL', scan_id: scanId });
+    expect(items.find((i) => i.vulnerability_id === 'CVE-2024-BBBB')).toMatchObject({ cvss_score: 7.2, epss_score: null, kev: false });
+    expect(res.body.truncated).toBe(false);
+  });
+
+  it('requires authentication', async () => {
+    const res = await request(app).get('/api/security/overview/exploit-intel');
+    expect(res.status).toBe(401);
   });
 });

@@ -64,7 +64,7 @@ export interface EffService {
   envKeys: string[];
   /** Network membership by network key, with any aliases. */
   networks: EffServiceNetwork[];
-  /** `extra_hosts` entries as `host:value` strings (host names / static IPs, never secrets). */
+  /** `extra_hosts` entries as `host:value` strings (host names / static IPs; a value built from a `${VAR}` is resolved upstream by `docker compose config`, so it can carry an interpolated secret). */
   extraHosts: string[];
   /** Label KEY names only. Values are never extracted (a label value can carry a secret). */
   labelKeys: string[];
@@ -282,7 +282,7 @@ function parseServiceNetworks(networks: unknown): EffServiceNetwork[] {
   return [];
 }
 
-/** `extra_hosts` (list `host:ip` or map `{host: ip}`) → `host:value` strings. Infra facts, not secrets. */
+/** `extra_hosts` (list `host:ip` or map `{host: ip}`) → `host:value` strings. A value built from a `${VAR}` is resolved upstream by `docker compose config`, so it can carry an interpolated secret. */
 function parseExtraHosts(extraHosts: unknown): string[] {
   if (Array.isArray(extraHosts)) {
     return extraHosts.map(e => str(e)).filter((s): s is string => s !== undefined);

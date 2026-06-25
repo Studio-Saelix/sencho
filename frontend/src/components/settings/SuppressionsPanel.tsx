@@ -6,12 +6,13 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
-import { ChevronLeft, ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Trash2, Download } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
 import type { CveSuppression } from '@/types/security';
 import { useAuth } from '@/context/AuthContext';
+import { useLicense } from '@/context/LicenseContext';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 const PAGE_SIZE = 8;
@@ -38,6 +39,7 @@ interface SuppressionsPanelProps {
 
 export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
   const { isAdmin } = useAuth();
+  const { isPaid } = useLicense();
   const [rows, setRows] = useState<CveSuppression[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -148,6 +150,24 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
     return d.toLocaleDateString();
   };
 
+  const handleExportVex = useCallback(async () => {
+    try {
+      const res = await apiFetch('/security/vex/export', { localOnly: true });
+      if (!res.ok) throw new Error('Failed to export VEX');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'sencho-fleet.openvex.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Failed to export VEX');
+    }
+  }, []);
+
   return (
     <div className="space-y-4">
       <FleetTabHeading
@@ -155,10 +175,18 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
         subtitle="Accept known-benign CVEs so they stop triggering alerts. Suppressions apply at read time across the fleet and never modify stored scan data."
         action={
           isAdmin && !isReplica ? (
-            <Button size="sm" onClick={openCreate}>
-              <Plus className="w-4 h-4 mr-1.5" />
-              Add suppression
-            </Button>
+            <div className="flex items-center gap-2">
+              {isPaid && (
+                <Button size="sm" variant="outline" onClick={handleExportVex}>
+                  <Download className="w-4 h-4 mr-1.5" />
+                  Export VEX
+                </Button>
+              )}
+              <Button size="sm" onClick={openCreate}>
+                <Plus className="w-4 h-4 mr-1.5" />
+                Add suppression
+              </Button>
+            </div>
           ) : undefined
         }
       />
