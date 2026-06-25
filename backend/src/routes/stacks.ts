@@ -695,8 +695,6 @@ stacksRouter.put('/:stackName/project-env-files', async (req: Request, res: Resp
     }
     const files = envFiles as string[];
     const fsService = FileSystemService.getInstance(req.nodeId);
-    const baseDir = fsService.getBaseDir();
-    const stackDir = path.join(baseDir, stackName);
 
     // Dedup while preserving order. Skip validation for duplicates: already
     // confirmed on first occurrence and the file cannot change mid-handler.
@@ -716,12 +714,16 @@ stacksRouter.put('/:stackName/project-env-files', async (req: Request, res: Resp
       if (!isValidRelativeStackPath(file)) {
         return res.status(400).json({ error: `Invalid env file path: "${file}"` });
       }
-      // Canonical js/path-injection barrier inline with the fs sink: resolve
-      // against the compose root and assert containment right here. CodeQL does
-      // not credit a containment check separated from the sink. Mirrors the
-      // inline barriers in authoredComposeArgs.ts, FileSystemService.ts, etc.
-      const baseResolved = path.resolve(baseDir);
-      const safePath = path.resolve(baseResolved, stackDir, file);
+      // Canonical js/path-injection barrier inline with the fs sink: resolve both
+      // the compose root and the stack directory from a single canonical root so
+      // containment is unambiguous even when the compose dir is a symlink. The
+      // pattern mirrors authoredComposeArgs.ts and every FileSystemService sink.
+      const baseResolved = path.resolve(fsService.getBaseDir());
+      const stackDir = path.resolve(baseResolved, stackName);
+      if (!stackDir.startsWith(baseResolved + path.sep)) {
+        return res.status(400).json({ error: `Stack directory escapes the compose directory: "${stackName}"` });
+      }
+      const safePath = path.resolve(stackDir, file);
       if (!safePath.startsWith(baseResolved + path.sep)) {
         return res.status(400).json({ error: `Env file path escapes the compose directory: "${file}"` });
       }
