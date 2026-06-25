@@ -67,14 +67,14 @@ The All tasks toggle swaps the lane track for a sortable table.
 | **Backup Stack Compose Files** | A specific stack on a specific node | Copies the stack's compose file and `.env` to `<DATA_DIR>/backups/<stack>/`. One slot per stack; each run overwrites the previous backup. For a versioned archive use a Create Fleet Snapshot instead. |
 | **Stop Stack** | A specific stack on a specific node | Runs `docker compose stop`. Containers are stopped but preserved. Use for off-hours power saving when you want a fast restart later. |
 | **Take Stack Down** | A specific stack on a specific node | Runs `docker compose down`. Containers are removed. Use to fully release resources when the stack is not needed for an extended period. |
-| **Start Stack** | A specific stack on a specific node | Runs `docker compose up -d`. Works for both stopped and removed containers: if they exist they are started, if not they are created from the compose file. |
+| **Start / Bring Up Stack** | A specific stack on a specific node | Runs `docker compose up -d`. Works for both stopped and removed containers: if they exist they are started, if not they are created from the compose file. |
 
 ## Creating a scheduled task
 
 Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Lifecycle, Updates, Security, Maintenance, and Backups.
 
 <Frame>
-  <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown lists Restart Stack, Auto-update Stack, Auto-update All Stacks on Node, Create Fleet Snapshot, Prune Node Resources, and Scan Node Images as the first six entries. Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />
+  <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown groups actions under category headers: Lifecycle (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down), Updates (Auto-update Stack, Auto-update All Stacks on Node), Security (Scan Node Images), Maintenance (Prune Node Resources), and Backups (Create Fleet Snapshot). Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />
 </Frame>
 
 Common fields:
@@ -126,7 +126,7 @@ When creating a Prune Node Resources task, the **Label Filter (optional)** input
 Backup Stack Compose Files, Start / Bring Up Stack, Stop Stack, and Take Stack Down let you schedule lifecycle events for individual stacks on a per-node basis. A common pattern for development or staging stacks is:
 
 - A **Stop Stack** or **Take Stack Down** task at the end of the working day (for example, `0 19 * * 1-5`, 7 PM on weekdays).
-- A **Start Stack** task at the start of the working day (for example, `0 8 * * 1-5`, 8 AM on weekdays).
+- A **Start / Bring Up Stack** task at the start of the working day (for example, `0 8 * * 1-5`, 8 AM on weekdays).
 
 **Stop vs Take Down.** Use Stop Stack when you want containers ready to resume quickly: Docker keeps the container filesystem in place and the matching Start Stack simply restarts the existing containers. Use Take Stack Down to fully release resources; Start Stack then recreates the containers from the compose file on the next run.
 
@@ -253,8 +253,8 @@ If Sencho restarts while a task is mid-execution, the orphaned run record is mar
   <Accordion title="A Scan Node Images fails with 'Trivy binary is not available'">
     Trivy must be installed on the node that runs the scan, not just on the gateway. Follow [Installing Trivy](/operations/trivy-setup) on the target node, then click **Run now** on the schedule to confirm the scan succeeds before waiting for the next cron tick.
   </Accordion>
-  <Accordion title="A Start Stack run fails with a compose file error">
-    Start Stack runs `docker compose up -d` against the stack's compose directory. If the stack folder has been removed or its compose file is missing, the run fails. Re-create or restore the stack from the [Editor](/features/editor), then click **Run now** on the schedule to confirm it succeeds before the next cron tick.
+  <Accordion title="A Start / Bring Up Stack run fails with a compose file error">
+    Start / Bring Up Stack runs `docker compose up -d` against the stack's compose directory. If the stack folder has been removed or its compose file is missing, the run fails. Re-create or restore the stack from the [Editor](/features/editor), then click **Run now** on the schedule to confirm it succeeds before the next cron tick.
   </Accordion>
   <Accordion title="A Backup Stack Compose Files run overwrote the previous backup">
     Backup Stack Compose Files keeps a single slot per stack under `<DATA_DIR>/backups/<stack>/`. Each run overwrites the previous backup. This is by design: for a versioned archive of compose files across the fleet, use a [Create Fleet Snapshot](/features/fleet-backups) task, which retains every snapshot under the snapshots directory.

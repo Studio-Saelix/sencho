@@ -90,4 +90,26 @@ describe('Combobox', () => {
       expect(h.getAttribute('role')).toBeNull();
     }
   });
+
+  it('correctly partitions interleaved groups by first appearance', async () => {
+    const MIXED: ComboboxOption[] = [
+      { value: 'a1', label: 'A1', group: 'Lifecycle' },
+      { value: 'u1', label: 'U1', group: 'Updates' },
+      { value: 'a2', label: 'A2', group: 'Lifecycle' },
+    ];
+    const onChange = vi.fn();
+    render(<Combobox options={MIXED} value="" onValueChange={onChange} placeholder="Pick..." />);
+
+    await userEvent.click(screen.getByRole('combobox'));
+
+    const headers = document.querySelectorAll('.text-xs.font-medium.text-muted-foreground');
+    expect(headers).toHaveLength(2);
+    expect(headers[0].textContent).toBe('Lifecycle');
+    expect(headers[1].textContent).toBe('Updates');
+
+    // A1 and A2 should both be under Lifecycle, not split.
+    const lifecycleSection = headers[0].parentElement!;
+    expect(lifecycleSection.querySelectorAll('button')).toHaveLength(2);
+    expect(lifecycleSection.querySelector('button')?.textContent).toContain('A1');
+  });
 });

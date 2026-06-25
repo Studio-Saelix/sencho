@@ -82,17 +82,17 @@ export function Combobox({
 
   const groupedOptions = React.useMemo(() => {
     if (!hasGroups) return null
-    const groups: { label: string; options: ComboboxOption[] }[] = []
-    const seen = new Set<string>()
+    const groupMap = new Map<string, ComboboxOption[]>()
+    const groupOrder: string[] = []
     for (const o of filtered) {
       const g = o.group!
-      if (!seen.has(g)) {
-        seen.add(g)
-        groups.push({ label: g, options: [] })
+      if (!groupMap.has(g)) {
+        groupMap.set(g, [])
+        groupOrder.push(g)
       }
-      groups[groups.length - 1].options.push(o)
+      groupMap.get(g)!.push(o)
     }
-    return groups
+    return groupOrder.map(label => ({ label, options: groupMap.get(label)! }))
   }, [filtered, hasGroups])
 
   return (
