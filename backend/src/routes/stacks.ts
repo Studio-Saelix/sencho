@@ -710,6 +710,9 @@ stacksRouter.put('/:stackName/project-env-files', async (req: Request, res: Resp
       if (path.isAbsolute(file) || file.includes('..') || file.startsWith('.git')) {
         return res.status(400).json({ error: `Invalid env file path: "${file}"` });
       }
+      if (file.includes('/') || file.includes('\\')) {
+        return res.status(400).json({ error: `Project env files must be at the stack root: "${file}"` });
+      }
       if (!isValidRelativeStackPath(file)) {
         return res.status(400).json({ error: `Invalid env file path: "${file}"` });
       }

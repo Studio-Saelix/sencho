@@ -86,12 +86,23 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
       if (!file || !isValidRelativeStackPath(file)) {
         throw new Error(`Invalid project env file path for stack "${stackName}": "${file}"`);
       }
+      // Reject paths with directory separators: project env files live at the
+      // stack root, matching Compose's auto-discovery behavior.
+      if (file.includes('/') || file.includes('\\')) {
+        throw new Error(
+          `Project env file "${file}" for stack "${stackName}" must be at the stack root. ` +
+          `Update the project env file selection in the Environment tab.`
+        );
+      }
       const envPath = path.resolve(stackDir, file);
       if (!isPathWithinBase(envPath, stackDir)) {
         throw new Error(`Project env file path escapes stack directory for stack "${stackName}": "${file}"`);
       }
+      // Verify the real path stays within the stack directory, defending against
+      // symlinks that were created or swapped after configuration.
+      let realEnvPath: string;
       try {
-        await fsPromises.access(envPath);
+        realEnvPath = await fsPromises.realpath(envPath);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
           throw new Error(
@@ -101,14 +112,20 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
         }
         throw err;
       }
-      const stat = await fsPromises.stat(envPath);
+      if (!isPathWithinBase(realEnvPath, stackDir)) {
+        throw new Error(
+          `Project env file "${file}" for stack "${stackName}" resolves outside the stack directory. ` +
+          `Update the project env file selection in the Environment tab.`
+        );
+      }
+      const stat = await fsPromises.stat(realEnvPath);
       if (!stat.isFile()) {
         throw new Error(
           `Project env file "${file}" configured for stack "${stackName}" is not a regular file. ` +
           `Update the project env file selection in the Environment tab.`
         );
       }
-      args.push('--env-file', envPath);
+      args.push('--env-file', realEnvPath);
     }
     return args;
   }

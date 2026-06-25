@@ -954,23 +954,31 @@ export class FileSystemService {
     }
     await fsPromises.mkdir(backupDir, { recursive: true });
 
-    // Clear stale managed files from the backup slot before writing the current
-    // ones. The slot is reused across runs, so a managed file removed from the
-    // stack since the last backup (e.g. a deleted .env or a switched compose
-    // variant) would otherwise linger here and a later restore would resurrect
-    // it, breaking the faithful-revert guarantee. Scope is the protected set
-    // Sencho writes; .timestamp is rewritten below. A clear failure is logged but
-    // not fatal: it only risks a stale future rollback, so it should not block an
-    // otherwise valid deploy.
-    for (const file of PROTECTED_STACK_FILES) {
-      const stale = path.resolve(backupRoot, path.join(backupDir, file));
-      if (!stale.startsWith(backupRoot + path.sep)) continue;
-      try {
-        await fsPromises.unlink(stale);
-      } catch (e: unknown) {
-        if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-          console.warn(`[FileSystemService] Could not clear stale backup ${file}:`, (e as Error).message);
+    // Clear ALL non-marker files from the backup slot before writing the current
+    // set. The slot is reused across runs, so a file removed from the stack since
+    // the last backup (e.g. a deleted .env, a switched compose variant, or a
+    // removed project env file like old.env) would otherwise linger here and a
+    // later restore would resurrect it, breaking the faithful-revert guarantee.
+    // Marker files (.timestamp, .checksums) are preserved until rewritten below.
+    // A clear failure is logged but not fatal: it only risks a stale future
+    // rollback, so it should not block an otherwise valid deploy.
+    try {
+      const existing = await fsPromises.readdir(backupDir);
+      for (const item of existing) {
+        if (BACKUP_MARKER_FILES.has(item)) continue;
+        const stale = path.resolve(backupRoot, path.join(backupDir, item));
+        if (!stale.startsWith(backupRoot + path.sep)) continue;
+        try {
+          await fsPromises.unlink(stale);
+        } catch (e: unknown) {
+          if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+            console.warn(`[FileSystemService] Could not clear stale backup ${item}:`, (e as Error).message);
+          }
         }
+      }
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        console.warn('[FileSystemService] Could not read backup directory for stale cleanup:', (e as Error).message);
       }
     }
 
